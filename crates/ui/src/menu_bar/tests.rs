@@ -22,6 +22,7 @@ fn input(id: &str, state: RunState, mins_ago: i64, account: Option<&str>) -> Inp
         account: account.map(str::to_owned),
         model: None,
         background: 0,
+        admin: false,
     }
 }
 
@@ -598,4 +599,19 @@ fn a_failed_probe_is_retried_after_a_minute_not_five() {
     schedule.begin();
     schedule.finish(at(USAGE_STALE_SECS), true);
     assert!(!schedule.due(at(2 * USAGE_STALE_SECS), UsageTrigger::Tick), "success goes back to five minutes");
+}
+
+// --- admin chats ------------------------------------------------------------
+
+#[test]
+fn an_admin_chat_row_carries_an_admin_tag_and_others_do_not() {
+    let mut admin = input("a", RunState::Working, 3, None);
+    admin.admin = true;
+    let plain = input("b", RunState::Working, 4, None);
+    let snap = snapshot(&[admin, plain]);
+    let rows = texts(&menu(&snap, None, None));
+    let admin_row = rows.iter().find(|t| t.contains("chat a")).unwrap();
+    let plain_row = rows.iter().find(|t| t.contains("chat b")).unwrap();
+    assert!(admin_row.contains("\u{b7} Admin"), "{admin_row}");
+    assert!(!plain_row.contains("Admin"), "{plain_row}");
 }

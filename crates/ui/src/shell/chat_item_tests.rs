@@ -26,7 +26,7 @@ impl Render for Host {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::default();
         let tab = self.tab;
-        let (header, body) = self.shell.update(cx, |shell, cx| {
+        let (header, body, dialog) = self.shell.update(cx, |shell, cx| {
             let header = shell.render_chat_header_metadata(&theme, cx);
             let body = tab.then(|| {
                 if shell.resolved_right_active(cx) == RightSurface::Team {
@@ -35,13 +35,15 @@ impl Render for Host {
                     shell.render_item_tab(cx)
                 }
             });
-            (header, body)
+            let dialog = shell.render_admin_dialog(gpui::size(px(900.0), px(600.0)), cx);
+            (header, body, dialog)
         });
         div()
             .relative()
             .w(px(900.0))
             .h(px(600.0))
             .children(header)
+            .children(dialog)
             .children(body.map(|body| div().w(px(420.0)).h(px(500.0)).child(body)))
     }
 }
@@ -67,7 +69,7 @@ fn chat(id: &str) -> mast_proto::Chat {
 }
 
 /// `edit` runs on the Space's snapshot before the Shell sees it.
-fn mount<'a>(
+pub(super) fn mount<'a>(
     cx: &'a mut TestAppContext,
     chat_id: &'static str,
     tab: bool,
@@ -161,7 +163,7 @@ fn mount<'a>(
     (shell, vcx)
 }
 
-fn draw(vcx: &mut VisualTestContext) {
+pub(super) fn draw(vcx: &mut VisualTestContext) {
     vcx.update(|window, cx| window.draw(cx).clear());
     vcx.run_until_parked();
     vcx.update(|window, cx| window.draw(cx).clear());
@@ -176,7 +178,7 @@ fn expand(shell: &Entity<Shell>, vcx: &mut VisualTestContext, rows: &[&'static s
     draw(vcx);
 }
 
-fn has(vcx: &mut VisualTestContext, selector: &'static str) -> bool {
+pub(super) fn has(vcx: &mut VisualTestContext, selector: &'static str) -> bool {
     vcx.debug_bounds(selector).is_some()
 }
 

@@ -61,6 +61,8 @@ pub struct Input {
     pub model: Option<String>,
     /// Background processes still running for an idle chat.
     pub background: u32,
+    /// The chat holds a live admin grant.
+    pub admin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +76,8 @@ pub struct Row {
     pub account: Option<String>,
     pub model: Option<String>,
     pub background: u32,
+    /// The chat holds a live admin grant (shield glyph / "Admin" tag).
+    pub admin: bool,
     /// 0 for a top-level row, 1 for a child under its coordinator.
     pub depth: u8,
 }
@@ -190,6 +194,7 @@ pub fn snapshot(
             account: input.account.clone(),
             model: input.model.clone(),
             background: input.background,
+            admin: input.admin,
             depth,
         }
     };

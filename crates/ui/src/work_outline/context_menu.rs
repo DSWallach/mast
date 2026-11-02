@@ -88,6 +88,9 @@ pub(crate) enum MenuAction {
     },
     CopyChatIdentity(String),
     CloseOutChat(String),
+    /// Open the grant dialog ("Grant admin for this Space…" / "Renew admin…").
+    GrantAdmin(String),
+    RevokeAdmin(String),
     ArchiveChat(String),
     /// Hide the Space from the Outline (device-local).
     HideSpace(String),
@@ -146,6 +149,8 @@ impl MenuAction {
             | Self::PinChat { .. }
             | Self::CopyChatIdentity(_)
             | Self::CloseOutChat(_)
+            | Self::GrantAdmin(_)
+            | Self::RevokeAdmin(_)
             | Self::HideSpace(_)
             | Self::UnhideSpace(_)
             | Self::RenameSpace(_)

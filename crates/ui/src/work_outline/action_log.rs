@@ -418,6 +418,8 @@ pub(crate) struct Recent {
     pub label: String,
     /// Already undone (redoable).
     pub undone: bool,
+    /// When the change was logged (epoch ms); merges with admin turns.
+    pub at_ms: i64,
 }
 
 #[derive(Debug, Default)]
@@ -425,13 +427,21 @@ pub(crate) struct ActionLog {
     spaces: HashMap<String, SpaceLog>,
     next_id: u64,
     last_space: Option<String>,
+    /// Entry id -> when it was logged (epoch ms).
+    times: HashMap<u64, i64>,
 }
 
 impl ActionLog {
+    /// When entry `id` was logged.
+    pub(crate) fn at_ms(&self, id: u64) -> i64 {
+        self.times.get(&id).copied().unwrap_or(0)
+    }
+
     /// Append `draft`; a new change forgets the redo tail.
     pub(crate) fn record(&mut self, space_id: &str, mut draft: Draft) -> u64 {
         self.next_id += 1;
         draft.id = self.next_id;
+        self.times.insert(self.next_id, crate::admin::now_ms());
         let log = self.spaces.entry(space_id.to_owned()).or_default();
         log.entries.truncate(log.applied);
         log.entries.push(draft);
@@ -524,6 +534,7 @@ impl ActionLog {
                 id: entry.id,
                 label: entry.label.clone(),
                 undone: ix >= log.applied,
+                at_ms: self.at_ms(entry.id),
             })
             .collect()
     }

@@ -11,6 +11,10 @@
 use super::super::action_log::{self, Draft, Recent};
 use super::super::actions::WorkOutlineActions;
 use super::*;
+use crate::admin::{RecentItem, UiRecent};
+
+/// Picker value of rows that only inform (admin action summaries).
+const INERT_ROW: &str = "i";
 
 /// How long to wait for the snapshot to show an applied step before the next
 /// step of a multi-step undo (or the next ⌘Z) is allowed anyway.
@@ -134,8 +138,80 @@ impl OutlineView {
         selected.or_else(|| log.last_space().map(str::to_owned))
     }
 
+    /// The Space Recent Changes and the admin half of ⌘Z read: the selected
+    /// row's Space when it has UI history or admin turns, else the Space
+    /// ⌘Z already acts on, else the Space of the newest admin turn.
+    pub(crate) fn recent_space(&self, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        let selected = self
+            .selected_row()
+            .and_then(|row| row.item().map(|item| item.space_id.clone()))
+            .filter(|space| {
+                state.action_log.len(space) > 0 || state.admin.newest_undoable(space).is_some()
+            });
+        selected.or_else(|| self.undo_space(cx)).or_else(|| {
+            state
+                .admin
+                .audit()
+                .iter()
+                .filter(|t| !t.undone && !t.actions.is_empty())
+                .max_by_key(|t| t.updated_at_ms)
+                .map(|t| t.space_id.clone())
+        })
+    }
+
+    /// The admin turn ⌘Z would undo: the Space's newest un-undone turn when
+    /// it is newer than the UI log's next undo entry.
+    pub(crate) fn admin_undo_target(&self, cx: &App) -> Option<mast_proto::AdminAuditTurn> {
+        let space = self.recent_space(cx)?;
+        let state = self.state.read(cx);
+        let turn = state.admin.newest_undoable(&space)?;
+        let ui_at = state
+            .action_log
+            .next_undo(&space)
+            .map(|entry| state.action_log.at_ms(entry.id));
+        match ui_at {
+            Some(at) if at >= turn.updated_at_ms => None,
+            _ => Some(turn.clone()),
+        }
+    }
+
+    /// Undo one admin turn through the engine and say what happened,
+    /// including the steps it had to skip.
+    pub(crate) fn undo_admin_turn(
+        &mut self,
+        turn: mast_proto::AdminAuditTurn,
+        cx: &mut Context<Self>,
+    ) {
+        if self.log_busy {
+            self.show_notice("Still applying the last change. Try again in a moment", cx);
+            return;
+        }
+        let Some(task) = crate::admin::undo_admin_turn(&self.state, &turn.turn_id, cx) else {
+            self.show_notice("Not connected to the engine", cx);
+            return;
+        };
+        self.log_busy = true;
+        cx.spawn(async move |this, cx| {
+            let reply = task.await;
+            this.update(cx, |this, cx| {
+                this.log_busy = false;
+                let text = match reply {
+                    Some(reply) => crate::admin::undo_notice(&turn, &reply),
+                    None => "Could not undo the admin changes".to_owned(),
+                };
+                this.show_notice(text, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// What ⌘Z would undo.
     pub(crate) fn next_undo_label(&self, cx: &App) -> Option<String> {
+        if let Some(turn) = self.admin_undo_target(cx) {
+            return Some(crate::admin::turn_title(&turn));
+        }
         let space = self.undo_space(cx)?;
         let state = self.state.read(cx);
         let entry = state.action_log.next_undo(&space)?;
@@ -151,11 +227,36 @@ impl OutlineView {
     }
 
     pub(crate) fn undo_change(&mut self, cx: &mut Context<Self>) {
+        if let Some(turn) = self.admin_undo_target(cx) {
+            self.undo_admin_turn(turn, cx);
+            return;
+        }
         self.run_log(Direction::Undo, 1, cx);
     }
 
     pub(crate) fn redo_change(&mut self, cx: &mut Context<Self>) {
         self.run_log(Direction::Redo, 1, cx);
+    }
+
+    /// The Space's UI entries merged by time with its admin turns, newest
+    /// first.
+    pub(crate) fn recent_items(&self, cx: &App) -> Vec<RecentItem> {
+        let Some(space) = self.recent_space(cx) else {
+            return Vec::new();
+        };
+        let state = self.state.read(cx);
+        let ui = state
+            .action_log
+            .recent(&space, action_log::RECENT_LIMIT)
+            .into_iter()
+            .map(|r| UiRecent {
+                id: r.id,
+                label: r.label,
+                undone: r.undone,
+                at_ms: r.at_ms,
+            })
+            .collect();
+        crate::admin::merge_recent(ui, state.admin.audit(), &space)
     }
 
     /// The recent changes of the current Space, newest first.
@@ -194,26 +295,50 @@ impl OutlineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        let recent = self.recent_changes(cx);
-        if recent.is_empty() {
+        // The engine's admin audit is read fresh for the next open.
+        self.state
+            .update(cx, |state, cx| state.refresh_admin_audit(cx));
+        let items = self.recent_items(cx);
+        if items.is_empty() {
             return Err("No changes to undo yet");
         }
-        let entries = recent
-            .into_iter()
-            .map(|recent| PickerEntry {
-                label: if recent.undone {
-                    format!("{} (undone)", recent.label)
-                } else {
-                    recent.label
-                },
-                depth: 0,
-                value: Some(format!(
-                    "{}{}",
-                    if recent.undone { 'r' } else { 'u' },
-                    recent.id
-                )),
-            })
-            .collect();
+        let mut entries = Vec::new();
+        for item in items {
+            match item {
+                RecentItem::Ui(recent) => entries.push(PickerEntry {
+                    label: if recent.undone {
+                        format!("{} (undone)", recent.label)
+                    } else {
+                        recent.label
+                    },
+                    depth: 0,
+                    value: Some(format!(
+                        "{}{}",
+                        if recent.undone { 'r' } else { 'u' },
+                        recent.id
+                    )),
+                }),
+                // One entry per admin sweep, its actions listed beneath.
+                RecentItem::Admin(turn) => {
+                    entries.push(PickerEntry {
+                        label: crate::admin::turn_title(&turn),
+                        depth: 0,
+                        value: Some(if turn.undone {
+                            INERT_ROW.to_owned()
+                        } else {
+                            format!("a{}", turn.turn_id)
+                        }),
+                    });
+                    entries.extend(crate::admin::turn_action_rows(&turn).into_iter().map(
+                        |summary| PickerEntry {
+                            label: summary,
+                            depth: 1,
+                            value: Some(INERT_ROW.to_owned()),
+                        },
+                    ));
+                }
+            }
+        }
         self.open_picker(
             "Recent changes: undo back to\u{2026}".to_string(),
             entries,
@@ -231,8 +356,27 @@ impl OutlineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_picker(window, cx);
         let value = entry.value.as_deref().unwrap_or_default();
+        // Action summaries and undone sweeps are informational.
+        if value == INERT_ROW {
+            return;
+        }
+        self.close_picker(window, cx);
+        if let Some(turn_id) = value.strip_prefix('a') {
+            let turn = self
+                .state
+                .read(cx)
+                .admin
+                .audit()
+                .iter()
+                .find(|turn| turn.turn_id == turn_id)
+                .cloned();
+            match turn {
+                Some(turn) => self.undo_admin_turn(turn, cx),
+                None => self.show_notice("That admin change is no longer listed", cx),
+            }
+            return;
+        }
         let Some(id) = value.get(1..).and_then(|id| id.parse::<u64>().ok()) else {
             return;
         };

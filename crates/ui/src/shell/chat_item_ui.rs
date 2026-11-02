@@ -249,6 +249,7 @@ impl Shell {
             .then(|| self.render_item_card(&facts, theme, cx));
         let crumbs = self.render_header_breadcrumb(&facts, theme, cx);
         let badges = self.render_header_badges(&facts, theme, cx);
+        let admin_badge = self.render_admin_badge(&chat_id, "chat-header", theme, cx);
         let chips = self.render_header_chips(&facts, theme, cx);
         let title = div()
             .debug_selector(|| "chat-header-title".into())
@@ -299,6 +300,7 @@ impl Shell {
                                 .when_some(crumbs, |col, crumbs| col.child(crumbs))
                                 .child(title),
                         )
+                        .children(admin_badge)
                         .children(badges),
                 )
                 .child(chips)
@@ -890,6 +892,23 @@ impl Shell {
                         "chat-item-path-icon".into(),
                     ))
                     .child(self.render_item_path(item, theme, cx)),
+            );
+        }
+
+        // Admin: the grant badge (with Revoke) or the Grant link.
+        if let Some(block) = self.render_item_tab_admin(&facts.chat_id, theme, cx) {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(section_label(
+                        theme,
+                        crate::icons::SHIELD,
+                        "Admin",
+                        "chat-item-admin-icon".into(),
+                    ))
+                    .child(block),
             );
         }
 

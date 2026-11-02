@@ -24,6 +24,7 @@ pub mod change_requests;
 pub mod changes;
 pub mod chat_closeout;
 mod chat_item;
+pub(crate) mod admin;
 mod orchestrator_wakes;
 mod team;
 mod chat_metadata;

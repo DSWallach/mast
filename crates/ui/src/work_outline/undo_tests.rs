@@ -522,3 +522,157 @@ fn compact_rows_record_and_undo_like_items(cx: &mut gpui::TestAppContext) {
         assert!(ids.contains(&id), "{id} in {ids:?}");
     }
 }
+
+// ----------------------------------------------------------------------
+// Admin turns in Recent Changes and ⌘Z
+// ----------------------------------------------------------------------
+
+fn admin_turn(
+    id: &str,
+    at_ms: i64,
+    actions: &[&str],
+) -> mast_proto::AdminAuditTurn {
+    crate::admin::tests::turn(id, at_ms, actions)
+}
+
+fn admin_state(
+    outline: &Entity<OutlineView>,
+    vcx: &mut gpui::VisualTestContext,
+) -> Entity<crate::state::AppState> {
+    outline.read_with(vcx, |outline, _| outline.app_state_for_test())
+}
+
+fn picker_rows(outline: &Entity<OutlineView>, vcx: &mut gpui::VisualTestContext) -> Vec<(String, u32)> {
+    outline.read_with(vcx, |outline, _| outline.picker_rows_for_test())
+}
+
+/// One UI move so the log has an entry, then the admin turn on top of it.
+#[gpui::test]
+fn an_admin_turn_is_one_recent_change_with_its_actions_merged_by_time(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, outline, _calls, vcx) = undo_overview(cx, dir.path(), fixture(), reply_ok);
+    select(&outline, vcx, UI);
+    press(vcx, "shift-up");
+    settle(&overview, vcx, fixture());
+    let now = crate::admin::now_ms();
+    let state = admin_state(&outline, vcx);
+    state.update(vcx, |state, _| {
+        state.admin.set_audit(vec![
+            admin_turn("run-new", now + 60_000, &["Renamed \"A\" to \"B\"", "Archived \"C\""]),
+            admin_turn("run-old", now - 3_600_000, &["Moved \"D\""]),
+        ]);
+    });
+    vcx.update(|window, cx| {
+        outline.update(cx, |outline, cx| outline.open_recent_changes(window, cx).unwrap())
+    });
+    let rows = picker_rows(&outline, vcx);
+    let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "by admin chat Tidy \u{b7} 2 actions",
+            "Renamed \"A\" to \"B\"",
+            "Archived \"C\"",
+            "reordered \u{2018}UI\u{2019}",
+            "by admin chat Tidy \u{b7} 1 action",
+            "Moved \"D\"",
+        ],
+        "one entry per sweep, newest first, interleaved with the UI entries"
+    );
+    let depths: Vec<u32> = rows.iter().map(|(_, d)| *d).collect();
+    assert_eq!(depths, [0, 1, 1, 0, 0, 1]);
+}
+
+/// Choosing the admin entry calls `AdminUndoTurn` and reports the skipped list.
+#[gpui::test]
+fn undoing_an_admin_turn_calls_the_engine_and_shows_the_skipped_steps(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut wire, engine, _guard) = crate::admin::tests::Wire::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, outline, calls, vcx) = undo_overview(cx, dir.path(), fixture(), reply_ok);
+    select(&outline, vcx, UI);
+    let state = admin_state(&outline, vcx);
+    state.update(vcx, |state, _| {
+        state.set_test_engine(engine);
+        state.admin.set_audit(vec![admin_turn("run-9", crate::admin::now_ms(), &["a", "b", "c"])]);
+    });
+    // Admin turns alone are enough for Recent Changes to open.
+    vcx.update(|window, cx| {
+        outline.update(cx, |outline, cx| {
+            outline.open_recent_changes(window, cx).unwrap();
+            outline.choose_picker_entry(0, window, cx);
+        })
+    });
+    vcx.run_until_parked();
+    let script = |method: &str| {
+        (method == mast_rpc::methods::ADMIN_UNDO_TURN)
+            .then(|| serde_json::json!({ "undone": 2, "skipped": ["Moved \"X\""] }))
+    };
+    let sent = wire.answer(&script);
+    let undo: Vec<_> = sent
+        .iter()
+        .filter(|(m, _)| m == mast_rpc::methods::ADMIN_UNDO_TURN)
+        .collect();
+    assert_eq!(undo.len(), 1, "{sent:?}");
+    assert_eq!(undo[0].1, serde_json::json!({ "turnId": "run-9" }));
+    vcx.run_until_parked();
+    assert_eq!(
+        notice(&outline, vcx).as_deref(),
+        Some("Undid 2 actions by admin chat Tidy. Skipped 1 (changed since): Moved \"X\"")
+    );
+    assert_eq!(count(&calls), 0, "no UI change was sent");
+
+    // An action row is informational: choosing it leaves the picker open.
+    state.update(vcx, |state, _| {
+        state.admin.set_audit(vec![admin_turn("run-9", crate::admin::now_ms(), &["a"])]);
+    });
+    vcx.update(|window, cx| {
+        outline.update(cx, |outline, cx| {
+            outline.open_recent_changes(window, cx).unwrap();
+            outline.choose_picker_entry(1, window, cx);
+        })
+    });
+    assert_eq!(picker_rows(&outline, vcx).len(), 2);
+}
+
+/// ⌘Z undoes whichever entry is newest by time: an admin turn newer than the
+/// last UI change goes to the engine; an older one leaves ⌘Z to the UI log.
+#[gpui::test]
+fn cmd_z_undoes_the_newest_entry_whether_ui_or_admin(cx: &mut gpui::TestAppContext) {
+    let (mut wire, engine, _guard) = crate::admin::tests::Wire::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, outline, calls, vcx) = undo_overview(cx, dir.path(), fixture(), reply_ok);
+    select(&outline, vcx, UI);
+    press(vcx, "shift-up");
+    settle(&overview, vcx, fixture());
+    assert_eq!(count(&calls), 1);
+    let state = admin_state(&outline, vcx);
+    let now = crate::admin::now_ms();
+    state.update(vcx, |state, _| {
+        state.set_test_engine(engine);
+        state.admin.set_audit(vec![admin_turn("run-old", now - 3_600_000, &["a"])]);
+    });
+    // The UI move is newer: ⌘Z undoes it, not the admin turn.
+    assert_eq!(undo_label(&outline, vcx).as_deref(), Some("reordered \u{2018}UI\u{2019}"));
+    press(vcx, "cmd-z");
+    assert_eq!(count(&calls), 2);
+    assert!(wire.sent().is_empty());
+
+    // Now the admin turn is the newest remaining entry.
+    state.update(vcx, |state, _| {
+        state.admin.set_audit(vec![admin_turn("run-new", now + 120_000, &["a", "b"])]);
+    });
+    assert_eq!(
+        undo_label(&outline, vcx).as_deref(),
+        Some("by admin chat Tidy \u{b7} 2 actions")
+    );
+    press(vcx, "cmd-z");
+    let sent = wire.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, mast_rpc::methods::ADMIN_UNDO_TURN);
+    assert_eq!(sent[0].1, serde_json::json!({ "turnId": "run-new" }));
+    assert_eq!(count(&calls), 2, "the UI log was not touched");
+}

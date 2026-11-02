@@ -143,7 +143,7 @@ impl Shell {
 
     /// The sidebar Chat menu's own actions, reused on Chat rows (only for
     /// Chats this device knows), and Apply's host blocker.
-    fn add_sidebar_chat_entries(&self, menu: &mut OutlineContextMenu, cx: &App) {
+    pub(super) fn add_sidebar_chat_entries(&self, menu: &mut OutlineContextMenu, cx: &App) {
         if menu.kind != MenuKind::Chat {
             return;
         }
@@ -162,6 +162,26 @@ impl Shell {
             return;
         };
         let closeable = crate::chat_closeout::is_closeout_candidate(chat.cwd.as_deref());
+        if chat.space_id.is_some() {
+            let is_admin = self.chat_is_admin(&chat_id, cx);
+            menu.entries.push(
+                MenuEntry::new(
+                    "grant-admin",
+                    crate::admin::grant_entry_label(is_admin),
+                    icons::SHIELD,
+                    MenuAction::GrantAdmin(chat_id.clone()),
+                )
+                .separated(),
+            );
+            if is_admin {
+                menu.entries.push(MenuEntry::new(
+                    "revoke-admin",
+                    crate::admin::REVOKE_LABEL,
+                    icons::SHIELD,
+                    MenuAction::RevokeAdmin(chat_id.clone()),
+                ));
+            }
+        }
         let pinned = self.active_sidebar_pins(cx).contains(&chat_id);
         menu.entries.push(
             MenuEntry::new(
@@ -428,6 +448,8 @@ impl Shell {
             MenuAction::PinChat { chat_id, pinned } => self.set_chat_pinned(chat_id, pinned, cx),
             MenuAction::CopyChatIdentity(chat_id) => self.copy_chat_identity(&chat_id, true, cx),
             MenuAction::CloseOutChat(chat_id) => self.open_chat_closeout(chat_id, cx),
+            MenuAction::GrantAdmin(chat_id) => self.open_admin_dialog(&chat_id, cx),
+            MenuAction::RevokeAdmin(chat_id) => self.revoke_chat_admin(&chat_id, cx),
             MenuAction::ArchiveChat(chat_id) => self.archive_chat(chat_id, cx),
             MenuAction::HideSpace(space_id) => {
                 Self::set_outline_space_hidden(outline, &space_id, true, cx)

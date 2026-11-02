@@ -63,6 +63,8 @@ mod actions_ui;
 pub(crate) mod artifacts_ui;
 #[cfg(test)]
 mod chat_item_tests;
+#[cfg(test)]
+mod admin_tests;
 mod chat_item_ui;
 mod closeout_ui;
 mod command_palette;
@@ -85,6 +87,7 @@ mod start_chat_ui;
 mod tabs;
 mod team_ui;
 mod wake_ui;
+mod admin_ui;
 mod work_outline_menu_ui;
 pub(crate) mod work_outline_ui;
 pub(crate) use tabs::chat_identity_for;
@@ -1813,6 +1816,8 @@ pub struct Shell {
     team_panel_focus: Option<FocusHandle>,
     /// Orchestrator wakes: per-chat status cache and refresh loops.
     wakes: wake_ui::WakeUi,
+    /// Admin chats: the grant dialog.
+    admin_ui: admin_ui::AdminUi,
     /// What the full-chat header adds below the metadata line (the work-context
     /// strip's line), so the transcript's top fade clears it.
     chat_header_extra_clearance: f32,
@@ -2053,6 +2058,7 @@ impl Shell {
                     // Dock debounce needs a clock: a once-a-second check does both.
                     shell.sync_status_light(cx);
                     shell.running_tick(cx);
+                    shell.admin_tick(cx);
                 });
                 if alive.is_err() {
                     break;
@@ -2261,6 +2267,7 @@ impl Shell {
             item_needs: None,
             team_panel_focus: None,
             wakes: Default::default(),
+            admin_ui: Default::default(),
             chat_header_extra_clearance: 0.0,
             update_flow: UpdateFlow::Idle,
             update_task: None,
@@ -8978,6 +8985,10 @@ impl Shell {
             self.close_chat_closeout(cx);
             return true;
         }
+        if self.admin_ui.is_open() {
+            self.close_admin_dialog(cx);
+            return true;
+        }
         if self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
             || self.work_outline_modal.is_some()
@@ -9141,6 +9152,10 @@ impl Shell {
             let link_id = chat_id.clone();
             let closeout_id = chat_id.clone();
             let identity_id = chat_id.clone();
+            let admin_id = chat_id.clone();
+            let revoke_id = chat_id.clone();
+            let admin_space = self.admin_space_of(&chat_id, cx).is_some();
+            let is_admin = self.chat_is_admin(&chat_id, cx);
             let closeable = menu_state.closeable;
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
@@ -9209,6 +9224,42 @@ impl Shell {
                             )
                             .child(SharedString::from("Add PR / ticket…")),
                     )
+                    .when(admin_space, |menu| {
+                        menu.child(
+                            popover::menu_row(&theme, false, format!("chat-menu-admin-{chat_id}"))
+                                .id("chat-menu-admin")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    this.open_admin_dialog(&admin_id, cx)
+                                }))
+                                .child(
+                                    icon(icons::SHIELD)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from(crate::admin::grant_entry_label(is_admin))),
+                        )
+                        .when(is_admin, |menu| {
+                            menu.child(
+                                popover::menu_row(
+                                    &theme,
+                                    false,
+                                    format!("chat-menu-admin-revoke-{chat_id}"),
+                                )
+                                .id("chat-menu-admin-revoke")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    this.revoke_chat_admin(&revoke_id, cx)
+                                }))
+                                .child(
+                                    icon(icons::SHIELD)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from(crate::admin::REVOKE_LABEL)),
+                            )
+                        })
+                    })
                     .when(closeable, |menu| {
                         menu.child(
                             popover::menu_row(
@@ -9475,6 +9526,10 @@ impl Shell {
                 )
                 .into_any_element();
             overlays.push(popover::modal("delete-chat-dialog", viewport, card));
+        }
+
+        if let Some(overlay) = self.render_admin_dialog(viewport, cx) {
+            overlays.push(overlay);
         }
 
         if let Some(overlay) = self.render_closeout_overlay(viewport, cx) {
