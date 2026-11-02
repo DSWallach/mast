@@ -22,12 +22,14 @@ pub(crate) enum WakeToggle {
     Errors,
     TurnFinished,
     Prs,
+    WorkerReports,
 }
 
 impl WakeToggle {
-    pub(crate) const KINDS: [WakeToggle; 4] = [
+    pub(crate) const KINDS: [WakeToggle; 5] = [
         Self::RequiredActions,
         Self::Errors,
+        Self::WorkerReports,
         Self::TurnFinished,
         Self::Prs,
     ];
@@ -39,6 +41,7 @@ impl WakeToggle {
             Self::Errors => "Errors",
             Self::TurnFinished => "Turn finished",
             Self::Prs => "PRs",
+            Self::WorkerReports => "Worker reports",
         }
     }
 
@@ -49,6 +52,7 @@ impl WakeToggle {
             Self::Errors => "errors",
             Self::TurnFinished => "turn-finished",
             Self::Prs => "prs",
+            Self::WorkerReports => "worker-reports",
         }
     }
 
@@ -59,6 +63,7 @@ impl WakeToggle {
             Self::Errors => settings.errors,
             Self::TurnFinished => settings.turn_finished,
             Self::Prs => settings.prs,
+            Self::WorkerReports => settings.worker_reports,
         }
     }
 
@@ -70,6 +75,7 @@ impl WakeToggle {
             Self::Errors => &mut settings.errors,
             Self::TurnFinished => &mut settings.turn_finished,
             Self::Prs => &mut settings.prs,
+            Self::WorkerReports => &mut settings.worker_reports,
         };
         *slot = !*slot;
         settings
@@ -170,6 +176,22 @@ pub(crate) fn unseen_by_worker(status: &WakeStatus) -> HashMap<String, Vec<Strin
     out
 }
 
+/// Worker chat id -> its latest report to the orchestrator (full text),
+/// from `recent` (newest first). Reports stay here whether or not they were
+/// delivered, so the Team tab shows what a worker last said.
+pub(crate) fn latest_reports(status: &WakeStatus) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for event in &status.recent {
+        if event.kind == mast_proto::WakeEventKind::WorkerReport
+            && let Some(report) = &event.report
+        {
+            out.entry(event.worker_chat_id.clone())
+                .or_insert_with(|| report.clone());
+        }
+    }
+    out
+}
+
 /// Decides which user-activity pings reach the engine: a flipped draft flag
 /// goes out at once; anything else at most once per [`ACTIVITY_THROTTLE`].
 #[derive(Debug, Default)]
@@ -236,6 +258,7 @@ mod tests {
             worker_title: None,
             kind: WakeEventKind::Errored,
             summary: format!("summary {id}"),
+            report: None,
             at_ms: 1,
             delivered: false,
             unseen,

@@ -24,22 +24,25 @@ pub enum WakeEventKind {
     PrOpened,
     /// A PR was merged for the worker.
     PrMerged,
+    /// The worker sent a report to its parent chat (`report_to_parent`).
+    WorkerReport,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 6] = [
+    pub const ALL: [WakeEventKind; 7] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
         Self::TurnFinished,
         Self::PrOpened,
         Self::PrMerged,
+        Self::WorkerReport,
     ];
 }
 
 /// Per-orchestrator-chat wake settings. Required Actions (raised and
-/// resolved) and errors are on by default; turn-finished and PR events are
-/// off by default.
+/// resolved), errors and worker reports are on by default; turn-finished and
+/// PR events are off by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WakeSettings {
@@ -53,6 +56,8 @@ pub struct WakeSettings {
     pub turn_finished: bool,
     /// A PR was opened / merged for a worker.
     pub prs: bool,
+    /// A worker sent a report to this chat (`report_to_parent`).
+    pub worker_reports: bool,
 }
 
 impl Default for WakeSettings {
@@ -63,6 +68,7 @@ impl Default for WakeSettings {
             errors: true,
             turn_finished: false,
             prs: false,
+            worker_reports: true,
         }
     }
 }
@@ -78,6 +84,7 @@ impl WakeSettings {
                 WakeEventKind::Errored => self.errors,
                 WakeEventKind::TurnFinished => self.turn_finished,
                 WakeEventKind::PrOpened | WakeEventKind::PrMerged => self.prs,
+                WakeEventKind::WorkerReport => self.worker_reports,
             }
     }
 }
@@ -109,6 +116,9 @@ pub struct WakeEventView {
     pub kind: WakeEventKind,
     /// One-line text, exactly what the orchestrator is told.
     pub summary: String,
+    /// The worker's full report text (`WorkerReport` events only; capped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
     pub at_ms: i64,
     /// Told to the orchestrator already.
     pub delivered: bool,
@@ -166,4 +176,49 @@ pub struct NoteChatUserActivityParams {
     /// held while this is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_non_empty: Option<bool>,
+}
+
+/// Longest report text a parent is sent; longer ones are cut and marked.
+pub const MAX_WORKER_REPORT_BYTES: usize = 4096;
+
+/// `ReportToParent` params: `chat_id` is the reporting worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportToParentParams {
+    pub chat_id: String,
+    pub text: String,
+}
+
+/// `ReportToParent` reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportToParentResult {
+    pub parent_chat_id: String,
+    /// `queuedForParent`, or `parentReportsOff` when the parent turned
+    /// worker reports off (nothing was queued).
+    pub delivery: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<WakeHoldReason>,
+    pub truncated: bool,
+}
+
+/// Cut `text` to [`MAX_WORKER_REPORT_BYTES`] on a char boundary, marking a
+/// cut. Returns the text and whether it was cut.
+pub fn cap_worker_report(text: &str) -> (String, bool) {
+    let text = text.trim();
+    if text.len() <= MAX_WORKER_REPORT_BYTES {
+        return (text.to_owned(), false);
+    }
+    let mut end = MAX_WORKER_REPORT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (
+        format!(
+            "{}\n[truncated: first {end} of {} bytes; the rest is in the worker's transcript, read_chat]",
+            &text[..end],
+            text.len()
+        ),
+        true,
+    )
 }

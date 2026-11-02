@@ -473,6 +473,86 @@ impl OrchestratorWakes {
         self.after_ingest(recorded).await;
     }
 
+    /// A worker's report to its parent chat (`report_to_parent`, or
+    /// `send_message` to the parent): queued as a "worker report" event and
+    /// delivered in the next "Worker updates:" batch under the usual
+    /// idle / user-first rules. Parent only, same Space, and only when this
+    /// device hosts the parent (only the host delivers).
+    pub async fn report_to_parent(
+        &self,
+        from: &str,
+        text: &str,
+    ) -> Result<mast_proto::ReportToParentResult, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("text is empty".into());
+        }
+        let worker = self
+            .inner
+            .workspace
+            .chat(from)
+            .ok()
+            .flatten()
+            .ok_or_else(|| format!("unknown chat {from}"))?;
+        let parent_id = worker
+            .parent_chat_id
+            .clone()
+            .filter(|p| p != from)
+            .ok_or("this chat has no parent chat, so there is nobody to report to")?;
+        let parent = self
+            .inner
+            .workspace
+            .chat(&parent_id)
+            .ok()
+            .flatten()
+            .ok_or("the parent chat no longer exists")?;
+        if parent.space_id != worker.space_id {
+            return Err("the parent chat is in another Space; reports never cross Spaces".into());
+        }
+        if parent.device_id != self.inner.doc_host.device_id() {
+            return Err(
+                "the parent chat runs on another device; worker reports are only delivered \
+                 by the device that hosts the parent (read_chat / Required Actions still work)"
+                    .into(),
+            );
+        }
+        let (report, truncated) = mast_proto::cap_worker_report(text);
+        let now = self.now();
+        {
+            let mut state = lock(&self.inner.state);
+            let info = state.chats.entry(from.to_owned()).or_default();
+            info.title = worker.title.clone();
+            info.ticket = worker.linked_ticket_id.clone();
+            info.parent = Some(parent_id.clone());
+            let first = report.lines().next().unwrap_or_default();
+            let line = format!(
+                "{} — worker report: {}",
+                label(&state, from),
+                truncate(first, 120)
+            );
+            let key = format!("rep:{from}:{}", report_hash(&report, now / WAKE_WINDOW_MS));
+            let mut event = make_event(&mut state, from, WakeEventKind::WorkerReport, key, &line, now);
+            event.report = Some(report);
+            state.core.record(&parent_id, event, now);
+        }
+        self.evaluate(&parent_id, false).await;
+        let status = self.status(&parent_id);
+        if !status.settings.wakes_for(WakeEventKind::WorkerReport) {
+            return Ok(mast_proto::ReportToParentResult {
+                parent_chat_id: parent_id,
+                delivery: "parentReportsOff".into(),
+                held_reason: None,
+                truncated,
+            });
+        }
+        Ok(mast_proto::ReportToParentResult {
+            parent_chat_id: parent_id,
+            delivery: "queuedForParent".into(),
+            held_reason: status.hold_reason,
+            truncated,
+        })
+    }
+
     /// Required Actions raised/resolved, plus the project-destination
     /// worker relation, from one Space's snapshot.
     pub async fn ingest_snapshot(&self, snapshot: &WorkOutlineSnapshot) {
@@ -650,7 +730,15 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::TurnFinished => "turn",
         WakeEventKind::PrOpened => "pr",
         WakeEventKind::PrMerged => "prm",
+        WakeEventKind::WorkerReport => "rep",
     }
+}
+
+fn report_hash(text: &str, bucket: i64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (text, bucket).hash(&mut h);
+    h.finish()
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -692,6 +780,7 @@ fn make_event(
         worker_title: state.chats.get(worker).and_then(|c| c.title.clone()),
         kind,
         summary: summary.to_owned(),
+        report: None,
         at_ms: now,
     }
 }

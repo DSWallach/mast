@@ -18,6 +18,8 @@ pub(super) struct WakeUi {
     pub statuses: HashMap<String, WakeStatus>,
     /// Chats with a live refresh loop.
     looping: HashSet<String>,
+    /// Workers whose latest report is shown in full.
+    pub expanded_reports: HashSet<String>,
 }
 
 impl WakeUi {
@@ -135,6 +137,23 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// The latest report `worker_chat_id` sent its orchestrator (the active
+    /// chat), full text.
+    pub(super) fn latest_report_for_worker(&self, worker_chat_id: &str) -> Option<String> {
+        self.wakes
+            .statuses
+            .get(&self.active_chat)
+            .map(crate::orchestrator_wakes::latest_reports)
+            .and_then(|mut map| map.remove(worker_chat_id))
+    }
+
+    pub(super) fn toggle_report_expanded(&mut self, worker_chat_id: &str, cx: &mut Context<Self>) {
+        if !self.wakes.expanded_reports.remove(worker_chat_id) {
+            self.wakes.expanded_reports.insert(worker_chat_id.to_owned());
+        }
+        cx.notify();
     }
 
     /// Summaries of the events of `worker_chat_id` the active orchestrator

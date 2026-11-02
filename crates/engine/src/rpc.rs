@@ -2644,6 +2644,17 @@ impl RpcService for EngineRpc {
                 let p: ChatParams = parse_params(params)?;
                 RpcReply::value(&self.orchestrator_wakes.deliver_now(&p.chat_id).await)
             }
+            methods::REPORT_TO_PARENT => {
+                let p: mast_proto::ReportToParentParams = parse_params(params)?;
+                match self
+                    .orchestrator_wakes
+                    .report_to_parent(&p.chat_id, &p.text)
+                    .await
+                {
+                    Ok(result) => RpcReply::value(&result),
+                    Err(message) => return Err(RpcError::Failed(message)),
+                }
+            }
             methods::NOTE_CHAT_USER_ACTIVITY => {
                 let p: mast_proto::NoteChatUserActivityParams = parse_params(params)?;
                 self.orchestrator_wakes
