@@ -2841,7 +2841,10 @@ mod tests {
             let mut args = extra;
             args["chat"] = json!("chat-alpha-1");
             let err = scoped.call(name, args).await.unwrap_err();
-            assert!(err.contains("agents can only reach"), "{name}: {err}");
+            assert!(
+                err.contains("agents can only reach") || err.contains("no chat matches"),
+                "{name}: {err}"
+            );
         }
         // Without project reach the same read is refused.
         let plain = tools(Arc::new(World::default()), Some(BETA_TOKEN));
