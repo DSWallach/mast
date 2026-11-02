@@ -2976,18 +2976,15 @@ fn title_of(rig: &Rig, id: &str) -> String {
     snapshot(rig).item(id).map(|i| i.title.clone()).unwrap_or_default()
 }
 
-fn admin(rig: &Rig, token: &str, args: Value) -> impl std::future::Future<Output = Result<Value, String>> {
-    let client = rig.client.clone();
-    let token = token.to_owned();
-    async move {
-        client
-            .call(
-                mast_proto::agent_tools::TOOL_CALL_METHOD,
-                json!({ "token": token, "tool": "work_outline_admin", "arguments": args }),
-            )
-            .await
-            .map_err(|e| e.to_string())
-    }
+async fn admin(rig: &Rig, token: &str, args: Value) -> Result<Value, String> {
+    tool(rig, token, "work_outline_admin", args).await
+}
+
+async fn auth_origin(rig: &Rig, token: &str) -> Value {
+    rig.client
+        .call(mast_proto::agent_tools::AUTHENTICATE_METHOD, json!({ "token": token }))
+        .await
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2996,17 +2993,7 @@ async fn admin_grants_expire_revoke_and_are_user_only() {
     let tokens = rig.core.sessions.agent_tokens();
     let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
     let token = lease.token().to_owned();
-    let origin = |t: &str| {
-        let client = rig.client.clone();
-        let t = t.to_owned();
-        async move {
-            client
-                .call(mast_proto::agent_tools::AUTHENTICATE_METHOD, json!({ "token": t }))
-                .await
-                .unwrap()
-        }
-    };
-    assert!(origin(&token).await.get("adminSpaceId").is_none());
+    assert!(auth_origin(&rig, &token).await.get("adminSpaceId").is_none());
     let err = admin(&rig, &token, json!({ "read": true })).await.unwrap_err();
     assert!(err.contains("not an admin chat"), "{err}");
 
@@ -3025,23 +3012,23 @@ async fn admin_grants_expire_revoke_and_are_user_only() {
 
     let granted = grant(&rig, CHAT, Some(3600), false).await;
     assert_eq!(granted["spaceId"], SPACE);
-    assert_eq!(origin(&token).await["adminSpaceId"], SPACE);
+    assert_eq!(auth_origin(&rig, &token).await["adminSpaceId"], SPACE);
     let listed = rig.client.call(methods::LIST_ADMIN_GRANTS, json!({})).await.unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert!(admin(&rig, &token, json!({ "read": true })).await.is_ok());
 
     // Expiry: the grant stops working at once.
     tokens.admin().advance_clock_ms(3_600_001);
-    assert!(origin(&token).await.get("adminSpaceId").is_none());
+    assert!(auth_origin(&rig, &token).await.get("adminSpaceId").is_none());
     assert!(admin(&rig, &token, json!({ "read": true })).await.is_err());
     let listed = rig.client.call(methods::LIST_ADMIN_GRANTS, json!({})).await.unwrap();
     assert!(listed.as_array().unwrap().is_empty());
 
     // Renew, then revoke.
     grant(&rig, CHAT, None, false).await;
-    assert_eq!(origin(&token).await["adminSpaceId"], SPACE);
+    assert_eq!(auth_origin(&rig, &token).await["adminSpaceId"], SPACE);
     rig.client.call(methods::REVOKE_ADMIN, json!({ "chatId": CHAT })).await.unwrap();
-    assert!(origin(&token).await.get("adminSpaceId").is_none());
+    assert!(auth_origin(&rig, &token).await.get("adminSpaceId").is_none());
     assert!(admin(&rig, &token, json!({ "read": true })).await.is_err());
 }
 
@@ -3096,7 +3083,9 @@ async fn an_admin_changes_anything_in_its_space_but_nothing_outside_it() {
             "steps": [step] })).await.unwrap_err();
         assert!(err.contains("nauthorized") || err.contains("own Space"), "{err}");
     }
-    assert_eq!(title_of(&rig, &foreign), "Foreign");
+    let inputs = rig.core.workspace.work_outline_inputs(OTHER_SPACE);
+    let other = mast_doc::materialize_work_outline(OTHER_SPACE, &inputs);
+    assert_eq!(other.item(&foreign).unwrap().title, "Foreign");
 
     // Unsupported ops (Linear/GitHub, delete, grant) are not in the vocabulary.
     for op in ["linear_link", "github_comment", "delete_item", "grant_admin"] {

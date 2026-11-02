@@ -67,6 +67,8 @@ struct Ctx<'a> {
     /// ref name → real item id (apply) or the placeholder `$name` (preview).
     refs: HashMap<String, String>,
     dry: bool,
+    /// "by admin chat <title> (granted by Mikey)".
+    who: String,
 }
 
 impl Ctx<'_> {
@@ -512,7 +514,10 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
                 format!("Resolve Required Action {about}"),
                 WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
                     user_action_request_id: id,
-                    note: opt_text(step, "note"),
+                    note: Some(match opt_text(step, "note") {
+                        Some(n) => format!("{n} ({})", ctx.who),
+                        None => format!("Resolved {}", ctx.who),
+                    }),
                     operation_id: op.to_owned(),
                 }),
                 None,
@@ -647,7 +652,7 @@ impl AgentToolsService {
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut preview = Vec::new();
         for (i, step) in actions.iter().enumerate() {
-            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: true };
+            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: true, who: crate::admin::attribution(&context.chat_title) };
             let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
             if let Some(name) = built.creates_ref {
                 refs.insert(name.clone(), format!("${name}"));
@@ -705,7 +710,7 @@ impl AgentToolsService {
                     actions.len()
                 )));
             }
-            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: false };
+            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: false, who: crate::admin::attribution(&context.chat_title) };
             let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
             let reply = self.apply(context, &built.mutation).map_err(|e| {
                 invalid(format!(
