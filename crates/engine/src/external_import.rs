@@ -2333,7 +2333,7 @@ mod link_mining_tests {
     /// only from user/assistant MESSAGE text (never tool output) — matching
     /// the live tap's own scope.
     #[test]
-    fn most_recent_ticket_mention_wins_and_ignores_tool_output() {
+    fn first_ticket_mention_wins_and_ignores_tool_output() {
         let entries = vec![
             entry(
                 MessageRole::User,
@@ -2355,7 +2355,7 @@ mod link_mining_tests {
             ),
         ];
         let mined = mine_links_from_entries(&entries);
-        assert_eq!(mined.mentioned_ticket.as_deref(), Some("ENG-200"));
+        assert_eq!(mined.mentioned_ticket.as_deref(), Some("ENG-100"));
     }
 
     #[test]
