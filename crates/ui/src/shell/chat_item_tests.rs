@@ -1534,15 +1534,27 @@ fn record_engine(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> (Sent, t
     (requests, runtime)
 }
 
+/// The `setChatArchived` requests sent so far (other traffic is skipped).
+fn archive_requests(sent: &mut Sent) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    while let Ok(line) = sent.try_recv() {
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if request["params"]["op"] == "setChatArchived" {
+            out.push(request["params"].clone());
+        }
+    }
+    out
+}
+
 fn click_selector(vcx: &mut VisualTestContext, selector: &'static str) {
     let at = vcx.debug_bounds(selector).unwrap().center();
-    vcx.simulate_click(at, Modifiers::default());
+    vcx.simulate_click(at, gpui::Modifiers::default());
     draw(vcx);
 }
 
 #[gpui::test]
 fn the_team_tab_offers_archive_finished_and_suggests_it_from_three(cx: &mut TestAppContext) {
-    let (shell, vcx) = mount(cx, CHAT_API, false, finished_workers(2));
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(2));
     add_workers(&shell, vcx, 4);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
@@ -1551,13 +1563,13 @@ fn the_team_tab_offers_archive_finished_and_suggests_it_from_three(cx: &mut Test
     assert!(!has(vcx, "team-archive-suggest"));
     assert!(has(vcx, "team-archivable-w-1") && has(vcx, "team-archivable-w-2"));
     assert!(!has(vcx, "team-archivable-w-0") && !has(vcx, "team-archivable-w-3"));
-    let (shell, vcx) = mount(cx, CHAT_API, false, finished_workers(3));
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(3));
     add_workers(&shell, vcx, 4);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
     assert!(has(vcx, "team-archive-suggest"));
     // None finished: nothing to offer.
-    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
     add_workers(&shell, vcx, 4);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
@@ -1566,7 +1578,7 @@ fn the_team_tab_offers_archive_finished_and_suggests_it_from_three(cx: &mut Test
 
 #[gpui::test]
 fn archive_finished_confirms_then_archives_exactly_the_listed_chats(cx: &mut TestAppContext) {
-    let (shell, vcx) = mount(cx, CHAT_API, false, finished_workers(3));
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(3));
     add_workers(&shell, vcx, 4);
     let (mut sent, _runtime) = record_engine(&shell, vcx);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
@@ -1580,21 +1592,19 @@ fn archive_finished_confirms_then_archives_exactly_the_listed_chats(cx: &mut Tes
     }
     assert!(!has(vcx, "team-archive-confirm-row-w-0"));
     vcx.run_until_parked();
-    assert!(sent.try_recv().is_err());
+    assert!(archive_requests(&mut sent).is_empty());
     // Cancel leaves everything as it was.
     click_selector(vcx, "team-archive-confirm-cancel");
     assert!(!has(vcx, "team-archive-confirm") && has(vcx, "team-archive-finished"));
-    assert!(sent.try_recv().is_err());
+    assert!(archive_requests(&mut sent).is_empty());
     // Confirm archives each listed chat.
     click_selector(vcx, "team-archive-finished");
     click_selector(vcx, "team-archive-confirm-go");
     vcx.run_until_parked();
     let mut archived: Vec<String> = Vec::new();
-    while let Ok(line) = sent.try_recv() {
-        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(request["params"]["op"], "setChatArchived");
-        assert_eq!(request["params"]["archived"], true);
-        archived.push(request["params"]["chatId"].as_str().unwrap().to_owned());
+    for params in archive_requests(&mut sent) {
+        assert_eq!(params["archived"], true);
+        archived.push(params["chatId"].as_str().unwrap().to_owned());
     }
     archived.sort();
     assert_eq!(archived, ["w-1", "w-2", "w-3"]);
@@ -1603,7 +1613,7 @@ fn archive_finished_confirms_then_archives_exactly_the_listed_chats(cx: &mut Tes
 
 #[gpui::test]
 fn archived_workers_leave_the_rows_and_a_toggle_brings_them_back(cx: &mut TestAppContext) {
-    let (shell, vcx) = mount(cx, CHAT_API, false, finished_workers(1));
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(1));
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| {
         shell.state.update(cx, |state, _| {
@@ -1630,7 +1640,7 @@ fn archived_workers_leave_the_rows_and_a_toggle_brings_them_back(cx: &mut TestAp
 
 #[gpui::test]
 fn unarchive_sends_set_chat_archived_false(cx: &mut TestAppContext) {
-    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
     add_workers(&shell, vcx, 2);
     let (mut sent, _runtime) = record_engine(&shell, vcx);
     shell.update(vcx, |shell, cx| {
@@ -1643,8 +1653,8 @@ fn unarchive_sends_set_chat_archived_false(cx: &mut TestAppContext) {
     draw(vcx);
     click_selector(vcx, "team-unarchive-w-1");
     vcx.run_until_parked();
-    let request: serde_json::Value = serde_json::from_str(&sent.try_recv().unwrap()).unwrap();
-    assert_eq!(request["params"]["op"], "setChatArchived");
-    assert_eq!(request["params"]["chatId"], "w-1");
-    assert_eq!(request["params"]["archived"], false);
+    let requests = archive_requests(&mut sent);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["chatId"], "w-1");
+    assert_eq!(requests[0]["archived"], false);
 }
