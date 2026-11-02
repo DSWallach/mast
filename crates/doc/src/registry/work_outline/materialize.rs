@@ -165,6 +165,9 @@ pub(crate) struct DecodedItem {
     /// `templateId` / `templateRevision` (project templates).
     pub template_id: Option<String>,
     pub template_revision: Option<u32>,
+    /// `containerTemplate` / `templateNodeId` (container templates).
+    pub container_template: Option<mast_proto::work_outline_container_templates::ContainerTemplate>,
+    pub template_node_id: Option<String>,
 }
 
 impl DecodedItem {
@@ -232,6 +235,12 @@ pub(crate) fn decode_item(row: &RegistryRow) -> Result<DecodedItem, WorkOutlineR
             .get("templateRevision")
             .and_then(Value::as_u64)
             .and_then(|r| u32::try_from(r).ok()),
+        container_template: row
+            .fields
+            .get("containerTemplate")
+            .filter(|v| v.is_object())
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        template_node_id: str_field(row, "templateNodeId").filter(|id| !id.is_empty()),
     })
 }
 
@@ -472,6 +481,7 @@ pub(crate) fn decode_instruction(
         source_proposal_id: str_field(row, "sourceProposalId").filter(|s| !s.is_empty()),
         archived_at,
         archived_by: archived_at.and_then(|_| actor_field(row, "archivedBy")),
+        template_instruction_id: str_field(row, "templateInstructionId").filter(|s| !s.is_empty()),
     })
 }
 
@@ -664,6 +674,8 @@ pub(crate) fn bare_view(
         worker_destination_id: None,
         template_id: None,
         template_revision: None,
+        container_template: None,
+        template_node_id: None,
     }
 }
 
@@ -915,6 +927,8 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             worker_destination_id: item.worker_destination_id.clone(),
             template_id: item.template_id.clone(),
             template_revision: item.template_revision,
+            container_template: item.container_template.clone(),
+            template_node_id: item.template_node_id.clone(),
         });
     }
     for index in (0..views.len()).rev() {

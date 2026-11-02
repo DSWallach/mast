@@ -268,6 +268,7 @@ impl RegistryDoc {
             actor,
             now_ms,
         )?;
+        self.plan_follow_for_new_child(&p.space_id, parent, &id, actor, now_ms, &mut plan)?;
         let mut set = BTreeMap::from([
             ("spaceId".to_owned(), json!(p.space_id)),
             ("workItemId".to_owned(), json!(id)),

@@ -42,6 +42,7 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
+pub mod container_templates;
 pub mod execution;
 pub mod instructions;
 pub mod linear;
@@ -916,6 +917,12 @@ impl RegistryDoc {
             WorkOutlineMutation::DeleteWorkItemTemplate(p) => {
                 self.delete_work_item_template(p).map(|_| empty)
             }
+            WorkOutlineMutation::SetContainerTemplate(p) => self
+                .set_container_template(p, actor, now_ms)
+                .map(|_| empty),
+            WorkOutlineMutation::ApplyContainerTemplate(p) => self
+                .apply_container_template(p, actor, now_ms)
+                .map(|_| empty),
         }
     }
 
@@ -953,6 +960,8 @@ impl RegistryDoc {
             actor,
             now_ms,
         )?;
+        let mut plan = plan;
+        self.plan_follow_for_new_child(&p.space_id, parent, &id, actor, now_ms, &mut plan)?;
         let extra: Vec<(&str, &str)> = parent.map(|p| (KIND_WORK_ITEMS, p)).into_iter().collect();
         self.commit(plan, &extra)?;
         Ok(id)

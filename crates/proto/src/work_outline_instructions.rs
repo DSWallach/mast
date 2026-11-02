@@ -138,6 +138,10 @@ pub struct WorkItemInstructionView {
     pub archived_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_by: Option<WorkOutlineActor>,
+    /// Container templates: the rule instruction this row follows
+    /// (`workItemInstructions.templateInstructionId`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_instruction_id: Option<String>,
 }
 
 impl WorkItemInstructionView {
