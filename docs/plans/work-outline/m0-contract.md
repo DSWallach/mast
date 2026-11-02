@@ -1850,3 +1850,41 @@ item 2.
    and "Proposed" blocks, and its Accept reads "Apply anyway". Accepting goes through the drift
    confirmation as an edit or archive of that instruction. The Item tab's proposals chip and
    Needs-you lead to this surface.
+
+## Amendment: container templates
+
+Design: `mast-artifact:df5be7ef1a2fa657e3737f17dd0ef89a` (approved by Mikey 2026-11-02).
+
+- **Rules** live on a container item: `workItems.containerTemplate` = `{revision, root}`
+  (`mast_proto::work_outline_container_templates`). The root describes each DIRECT child
+  (its title is ignored); its children are the items created under the child. Nodes and
+  instructions have stable ids (empty ids on input are assigned deterministically from the
+  operation id). Limits: 64 nodes, depth 6, 16 instructions per node, 13,000 UTF-16 units,
+  one worker-destination node (never the root). A followed item cannot hold rules (nesting later).
+- **Followed items** carry `workItems.templateNodeId`; **followed instruction rows** are real
+  rows with `workItemInstructions.templateInstructionId`. Everything downstream (revisions,
+  delivery, budgets, pins) is unchanged. Template text can't be edited in a project
+  (`updateWorkItemInstruction` is refused); archiving a row mutes it.
+- **`createWorkItem` / `createWorkItemFromLinear` under a container with rules** add the
+  structure to the same batch. Item and row ids are `derive_id(parentItemId, ruleNodeId)`
+  (instruction rows: `derive_id(itemId, ruleInstructionId)`), so replays and two devices
+  converge. A tombstoned or moved-out derived item is never re-created.
+- **`setContainerTemplate`** (users and system only; agents are `unauthorized`): saves the rules
+  (revision +1; `template: null` turns them off) and propagates in the same batch to every
+  direct child that follows: added nodes and instructions are created, template instruction
+  text follows, removed rule instructions are archived, renamed nodes rename (a node whose
+  title the project changed is overwritten when the template title changed), the project flag
+  follows, a changed worker destination rebinds. A removed node's item is DETACHED (its
+  `templateNodeId` cleared and its instruction rows' links cleared, so it keeps them as its
+  own); nothing is deleted or archived. Reorder and node moves are not propagated (phase 2).
+- **`applyContainerTemplate`** (`workItemId` = the container: every direct child; or one
+  child): makes the child follow its parent's rules. Existing sub-items are adopted level by
+  level by case-insensitive title and keep their titles; missing items and instruction rows
+  are created; extras are untouched; nothing is moved or deleted. Agents may call it inside
+  their item's scope (tool `work_outline_apply_container_template`); editing rules is
+  user-only. An item moved into a container does not follow until Apply.
+- Snapshot: `WorkItemView.containerTemplate`, `WorkItemView.templateNodeId`,
+  `WorkItemInstructionView.templateInstructionId`. A child "follows" iff its `templateNodeId`
+  equals its parent's `containerTemplate.root.id`.
+- Not undoable by the outline undo stack when written by the engine; user edits of the rules
+  are ordinary UI calls.
