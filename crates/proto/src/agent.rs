@@ -773,6 +773,9 @@ pub mod agent_tools {
         pub const ANSWER_USER_ACTION_REQUEST: &str = "answer_user_action_request";
         /// Propose an instruction for the item, its parent, or the Space root.
         pub const PROPOSE_INSTRUCTION: &str = "work_outline_propose_instruction";
+        /// Make an item (or every direct child of a container) follow its
+        /// container template: adopts existing items by title, creates the rest.
+        pub const APPLY_CONTAINER_TEMPLATE: &str = "work_outline_apply_container_template";
         /// Engine-internal (not an MCP tool): queue the first Turn of a child
         /// Chat the MCP `create_chat` tool created, with ids derived from the
         /// calling Chat and its idempotency key so retries never duplicate it.
@@ -814,7 +817,7 @@ pub mod agent_tools {
             [ARTIFACT_PUBLISH, ARTIFACT_GET_PLAN, ARTIFACT_RENDER_CHECK];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 9] = [
+        pub const WORK_OUTLINE: [&str; 10] = [
             READ_CURRENT,
             READ_SUBTREE,
             CREATE_CHILD,
@@ -823,6 +826,7 @@ pub mod agent_tools {
             CREATE_USER_ACTION_REQUEST,
             RESOLVE_USER_ACTION_REQUEST,
             ANSWER_USER_ACTION_REQUEST,
+            APPLY_CONTAINER_TEMPLATE,
             PROPOSE_INSTRUCTION,
         ];
     }
@@ -1042,6 +1046,15 @@ pub mod agent_tools {
             ],
             optional: &[],
             example: r#"{"requestId": "<request id>", "userMessageId": "<message id>", "idempotencyKey": "answer-<request id>"}"#,
+        },
+        ToolUsage {
+            tool: tools::APPLY_CONTAINER_TEMPLATE,
+            required: &[p(
+                "workItemId",
+                "a container with a template (every direct child) or one item under it",
+            )],
+            optional: &[KEY_DERIVED],
+            example: r#"{"workItemId": "<container or child id>"}"#,
         },
         ToolUsage {
             tool: tools::PROPOSE_INSTRUCTION,
