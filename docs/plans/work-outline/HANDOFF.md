@@ -582,6 +582,19 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   usage cards with reset times, chats (Needs you first), interrupted + Resume all, Restart when idle
   (newer build only), Open Mast, Quit. Uses the existing usage cache; AppKit glue is compile-checked
   only (hand-verify). Also supersedes the retired peon tray.
+  Usage fetch fix (2026-11-02, `menu-bar-usage-fetch`): `UsageSchedule` probes at startup (once the
+  engine answers), on menu open (if ≥60 s old) and every 5 min; failures retry after 60 s. Rows are
+  enabled (AppKit dims disabled items) with label/secondaryLabel colours and solid bars. Cards say why
+  usage is missing (token expired, not signed in, sign-in not readable, API key); debug log target `usage`.
+- **Orchestrator wakes** (2026-11-02, `orchestrator-wakes`): engine `orchestrator_wakes.rs`, event-driven
+  (outline snapshot Required Actions raised/resolved, session watch errored/turn finished, PR linked).
+  Workers = child chats + chats under the project worker destination. Events batch over
+  `WAKE_WINDOW_MS` (45 s) into one queued system "Worker updates:" message, delivered only when the
+  orchestrator is idle; held while Mikey has a draft, was active in the last 2 min, or has a queued
+  message; a user send during a wake turn interrupts it and runs next. Defaults: on, Required Actions +
+  errors; turn-finished and PR events off. Settings in `<data_dir>/orchestrator-wakes.json`. UI: Team
+  tab header (toggles, "N updates held" + Deliver now, unseen marks), Item tab Wakes row. Gaps: PR
+  merged not fed yet, held events in memory only, only the orchestrator's host device delivers.
 - **Known test failures** (pre-existing, not regressions):
   - Engine lib, on main `3801cb5b`: `capture_source_context_reads_the_dispatch_checkout`,
     `local_opening_tail_arrives_before_full_mirror_and_keeps_all_history`.
@@ -723,7 +736,7 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
 
 ## Diagnostics
 
-- Outline key handling: grep `work_outline_keys` in `~/.zeron/logs/zeron-headed.log`.
+- Outline key handling: grep `work_outline_keys` in `~/.zeron/logs/mast-headed.log` (zeron-headed.log before the rename).
 - Linear PR attachments: log target `linear`.
 - Pre-settle registry DB backup:
   `~/zeron-dev-app-backups/local-profile-docs-2026-10-12-pre-settle.sqlite3`.
