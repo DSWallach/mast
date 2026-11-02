@@ -51,7 +51,8 @@ fn time_left_reads_hours_minutes_and_the_last_minute() {
     assert_eq!(at(4 * HOUR).as_deref(), Some("4h left"));
     assert_eq!(at(3 * HOUR + 59 * MIN).as_deref(), Some("3h left"));
     assert_eq!(at(HOUR).as_deref(), Some("1h left"));
-    assert_eq!(at(HOUR - 1).as_deref(), Some("59m left"));
+    assert_eq!(at(HOUR - 1).as_deref(), Some("1h left"));
+    assert_eq!(at(HOUR - MIN).as_deref(), Some("59m left"));
     assert_eq!(at(2 * MIN + 1).as_deref(), Some("3m left"));
     assert_eq!(at(MIN).as_deref(), Some("1m left"));
     assert_eq!(at(MIN - 1).as_deref(), Some("<1m left"));
@@ -63,7 +64,7 @@ fn time_left_reads_hours_minutes_and_the_last_minute() {
 
 #[test]
 fn badge_text_names_the_space_and_vanishes_at_expiry() {
-    let g = grant("c1", Some(3 * HOUR + 10));
+    let g = grant("c1", Some(4 * HOUR + 10));
     assert_eq!(
         badge_text("Mast", &g, 0).as_deref(),
         Some("Admin \u{b7} Mast \u{b7} 4h left")
@@ -72,7 +73,7 @@ fn badge_text_names_the_space_and_vanishes_at_expiry() {
         badge_text("Mast", &g, 10 + 30 * MIN).as_deref(),
         Some("Admin \u{b7} Mast \u{b7} 3h left")
     );
-    assert_eq!(badge_text("Mast", &g, 3 * HOUR + 10), None);
+    assert_eq!(badge_text("Mast", &g, 4 * HOUR + 10), None);
     assert_eq!(
         badge_text("Mast", &grant("c1", None), 5).as_deref(),
         Some("Admin \u{b7} Mast \u{b7} until revoked")
