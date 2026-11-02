@@ -360,6 +360,7 @@ pub(crate) fn drift_impact(snapshot: &WorkOutlineSnapshot, change: &OutlineChang
                     source_proposal_id: None,
                     archived_at: None,
                     archived_by: None,
+                    template_instruction_id: None,
                 });
             scope_candidates(snapshot, work_item_id.as_deref())
         }
@@ -535,6 +536,7 @@ pub(crate) mod fixture {
             source_proposal_id: None,
             archived_at: None,
             archived_by: None,
+            template_instruction_id: None,
         }
     }
 

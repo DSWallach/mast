@@ -20,6 +20,7 @@ fn instruction(id: &str, item: Option<&str>, text: &str) -> WorkItemInstructionV
         source_proposal_id: None,
         archived_at: None,
         archived_by: None,
+        template_instruction_id: None,
     }
 }
 

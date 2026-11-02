@@ -530,6 +530,9 @@ impl WorkItemDetails {
                 instruction.id.clone(),
                 instruction.id.clone(),
             );
+            // Template-linked rows (container templates): no text edits, and
+            // "Remove" reads "Mute" (the same archive).
+            let from_template = instruction.template_instruction_id.is_some();
             let collapsible = needs_collapse(&instruction.text);
             let expanded = self.instructions_expanded.contains(&instruction.id);
             let line_height = crate::typography::ui_rems(LINE_HEIGHT_REMS);
@@ -593,29 +596,31 @@ impl WorkItemDetails {
                                                 })),
                                             )
                                         })
-                                        .child(
-                                            Self::small_button(
-                                                ("work-item-instruction-edit", ix),
-                                                "Edit",
-                                                theme,
+                                        .when(!from_template, |el| {
+                                            el.child(
+                                                Self::small_button(
+                                                    ("work-item-instruction-edit", ix),
+                                                    "Edit",
+                                                    theme,
+                                                )
+                                                .debug_selector(move || {
+                                                    format!("work-item-instruction-edit-{ix}")
+                                                })
+                                                .on_click(
+                                                    cx.listener(move |this, _, window, cx| {
+                                                        this.begin_instruction_draft(
+                                                            Some(edit_id.clone()),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    }),
+                                                ),
                                             )
-                                            .debug_selector(move || {
-                                                format!("work-item-instruction-edit-{ix}")
-                                            })
-                                            .on_click(
-                                                cx.listener(move |this, _, window, cx| {
-                                                    this.begin_instruction_draft(
-                                                        Some(edit_id.clone()),
-                                                        window,
-                                                        cx,
-                                                    )
-                                                }),
-                                            ),
-                                        )
+                                        })
                                         .child(
                                             Self::small_button(
                                                 ("work-item-instruction-archive", ix),
-                                                "Remove",
+                                                if from_template { "Mute" } else { "Remove" },
                                                 theme,
                                             )
                                             .debug_selector(move || {
@@ -628,6 +633,22 @@ impl WorkItemDetails {
                                             ),
                                         ),
                                 )
+                                .when(from_template, |el| {
+                                    el.child(
+                                        div()
+                                            .debug_selector(move || {
+                                                format!("work-item-instruction-template-{ix}")
+                                            })
+                                            .flex_none()
+                                            .px(px(4.0))
+                                            .rounded(px(3.0))
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .text_size(crate::typography::ui_rems(9.5))
+                                            .text_color(theme.accent)
+                                            .child("From template"),
+                                    )
+                                })
                                 .when_some(badge, |el, badge| {
                                     el.child(
                                         div()

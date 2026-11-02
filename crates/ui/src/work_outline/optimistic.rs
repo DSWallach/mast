@@ -247,6 +247,8 @@ fn apply_create(
         worker_destination_id: None,
         template_id: None,
         template_revision: None,
+        container_template: None,
+        template_node_id: None,
         external_sync_modified_fields: Vec::new(),
     });
     Some(out)

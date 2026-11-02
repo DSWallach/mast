@@ -63,6 +63,8 @@ pub(crate) mod templates_section;
 
 #[path = "details_template_review.rs"]
 pub(crate) mod template_review_section;
+#[path = "details_container_template.rs"]
+pub(crate) mod container_template_section;
 #[path = "details_convert.rs"]
 pub(crate) mod convert_section;
 
@@ -246,6 +248,8 @@ pub(crate) struct WorkItemDetails {
     pub(crate) artifacts: artifacts_section::ArtifactsDetailsState,
     /// Project templates (`details_templates.rs`).
     pub(crate) templates: templates_section::TemplatesDetailsState,
+    /// Container templates: the rules editor (`details_container_template.rs`).
+    pub(crate) container_template: container_template_section::ContainerTemplateState,
     template_name_input: Entity<ComposerInput>,
     _subscriptions: Vec<Subscription>,
     /// Tests run without a Shell: the artifact a row click opened.
@@ -440,6 +444,7 @@ impl WorkItemDetails {
             pr_sync: Default::default(),
             artifacts: Default::default(),
             templates: Default::default(),
+            container_template: Default::default(),
             template_name_input,
             _subscriptions: subscriptions,
             #[cfg(test)]
@@ -1892,6 +1897,10 @@ impl Render for WorkItemDetails {
         // Project (templates): the project flag and its worker destination.
         let project_section = self.render_project_section(&item, &snapshot, &theme, cx);
 
+        // Container templates: rules, follow state and Apply.
+        let container_template_section =
+            self.render_container_template_section(&item, &snapshot, &theme, cx);
+
         // Archive / restore.
         let footer = if item.archived_at.is_some() {
             div().child(
@@ -1937,6 +1946,7 @@ impl Render for WorkItemDetails {
                 .when_some(children_section, |el, section| el.child(section))
                 .child(refs_section)
                 .child(project_section)
+                .child(container_template_section)
                 .children(linear_hint)
                 .when_some(error, |el, error| {
                     el.child(

@@ -3636,6 +3636,21 @@ fn item_body(
                     .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
             )
         })
+        .when(item.follows_template && !item.archived, |el| {
+            el.child(
+                div()
+                    .id(SharedString::from(format!("outline-follows-template-{key}")))
+                    .debug_selector({
+                        let selector = format!("outline-follows-template-{key}");
+                        move || selector.clone()
+                    })
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(theme.text_faint)
+                    .child("\u{25c7}")
+                    .hint("Follows its container\u{2019}s template", HintKey::None),
+            )
+        })
         .when(
             item.chat_count > 0 && !compact_pr && item.compact_chat.is_none(),
             |el| {

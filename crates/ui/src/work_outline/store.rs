@@ -244,6 +244,8 @@ pub(crate) fn fixture_item(
         worker_destination_id: None,
         template_id: None,
         template_revision: None,
+        container_template: None,
+        template_node_id: None,
     }
 }
 
