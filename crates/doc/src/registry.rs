@@ -438,9 +438,22 @@ pub struct RegistryDoc {
     /// "did that call write anything" for tests and diagnostics, which the
     /// queue length cannot answer once writes settle locally.
     batches_written: u64,
+    /// Set only for the span of one admin-chat mutation (see
+    /// `set_admin_scope`): the Space the calling agent administers. Never
+    /// persisted, never read from a wire value.
+    admin_space: Option<String>,
 }
 
 impl RegistryDoc {
+    /// Run `f` with the calling agent's admin Space in force (the engine
+    /// passes a live user grant's Space, re-checked per call), then clear it.
+    pub fn with_admin_scope<R>(&mut self, space_id: Option<&str>, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.admin_space = space_id.map(str::to_owned);
+        let result = f(self);
+        self.admin_space = None;
+        result
+    }
+
     pub fn new(device_id: impl Into<String>) -> Self {
         Self {
             device_id: device_id.into(),
@@ -453,6 +466,7 @@ impl RegistryDoc {
             kind_generations: HashMap::new(),
             all_kinds_generation: 0,
             batches_written: 0,
+            admin_space: None,
         }
     }
 

@@ -16,6 +16,7 @@ use mast_rpc::{RpcError, RpcReply, RpcService, methods};
 use mast_sync::DocsStore;
 
 pub mod agent_accounts;
+pub mod admin;
 pub mod agent_tools;
 pub mod artifact_questions;
 pub mod artifacts;
@@ -588,6 +589,10 @@ impl EngineCore {
         }
         artifacts.spawn_watch_loop();
         artifact_questions::ArtifactQuestionSync::new(artifacts.clone()).spawn_loop();
+        sessions
+            .agent_tokens()
+            .admin()
+            .set_store(data_dir.join("admin-grants.json"));
         let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::start(
             sessions.clone(),
             doc_host.clone(),

@@ -1110,6 +1110,12 @@ impl RegistryDoc {
     /// created.
     fn agent_may_resolve_origin(&self, agent_chat: &str, origin: &str) -> bool {
         origin == agent_chat
+            || self.admin_space.as_deref().is_some_and(|space| {
+                self.chat(origin)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.space_id.as_deref() == Some(space))
+            })
             || self
                 .chat(origin)
                 .ok()
@@ -1169,6 +1175,166 @@ impl RegistryDoc {
         false
     }
 
+    /// Whether the mutation in flight is an admin chat's (a live user grant).
+    pub(super) fn admin_in_force(&self) -> bool {
+        self.admin_space.is_some()
+    }
+
+    fn item_in_space(&self, item_id: &str, space: &str) -> bool {
+        // Unknown ids fall through to the mutator's `notFound`.
+        self.live_item(item_id).map_or(true, |item| item.space_id == space)
+    }
+
+    /// Admin chats (contract amendment "admin chats"): within their granted
+    /// Space only, outline changes anywhere (create, update including status
+    /// and project settings, move, archive, restore), instruction add / edit /
+    /// reorder / archive, and resolving any Space request except a bulk-change
+    /// approval (only the user resolves those). `None` = not an admin rule, the
+    /// normal agent policy decides (own-Chat association, own requests,
+    /// proposals). Linear / PR-sync settings, execution configuration (accounts
+    /// and sandbox), references, repair, templates and approvals stay denied.
+    fn authorize_admin_mutation(
+        &self,
+        space: &str,
+        mutation: &WorkOutlineMutation,
+    ) -> Option<Outcome<()>> {
+        let outside = || unauthorized("Admin chats may only change their own Space");
+        let ok_if = |cond: bool| Some(if cond { Ok(()) } else { Err(outside()) });
+        match mutation {
+            WorkOutlineMutation::CreateWorkItem(p) => ok_if(
+                p.space_id == space
+                    && p.parent_work_item_id
+                        .as_deref()
+                        .is_none_or(|parent| self.item_in_space(parent, space)),
+            ),
+            WorkOutlineMutation::UpdateWorkItem(p) => {
+                let c = &p.changes;
+                if c.external_sync_state.is_some() || !c.template.is_unchanged() {
+                    return Some(Err(unauthorized(
+                        "Admin chats cannot change sync state or template links",
+                    )));
+                }
+                if c.resolve_open_requests {
+                    return Some(Err(unauthorized(
+                        "Agents cannot resolve open user action requests by completing an item",
+                    )));
+                }
+                if matches!(c.status, Some(WorkItemStatus::Pending)) {
+                    return Some(Err(unauthorized(
+                        "Agents may only mark a work item active or completed",
+                    )));
+                }
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::MoveWorkItem(p) => ok_if(
+                self.item_in_space(&p.work_item_id, space)
+                    && p.destination_parent_work_item_id
+                        .as_deref()
+                        .is_none_or(|parent| self.item_in_space(parent, space)),
+            ),
+            WorkOutlineMutation::ArchiveWorkItem(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::RestoreWorkItem(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::CreateWorkItemInstruction(p) => ok_if(
+                p.space_id == space
+                    && match &p.scope {
+                        InstructionScope::SpaceRoot => true,
+                        InstructionScope::WorkItem { work_item_id } => {
+                            self.item_in_space(work_item_id, space)
+                        }
+                    },
+            ),
+            WorkOutlineMutation::UpdateWorkItemInstruction(p) => self.admin_instruction(&p.instruction_id, space),
+            WorkOutlineMutation::MoveWorkItemInstruction(p) => self.admin_instruction(&p.instruction_id, space),
+            WorkOutlineMutation::ArchiveWorkItemInstruction(p) => self.admin_instruction(&p.instruction_id, space),
+            WorkOutlineMutation::ResolveUserActionRequest(p) => {
+                let row = self.overlay_row(KIND_USER_ACTION_REQUESTS, &p.user_action_request_id)?;
+                if str_field(&row, "dedupeKey")
+                    .is_some_and(|key| key.starts_with(mast_proto::ADMIN_BULK_DEDUPE_PREFIX))
+                {
+                    return Some(Err(unauthorized(
+                        "Only the user can approve a bulk change",
+                    )));
+                }
+                let item_ok = str_field(&row, "workItemId")
+                    .is_none_or(|item| self.item_in_space(&item, space));
+                ok_if(item_ok)
+            }
+            // Parity with the user's own menus, inside the Space: accept /
+            // dismiss proposals, move chats between items, instruction
+            // revisions, execution configuration, template save.
+            WorkOutlineMutation::ApproveWorkItemInstructionProposal(p) => {
+                self.admin_proposal(&p.proposal_id, space)
+            }
+            WorkOutlineMutation::RejectWorkItemInstructionProposal(p) => {
+                self.admin_proposal(&p.proposal_id, space)
+            }
+            WorkOutlineMutation::AssignChatToWorkItem(p) => ok_if(
+                self.chat_in_space(&p.chat_id, space)
+                    && self.item_in_space(&p.work_item_id, space),
+            ),
+            WorkOutlineMutation::RemoveChatFromWorkItem(p) => {
+                ok_if(self.chat_in_space(&p.chat_id, space))
+            }
+            WorkOutlineMutation::ApplyInstructionRevision(p) => {
+                ok_if(self.chat_in_space(&p.chat_id, space))
+            }
+            WorkOutlineMutation::KeepInstructionSession(p) => {
+                ok_if(self.chat_in_space(&p.chat_id, space))
+            }
+            WorkOutlineMutation::CreateInstructionRevision(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::ConfigureExecution(p) => ok_if(match &p.scope {
+                mast_proto::ExecutionScope::Space { space_id } => space_id == space,
+                mast_proto::ExecutionScope::WorkItem { work_item_id } => {
+                    self.item_in_space(work_item_id, space)
+                }
+            }),
+            WorkOutlineMutation::SaveWorkItemTemplate(p) => ok_if(
+                p.space_id == space && self.item_in_space(&p.project_work_item_id, space),
+            ),
+            // Linear / PR-sync settings, external references, repair and
+            // template deletion stay with the user (and the normal agent
+            // policy refuses them).
+            _ => None,
+        }
+    }
+
+    fn chat_in_space(&self, chat_id: &str, space: &str) -> bool {
+        self.chat(chat_id)
+            .ok()
+            .flatten()
+            .is_none_or(|c| c.space_id.as_deref() == Some(space))
+    }
+
+    fn admin_proposal(&self, proposal_id: &str, space: &str) -> Option<Outcome<()>> {
+        let in_space = self
+            .overlay_row(KIND_WORK_ITEM_INSTRUCTION_PROPOSALS, proposal_id)
+            .and_then(|row| str_field(&row, "spaceId"))
+            .is_none_or(|s| s == space);
+        Some(if in_space {
+            Ok(())
+        } else {
+            Err(unauthorized("Admin chats may only change their own Space"))
+        })
+    }
+
+    fn admin_instruction(&self, instruction_id: &str, space: &str) -> Option<Outcome<()>> {
+        match self.live_instruction(instruction_id) {
+            Ok(view) => Some(if view.space_id == space {
+                Ok(())
+            } else {
+                Err(unauthorized("Admin chats may only change their own Space"))
+            }),
+            // The mutator reports the missing instruction.
+            Err(_) => Some(Ok(())),
+        }
+    }
+
     /// The narrow agent policy: `Ok` when an agent acting for Chat
     /// `chat_id` may perform `mutation`, else `unauthorized` (with the
     /// reason). Allowed, all within the Chat's Space:
@@ -1201,6 +1367,11 @@ impl RegistryDoc {
         let space = chat.space_id.filter(|s| !s.is_empty()).ok_or_else(|| {
             unauthorized("Agents in Chats outside a project cannot change the Work Outline")
         })?;
+        if self.admin_space.as_deref() == Some(space.as_str())
+            && let Some(decision) = self.authorize_admin_mutation(&space, mutation)
+        {
+            return decision;
+        }
         let assigned = self.chat_assigned_work_item(chat_id, &space);
         let require_assigned = || {
             assigned

@@ -376,6 +376,22 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                 "required": ["idempotencyKey"]
             }),
         },
+        ToolDef {
+            name: agent_tool_names::ADMIN,
+            description: "ADMIN CHATS ONLY (the user grants this per chat and Space, with an expiry; refused otherwise). Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "steps": { "type": "array", "items": { "type": "object", "properties": { "op": { "type": "string" } }, "required": ["op"] } },
+                    "dryRun": { "type": "boolean" },
+                    "confirmToken": { "type": "string" },
+                    "read": { "type": "boolean" },
+                    "maxDepth": { "type": "integer" },
+                    "idempotencyKey": idempotency_key_schema()
+                },
+                "required": ["idempotencyKey"]
+            }),
+        },
     ]
 }
 
@@ -841,6 +857,7 @@ impl Tools {
             "authenticated": origin.is_some(),
             "originDeviceId": origin.map(|o| o.device_id.clone()),
             "runId": origin.map(|o| o.run_id.clone()),
+            "adminSpaceId": origin.and_then(|o| o.admin_space_id.clone()),
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
             "workOutlineTools": if origin.is_some() {
@@ -858,7 +875,8 @@ impl Tools {
                  You can reach only the chats you created (plus read this one), and \
                  create_chat works only in this chat's project, never with a wider \
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
-                 need an idempotency key."
+                 need an idempotency key. Admin chats (user-granted, per Space, expiring) \
+                 also reach every chat and item of their Space; see adminSpaceId."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
@@ -941,7 +959,7 @@ impl Tools {
             self.zeron.sessions()
         )?;
         if let Some(origin) = origin {
-            chats.retain(|c| reachable(origin, c, true));
+            chats.retain(|c| reachable(origin, c, true, true));
         }
         if let Some(project) = args.project.as_deref() {
             let space = self.zeron.resolve_space(project).await?;
@@ -1602,7 +1620,9 @@ impl Tools {
         origin: Option<&AgentOrigin>,
         args: WaitArgs,
     ) -> anyhow::Result<Value> {
-        let chat = self.reach_chat(origin, &args.chat, Reach::Child).await?;
+        let chat = self
+            .reach_chat(origin, &args.chat, Reach::ChildOrAdmin)
+            .await?;
         let turn = self
             .await_turn(&chat, None, false, args.timeout_secs, 0)
             .await?;
@@ -1615,9 +1635,14 @@ impl Tools {
         args: ArchiveArgs,
     ) -> anyhow::Result<Value> {
         let chat = self
-            .reach_chat(origin, &args.chat, Reach::Child)
+            .reach_chat(origin, &args.chat, Reach::ChildOrAdmin)
             .await
-            .map_err(|e| anyhow::anyhow!("agents can only archive chats they created: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "agents can only archive chats they created (admin chats: any chat of \
+                     their Space): {e}"
+                )
+            })?;
         let archived = args.archived.unwrap_or(true);
         self.zeron
             .mutate(json!({ "op": "setChatArchived", "chatId": chat.id, "archived": archived }))
@@ -1698,7 +1723,9 @@ impl Tools {
         let Some(origin) = origin else {
             return self.zeron.resolve_chat(key).await;
         };
-        let allow_self = reach != Reach::Child;
+        let allow_self = !matches!(reach, Reach::Child | Reach::ChildOrAdmin);
+        // Admin chats reach their whole Space for everything but interrupt/respond.
+        let admin_ok = reach != Reach::Child;
         let all = self.zeron.chats().await?;
         let parent = (reach == Reach::SelfChildOrParent)
             .then(|| {
@@ -1720,7 +1747,7 @@ impl Tools {
         let chats: Vec<Chat> = all
             .into_iter()
             .filter(|c| {
-                reachable(origin, c, allow_self)
+                reachable(origin, c, allow_self, admin_ok)
                     || parent.as_deref() == Some(c.id.as_str())
                     || project_chats.contains(&c.id)
             })
@@ -1769,8 +1796,13 @@ impl Tools {
             }
             _ => short(origin_id).to_owned(),
         };
+        let admin = if origin.is_some_and(|o| o.admin_space_id.is_some()) {
+            " (an admin chat, granted by Mikey; this is not Mikey's own message)"
+        } else {
+            ""
+        };
         format!(
-            "{} {label}. Reply to it with the Mast `send_message` tool, chat {}.]\n\n{text}",
+            "{} {label}{admin}. Reply to it with the Mast `send_message` tool, chat {}.]\n\n{text}",
             mast_proto::RELAYED_MESSAGE_PREFIX,
             short(origin_id)
         )
@@ -1934,20 +1966,34 @@ impl Tools {
 enum Reach {
     /// Only chats the caller created (`parentChatId` = the caller).
     Child,
-    /// Those, or the caller itself (reads).
+    /// Those, or the caller itself (reads, sends). An admin chat also
+    /// reaches every chat of its Space.
     SelfOrChild,
     /// Those, the caller itself, or the caller's parent chat (`send_message`).
     SelfChildOrParent,
     /// Those, or any chat on an item inside the caller's project (read-only:
     /// `read_chat` only, never a send).
     ReadScope,
+    /// Children only, but an admin chat also reaches every chat of its Space
+    /// (wait, archive). Interrupt and respond stay `Child`.
+    ChildOrAdmin,
 }
 
 /// Whether the token's Chat may reach `chat`: one it created (Mast-created
 /// children carry the creating Chat as `parentChatId`), or itself.
-fn reachable(origin: &AgentOrigin, chat: &Chat, allow_self: bool) -> bool {
+fn reachable(origin: &AgentOrigin, chat: &Chat, allow_self: bool, admin_ok: bool) -> bool {
     chat.parent_chat_id.as_deref() == Some(origin.chat_id.as_str())
         || (allow_self && chat.id == origin.chat_id)
+        || (admin_ok && admin_reaches(origin, chat))
+}
+
+/// An admin chat (a live user grant, re-checked at every authenticate) reaches
+/// the chats of its granted Space, never another Space's.
+fn admin_reaches(origin: &AgentOrigin, chat: &Chat) -> bool {
+    origin
+        .admin_space_id
+        .as_deref()
+        .is_some_and(|space| chat.space_id.as_deref() == Some(space))
 }
 
 /// Permissiveness order of sandbox levels.
@@ -2045,6 +2091,8 @@ mod tests {
     use std::sync::Mutex;
 
     const BETA_TOKEN: &str = "tok-beta";
+    /// Chat beta holding a live user grant over space-1.
+    const ADMIN_TOKEN: &str = "tok-admin";
 
     /// A fixed little workspace: one device, one project, two chats with a
     /// two-message transcript, and one live agent token (`tok-beta`, minted
@@ -2164,15 +2212,19 @@ mod tests {
                                       |n| format!("HEAD{}TAIL", "x".repeat(n))) }] }
                 ]})),
                 agent_tools::AUTHENTICATE_METHOD => {
-                    if params["token"] != BETA_TOKEN {
+                    if params["token"] != BETA_TOKEN && params["token"] != ADMIN_TOKEN {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
                     }
-                    RpcReply::Value(json!({
+                    let mut origin = json!({
                         "chatId": "chat-beta-2", "runId": "run-1",
                         "spaceId": "space-1", "deviceId": "dev-local"
-                    }))
+                    });
+                    if params["token"] == ADMIN_TOKEN {
+                        origin["adminSpaceId"] = json!("space-1");
+                    }
+                    RpcReply::Value(origin)
                 }
                 agent_tools::TOOL_CALL_METHOD => {
                     if params["token"] != BETA_TOKEN {
@@ -2701,6 +2753,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("agents can only reach"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_admin_chat_reaches_every_chat_of_its_space_and_no_other_space() {
+        let world = Arc::new(World::default());
+        world.created.lock().unwrap().push(json!({
+            "id": "chat-nova-3", "deviceId": "dev-local", "title": "Nova",
+            "archived": false, "spaceId": "space-2", "createdAt": "2026-09-03T00:00:00Z"
+        }));
+        let admin = tools(world.clone(), Some(ADMIN_TOKEN));
+        let plain = tools(world.clone(), Some(BETA_TOKEN));
+        // Inside space-1 (alpha is someone else's chat): reads, sends, waits,
+        // archives; interrupt and respond stay child-only.
+        for (name, extra, ok_for_admin) in [
+            ("get_chat", json!({}), true),
+            ("read_chat", json!({}), true),
+            ("send_message", json!({ "text": "hi" }), true),
+            ("wait_for_turn", json!({ "timeout_secs": 1 }), true),
+            ("archive_chat", json!({}), true),
+            ("interrupt_chat", json!({}), false),
+        ] {
+            let mut args = extra.clone();
+            args["chat"] = json!("chat-alpha-1");
+            assert_eq!(admin.call(name, args.clone()).await.is_ok(), ok_for_admin, "admin {name}");
+            assert!(plain.call(name, args).await.is_err(), "non-admin {name}");
+        }
+        // Another Space: never, even for an admin.
+        for name in ["get_chat", "read_chat", "send_message", "archive_chat"] {
+            let err = admin
+                .call(name, json!({ "chat": "chat-nova-3", "text": "hi" }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("agents can only"), "{name}: {err}");
+        }
+        let listed = admin
+            .call("list_chats", json!({ "include_archived": true }))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = listed["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"chat-alpha-1") && ids.contains(&"chat-beta-2"), "{ids:?}");
+        assert!(!ids.contains(&"chat-nova-3"), "{ids:?}");
+        // The sent message says it is an admin chat's, not the user's.
+        let sent = world.writes_of(methods::QUEUE_COMMAND);
+        assert!(
+            sent.iter().any(|w| w.to_string().contains("not Mikey's own message")),
+            "{sent:?}"
+        );
+        // An expired or revoked grant is gone from the next authenticate.
+        assert!(plain.call("get_chat", json!({ "chat": "chat-alpha-1" })).await.is_err());
     }
 
     #[tokio::test]

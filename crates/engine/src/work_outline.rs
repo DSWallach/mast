@@ -336,6 +336,17 @@ impl WorkOutlineService {
         mutation: &WorkOutlineMutation,
         actor: &WorkOutlineActor,
     ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
+        self.mutate_as_admin(mutation, actor, None)
+    }
+
+    /// [`Self::mutate_as`] for an agent with a live admin grant on
+    /// `admin_space` (checked by the caller at this call).
+    pub fn mutate_as_admin(
+        &self,
+        mutation: &WorkOutlineMutation,
+        actor: &WorkOutlineActor,
+        admin_space: Option<&str>,
+    ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
         if writes_disabled() {
             return Err(WorkOutlineError::new(
                 WorkOutlineErrorCode::WritesDisabled,
@@ -382,7 +393,9 @@ impl WorkOutlineService {
                 self.workspace
                     .work_outline_keep_session(p, kept, actor, &keys)?
             }
-            _ => self.workspace.work_outline_mutate(mutation, actor, &keys)?,
+            _ => self
+                .workspace
+                .work_outline_mutate_admin(mutation, actor, admin_space, &keys)?,
         };
         recent.insert(operation_id, hash, reply.clone());
         Ok(reply)

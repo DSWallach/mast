@@ -2934,4 +2934,329 @@ async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
     .await
     .unwrap_err();
     assert!(err.contains("work-outline/unauthorized"), "{err}");
+// ---- admin chats ---------------------------------------------------------------
+
+const OTHER_SPACE: &str = "space-2";
+
+/// A second Space with one item, for "never another Space" checks.
+async fn other_space_item(rig: &Rig) -> String {
+    let path = std::path::Path::new(&rig.space_path).join("other-space");
+    std::fs::create_dir_all(&path).unwrap();
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createSpace", "spaceId": OTHER_SPACE, "deviceId": rig.core.device_id,
+                    "path": path.to_string_lossy() }),
+        )
+        .await
+        .unwrap();
+    let op = "op-foreign";
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItem", "spaceId": OTHER_SPACE, "title": "Foreign",
+                    "operationId": op }),
+        )
+        .await
+        .unwrap();
+    derive_id(op, roles::ITEM)
+}
+
+async fn grant(rig: &Rig, chat: &str, secs: Option<u64>, skip_bulk: bool) -> Value {
+    rig.client
+        .call(
+            methods::GRANT_ADMIN,
+            json!({ "chatId": chat, "durationSecs": secs, "skipBulkConfirmation": skip_bulk }),
+        )
+        .await
+        .unwrap()
+}
+
+fn title_of(rig: &Rig, id: &str) -> String {
+    snapshot(rig).item(id).map(|i| i.title.clone()).unwrap_or_default()
+}
+
+fn admin(rig: &Rig, token: &str, args: Value) -> impl std::future::Future<Output = Result<Value, String>> {
+    let client = rig.client.clone();
+    let token = token.to_owned();
+    async move {
+        client
+            .call(
+                mast_proto::agent_tools::TOOL_CALL_METHOD,
+                json!({ "token": token, "tool": "work_outline_admin", "arguments": args }),
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_grants_expire_revoke_and_are_user_only() {
+    let rig = rig().await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    let origin = |t: &str| {
+        let client = rig.client.clone();
+        let t = t.to_owned();
+        async move {
+            client
+                .call(mast_proto::agent_tools::AUTHENTICATE_METHOD, json!({ "token": t }))
+                .await
+                .unwrap()
+        }
+    };
+    assert!(origin(&token).await.get("adminSpaceId").is_none());
+    let err = admin(&rig, &token, json!({ "read": true })).await.unwrap_err();
+    assert!(err.contains("not an admin chat"), "{err}");
+
+    // A projectless chat cannot be admin.
+    assert!(
+        rig.client
+            .call(methods::GRANT_ADMIN, json!({ "chatId": PROJECTLESS }))
+            .await
+            .is_err()
+    );
+
+    // No agent tool grants: unknown tool names are refused.
+    for name in ["grant_admin", "work_outline_grant_admin"] {
+        assert!(tool(&rig, &token, name, json!({ "chatId": OTHER_CHAT })).await.is_err());
+    }
+
+    let granted = grant(&rig, CHAT, Some(3600), false).await;
+    assert_eq!(granted["spaceId"], SPACE);
+    assert_eq!(origin(&token).await["adminSpaceId"], SPACE);
+    let listed = rig.client.call(methods::LIST_ADMIN_GRANTS, json!({})).await.unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert!(admin(&rig, &token, json!({ "read": true })).await.is_ok());
+
+    // Expiry: the grant stops working at once.
+    tokens.admin().advance_clock_ms(3_600_001);
+    assert!(origin(&token).await.get("adminSpaceId").is_none());
+    assert!(admin(&rig, &token, json!({ "read": true })).await.is_err());
+    let listed = rig.client.call(methods::LIST_ADMIN_GRANTS, json!({})).await.unwrap();
+    assert!(listed.as_array().unwrap().is_empty());
+
+    // Renew, then revoke.
+    grant(&rig, CHAT, None, false).await;
+    assert_eq!(origin(&token).await["adminSpaceId"], SPACE);
+    rig.client.call(methods::REVOKE_ADMIN, json!({ "chatId": CHAT })).await.unwrap();
+    assert!(origin(&token).await.get("adminSpaceId").is_none());
+    assert!(admin(&rig, &token, json!({ "read": true })).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_changes_anything_in_its_space_but_nothing_outside_it() {
+    let rig = rig().await;
+    let foreign = other_space_item(&rig).await;
+    let a = create_item(&rig, "op-a", "Alpha", None).await;
+    let b = create_item(&rig, "op-b", "Beta", None).await;
+    let child = create_item(&rig, "op-c", "Child", Some(&b)).await;
+    assign_chat(&rig, "assign-admin", CHAT, &a).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+
+    // Without a grant the same tool call is refused and Beta is untouched.
+    assert!(admin(&rig, &token, json!({ "idempotencyKey": "k0",
+        "steps": [{ "op": "rename", "itemId": b, "title": "Nope" }] })).await.is_err());
+    // The ordinary tool still only reaches the chat's own subtree.
+    assert!(tool(&rig, &token, "work_outline_set_status",
+        json!({ "workItemId": b, "status": "active" })).await.is_err());
+
+    grant(&rig, CHAT, Some(3600), false).await;
+    let done = admin(&rig, &token, json!({ "idempotencyKey": "k1", "steps": [
+        { "op": "rename", "itemId": b, "title": "Beta 2" },
+        { "op": "status", "itemId": child, "status": "active" },
+        { "op": "move", "itemId": child, "parentId": a },
+        { "op": "create", "parentId": a, "title": "New", "ref": "n" },
+        { "op": "instruction_add", "itemId": "$n", "text": "Be careful." },
+        { "op": "project", "itemId": b, "isProject": true },
+        { "op": "archive", "itemId": child },
+    ]})).await.unwrap();
+    assert_eq!(done["applied"], 7, "{done}");
+    assert_eq!(title_of(&rig, &b), "Beta 2");
+    let snap = snapshot(&rig);
+    assert!(snap.item(&b).unwrap().is_project);
+    assert!(snap.item(&child).unwrap().archived_at.is_some());
+    assert!(snap.instructions.iter().any(|i| i.text == "Be careful."));
+
+    // Widened existing tools: set_status anywhere in the Space.
+    assert!(tool(&rig, &token, "work_outline_set_status",
+        json!({ "workItemId": b, "status": "active" })).await.is_ok());
+
+    // Other Space: refused for every op shape.
+    for step in [
+        json!({ "op": "rename", "itemId": foreign, "title": "Hacked" }),
+        json!({ "op": "move", "itemId": a, "parentId": foreign }),
+        json!({ "op": "create", "parentId": foreign, "title": "x" }),
+        json!({ "op": "archive", "itemId": foreign }),
+    ] {
+        let err = admin(&rig, &token, json!({ "idempotencyKey": format!("f{step}"),
+            "steps": [step] })).await.unwrap_err();
+        assert!(err.contains("nauthorized") || err.contains("own Space"), "{err}");
+    }
+    assert_eq!(title_of(&rig, &foreign), "Foreign");
+
+    // Unsupported ops (Linear/GitHub, delete, grant) are not in the vocabulary.
+    for op in ["linear_link", "github_comment", "delete_item", "grant_admin"] {
+        let err = admin(&rig, &token, json!({ "idempotencyKey": format!("u{op}"),
+            "steps": [{ "op": op }] })).await.unwrap_err();
+        assert!(err.contains("unknown op"), "{err}");
+    }
+
+    // Revoke: the next call is refused.
+    rig.client.call(methods::REVOKE_ADMIN, json!({ "chatId": CHAT })).await.unwrap();
+    assert!(admin(&rig, &token, json!({ "idempotencyKey": "k9",
+        "steps": [{ "op": "rename", "itemId": b, "title": "Late" }] })).await.is_err());
+    assert_eq!(title_of(&rig, &b), "Beta 2");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_resolves_requests_and_accepts_proposals_with_its_own_attribution() {
+    let rig = rig().await;
+    let a = create_item(&rig, "op-a", "Alpha", None).await;
+    let b = create_item(&rig, "op-b", "Beta", None).await;
+    assign_chat(&rig, "assign-admin", CHAT, &a).await;
+    assign_chat(&rig, "assign-worker", OTHER_CHAT, &b).await;
+    add_instruction(&rig, "ins-b", json!({ "type": "workItem", "workItemId": b }), "Old rule.").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let admin_lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let worker_lease = tokens.mint(OTHER_CHAT, "run-2", SPACE, &rig.core.device_id);
+    let raised = tool(&rig, worker_lease.token(), "work_outline_create_user_action_request",
+        json!({ "request": "Which db?", "dedupeKey": "db", "idempotencyKey": "q" })).await.unwrap();
+    let request_id = raised["userActionRequestId"].as_str().unwrap().to_owned();
+    let rule = snapshot(&rig).instructions[0].id.clone();
+    let proposal = tool(&rig, worker_lease.token(), "work_outline_propose_instruction",
+        json!({ "action": "edit", "instructionId": rule, "text": "New rule.",
+                "idempotencyKey": "p" })).await.unwrap();
+    let proposal_id = proposal["proposalId"].as_str().unwrap().to_owned();
+
+    // Not admin: another chat's request is off limits.
+    assert!(tool(&rig, admin_lease.token(), "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": request_id, "idempotencyKey": "x" })).await.is_err());
+
+    grant(&rig, CHAT, Some(3600), false).await;
+    let done = admin(&rig, admin_lease.token(), json!({ "idempotencyKey": "k", "steps": [
+        { "op": "resolve_request", "requestId": request_id, "note": "Postgres" },
+        { "op": "proposal_accept", "proposalId": proposal_id },
+    ]})).await.unwrap();
+    assert_eq!(done["applied"], 2, "{done}");
+    let snap = snapshot(&rig);
+    let resolved = snap.user_action_requests.iter().find(|r| r.id == request_id).unwrap();
+    let resolution = resolved.resolution.as_ref().unwrap();
+    assert_eq!(resolution.by.kind, WorkOutlineActorKind::Agent, "never the user");
+    assert_eq!(resolution.by.chat_id.as_deref(), Some(CHAT));
+    assert!(resolution.note.as_deref().unwrap().contains("by admin chat"));
+    assert_eq!(snap.instructions.iter().find(|i| i.id == rule).unwrap().text, "New rule.");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
+    let rig = rig().await;
+    let a = create_item(&rig, "op-a", "Alpha", None).await;
+    let mut ids = Vec::new();
+    for n in 0..11 {
+        ids.push(create_item(&rig, &format!("op-i{n}"), &format!("Item {n}"), None).await);
+    }
+    assign_chat(&rig, "assign-admin", CHAT, &a).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    grant(&rig, CHAT, Some(36000), false).await;
+    let steps: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({ "op": "rename", "itemId": id, "title": "Renamed" }))
+        .collect();
+
+    let preview = admin(&rig, &token, json!({ "idempotencyKey": "b1", "steps": steps })).await.unwrap();
+    assert_eq!(preview["needsApproval"], true, "{preview}");
+    assert_eq!(preview["count"], 11);
+    assert!(ids.iter().all(|id| title_of(&rig, id) != "Renamed"), "nothing ran");
+    let confirm = preview["confirmToken"].as_str().unwrap().to_owned();
+    let request_id = preview["requestId"].as_str().unwrap().to_owned();
+    let snap = snapshot(&rig);
+    let request = snap.user_action_requests.iter().find(|r| r.id == request_id).unwrap();
+    assert!(request.text.starts_with("Approve bulk change"), "{}", request.text);
+
+    // Not yet approved.
+    let with_token = |key: &str, token: &str| {
+        json!({ "idempotencyKey": key, "steps": steps, "confirmToken": token })
+    };
+    let err = admin(&rig, &token, with_token("b2", &confirm)).await.unwrap_err();
+    assert!(err.contains("not approved"), "{err}");
+    // The agent (admin or not) cannot resolve it itself.
+    let err = tool(&rig, &token, "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": request_id, "idempotencyKey": "self" })).await.unwrap_err();
+    assert!(err.contains("nauthorized") || err.contains("approve"), "{err}");
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "b3",
+        "steps": [{ "op": "resolve_request", "requestId": request_id }] })).await.unwrap_err();
+    assert!(err.contains("nauthorized") || err.contains("approve"), "{err}");
+    // Different steps than the user saw: refused.
+    let mut other = steps.clone();
+    other[0]["title"] = json!("Sneaky");
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "b4", "steps": other,
+        "confirmToken": confirm })).await.unwrap_err();
+    assert!(err.contains("differ"), "{err}");
+
+    // The user resolves it.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "resolveUserActionRequest", "userActionRequestId": request_id,
+        "operationId": "user-approves" })).await.unwrap();
+    let done = admin(&rig, &token, with_token("b5", &confirm)).await.unwrap();
+    assert_eq!(done["applied"], 11, "{done}");
+    assert!(ids.iter().all(|id| title_of(&rig, id) == "Renamed"));
+
+    // One use only.
+    let err = admin(&rig, &token, with_token("b6", &confirm)).await.unwrap_err();
+    assert!(err.contains("already used"), "{err}");
+
+    // Expiry of an unused token.
+    let steps2: Vec<Value> = ids.iter().map(|id| json!({ "op": "rename", "itemId": id, "title": "Again" })).collect();
+    let p2 = admin(&rig, &token, json!({ "idempotencyKey": "b7", "steps": steps2 })).await.unwrap();
+    let t2 = p2["confirmToken"].as_str().unwrap().to_owned();
+    tokens.admin().advance_clock_ms(31 * 60 * 1000);
+    grant(&rig, CHAT, None, false).await;
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "b8", "steps": steps2,
+        "confirmToken": t2 })).await.unwrap_err();
+    assert!(err.contains("expired"), "{err}");
+
+    // "Skip bulk confirmations" runs the sweep directly.
+    grant(&rig, CHAT, None, true).await;
+    let done = admin(&rig, &token, json!({ "idempotencyKey": "b9", "steps": steps2 })).await.unwrap();
+    assert_eq!(done["applied"], 11);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_turn_is_audited_as_one_entry_and_undone_in_one_step() {
+    let rig = rig().await;
+    let a = create_item(&rig, "op-a", "Alpha", None).await;
+    let b = create_item(&rig, "op-b", "Beta", None).await;
+    assign_chat(&rig, "assign-admin", CHAT, &a).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-7", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    grant(&rig, CHAT, Some(3600), false).await;
+    for (key, steps) in [
+        ("t1", json!([{ "op": "rename", "itemId": b, "title": "Beta 2" }])),
+        ("t2", json!([{ "op": "move", "itemId": b, "parentId": a },
+                      { "op": "group", "title": "Box", "itemIds": [a] }])),
+    ] {
+        admin(&rig, &token, json!({ "idempotencyKey": key, "steps": steps })).await.unwrap();
+    }
+    let turns = rig.client.call(methods::ADMIN_AUDIT_LIST, json!({ "spaceId": SPACE })).await.unwrap();
+    let turns = turns.as_array().unwrap();
+    assert_eq!(turns.len(), 1, "both calls are one turn (one run): {turns:?}");
+    assert_eq!(turns[0]["turnId"], "run-7");
+    assert!(turns[0]["label"].as_str().unwrap().starts_with("by admin chat"));
+    assert_eq!(turns[0]["actions"].as_array().unwrap().len(), 4);
+    assert_eq!(snapshot(&rig).item(&b).unwrap().parent_work_item_id.as_deref(), Some(a.as_str()));
+
+    let reply = rig.client.call(methods::ADMIN_UNDO_TURN, json!({ "turnId": "run-7" })).await.unwrap();
+    assert_eq!(reply["undone"], 4, "{reply}");
+    let snap = snapshot(&rig);
+    assert_eq!(snap.item(&b).unwrap().title, "Beta");
+    assert_eq!(snap.item(&b).unwrap().parent_work_item_id, None);
+    assert_eq!(snap.item(&a).unwrap().parent_work_item_id, None);
+    assert!(rig.client.call(methods::ADMIN_UNDO_TURN, json!({ "turnId": "run-7" })).await.is_err());
 }

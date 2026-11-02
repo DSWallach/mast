@@ -2662,6 +2662,53 @@ impl RpcService for EngineRpc {
                     .await;
                 RpcReply::value(&serde_json::json!({}))
             }
+            methods::GRANT_ADMIN => {
+                // User action only: no agent tool reaches this method.
+                let p: mast_proto::GrantAdminParams = parse_params(params)?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
+                let space = chat
+                    .space_id
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| RpcError::Failed("only chats in a Space can be admin".into()))?;
+                RpcReply::value(&self.agent_tools.tokens().admin().grant(
+                    &p.chat_id,
+                    &space,
+                    p.duration_secs,
+                    p.skip_bulk_confirmation,
+                ))
+            }
+            methods::REVOKE_ADMIN => {
+                let p: ChatParams = parse_params(params)?;
+                self.agent_tools.tokens().admin().revoke(&p.chat_id);
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::LIST_ADMIN_GRANTS => {
+                RpcReply::value(&self.agent_tools.tokens().admin().list())
+            }
+            methods::ADMIN_AUDIT_LIST => {
+                let p: mast_proto::AdminAuditListParams = parse_params(params)?;
+                RpcReply::value(
+                    &self
+                        .agent_tools
+                        .tokens()
+                        .admin()
+                        .turns(p.space_id.as_deref()),
+                )
+            }
+            methods::ADMIN_UNDO_TURN => {
+                let p: mast_proto::AdminUndoTurnParams = parse_params(params)?;
+                let service = self.agent_tools.clone();
+                let reply = tokio::task::spawn_blocking(move || service.admin_undo_turn(&p.turn_id))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                RpcReply::value(&reply)
+            }
             methods::LIST_INTERRUPTED_RUNS => RpcReply::value(&self.sessions.interrupted_runs()),
             methods::DISMISS_INTERRUPTED_RUN => {
                 let p: ChatParams = parse_params(params)?;

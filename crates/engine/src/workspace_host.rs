@@ -869,9 +869,23 @@ impl WorkspaceHost {
         actor: &mast_proto::WorkOutlineActor,
         ledger_keys: &[String],
     ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
+        self.work_outline_mutate_admin(mutation, actor, None, ledger_keys)
+    }
+
+    /// [`Self::work_outline_mutate`] for an agent holding a live admin grant
+    /// on `admin_space` (the engine re-checks the grant per call).
+    pub fn work_outline_mutate_admin(
+        &self,
+        mutation: &mast_proto::WorkOutlineMutation,
+        actor: &mast_proto::WorkOutlineActor,
+        admin_space: Option<&str>,
+        ledger_keys: &[String],
+    ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
         let now = Utc::now().timestamp_millis();
         self.mutate(|doc| {
-            let reply = doc.apply_work_outline_mutation(mutation, actor, now)?;
+            let reply = doc.with_admin_scope(admin_space, |doc| {
+                doc.apply_work_outline_mutation(mutation, actor, now)
+            })?;
             lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
             Ok(reply)
         })

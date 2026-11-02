@@ -1093,7 +1093,7 @@ impl RegistryDoc {
         let project_change = p.changes.is_project.is_some()
             || !p.changes.worker_destination.is_unchanged()
             || !p.changes.template.is_unchanged();
-        if project_change && actor.kind == WorkOutlineActorKind::Agent {
+        if project_change && actor.kind == WorkOutlineActorKind::Agent && !self.admin_in_force() {
             return Err(WorkOutlineError::unauthorized(
                 "Agents may not change a project's settings",
             ));
