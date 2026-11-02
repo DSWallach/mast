@@ -419,8 +419,8 @@ impl OrchestratorWakes {
             for chat in chats {
                 let info = ChatInfo {
                     title: chat.title.clone(),
-                    ticket: chat.linked_ticket_id.clone(),
-                    pr_url: chat.linked_pr_url.clone(),
+                    ticket: firm_link(chat.linked_ticket_id.as_ref(), chat.linked_ticket_source),
+                    pr_url: firm_link(chat.linked_pr_url.as_ref(), chat.linked_pr_source),
                     parent: chat.parent_chat_id.clone(),
                 };
                 let prev = state.chats.insert(chat.id.clone(), info.clone());
@@ -662,7 +662,18 @@ fn truncate(text: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
-/// "ENG-2818" when the worker has a linked ticket, else its title, then the
+/// A link worth naming a worker by or announcing: anything but a bare
+/// `mentioned` one, which only says the chat's text contained the id or URL
+/// (a planner discussing ENG-3219 is not working on it, and a PR it read
+/// about was not opened by it).
+fn firm_link(value: Option<&String>, source: Option<mast_proto::ChatLinkSource>) -> Option<String> {
+    match source {
+        Some(mast_proto::ChatLinkSource::Mentioned) | None => None,
+        Some(_) => value.cloned(),
+    }
+}
+
+/// "ENG-2818" when the worker has a firmly linked ticket, else its title, then the
 /// chat id prefix the tools accept.
 fn label(state: &State, chat_id: &str) -> String {
     let short: String = chat_id.chars().take(12).collect();
@@ -756,4 +767,25 @@ fn destination_parents(snapshot: &WorkOutlineSnapshot) -> HashMap<String, Vec<St
         }
     }
     out
+}
+
+#[cfg(test)]
+mod firm_link_tests {
+    use super::firm_link;
+    use mast_proto::ChatLinkSource;
+
+    #[test]
+    fn a_mentioned_link_neither_labels_nor_announces() {
+        let id = "ENG-3219".to_string();
+        assert_eq!(firm_link(Some(&id), Some(ChatLinkSource::Mentioned)), None);
+        assert_eq!(firm_link(Some(&id), None), None);
+        assert_eq!(
+            firm_link(Some(&id), Some(ChatLinkSource::Manual)),
+            Some(id.clone())
+        );
+        assert_eq!(
+            firm_link(Some(&id), Some(ChatLinkSource::Branch)),
+            Some(id)
+        );
+    }
 }

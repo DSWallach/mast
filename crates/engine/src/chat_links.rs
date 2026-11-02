@@ -150,6 +150,49 @@ pub(crate) fn extract_ticket_mention(text: &str) -> Option<String> {
     crate::pr_ticket_cache::extract_ticket_id(text)
 }
 
+/// `text` without what only quotes someone else: fenced code blocks and
+/// `>` blockquote lines. A ticket or PR named there (a pasted log, a
+/// documentation example) says nothing about what this chat is about.
+pub(crate) fn strip_quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fenced = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || trimmed.starts_with('>') {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Whether a tool invocation's output may earn `mentioned` PR links: a shell
+/// command that reports on a PR or pushes a branch (`gh pr ...`, `gh api`,
+/// `git push`), not one that reads files (`cat`, `rg`, `sed`...), and never
+/// the file-reading, search or web tools, whose output is documentation,
+/// fixtures or someone else's text.
+pub(crate) fn invocation_may_mention_pr(call: &ToolCall) -> bool {
+    let ToolCall::Exec { command } = call else {
+        return false;
+    };
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let reads_files = words.iter().any(|w| {
+        matches!(
+            *w,
+            "cat" | "rg" | "grep" | "sed" | "awk" | "head" | "tail" | "less" | "bat" | "find"
+        )
+    });
+    !reads_files
+        && (command.contains("gh pr ")
+            || command.contains("gh api")
+            || command.contains("git push"))
+}
+
 /// Stamp a `mentioned` PR link from free text (a message or a tool result),
 /// most-recent-mention-wins (write-time precedence: `mentioned` never
 /// overwrites `manual`/`created_in_chat`, but DOES overwrite an older
@@ -158,7 +201,7 @@ pub(crate) fn extract_ticket_mention(text: &str) -> Option<String> {
 /// precedence loss both no-op silently, matching every other workspace write
 /// this engine makes off the hot path.
 pub(crate) fn mine_pr_mention(workspace: &WorkspaceHost, chat_id: &str, text: &str) {
-    for url in extract_pr_urls(text) {
+    for url in extract_pr_urls(&strip_quoted(text)) {
         if let Err(err) = workspace.set_chat_link(
             chat_id,
             ChatLinkKind::Pr,
@@ -171,8 +214,20 @@ pub(crate) fn mine_pr_mention(workspace: &WorkspaceHost, chat_id: &str, text: &s
 }
 
 /// Sibling to [`mine_pr_mention`] for ticket ids.
+///
+/// The first mention wins: a mention only fills an empty slot, so the ticket
+/// a chat's opening prompt names is not replaced by every ticket it later
+/// discusses (a planner talks about many).
 pub(crate) fn mine_ticket_mention(workspace: &WorkspaceHost, chat_id: &str, text: &str) {
-    if let Some(id) = extract_ticket_mention(text)
+    if workspace
+        .chat(chat_id)
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.linked_ticket_source.is_some())
+    {
+        return;
+    }
+    if let Some(id) = extract_ticket_mention(&strip_quoted(text))
         && let Err(err) = workspace.set_chat_link(
             chat_id,
             ChatLinkKind::Ticket,
@@ -187,21 +242,27 @@ pub(crate) fn mine_ticket_mention(workspace: &WorkspaceHost, chat_id: &str, text
 /// The PR links one tool result earns: every URL of a SUCCESSFUL PR-create
 /// call's output is `created_in_chat` (stacked PRs, a loop of `gh pr create`);
 /// a failed create ("a pull request ... already exists: <url>") created
-/// nothing, so its URLs only degrade to `mentioned`; any other tool result's
-/// URLs are mentions.
+/// nothing, so its URLs only degrade to `mentioned`. Other tool results earn
+/// mentions only when `may_mention` (see [`invocation_may_mention_pr`]) and
+/// name a single PR: a listing of many is noise, not this chat's PR.
 pub(crate) fn tool_result_pr_links(
     is_pr_create: bool,
+    may_mention: bool,
     is_error: bool,
     output: &str,
 ) -> Vec<(String, ChatLinkSource)> {
-    let source = if is_pr_create && !is_error {
-        ChatLinkSource::CreatedInChat
-    } else {
-        ChatLinkSource::Mentioned
-    };
-    extract_pr_urls(output)
-        .into_iter()
-        .map(|url| (url, source))
+    let urls = extract_pr_urls(output);
+    if is_pr_create && !is_error {
+        return urls
+            .into_iter()
+            .map(|url| (url, ChatLinkSource::CreatedInChat))
+            .collect();
+    }
+    if !(is_pr_create || may_mention) || urls.len() > 1 {
+        return Vec::new();
+    }
+    urls.into_iter()
+        .map(|url| (url, ChatLinkSource::Mentioned))
         .collect()
 }
 
@@ -210,10 +271,11 @@ pub(crate) fn mine_tool_result_links(
     workspace: &WorkspaceHost,
     chat_id: &str,
     is_pr_create: bool,
+    may_mention: bool,
     is_error: bool,
     output: &str,
 ) {
-    for (url, source) in tool_result_pr_links(is_pr_create, is_error, output) {
+    for (url, source) in tool_result_pr_links(is_pr_create, may_mention, is_error, output) {
         if let Err(err) = workspace.set_chat_link(chat_id, ChatLinkKind::Pr, Some(&url), source) {
             tracing::warn!(chat = %chat_id, error = %err, "PR tool-result link write failed");
         }
@@ -334,7 +396,7 @@ mod tests {
     #[test]
     fn tool_result_links_stamp_every_created_url() {
         let out = "https://github.com/Cofactr/flagship/pull/6487\nhttps://github.com/Cofactr/flagship/pull/6488\n";
-        let links = tool_result_pr_links(true, false, out);
+        let links = tool_result_pr_links(true, false, false, out);
         assert_eq!(links.len(), 2);
         assert!(
             links
@@ -348,10 +410,10 @@ mod tests {
     fn tool_result_links_do_not_credit_a_failed_create() {
         let out =
             "a pull request for branch \"x\" already exists:\nhttps://github.com/acme/ui/pull/4";
-        let links = tool_result_pr_links(true, true, out);
+        let links = tool_result_pr_links(true, false, true, out);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].1, ChatLinkSource::Mentioned);
-        let other = tool_result_pr_links(false, false, out);
+        let other = tool_result_pr_links(false, true, false, out);
         assert_eq!(other[0].1, ChatLinkSource::Mentioned);
     }
 
@@ -387,12 +449,14 @@ mod tests {
             "c1",
             true,
             false,
+            false,
             "https://github.com/Cofactr/flagship/pull/6487\nhttps://github.com/Cofactr/flagship/pull/6488",
         );
         mine_tool_result_links(
             &host,
             "c1",
             true,
+            false,
             true,
             "already exists: https://github.com/Cofactr/flagship/pull/9",
         );
@@ -406,5 +470,69 @@ mod tests {
         assert_eq!(source_of(6487), Some(ChatLinkSource::CreatedInChat));
         assert_eq!(source_of(6488), Some(ChatLinkSource::CreatedInChat));
         assert_eq!(source_of(9), Some(ChatLinkSource::Mentioned));
+    }
+
+    /// The 2026-11 bad case: a planner read the artifact conventions doc
+    /// (example link `#6265`) and talked about many tickets.
+    #[test]
+    fn documentation_read_by_a_file_tool_earns_no_pr_mention() {
+        let doc = "- `[#6265](https://github.com/Cofactr/flagship/pull/6265 \"claimed\")`";
+        let read = ToolCall::ReadFile {
+            path: "docs/planning-artifact-conventions.md".into(),
+        };
+        let cat = ToolCall::Exec {
+            command: "cat docs/planning-artifact-conventions.md".into(),
+        };
+        let grep = ToolCall::Exec {
+            command: "gh pr list | grep 6265".into(),
+        };
+        let view = ToolCall::Exec {
+            command: "gh pr view 42 --json url".into(),
+        };
+        for call in [&read, &cat, &grep] {
+            let may = invocation_may_mention_pr(call);
+            assert!(tool_result_pr_links(false, may, false, doc).is_empty());
+        }
+        assert!(invocation_may_mention_pr(&view));
+        let links = tool_result_pr_links(false, true, false, "https://github.com/acme/ui/pull/42");
+        assert_eq!(links.len(), 1);
+    }
+
+    #[test]
+    fn a_listing_of_prs_is_noise_not_a_mention() {
+        let out = "https://github.com/acme/ui/pull/1\nhttps://github.com/acme/ui/pull/2";
+        assert!(tool_result_pr_links(false, true, false, out).is_empty());
+    }
+
+    #[test]
+    fn quoted_and_fenced_text_does_not_count() {
+        let text = "Plan the sidebar.\n> earlier: ENG-2593 and https://github.com/a/b/pull/5\n```\nENG-9999 https://github.com/a/b/pull/6\n```\nOwned by ENG-3000.";
+        let stripped = strip_quoted(text);
+        assert_eq!(extract_ticket_mention(&stripped), Some("ENG-3000".into()));
+        assert!(extract_pr_urls(&stripped).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_first_ticket_mention_sticks() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap()),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "dev".into(),
+                device_name: "Dev".into(),
+                platform: "macos".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        host.create_chat("c1", None, Some("dev"), None, None)
+            .unwrap();
+        mine_ticket_mention(&host, "c1", "Plan ENG-2593 first");
+        mine_ticket_mention(&host, "c1", "Also relates to ENG-3219");
+        let chat = host.chat("c1").unwrap().unwrap();
+        assert_eq!(chat.linked_ticket_id.as_deref(), Some("ENG-2593"));
     }
 }

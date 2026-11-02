@@ -41,6 +41,9 @@ pub struct RenderedMessage {
     pub status: Option<MessageStatus>,
     /// Prose parts joined with blank lines.
     pub text: String,
+    /// Bytes cut from the start of `text` to fit a size cap (the tail is kept).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_omitted_bytes: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
     /// One line per tool call, in order.
@@ -156,6 +159,7 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
         device_id: entry.device_id.clone(),
         status: entry.status,
         text: text_parts.join("\n\n"),
+        text_omitted_bytes: None,
         reasoning: (!reasoning_parts.is_empty()).then(|| reasoning_parts.join("\n\n")),
         tools,
         pending_input,
@@ -324,5 +328,99 @@ mod tests {
         assert_eq!(rendered.len(), 1);
         assert_eq!(rendered[0].text, "first half\n\nsecond half");
         assert_eq!(rendered[0].status, Some(MessageStatus::Streaming));
+    }
+}
+
+/// Keep the last `max_bytes` of `text` on a char boundary; returns the bytes cut.
+pub fn tail_bytes(text: &mut String, max_bytes: usize) -> usize {
+    if text.len() <= max_bytes {
+        return 0;
+    }
+    let mut cut = text.len() - max_bytes;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    text.drain(..cut);
+    cut
+}
+
+/// Cap each message's text to `per_message` bytes (keeping the tail), then drop
+/// the oldest messages until the combined text fits `total`; the newest message
+/// is always kept (shrunk if it alone is over). Returns `(kept, dropped_older)`.
+pub fn cap_messages(
+    mut messages: Vec<RenderedMessage>,
+    per_message: usize,
+    total: usize,
+) -> (Vec<RenderedMessage>, usize) {
+    for m in &mut messages {
+        let cut = tail_bytes(&mut m.text, per_message);
+        if cut > 0 {
+            m.text_omitted_bytes = Some(m.text_omitted_bytes.unwrap_or(0) + cut);
+        }
+    }
+    let size = |m: &RenderedMessage| {
+        m.text.len() + m.tools.iter().map(String::len).sum::<usize>()
+            + m.reasoning.as_ref().map_or(0, String::len)
+    };
+    let mut used = 0usize;
+    let mut keep_from = messages.len();
+    for (i, m) in messages.iter().enumerate().rev() {
+        let n = size(m);
+        if keep_from < messages.len() && used + n > total {
+            break;
+        }
+        used += n;
+        keep_from = i;
+    }
+    let dropped = keep_from;
+    messages.drain(..keep_from);
+    if let Some(last) = messages.last_mut()
+        && size(last) > total
+    {
+        let cut = tail_bytes(&mut last.text, total.saturating_sub(last.tools.iter().map(String::len).sum::<usize>()));
+        if cut > 0 {
+            last.text_omitted_bytes = Some(last.text_omitted_bytes.unwrap_or(0) + cut);
+        }
+    }
+    (messages, dropped)
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    fn msg(id: &str, text: &str) -> RenderedMessage {
+        RenderedMessage {
+            id: id.into(),
+            role: MessageRole::Assistant,
+            created_at: 0,
+            created_at_iso: String::new(),
+            device_id: String::new(),
+            status: None,
+            text: text.into(),
+            text_omitted_bytes: None,
+            reasoning: None,
+            tools: vec![],
+            pending_input: None,
+            errors: vec![],
+        }
+    }
+
+    #[test]
+    fn cap_messages_drops_oldest_first_and_keeps_the_newest() {
+        let msgs = vec![msg("a", &"a".repeat(60)), msg("b", &"b".repeat(60)), msg("c", &"c".repeat(60))];
+        let (kept, dropped) = cap_messages(msgs, 50, 80);
+        assert_eq!(dropped, 2);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "c");
+        assert_eq!(kept[0].text.len(), 50);
+        assert_eq!(kept[0].text_omitted_bytes, Some(10));
+    }
+
+    #[test]
+    fn tail_bytes_respects_char_boundaries() {
+        let mut s = "ééé".to_string(); // 6 bytes
+        assert_eq!(tail_bytes(&mut s, 3), 4);
+        assert_eq!(s, "é");
     }
 }
