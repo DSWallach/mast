@@ -518,6 +518,7 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
                         Some(n) => format!("{n} ({})", ctx.who),
                         None => format!("Resolved {}", ctx.who),
                     }),
+                    answer: None,
                     operation_id: op.to_owned(),
                 }),
                 None,
