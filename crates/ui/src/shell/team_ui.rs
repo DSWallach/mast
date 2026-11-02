@@ -9,7 +9,7 @@ use super::*;
 
 use crate::shell::chat_item_ui::{ChipTone, chip_palette};
 use crate::team::{
-    ITEM_TAB_WORKERS, TeamFacts, TeamInput, WorkerFacts, WorkerPr, WorkerState, team,
+    ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr, WorkerState, team,
 };
 
 impl Shell {
@@ -43,6 +43,7 @@ impl Shell {
                 indicators: &indicators,
                 snapshot: snapshot.as_deref(),
                 links: &links,
+                now,
             })
         };
         for worker in &facts.workers {
@@ -121,7 +122,7 @@ impl Shell {
                     div()
                         .text_size(crate::typography::ui_rems(11.5))
                         .text_color(if active { theme.text } else { theme.text_muted })
-                        .child(SharedString::from(format!("Team {}", team.workers.len()))),
+                        .child(SharedString::from(format!("Team {}", team.live().count()))),
                 )
                 .when(waiting, |el| {
                     el.child(
@@ -162,9 +163,11 @@ impl Shell {
                     .child(SharedString::from(team.roll_up())),
             );
             col = col.child(self.render_team_wake_header(&chat_id, &theme, cx));
-            for worker in &team.workers {
+            col = col.child(self.render_team_archive_block(&chat_id, &team, &theme, cx));
+            for worker in team.live() {
                 col = col.child(self.render_worker_row(worker, false, &theme, cx));
             }
+            col = col.children(self.render_team_archived(&chat_id, &team, &theme, cx));
         }
         self.panel_root("team-tab", focus, col, cx)
     }
@@ -227,10 +230,10 @@ impl Shell {
                     .child(SharedString::from(format!("Team \u{b7} {}", team.roll_up())))
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
-        for worker in team.workers.iter().take(ITEM_TAB_WORKERS) {
+        for worker in team.live().take(ITEM_TAB_WORKERS) {
             block = block.child(self.render_worker_row(worker, true, theme, cx));
         }
-        if team.workers.len() > ITEM_TAB_WORKERS {
+        if team.live().count() > ITEM_TAB_WORKERS {
             block = block.child(
                 div()
                     .id("chat-item-team-all")
@@ -240,7 +243,7 @@ impl Shell {
                     .text_color(theme.accent)
                     .child(SharedString::from(format!(
                         "All {} workers \u{2192} Team",
-                        team.workers.len()
+                        team.live().count()
                     )))
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
@@ -492,6 +495,22 @@ impl Shell {
                 row = row.child(chips);
             }
         }
+        if !compact
+            && let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable)
+        {
+            row = row.child(
+                div()
+                    .debug_selector({
+                        let selector = format!("team-archivable-{id}");
+                        move || selector.clone()
+                    })
+                    .pl(px(13.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(10.5))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format!("can archive \u{b7} {}", verdict.reason))),
+            );
+        }
         if let Some(ready) = &worker.ready {
             let text = ready.text.clone();
             row = row.child(
@@ -534,5 +553,251 @@ impl Shell {
             );
         }
         row.into_any_element()
+    }
+}
+
+/// Small text button used by the Team tab's archive controls.
+fn team_button(
+    theme: &Theme,
+    id: impl Into<String>,
+    label: String,
+    primary: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let color = if primary { theme.accent } else { theme.text_muted };
+    let id: String = id.into();
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(|el| el.bg(color.opacity(0.12)))
+        .child(SharedString::from(label))
+}
+
+impl Shell {
+    /// "Archive finished (N)", the N >= 3 suggestion, and the confirmation.
+    fn render_team_archive_block(
+        &mut self,
+        chat_id: &str,
+        team: &TeamFacts,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let finished = team.finished();
+        let n = finished.len();
+        let mut block = div().flex().flex_col().gap(px(5.0));
+        if n == 0 {
+            self.wakes.archive_confirm.remove(chat_id);
+            return block.into_any_element();
+        }
+        if self.wakes.archive_confirm.contains(chat_id) {
+            let mut confirm = div()
+                .debug_selector(|| "team-archive-confirm".into())
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .p(px(6.0))
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(format!(
+                            "Archive {n} finished {}?",
+                            if n == 1 { "worker" } else { "workers" }
+                        ))),
+                );
+            for worker in &finished {
+                let selector = format!("team-archive-confirm-row-{}", worker.chat_id);
+                let reason = worker.archivable.as_ref().map(|a| a.reason.clone()).unwrap_or_default();
+                confirm = confirm.child(
+                    div()
+                        .debug_selector(move || selector.clone())
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!("{} \u{b7} {reason}", worker.title))),
+                );
+            }
+            let go_chat = chat_id.to_owned();
+            let cancel_chat = chat_id.to_owned();
+            confirm = confirm
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(10.5))
+                        .text_color(theme.text_faint)
+                        .child("They move to Show archived; Unarchive brings one back."),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(
+                            team_button(theme, "team-archive-confirm-go", format!("Archive {n}"), true)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.archive_finished_workers(&go_chat, cx)
+                                })),
+                        )
+                        .child(
+                            team_button(theme, "team-archive-confirm-cancel", "Cancel".into(), false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.wakes.archive_confirm.remove(&cancel_chat);
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            return block.child(confirm).into_any_element();
+        }
+        let ask_chat = chat_id.to_owned();
+        let mut line = div().flex().items_center().gap(px(8.0));
+        if n >= SUGGEST_ARCHIVE_AT {
+            line = line.child(
+                div()
+                    .debug_selector(|| "team-archive-suggest".into())
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("{n} finished workers can be archived"))),
+            );
+        } else {
+            line = line.child(div().flex_1());
+        }
+        line = line.child(
+            team_button(theme, "team-archive-finished", format!("Archive finished ({n})"), true)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.wakes.archive_confirm.insert(ask_chat.clone());
+                    cx.notify();
+                })),
+        );
+        block.child(line).into_any_element()
+    }
+
+    /// "Show archived (N)" and, when on, the archived workers with Unarchive.
+    fn render_team_archived(
+        &mut self,
+        chat_id: &str,
+        team: &TeamFacts,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let count = team.archived().count();
+        if count == 0 {
+            return Vec::new();
+        }
+        let shown = self.wakes.show_archived.contains(chat_id);
+        let toggle_chat = chat_id.to_owned();
+        let mut out = vec![
+            div()
+                .id("team-show-archived")
+                .debug_selector(|| "team-show-archived".into())
+                .cursor_pointer()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .hover(|el| el.text_color(theme.text))
+                .child(SharedString::from(format!(
+                    "{} archived ({count})",
+                    if shown { "Hide" } else { "Show" }
+                )))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.wakes.show_archived.remove(&toggle_chat) {
+                        this.wakes.show_archived.insert(toggle_chat.clone());
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+        ];
+        if shown {
+            for worker in team.archived() {
+                let id = worker.chat_id.clone();
+                let selector = format!("team-archived-{id}");
+                let restore_id = id.clone();
+                let button_id = format!("team-unarchive-{id}");
+                out.push(
+                    div()
+                        .id(SharedString::from(selector.clone()))
+                        .debug_selector(move || selector.clone())
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(6.0))
+                        .py(px(3.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(11.5))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(worker.title.clone())),
+                        )
+                        .child(
+                            team_button(theme, button_id, "Unarchive".into(), false).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.set_worker_archived(&restore_id, false, cx)
+                                }),
+                            ),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        out
+    }
+
+    /// Confirmed "Archive finished": archive every worker the rule rates
+    /// finished right now (re-evaluated, so a chat that started working since
+    /// the dialog opened is skipped).
+    fn archive_finished_workers(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.wakes.archive_confirm.remove(chat_id);
+        let ids: Vec<String> = self
+            .team_facts(chat_id, cx)
+            .finished()
+            .iter()
+            .map(|w| w.chat_id.clone())
+            .filter(|id| *id != self.active_chat)
+            .collect();
+        for id in ids {
+            self.set_worker_archived(&id, true, cx);
+        }
+        cx.notify();
+    }
+
+    /// One `setChatArchived`; failures show in the sidebar notice.
+    fn set_worker_archived(&mut self, worker_id: &str, archived: bool, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.sidebar_notice = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        let id = worker_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let failed = engine
+                .client()
+                .call(
+                    mast_rpc::methods::MUTATE,
+                    serde_json::json!({ "op": "setChatArchived", "chatId": id, "archived": archived }),
+                )
+                .await
+                .is_err();
+            if failed {
+                let _ = this.update(cx, |this, cx| {
+                    this.sidebar_notice = Some("Could not change that chat's archive state. Try again.".into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 }

@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
+use mast_engine::archivable::{Archivable, ArchivableInput, archivable, requests_of};
 use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, PrStatus};
 use mast_proto::{Chat, ChatIndicator, WorkItemEffectiveStatus, WorkOutlineSnapshot};
 
@@ -19,6 +20,8 @@ use crate::status_light::is_ready_to_merge;
 
 /// Longest activity line, in characters.
 pub(crate) const ACTIVITY_MAX_CHARS: usize = 110;
+/// Finished workers at or above which the Team tab suggests archiving them.
+pub(crate) const SUGGEST_ARCHIVE_AT: usize = 3;
 /// Workers the Item tab lists before pointing at the Team tab.
 pub(crate) const ITEM_TAB_WORKERS: usize = 3;
 
@@ -121,6 +124,10 @@ pub(crate) struct WorkerFacts {
     /// `(added, removed)` lines from the worker checkout's diff stat.
     pub diff: Option<(u32, u32)>,
     pub ready: Option<ReadyAction>,
+    /// The chat is archived (the Team tab hides it unless asked).
+    pub archived: bool,
+    /// The engine's finished-worker verdict; `None` once archived.
+    pub archivable: Option<Archivable>,
 }
 
 impl WorkerFacts {
@@ -147,8 +154,24 @@ impl TeamFacts {
         self.workers.is_empty()
     }
 
+    /// Workers that are not archived: what the Team tab lists and counts.
+    pub(crate) fn live(&self) -> impl Iterator<Item = &WorkerFacts> {
+        self.workers.iter().filter(|w| !w.archived)
+    }
+
+    pub(crate) fn archived(&self) -> impl Iterator<Item = &WorkerFacts> {
+        self.workers.iter().filter(|w| w.archived)
+    }
+
+    /// Live workers the finished rule says can be archived.
+    pub(crate) fn finished(&self) -> Vec<&WorkerFacts> {
+        self.live()
+            .filter(|w| w.archivable.as_ref().is_some_and(|a| a.archivable))
+            .collect()
+    }
+
     fn count(&self, pred: impl Fn(&WorkerFacts) -> bool) -> usize {
-        self.workers.iter().filter(|w| pred(w)).count()
+        self.live().filter(|w| pred(w)).count()
     }
 
     pub(crate) fn working(&self) -> usize {
@@ -185,7 +208,7 @@ impl TeamFacts {
         }
         if parts.is_empty() {
             let done = self.count(|w| w.state == WorkerState::Done);
-            return if done == self.workers.len() {
+            return if done > 0 && done == self.live().count() {
                 format!("{done} done")
             } else {
                 "No active workers".to_owned()
@@ -202,6 +225,7 @@ pub(crate) struct TeamInput<'a> {
     pub indicators: &'a HashMap<String, ChatIndicator>,
     pub snapshot: Option<&'a WorkOutlineSnapshot>,
     pub links: &'a HashMap<String, ChatLinkStatus>,
+    pub now: DateTime<Utc>,
 }
 
 /// One line from a message preview: first non-empty line, whitespace
@@ -351,6 +375,21 @@ fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFa
         .or_else(|| chat.title.as_deref().map(crate::transcript::single_line))
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "New session".to_owned());
+    let archivable = (!chat.archived).then(|| {
+        archivable(&ArchivableInput {
+            chat,
+            indicator,
+            queued: false,
+            item,
+            requests: snapshot.map(|s| requests_of(s, &chat.id)).unwrap_or_default(),
+            pr_states: prs
+                .iter()
+                .filter(|pr| !pr.state.is_empty())
+                .map(|pr| pr.state.clone())
+                .collect(),
+            now: input.now,
+        })
+    });
     WorkerFacts {
         chat_id: chat.id.clone(),
         title,
@@ -369,6 +408,8 @@ fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFa
             .and_then(|s| s.diff_stat.as_ref())
             .map(|d| (d.lines_added, d.lines_removed)),
         ready,
+        archived: chat.archived,
+        archivable,
     }
 }
 
@@ -391,6 +432,8 @@ mod tests {
                     prs: Vec::new(),
                     ticket: None,
                     diff: None,
+                    archived: false,
+                    archivable: None,
                     ready: ready.then(|| ReadyAction {
                         space_id: "s".into(),
                         item_id: "i".into(),

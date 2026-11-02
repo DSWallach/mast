@@ -4655,6 +4655,18 @@ impl DocHost {
     /// ours; a chat with no row is claimable (claim-on-first-command). Without a
     /// wired workspace host (bare-DocHost tests) every open chat is ours — M2's
     /// behavior, now the degenerate case.
+    /// Messages queued (not yet sent) in the chat; 0 when another device
+    /// hosts it or its queue can't be read.
+    pub fn queued_count(&self, chat_id: &str) -> usize {
+        if !self.is_host(chat_id) {
+            return 0;
+        }
+        self.open(chat_id)
+            .ok()
+            .and_then(|handle| handle.doc.read_queue().ok())
+            .map_or(0, |queue| queue.len())
+    }
+
     fn is_host(&self, chat_id: &str) -> bool {
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }

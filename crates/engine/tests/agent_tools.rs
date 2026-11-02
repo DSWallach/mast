@@ -141,6 +141,8 @@ struct Rig {
     client: RpcClient,
     harness: GatedHarness,
     space_path: String,
+    /// The service behind `client` (its agent archive log lives here).
+    service: Arc<mast_engine::EngineRpc>,
 }
 
 async fn rig() -> Rig {
@@ -165,7 +167,8 @@ async fn rig() -> Rig {
         args: vec!["mcp".into()],
         ipc_port: Some(27999),
     }));
-    let client = mast_rpc::memory_client(core.rpc_service());
+    let service = core.rpc_service();
+    let client = mast_rpc::memory_client(service.clone());
     let space_path = space_path.to_string_lossy().into_owned();
     client
         .call(
@@ -198,6 +201,7 @@ async fn rig() -> Rig {
         client,
         harness,
         space_path,
+        service,
     }
 }
 
@@ -3303,4 +3307,215 @@ async fn an_admin_configures_a_container_template_and_applies_it_to_existing_ite
     let reply = rig.client.call(methods::ADMIN_UNDO_TURN, json!({ "turnId": "run-1" })).await.unwrap();
     assert_eq!(reply["skipped"].as_array().unwrap().len(), 1, "apply cannot be undone: {reply}");
     assert!(snapshot(&rig).item(&container).unwrap().container_template.is_none());
+
+// ---- archiving finished workers ------------------------------------------------
+
+const ARCHIVE_CHILD: &str = "chat-archive-child";
+const ARCHIVE_OUTSIDER: &str = "chat-archive-outsider";
+
+struct ArchiveRig {
+    rig: Rig,
+    p: ProjectRig,
+    orchestrator: String,
+    /// CHAT is the orchestrator on Planning; OTHER_CHAT works on a ticket.
+    _lease: mast_engine::agent_tools::AgentTokenLease,
+}
+
+async fn archive_rig() -> ArchiveRig {
+    let rig = rig().await;
+    let p = project_rig(&rig).await;
+    assign_chat(&rig, "ar-orch", CHAT, &p.planning).await;
+    assign_chat(&rig, "ar-worker", OTHER_CHAT, &p.ticket).await;
+    for (chat, parent) in [(ARCHIVE_CHILD, Some(CHAT)), (ARCHIVE_OUTSIDER, None)] {
+        let mut params = json!({ "op": "createChat", "chatId": chat, "spaceId": SPACE,
+                                 "deviceId": rig.core.device_id });
+        if let Some(parent) = parent {
+            params["parentChatId"] = json!(parent);
+        }
+        rig.client.call(methods::MUTATE, params).await.unwrap();
+    }
+    assign_chat(&rig, "ar-out", ARCHIVE_OUTSIDER, &p.other_tickets).await;
+    let lease = rig
+        .core
+        .sessions
+        .agent_tokens()
+        .mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    ArchiveRig {
+        orchestrator: lease.token().to_owned(),
+        rig,
+        p,
+        _lease: lease,
+    }
+}
+
+fn chat_archived(rig: &Rig, chat: &str) -> bool {
+    rig.core.workspace.chat(chat).unwrap().unwrap().archived
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archive_info_rates_children_and_project_workers_only() {
+    let a = archive_rig().await;
+    let info = tool(&a.rig, &a.orchestrator, "chat_archive_info", json!({}))
+        .await
+        .unwrap();
+    let chats = info["chats"].as_object().unwrap();
+    assert!(chats.contains_key(OTHER_CHAT) && chats.contains_key(ARCHIVE_CHILD), "{chats:?}");
+    // Not itself, nor a chat in another project.
+    assert!(!chats.contains_key(CHAT) && !chats.contains_key(ARCHIVE_OUTSIDER), "{chats:?}");
+    // The ticket is open: not finished yet.
+    assert_eq!(chats[OTHER_CHAT]["archivable"], false);
+    update_item(&a.rig, "ar-done", &a.p.ticket, json!({ "status": "completed" }))
+        .await
+        .unwrap();
+    let info = tool(&a.rig, &a.orchestrator, "chat_archive_info", json!({ "chatIds": [OTHER_CHAT] }))
+        .await
+        .unwrap();
+    assert_eq!(info["chats"][OTHER_CHAT]["archivable"], true);
+    assert_eq!(info["chats"][OTHER_CHAT]["reason"], "its item is completed");
+    assert_eq!(info["chats"].as_object().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unfinished_worker_is_refused_unless_forced_with_a_reason() {
+    let a = archive_rig().await;
+    let err = tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": OTHER_CHAT }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("not archived") && err.contains("force"), "{err}");
+    assert!(!chat_archived(&a.rig, OTHER_CHAT));
+    let err = tool(
+        &a.rig,
+        &a.orchestrator,
+        "chat_archive",
+        json!({ "chatId": OTHER_CHAT, "force": true }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("short reason"), "{err}");
+    assert!(!chat_archived(&a.rig, OTHER_CHAT));
+    let done = tool(
+        &a.rig,
+        &a.orchestrator,
+        "chat_archive",
+        json!({ "chatId": OTHER_CHAT, "force": true, "reason": "superseded by ENG-9" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!((done["archived"].clone(), done["forced"].clone()), (json!(true), json!(true)));
+    assert!(chat_archived(&a.rig, OTHER_CHAT));
+    // Logged, attributed to the orchestrator, with the reason.
+    let log = a.rig.service.agent_tools().agent_archives_since(0);
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        (log[0].chat_id.as_str(), log[0].orchestrator_chat_id.as_str(), log[0].reason.as_str(), log[0].forced),
+        (OTHER_CHAT, CHAT, "superseded by ENG-9", true)
+    );
+    // Reversible: unarchive needs neither the rule nor a reason.
+    tool(
+        &a.rig,
+        &a.orchestrator,
+        "chat_archive",
+        json!({ "chatId": OTHER_CHAT, "archived": false }),
+    )
+    .await
+    .unwrap();
+    assert!(!chat_archived(&a.rig, OTHER_CHAT));
+    assert_eq!(a.rig.service.agent_tools().agent_archives_since(0).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_worker_archives_without_force_and_is_logged() {
+    let a = archive_rig().await;
+    update_item(&a.rig, "ar-done", &a.p.ticket, json!({ "status": "completed" }))
+        .await
+        .unwrap();
+    let done = tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": OTHER_CHAT }))
+        .await
+        .unwrap();
+    assert_eq!(done["forced"], false);
+    assert_eq!(done["reason"], "its item is completed");
+    assert!(chat_archived(&a.rig, OTHER_CHAT));
+    let log = a.rig.service.agent_tools().agent_archives_since(0);
+    assert_eq!(log.len(), 1);
+    assert!(!log[0].forced);
+    assert_eq!(log[0].space_id, SPACE);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_with_an_open_required_action_is_never_finished() {
+    let a = archive_rig().await;
+    update_item(&a.rig, "ar-done", &a.p.ticket, json!({ "status": "completed" }))
+        .await
+        .unwrap();
+    // The worker raised a question that nobody answered.
+    let worker = a.rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "run-w", SPACE, &a.rig.core.device_id);
+    tool(
+        &a.rig,
+        worker.token(),
+        "work_outline_create_user_action_request",
+        json!({ "request": "Which colour?", "dedupeKey": "colour" }),
+    )
+    .await
+    .unwrap();
+    let err = tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": OTHER_CHAT }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("open Required Action"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archiving_reaches_children_and_never_the_orchestrator_or_other_projects() {
+    let a = archive_rig().await;
+    // A child, as today (no finished rule for the caller's own chats).
+    tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": ARCHIVE_CHILD }))
+        .await
+        .unwrap();
+    assert!(chat_archived(&a.rig, ARCHIVE_CHILD));
+    for target in [ARCHIVE_OUTSIDER, CHAT, PROJECTLESS] {
+        let err = tool(
+            &a.rig,
+            &a.orchestrator,
+            "chat_archive",
+            json!({ "chatId": target, "force": true, "reason": "try" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("forbidden") || err.contains("no such chat"), "{target}: {err}");
+        assert!(!chat_archived(&a.rig, target), "{target}");
+    }
+    // The outsider's own orchestrator-less token reaches nothing of ours.
+    let outsider = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_OUTSIDER, "run-o", SPACE, &a.rig.core.device_id);
+    let err = tool(
+        &a.rig,
+        outsider.token(),
+        "chat_archive",
+        json!({ "chatId": OTHER_CHAT, "force": true, "reason": "try" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("forbidden"), "{err}");
+    assert!(!chat_archived(&a.rig, OTHER_CHAT));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_chat_archives_any_chat_of_its_space_without_the_rule_and_it_is_logged() {
+    let a = archive_rig().await;
+    grant(&a.rig, CHAT, Some(3600), false).await;
+    // An unfinished worker and a chat in another project: no rule, no force.
+    for target in [OTHER_CHAT, ARCHIVE_OUTSIDER] {
+        tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": target }))
+            .await
+            .unwrap();
+        assert!(chat_archived(&a.rig, target), "{target}");
+    }
+    let log = a.rig.service.agent_tools().agent_archives_since(0);
+    assert_eq!(log.len(), 2);
+    assert!(log.iter().all(|e| e.orchestrator_chat_id == CHAT && !e.forced));
+    // Still never itself, nor a projectless chat of another Space.
+    for target in [CHAT, PROJECTLESS] {
+        assert!(tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": target }))
+            .await
+            .is_err());
+        assert!(!chat_archived(&a.rig, target), "{target}");
+    }
 }

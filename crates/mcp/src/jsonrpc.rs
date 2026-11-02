@@ -58,7 +58,7 @@ Coordinating: `create_chat` with `workItemId` (your item or a descendant) \
 and a `prompt` runs work on a descendant. Workers answer with \
 `report_to_parent`; also use `wait_for_turn` / `read_chat` or Required \
 Actions, and poll `work_outline_read_subtree` for requests such as \"Ready to \
-merge\".\n\
+merge\". Archive finished workers (`archivable: true`).\n\
 \n\
 Admin (user-granted only): `work_outline_admin` batches Space-wide outline \
 changes; bulk ones need the user's approval first.";

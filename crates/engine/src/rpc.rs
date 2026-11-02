@@ -1178,6 +1178,7 @@ impl EngineRpc {
     /// runtime has one (unconditional, like `external_import`) —
     /// `EngineCore::rpc_service` always calls this.
     pub fn with_pr_ticket_cache(mut self, cache: crate::pr_ticket_cache::PrTicketCache) -> Self {
+        self.agent_tools.set_pr_ticket_cache(cache.clone());
         self.pr_ticket_cache = Some(cache);
         self
     }

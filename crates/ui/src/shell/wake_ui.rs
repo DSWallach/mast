@@ -20,6 +20,10 @@ pub(super) struct WakeUi {
     looping: HashSet<String>,
     /// Workers whose latest report is shown in full.
     pub expanded_reports: HashSet<String>,
+    /// Orchestrators whose Team tab is asking to confirm "Archive finished".
+    pub archive_confirm: HashSet<String>,
+    /// Orchestrators whose Team tab also lists archived workers.
+    pub show_archived: HashSet<String>,
 }
 
 impl WakeUi {
