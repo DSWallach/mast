@@ -21,6 +21,9 @@ use mast_proto::{
     WorkOutlineMutation, WorkOutlinePlacement, WorkOutlineSnapshot,
     ApproveWorkItemInstructionProposalParams,
 };
+use mast_proto::work_outline_container_templates::{
+    ApplyContainerTemplateParams, ContainerTemplate, SetContainerTemplateParams,
+};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -41,7 +44,8 @@ destination{itemId,destinationId|null} | convert_to_project{itemId,destinationId
 assign_chat{chatId,itemId|null} | instruction_add{itemId|null,text} | \
 instruction_edit{instructionId,text} | instruction_remove{instructionId} | \
 proposal_accept{proposalId,text?,allowStale?} | proposal_dismiss{proposalId,reason?} | \
-resolve_request{requestId,note?}";
+resolve_request{requestId,note?} | \
+template_set{itemId,template|null} | template_apply{itemId (a container: all its children; a child: just it)}";
 
 fn invalid(message: impl Into<String>) -> AgentToolError {
     AgentToolError::invalid(message.into())
@@ -502,6 +506,60 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
                 None,
             ))
         }
+        "template_set" => {
+            let item = ctx.item(step, "itemId")?;
+            let template = match step.get("template") {
+                None | Some(Value::Null) => None,
+                Some(v) => {
+                    let mut t: ContainerTemplate = serde_json::from_value(v.clone())
+                        .map_err(|e| invalid(format!("template is not a valid ContainerTemplate: {e}")))?;
+                    t.assign_ids(op);
+                    t.check().map_err(|e| invalid(format!("template: {e}")))?;
+                    Some(t)
+                }
+            };
+            let old = snap.item(&item).map(|i| i.container_template.clone());
+            let set = |template: Option<ContainerTemplate>, op: &str| {
+                WorkOutlineMutation::SetContainerTemplate(SetContainerTemplateParams {
+                    operation_id: op.to_owned(),
+                    space_id: ctx.space_id.to_owned(),
+                    work_item_id: item.clone(),
+                    template,
+                })
+            };
+            let summary = match &template {
+                Some(t) => format!(
+                    "Set the container template of {} ({} rule nodes)",
+                    ctx.title(&item),
+                    t.node_count()
+                ),
+                None => format!("Clear the container template of {}", ctx.title(&item)),
+            };
+            Ok(made(
+                "container template",
+                summary,
+                set(template, op),
+                old.map(|o| set(o, &undo_op)),
+            ))
+        }
+        "template_apply" => {
+            let item = ctx.item(step, "itemId")?;
+            let kids = snap.item(&item).filter(|i| i.container_template.is_some()).map(|i| i.child_ids.len());
+            let summary = match kids {
+                Some(n) => format!("Apply the template of {} to its {n} children", ctx.title(&item)),
+                None => format!("Make {} follow its parent's template", ctx.title(&item)),
+            };
+            Ok(made(
+                "apply template",
+                summary,
+                WorkOutlineMutation::ApplyContainerTemplate(ApplyContainerTemplateParams {
+                    operation_id: op.to_owned(),
+                    space_id: ctx.space_id.to_owned(),
+                    work_item_id: item,
+                }),
+                None,
+            ))
+        }
         "resolve_request" => {
             let id = text(step, "requestId")?;
             let about = snap
@@ -663,7 +721,21 @@ impl AgentToolsService {
         let dry_run = arguments.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
         let grant = admin.live(&context.grant.chat_id);
         let skip_bulk = grant.as_ref().is_some_and(|g| g.skip_bulk_confirmation);
-        let bulk = actions.len() > ADMIN_BULK_THRESHOLD && !skip_bulk;
+        // A container apply touches each of its children.
+        let weight: usize = actions
+            .iter()
+            .map(|a| {
+                if a.get("op").and_then(Value::as_str) != Some("template_apply") {
+                    return 1;
+                }
+                a.get("itemId")
+                    .and_then(Value::as_str)
+                    .and_then(|id| snapshot.item(id))
+                    .filter(|i| i.container_template.is_some())
+                    .map_or(1, |i| i.child_ids.len().max(1))
+            })
+            .sum();
+        let bulk = weight > ADMIN_BULK_THRESHOLD && !skip_bulk;
         let shown: Vec<&String> = preview.iter().take(PREVIEW_LINES).collect();
 
         let confirm = non_empty(arguments.get("confirmToken").and_then(Value::as_str).map(str::to_owned));
@@ -672,7 +744,7 @@ impl AgentToolsService {
         }
         if bulk {
             match confirm {
-                None => return self.open_bulk_approval(context, &steps_hash, actions.len(), &preview),
+                None => return self.open_bulk_approval(context, &steps_hash, weight, &preview),
                 Some(token) => {
                     let request_id = admin
                         .check_approval(&token, &context.grant.chat_id, &steps_hash)

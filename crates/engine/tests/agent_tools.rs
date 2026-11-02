@@ -3251,3 +3251,56 @@ async fn an_admin_turn_is_audited_as_one_entry_and_undone_in_one_step() {
     assert_eq!(snap.item(&a).unwrap().parent_work_item_id, None);
     assert!(rig.client.call(methods::ADMIN_UNDO_TURN, json!({ "turnId": "run-7" })).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_configures_a_container_template_and_applies_it_to_existing_items() {
+    let rig = rig().await;
+    let admin_item = create_item(&rig, "op-admin", "Admin work", None).await;
+    let container = create_item(&rig, "op-box", "Projects", None).await;
+    let p1 = create_item(&rig, "op-p1", "Alpha", Some(&container)).await;
+    let p2 = create_item(&rig, "op-p2", "Beta", Some(&container)).await;
+    assign_chat(&rig, "assign-admin", CHAT, &admin_item).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    let template = json!({ "root": { "children": [
+        { "title": "Planning", "instructions": [{ "text": "Plan first." }] },
+        { "title": "Tickets", "isWorkerDestination": true }
+    ]}});
+
+    // Non-admin: editing template rules (and applying them elsewhere) is refused.
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "t0",
+        "steps": [{ "op": "template_set", "itemId": container, "template": template }] }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("not an admin chat"), "{err}");
+    let err = tool(&rig, &token, "work_outline_apply_container_template",
+        json!({ "workItemId": container })).await.unwrap_err();
+    assert!(err.contains("nauthorized"), "{err}");
+    assert!(snapshot(&rig).item(&container).unwrap().container_template.is_none());
+
+    // Admin: configure, then apply to every existing child (two items).
+    grant(&rig, CHAT, Some(3600), false).await;
+    let done = admin(&rig, &token, json!({ "idempotencyKey": "t1", "steps": [
+        { "op": "template_set", "itemId": container, "template": template },
+        { "op": "template_apply", "itemId": container },
+    ]})).await.unwrap();
+    assert_eq!(done["applied"], 2, "{done}");
+    let snap = snapshot(&rig);
+    assert!(snap.item(&container).unwrap().container_template.is_some());
+    for project in [&p1, &p2] {
+        let titles: Vec<String> = snap
+            .item(project)
+            .unwrap()
+            .child_ids
+            .iter()
+            .map(|c| snap.item(c).unwrap().title.clone())
+            .collect();
+        assert!(titles.contains(&"Planning".to_owned()) && titles.contains(&"Tickets".to_owned()), "{titles:?}");
+    }
+
+    // The template edit is undoable as part of the turn.
+    let reply = rig.client.call(methods::ADMIN_UNDO_TURN, json!({ "turnId": "run-1" })).await.unwrap();
+    assert_eq!(reply["skipped"].as_array().unwrap().len(), 1, "apply cannot be undone: {reply}");
+    assert!(snapshot(&rig).item(&container).unwrap().container_template.is_none());
+}
