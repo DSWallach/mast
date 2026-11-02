@@ -2934,6 +2934,8 @@ async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
     .await
     .unwrap_err();
     assert!(err.contains("work-outline/unauthorized"), "{err}");
+}
+
 // ---- admin chats ---------------------------------------------------------------
 
 const OTHER_SPACE: &str = "space-2";
