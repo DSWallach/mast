@@ -367,6 +367,7 @@ mod tests {
             worker_title: Some(format!("title {worker}")),
             kind,
             summary: format!("{worker} — {key}"),
+            report: None,
             at_ms: at,
         }
     }
