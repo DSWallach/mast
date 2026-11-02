@@ -1024,6 +1024,7 @@ mod tests {
                 "remove-from-item",
                 "compare-instructions",
                 "apply-instructions",
+                "grant-admin",
                 "pin",
                 "copy-identity",
                 "archive-chat",
