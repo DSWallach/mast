@@ -1448,8 +1448,14 @@ impl AgentToolsService {
         let origin_chat = (!request.chat_id.is_empty())
             .then(|| self.workspace.chat(&request.chat_id).ok().flatten())
             .flatten();
-        let own_item = context.require_item("answering a request")?;
-        let reaches = request.chat_id == *caller
+        let admin = context.admin_space.as_deref() == Some(request.space_id.as_str());
+        let own_item = match context.current_item_id() {
+            Some(item) => item,
+            None if admin => request.work_item_id.clone(),
+            None => context.require_item("answering a request")?,
+        };
+        let reaches = admin
+            || request.chat_id == *caller
             || origin_chat
                 .as_ref()
                 .is_some_and(|c| c.parent_chat_id.as_deref() == Some(caller.as_str()))

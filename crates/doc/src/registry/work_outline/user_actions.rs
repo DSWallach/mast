@@ -1136,6 +1136,11 @@ impl RegistryDoc {
         if self.agent_may_resolve_origin(agent_chat, &request.chat_id) {
             return true;
         }
+        // An admin chat (live user grant) reaches every request of its Space;
+        // bulk-approval requests are filtered by the admin policy itself.
+        if self.admin_space.as_deref() == Some(request.space_id.as_str()) {
+            return true;
+        }
         let Some(space) = self
             .chat(agent_chat)
             .ok()
