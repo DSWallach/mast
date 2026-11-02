@@ -1379,6 +1379,7 @@ async fn recreating_a_request_with_a_changed_origin_gets_a_new_operation_id() {
             &WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
                 user_action_request_id: q1.id.clone(),
                 note: Some("closed by the system".into()),
+                answer: None,
                 operation_id: "test-close-q1".into(),
             }),
             &actor,

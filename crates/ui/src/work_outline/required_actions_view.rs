@@ -538,6 +538,7 @@ impl RequiredActionsList {
             .resolve_user_action_request(ResolveUserActionRequestParams {
                 user_action_request_id: request_id.clone(),
                 note,
+                answer: None,
                 operation_id,
             });
         self.clear_error();
@@ -708,6 +709,17 @@ impl RequiredActionsList {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        self.open_chat_link_labeled(selector, chat_id, "Open chat", theme, cx)
+    }
+
+    fn open_chat_link_labeled(
+        &self,
+        selector: String,
+        chat_id: String,
+        label: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let debug = selector.clone();
         div()
             .id(SharedString::from(selector))
@@ -717,7 +729,7 @@ impl RequiredActionsList {
             .text_color(theme.text_muted)
             .underline()
             .hover(|el| el.text_color(theme.text))
-            .child("Open chat")
+            .child(label)
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(RequiredActionsEvent::OpenChat(chat_id.clone()))
             }))
@@ -1005,10 +1017,13 @@ impl RequiredActionsList {
             .map(|replied| replied.chat_id.clone());
         let resolution = row.resolution.as_ref().map(|resolution| {
             let replied = replied_chat.is_some();
+            let answer_chat = resolution.answer.as_ref().map(|a| a.chat_id.clone());
             let mut line = format!(
                 "{} {} by {}",
                 if replied {
                     "Replied and resolved"
+                } else if answer_chat.is_some() {
+                    "Answered"
                 } else {
                     "Resolved"
                 },
@@ -1034,6 +1049,20 @@ impl RequiredActionsList {
                         cx,
                     ))
                 })
+                // The user's own message the answer was quoted from. The chat
+                // opens; there is no per-message anchor yet.
+                .when_some(
+                    answer_chat.filter(|chat_id| self.chat_open(chat_id)),
+                    |el, chat_id| {
+                        el.child(self.open_chat_link_labeled(
+                            format!("required-actions-history-answer-source-{id}"),
+                            chat_id,
+                            "Open message",
+                            theme,
+                            cx,
+                        ))
+                    },
+                )
         });
         let selector = if open {
             format!("required-actions-row-{id}")

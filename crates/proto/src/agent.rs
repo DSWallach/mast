@@ -766,6 +766,11 @@ pub mod agent_tools {
         pub const CREATE_USER_ACTION_REQUEST: &str = "work_outline_create_user_action_request";
         /// Resolve a request this Chat created.
         pub const RESOLVE_USER_ACTION_REQUEST: &str = "work_outline_resolve_user_action_request";
+        /// Answer a request with the user's own chat message: the engine
+        /// checks the message (a human-typed user message in the calling chat,
+        /// newer than the request), delivers it to the request's origin chat
+        /// as the user's reply, and resolves the request as the user's answer.
+        pub const ANSWER_USER_ACTION_REQUEST: &str = "answer_user_action_request";
         /// Propose an instruction for the item, its parent, or the Space root.
         pub const PROPOSE_INSTRUCTION: &str = "work_outline_propose_instruction";
         /// Engine-internal (not an MCP tool): queue the first Turn of a child
@@ -784,6 +789,10 @@ pub mod agent_tools {
         /// processed-command ledger). The same key with other inputs is
         /// `work-outline/operationConflict`; returns `{replayed}`.
         pub const CLAIM_CHILD_CHAT: &str = "chat_claim_child";
+        /// Engine-internal (not an MCP tool): the ids of the Chats attached to
+        /// items inside the caller's project scope (empty when its item has no
+        /// project above it). The MCP `read_chat` reads those, read-only.
+        pub const PROJECT_SCOPE_CHATS: &str = "chat_project_scope_chats";
 
         /// Copy a file the agent wrote into the work item's artifact folder
         /// and record a revision (`docs/planning-artifact-conventions.md`).
@@ -805,7 +814,7 @@ pub mod agent_tools {
             [ARTIFACT_PUBLISH, ARTIFACT_GET_PLAN, ARTIFACT_RENDER_CHECK];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 8] = [
+        pub const WORK_OUTLINE: [&str; 9] = [
             READ_CURRENT,
             READ_SUBTREE,
             CREATE_CHILD,
@@ -813,6 +822,7 @@ pub mod agent_tools {
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
             RESOLVE_USER_ACTION_REQUEST,
+            ANSWER_USER_ACTION_REQUEST,
             PROPOSE_INSTRUCTION,
         ];
     }
@@ -1018,6 +1028,22 @@ pub mod agent_tools {
             example: r#"{"userActionRequestId": "<request id>", "resolution": "Answered in chat"}"#,
         },
         ToolUsage {
+            tool: tools::ANSWER_USER_ACTION_REQUEST,
+            required: &[
+                p(
+                    "requestId",
+                    "the open request, from work_outline_read_subtree",
+                ),
+                p(
+                    "userMessageId",
+                    "id of the user's own message in YOUR chat (read_chat on yourself)",
+                ),
+                p("idempotencyKey", "stable key for this answer"),
+            ],
+            optional: &[],
+            example: r#"{"requestId": "<request id>", "userMessageId": "<message id>", "idempotencyKey": "answer-<request id>"}"#,
+        },
+        ToolUsage {
             tool: tools::PROPOSE_INSTRUCTION,
             required: &[KEY_CREATE],
             optional: &[
@@ -1150,6 +1176,8 @@ pub mod agent_tools {
         match (tool, name) {
             (tools::CREATE_USER_ACTION_REQUEST, "text" | "title" | "question") => "request",
             (tools::RESOLVE_USER_ACTION_REQUEST, "id" | "requestId") => "userActionRequestId",
+            (tools::ANSWER_USER_ACTION_REQUEST, "id" | "userActionRequestId") => "requestId",
+            (tools::ANSWER_USER_ACTION_REQUEST, "messageId") => "userMessageId",
             (
                 tools::CREATE_CHILD,
                 "workItemId" | "workItem" | "itemId" | "parentId" | "parentItemId" | "parent",

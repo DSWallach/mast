@@ -34,7 +34,7 @@ use mast_proto::work_outline_user_actions::{
     CreateUserActionRequestParams, InstructionProposalReview, InstructionProposalStatus,
     InstructionProposalTarget, ProposalAction, ProposalReviewState, ProposalTargetScope,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UserActionOriginKind, UserActionRequestState,
+    ResolveUserActionRequestParams, UserActionAnswer, UserActionOriginKind, UserActionRequestState,
     UserActionRequestView, UserActionResolution, WorkItemInstructionProposalView,
     user_action_limits,
 };
@@ -412,10 +412,18 @@ impl RegistryDoc {
         actor: &WorkOutlineActor,
         now_ms: i64,
         note: Option<&str>,
+        answer: Option<&UserActionAnswer>,
     ) -> Vec<Planned> {
         let mut resolution = json!({ "by": actor_row_value(actor), "at": now_ms });
         if let Some(note) = note {
             resolution["note"] = json!(note);
+        }
+        if let Some(answer) = answer {
+            resolution["answer"] = json!({
+                "chatId": answer.chat_id,
+                "messageId": answer.message_id,
+                "text": answer.text,
+            });
         }
         requests
             .into_iter()
@@ -463,6 +471,7 @@ impl RegistryDoc {
             actor,
             now_ms,
             Some(COMPLETION_RESOLUTION_NOTE),
+            None,
         ))
     }
 
@@ -613,6 +622,24 @@ impl RegistryDoc {
     ) -> Outcome<()> {
         check_id("request", &p.user_action_request_id)?;
         check_note("The resolution note", p.note.as_deref())?;
+        if let Some(answer) = &p.answer {
+            // Only the engine's `answer_user_action_request` writes this, as
+            // an agent actor; it verified the message before calling.
+            if actor.kind != WorkOutlineActorKind::Agent {
+                return Err(WorkOutlineError::new(
+                    WorkOutlineErrorCode::Invalid,
+                    "Only an agent carries the user's chat message as an answer",
+                ));
+            }
+            check_id("answer chat", &answer.chat_id)?;
+            check_id("answer message", &answer.message_id)?;
+            check_text(
+                "The answer",
+                &answer.text,
+                user_action_limits::MAX_NOTE_CHARS,
+                true,
+            )?;
+        }
         let request = self
             .user_action_request(&p.user_action_request_id)
             .ok_or_else(|| not_found("Request not found"))?;
@@ -642,11 +669,12 @@ impl RegistryDoc {
                     r.id == p.user_action_request_id
                         || agent_chat
                             .as_ref()
-                            .is_none_or(|chat| self.agent_may_resolve_origin(chat, &r.chat_id))
+                            .is_none_or(|chat| self.agent_may_resolve_request(chat, r, false))
                 })
                 .collect(),
         };
-        let plan = Self::plan_resolutions(&group, actor, now_ms, p.note.as_deref());
+        let plan =
+            Self::plan_resolutions(&group, actor, now_ms, p.note.as_deref(), p.answer.as_ref());
         self.commit(plan, &[])
     }
 
@@ -1089,6 +1117,58 @@ impl RegistryDoc {
                 .is_some_and(|c| c.parent_chat_id.as_deref() == Some(agent_chat))
     }
 
+    /// Whether an agent acting for Chat `agent_chat` may resolve or answer
+    /// `request`: [`Self::agent_may_resolve_origin`], or the request sits on
+    /// an item inside the Chat's project scope, or (`own_subtree`, set only for
+    /// the target of an answer) inside its own item's subtree (contract amendment "relay user answer").
+    pub(crate) fn agent_may_resolve_request(
+        &self,
+        agent_chat: &str,
+        request: &UserActionRequestView,
+        own_subtree: bool,
+    ) -> bool {
+        if self.agent_may_resolve_origin(agent_chat, &request.chat_id) {
+            return true;
+        }
+        let Some(space) = self
+            .chat(agent_chat)
+            .ok()
+            .flatten()
+            .and_then(|c| c.space_id)
+            .filter(|s| !s.is_empty())
+        else {
+            return false;
+        };
+        space == request.space_id
+            && self
+                .chat_assigned_work_item(agent_chat, &space)
+                .is_some_and(|root| {
+                    self.item_in_agent_reach(&space, &root, &request.work_item_id, own_subtree)
+                })
+    }
+
+    /// `item` is inside `root`'s nearest project (the item itself counts as a
+    /// project), or, with `own_subtree`, `root` or below it.
+    fn item_in_agent_reach(&self, space: &str, root: &str, item: &str, own_subtree: bool) -> bool {
+        let tree = self.outline_tree(space);
+        if own_subtree && (item == root || tree.descendants(root).iter().any(|id| id == item)) {
+            return true;
+        }
+        let mut cursor = Some(root.to_owned());
+        let mut steps = 0usize;
+        while let Some(id) = cursor {
+            if tree.items.get(&id).is_some_and(|i| i.is_project) {
+                return id == item || tree.descendants(&id).iter().any(|d| d == item);
+            }
+            steps += 1;
+            if steps > tree.items.len() {
+                break;
+            }
+            cursor = tree.parent.get(&id).cloned().flatten();
+        }
+        false
+    }
+
     /// The narrow agent policy: `Ok` when an agent acting for Chat
     /// `chat_id` may perform `mutation`, else `unauthorized` (with the
     /// reason). Allowed, all within the Chat's Space:
@@ -1265,14 +1345,11 @@ impl RegistryDoc {
                 Ok(())
             }
             WorkOutlineMutation::ResolveUserActionRequest(p) => {
-                let origin = self
-                    .overlay_row(KIND_USER_ACTION_REQUESTS, &p.user_action_request_id)
-                    .and_then(|row| str_field(&row, "chatId"));
-                match origin {
-                    Some(origin) if self.agent_may_resolve_origin(chat_id, &origin) => Ok(()),
+                match self.user_action_request(&p.user_action_request_id) {
+                    Some(request) if self.agent_may_resolve_request(chat_id, &request, p.answer.is_some()) => Ok(()),
                     Some(_) => Err(unauthorized(
                         "Agents may only resolve requests their own Chat or a Chat it created \
-                         raised",
+                         raised, or requests on items in their own item's subtree or project",
                     )),
                     None => Err(not_found("Request not found")),
                 }

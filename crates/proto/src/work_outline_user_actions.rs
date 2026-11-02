@@ -119,6 +119,61 @@ pub struct UserActionResolution {
     pub at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Set when an agent carried the human's own chat message to this
+    /// request (`answer_user_action_request`): the resolution is then the
+    /// user's answer (`note` repeats its text), not the agent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<UserActionAnswer>,
+}
+
+impl UserActionResolution {
+    /// Whether this resolution is the user's answer, quoted from a chat
+    /// message of theirs rather than typed into Required Actions.
+    pub fn answered_by_user(&self) -> bool {
+        self.answer.is_some()
+    }
+}
+
+/// The user's chat message an agent pointed a request at. The text is the
+/// message as the engine read it; the caller never supplies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserActionAnswer {
+    /// The chat the message was typed in (the caller's own).
+    pub chat_id: String,
+    pub message_id: String,
+    pub text: String,
+}
+
+/// Prefix Mast puts on a message one agent sends another (`send_message`).
+pub const RELAYED_MESSAGE_PREFIX: &str = "[Message from Mast chat";
+/// Prefix of Mast's own system messages (orchestrator wakes).
+pub const SYSTEM_MESSAGE_PREFIX: &str = "[Mast system message";
+
+/// Whether a user-role transcript message text is an agent relay or a Mast
+/// system message rather than something the human typed.
+pub fn is_relayed_or_system_message(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with(RELAYED_MESSAGE_PREFIX) || text.starts_with(SYSTEM_MESSAGE_PREFIX)
+}
+
+/// Longest quote of the request text in a reply message.
+pub const REPLY_QUOTE_MAX_CHARS: usize = 120;
+
+/// The message delivered to a request's origin Chat when the user answers:
+/// `Re: "<request>": <note>`, the request quoted on one line.
+pub fn user_reply_message(request_text: &str, note: &str) -> String {
+    let collapsed = request_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let quote = if collapsed.chars().count() > REPLY_QUOTE_MAX_CHARS {
+        let cut: String = collapsed.chars().take(REPLY_QUOTE_MAX_CHARS - 1).collect();
+        format!("{}\u{2026}", cut.trim_end())
+    } else {
+        collapsed
+    };
+    format!("Re: \"{quote}\": {}", note.trim())
 }
 
 /// One materialized `userActionRequests` row.
@@ -204,6 +259,9 @@ pub struct ResolveUserActionRequestParams {
     pub user_action_request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Agents only, set by the engine's `answer_user_action_request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<UserActionAnswer>,
     pub operation_id: String,
 }
 

@@ -1365,6 +1365,7 @@ impl PrReviewSyncService {
                             ResolveUserActionRequestParams {
                                 user_action_request_id: request,
                                 note: Some(note.into()),
+                                answer: None,
                                 operation_id: Self::fresh_operation(),
                             },
                         ))

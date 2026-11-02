@@ -61,6 +61,7 @@ fn user_action_request_view_field_names_are_pinned() {
             by: agent(),
             at: 20,
             note: Some("done".into()),
+            answer: None,
         }),
         deduped: true,
         origin_chat_available: true,
@@ -186,6 +187,7 @@ fn mutation_field_names_are_pinned() {
         &WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
             user_action_request_id: "r-1".into(),
             note: Some("answered".into()),
+            answer: None,
             operation_id: "op-2".into(),
         }),
         json!({

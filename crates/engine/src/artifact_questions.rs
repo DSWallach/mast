@@ -483,6 +483,7 @@ impl ArtifactQuestionSync {
             ResolveUserActionRequestParams {
                 user_action_request_id: request.id.clone(),
                 note: Some(truncate(&note, user_action_limits::MAX_NOTE_CHARS)),
+                answer: None,
                 operation_id: derive_id(&format!("artq-resolve\0{}", request.id), "artq"),
             },
         ))

@@ -629,6 +629,37 @@ fn reply_and_resolve_sends_one_message_then_resolves(cx: &mut gpui::TestAppConte
     overview.read_with(vcx, |o, _| assert!(o.chat_panel_open));
 }
 
+/// An answer an agent carried from the user's own chat message shows as the
+/// user's in the history, with a link to the chat it was typed in.
+#[gpui::test]
+fn a_carried_user_answer_shows_its_source_chat(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    for request in &mut snapshot.user_action_requests {
+        if request.id == m4::R_AUTH {
+            m4::resolve_with_answer(
+                request,
+                m4::NOW + 10,
+                CHAT_UI,
+                "msg-7",
+                "make linear tickets",
+            );
+        }
+    }
+    let (overview, _calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_ok);
+    let list = open_global(&overview, vcx);
+    let selector = format!("required-actions-history-answer-source-{}", m4::R_AUTH);
+    assert!(row_bounds(vcx, selector.clone()).is_none(), "history starts collapsed");
+    click(vcx, "required-actions-history-toggle".into());
+    let rows = list.read_with(vcx, |list, _| list.rows());
+    let resolution = rows.resolved[0].resolution.as_ref().unwrap();
+    assert_eq!(resolution.by, "you");
+    assert!(row_bounds(vcx, selector.clone()).is_some());
+    select_chat(&overview, vcx, CHAT_UI);
+    click(vcx, selector);
+    overview.read_with(vcx, |o, _| assert!(o.chat_panel_open));
+}
+
 /// A refused send never resolves: a capability error (the host can't
 /// deliver the Chat's instructions) and a rejected Turn (a context reset
 /// waiting on confirmation) show their message; a retry of the same note
