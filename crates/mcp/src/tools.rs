@@ -2152,6 +2152,7 @@ mod tests {
                     demands_key,
                     [
                         agent_tool_names::CREATE_CHILD,
+                        agent_tool_names::ANSWER_USER_ACTION_REQUEST,
                         agent_tool_names::PROPOSE_INSTRUCTION
                     ]
                     .contains(&def.name),

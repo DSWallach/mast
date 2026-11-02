@@ -1717,13 +1717,15 @@ coordinator agent tools.
    origin Chat that no longer exists (or a system request) is just resolved (`delivered:
    false`). Only an agent actor may write `answer` (`resolveUserActionRequest.answer` is
    `invalid` for users and the system).
-3. **Reach (requests).** An agent may resolve or answer a request when its origin Chat is the
-   caller or one the caller created (as before), or the request's item is inside the caller's
-   project scope (the nearest project at or above its item, itself included), or, for the call's
-   target request only, inside its own item's subtree. Other members of a dedupe group are closed
-   only by the first two project/origin rules, so a Chat's plain resolve still never closes a
-   sibling Chat's duplicate. Anything else is `work-outline/unauthorized`. Answering is the only
-   way an agent's resolve is shown as the user's.
+3. **Reach (requests).** An agent may resolve a request when its origin Chat is the caller or
+   one the caller created (as before), or the request's item is inside the caller's project
+   scope (the nearest project at or above its item, itself included). An **answer** additionally
+   reaches requests on items in the caller's own item subtree (a Chat without a project, or
+   a request raised there by a Chat the caller did not create); a plain resolve there stays
+   `work-outline/unauthorized` (coordinators still do not close grandchildren's requests). The
+   other members of a dedupe group close only under the origin/project rules. Anything else is
+   `work-outline/unauthorized`. Answering is the only way an agent's resolve is shown as the
+   user's.
 4. **Reach (reads).** `read_chat` also reaches (read-only) the Chats attached to items inside
    the caller's project scope, via the engine-internal tool `chat_project_scope_chats`
    (empty without a project). `send_message`, `wait_for_turn`, `interrupt_chat`,

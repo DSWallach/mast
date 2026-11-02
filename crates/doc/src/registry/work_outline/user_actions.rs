@@ -1119,9 +1119,8 @@ impl RegistryDoc {
 
     /// Whether an agent acting for Chat `agent_chat` may resolve or answer
     /// `request`: [`Self::agent_may_resolve_origin`], or the request sits on
-    /// an item inside the Chat's project scope, or (`own_subtree`, the target
-    /// of a call, not the other members of its dedupe group) inside its own
-    /// item's subtree (contract amendment "relay user answer").
+    /// an item inside the Chat's project scope, or (`own_subtree`, set only for
+    /// the target of an answer) inside its own item's subtree (contract amendment "relay user answer").
     pub(crate) fn agent_may_resolve_request(
         &self,
         agent_chat: &str,
@@ -1347,7 +1346,7 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::ResolveUserActionRequest(p) => {
                 match self.user_action_request(&p.user_action_request_id) {
-                    Some(request) if self.agent_may_resolve_request(chat_id, &request, true) => Ok(()),
+                    Some(request) if self.agent_may_resolve_request(chat_id, &request, p.answer.is_some()) => Ok(()),
                     Some(_) => Err(unauthorized(
                         "Agents may only resolve requests their own Chat or a Chat it created \
                          raised, or requests on items in their own item's subtree or project",
