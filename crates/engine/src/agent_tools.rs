@@ -890,6 +890,7 @@ impl AgentToolsService {
             tools::ANSWER_USER_ACTION_REQUEST => {
                 self.answer_user_action_request(context, arguments)
             }
+            tools::APPLY_CONTAINER_TEMPLATE => self.apply_container_template(context, arguments),
             tools::PROPOSE_INSTRUCTION => self.propose_instruction(context, arguments),
             tools::QUEUE_CHILD_CHAT_TURN => self.queue_child_chat_turn(context, arguments),
             tools::CLAIM_CHILD_CHAT => self.claim_child_chat(context, arguments),
@@ -1141,6 +1142,35 @@ impl AgentToolsService {
         });
         self.apply(context, &mutation)?;
         Ok(json!({ "chatId": context.grant.chat_id, "workItemId": args.work_item_id }))
+    }
+
+    fn apply_container_template(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: AssociateArgs = parse_args(arguments)?;
+        let target = args.work_item_id;
+        let operation_id = context.operation_id_or_derived(arguments, || {
+            let updated = context.row_stamp(
+                mast_doc::work_outline::KIND_WORK_ITEMS,
+                &target,
+                "updatedAt",
+            );
+            Ok(agent_tools::derived_idempotency_key(
+                tools::APPLY_CONTAINER_TEMPLATE,
+                &[&target, &updated],
+            ))
+        })?;
+        let mutation = WorkOutlineMutation::ApplyContainerTemplate(
+            mast_proto::work_outline_container_templates::ApplyContainerTemplateParams {
+                operation_id,
+                space_id: context.grant.space_id.clone(),
+                work_item_id: target.clone(),
+            },
+        );
+        self.apply(context, &mutation)?;
+        Ok(json!({ "workItemId": target, "applied": true }))
     }
 
     fn set_status(

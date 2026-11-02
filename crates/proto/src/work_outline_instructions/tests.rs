@@ -48,6 +48,8 @@ fn item(id: &str, parent: Option<&str>, title: &str, inherit: bool) -> WorkItemV
         worker_destination_id: None,
         template_id: None,
         template_revision: None,
+        container_template: None,
+        template_node_id: None,
     }
 }
 
@@ -70,6 +72,7 @@ fn instruction(
         source_proposal_id: None,
         archived_at: None,
         archived_by: None,
+        template_instruction_id: None,
     }
 }
 
@@ -756,6 +759,7 @@ fn instruction_wire_names_are_pinned() {
         source_proposal_id: Some("p".into()),
         archived_at: Some(3),
         archived_by: Some(user()),
+        template_instruction_id: None,
     };
     round_trip(
         &view,

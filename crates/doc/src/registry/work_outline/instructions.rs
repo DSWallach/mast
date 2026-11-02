@@ -110,7 +110,7 @@ pub(super) fn checked_source(
 
 /// Live, non-archived instructions of one scope as `(id, valid key)`, in
 /// the resolver's `(orderKey, id)` order, without `exclude`.
-fn scope_siblings(
+pub(super) fn scope_siblings(
     instructions: &[WorkItemInstructionView],
     scope: Option<&str>,
     exclude: Option<&str>,
@@ -553,6 +553,7 @@ impl RegistryDoc {
             source_proposal_id: new.source_proposal_id.map(str::to_owned),
             archived_at: None,
             archived_by: None,
+            template_instruction_id: None,
         });
         self.check_instruction_budget(new.space_id, scope, &instructions, new.action)?;
 
@@ -594,6 +595,11 @@ impl RegistryDoc {
     ) -> Outcome<()> {
         let instruction = self.live_instruction(&p.instruction_id)?;
         self.require_space(&instruction.space_id)?;
+        if instruction.template_instruction_id.is_some() {
+            return Err(invalid(
+                "This instruction comes from the container's template. Edit the template, or add your own instruction",
+            ));
+        }
         let plan = self.plan_instruction_text_update(&instruction, &p.text, now_ms)?;
         match plan {
             Some(plan) => self.commit(vec![plan], &[]),

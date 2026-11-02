@@ -81,6 +81,7 @@ fn review_fixture(linked: Option<u32>) -> WorkOutlineSnapshot {
         source_proposal_id: None,
         archived_at: None,
         archived_by: None,
+        template_instruction_id: None,
     });
     let project = snapshot
         .items

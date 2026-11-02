@@ -348,6 +348,18 @@ fn work_outline_catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: agent_tool_names::APPLY_CONTAINER_TEMPLATE,
+            description: "Make an item follow its parent's container template (the structure and live instructions configured on a container such as \"Projects\"). Pass the container to apply it to every direct child that doesn't follow yet, or one item under it. Existing sub-items are matched by title and adopted; missing ones are created; nothing is deleted or moved. Only the user edits a template's rules. Required: workItemId. Optional: idempotencyKey (derived when omitted).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workItemId": { "type": "string", "description": "A container with a template, or an item under it." },
+                    "idempotencyKey": optional_idempotency_key_schema()
+                },
+                "required": ["workItemId"]
+            }),
+        },
+        ToolDef {
             name: agent_tool_names::PROPOSE_INSTRUCTION,
             description: "Propose an instruction change; the user reviews it and nothing changes until they accept. To change or drop an existing instruction use action edit/remove with its instructionId (ids are in work_outline_read_current), not add plus remove. Required: idempotencyKey, and text (add, edit). Optional: action (add default, edit, remove), instructionId, rationale, target (add: item, parent, spaceRoot).",
             input_schema: json!({

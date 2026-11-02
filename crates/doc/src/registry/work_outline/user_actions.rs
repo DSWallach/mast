@@ -1304,6 +1304,16 @@ impl RegistryDoc {
                     Err(_) => Ok(()),
                 }
             }
+            // Container templates: an agent may make items inside its scope
+            // follow their parent's template; editing the rules stays denied.
+            WorkOutlineMutation::ApplyContainerTemplate(p) => {
+                if p.space_id != space {
+                    return Err(unauthorized(
+                        "Agents may only apply templates in their own Space",
+                    ));
+                }
+                in_scope(&p.work_item_id)
+            }
             WorkOutlineMutation::UpdateWorkItem(p) => {
                 let changes = &p.changes;
                 let status_only = changes.title.is_none()

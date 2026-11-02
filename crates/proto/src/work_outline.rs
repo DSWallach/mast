@@ -423,6 +423,14 @@ pub struct WorkItemView {
     /// reviewed (`workItems.templateRevision`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_revision: Option<u32>,
+    /// Container templates: the rules this item's DIRECT children follow
+    /// (`workItems.containerTemplate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_template: Option<crate::work_outline_container_templates::ContainerTemplate>,
+    /// Container templates: the rule node this item follows
+    /// (`workItems.templateNodeId`); `None` = doesn't follow a template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_node_id: Option<String>,
 }
 
 impl WorkItemView {
@@ -1391,6 +1399,9 @@ pub enum WorkOutlineMutation {
     // ── Project templates ──
     SaveWorkItemTemplate(crate::work_outline_templates::SaveWorkItemTemplateParams),
     DeleteWorkItemTemplate(crate::work_outline_templates::DeleteWorkItemTemplateParams),
+    // ── Container templates ──
+    SetContainerTemplate(crate::work_outline_container_templates::SetContainerTemplateParams),
+    ApplyContainerTemplate(crate::work_outline_container_templates::ApplyContainerTemplateParams),
 }
 
 impl WorkOutlineMutation {
@@ -1427,6 +1438,8 @@ impl WorkOutlineMutation {
             Self::SetLinearAssignedDestination(p) => &p.operation_id,
             Self::SaveWorkItemTemplate(p) => &p.operation_id,
             Self::DeleteWorkItemTemplate(p) => &p.operation_id,
+            Self::SetContainerTemplate(p) => &p.operation_id,
+            Self::ApplyContainerTemplate(p) => &p.operation_id,
         }
     }
 
@@ -1463,6 +1476,8 @@ impl WorkOutlineMutation {
             Self::SetLinearAssignedDestination(_) => "setLinearAssignedDestination",
             Self::SaveWorkItemTemplate(_) => "saveWorkItemTemplate",
             Self::DeleteWorkItemTemplate(_) => "deleteWorkItemTemplate",
+            Self::SetContainerTemplate(_) => "setContainerTemplate",
+            Self::ApplyContainerTemplate(_) => "applyContainerTemplate",
         }
     }
 
@@ -2056,6 +2071,8 @@ mod tests {
                 worker_destination_id: None,
                 template_id: None,
                 template_revision: None,
+                container_template: None,
+                template_node_id: None,
             }],
             assignments: vec![WorkItemChatAssignmentView {
                 chat_id: "chat-1".into(),
