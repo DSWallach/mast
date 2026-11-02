@@ -2558,6 +2558,10 @@ async fn drive_run(
     // set is scoped to one run's lifetime anyway.
     let mut pr_create_tool_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Tool calls whose output may earn a `mentioned` PR link (a `gh pr ...`
+    // style command, not a file read; see `invocation_may_mention_pr`).
+    let mut pr_mention_tool_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     let mut seen_images = std::collections::HashSet::new();
     for entry in doc_ref.read_entries().unwrap_or_default() {
         for part in entry.parts {
@@ -3169,6 +3173,9 @@ async fn drive_run(
                     if crate::chat_links::looks_like_pr_create(&text) {
                         pr_create_tool_ids.insert(id.clone());
                     }
+                    if crate::chat_links::invocation_may_mention_pr(call) {
+                        pr_mention_tool_ids.insert(id.clone());
+                    }
                 }
                 AgentEvent::ToolResult {
                     id,
@@ -3183,6 +3190,7 @@ async fn drive_run(
                         &workspace,
                         &chat_id,
                         pr_create_tool_ids.contains(id),
+                        pr_mention_tool_ids.contains(id),
                         *is_error,
                         output,
                     );

@@ -1331,9 +1331,13 @@ fn mine_links_from_entries(entries: &[(usize, SessionMessageEntry)]) -> MinedLin
                 } => {
                     let invocation = crate::chat_links::tool_call_invocation_text(call);
                     let is_create = crate::chat_links::looks_like_pr_create(&invocation);
-                    for (url, source) in
-                        crate::chat_links::tool_result_pr_links(is_create, *is_error, output)
-                    {
+                    let may_mention = crate::chat_links::invocation_may_mention_pr(call);
+                    for (url, source) in crate::chat_links::tool_result_pr_links(
+                        is_create,
+                        may_mention,
+                        *is_error,
+                        output,
+                    ) {
                         if source == ChatLinkSource::CreatedInChat {
                             mined.push_created(url);
                         } else {
@@ -1342,10 +1346,11 @@ fn mine_links_from_entries(entries: &[(usize, SessionMessageEntry)]) -> MinedLin
                     }
                 }
                 MessagePart::Text { text, .. } if is_message_role => {
-                    if let Some(id) = crate::chat_links::extract_ticket_mention(text) {
-                        mined.mentioned_ticket = Some(id);
+                    let text = crate::chat_links::strip_quoted(text);
+                    if mined.mentioned_ticket.is_none() {
+                        mined.mentioned_ticket = crate::chat_links::extract_ticket_mention(&text);
                     }
-                    for url in crate::chat_links::extract_pr_urls(text) {
+                    for url in crate::chat_links::extract_pr_urls(&text) {
                         mined.push_mentioned(url);
                     }
                 }
@@ -2328,7 +2333,7 @@ mod link_mining_tests {
     /// only from user/assistant MESSAGE text (never tool output) — matching
     /// the live tap's own scope.
     #[test]
-    fn most_recent_ticket_mention_wins_and_ignores_tool_output() {
+    fn first_ticket_mention_wins_and_ignores_tool_output() {
         let entries = vec![
             entry(
                 MessageRole::User,
@@ -2350,7 +2355,7 @@ mod link_mining_tests {
             ),
         ];
         let mined = mine_links_from_entries(&entries);
-        assert_eq!(mined.mentioned_ticket.as_deref(), Some("ENG-200"));
+        assert_eq!(mined.mentioned_ticket.as_deref(), Some("ENG-100"));
     }
 
     #[test]

@@ -38,11 +38,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::mast::{HarnessInfo, Mast, TurnOutcome, resolve_chat_in, session_for, short};
-use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
+use crate::transcript::{RenderOptions, RenderedMessage, cap_messages, render_entries};
 
 /// Default and ceiling for the blocking waits.
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 const MAX_WAIT: Duration = Duration::from_secs(3600);
+/// MCP clients drop a tool call that is silent for about 1990 s, so a wait
+/// returns `stillRunning` before that and the caller calls again.
+const WAIT_CAP: Duration = Duration::from_secs(1500);
+/// Largest text one message carries in a tool result (the tail is kept).
+const MAX_MESSAGE_BYTES: usize = 24_000;
+/// Largest combined message text in one tool result.
+const MAX_RESULT_BYTES: usize = 48_000;
 /// A session row older than this is not trusted to still be working
 /// (the UI's staleness window): a crashed host must not read as busy forever.
 const SESSION_STALE: chrono::Duration = chrono::Duration::seconds(45);
@@ -152,7 +159,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -162,7 +169,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes and returns the assistant's reply (the request/response pattern); if you did not wait, collect it later with `wait_for_turn`.",
+            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -181,7 +188,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message.",
+            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
@@ -604,6 +611,11 @@ fn wait_duration(secs: Option<u64>) -> Duration {
     secs.map(Duration::from_secs)
         .unwrap_or(DEFAULT_WAIT)
         .min(MAX_WAIT)
+        .min(WAIT_CAP)
+}
+
+fn wait_was_capped(secs: Option<u64>) -> bool {
+    secs.is_some_and(|s| Duration::from_secs(s.min(MAX_WAIT.as_secs())) > WAIT_CAP)
 }
 
 fn now_millis() -> i64 {
@@ -1409,7 +1421,7 @@ impl Tools {
                         &chat,
                         None,
                         true,
-                        wait_duration(args.timeout_secs),
+                        args.timeout_secs,
                         now_millis(),
                     )
                     .await?;
@@ -1438,8 +1450,14 @@ impl Tools {
         let limit = args.limit.unwrap_or(40).clamp(1, 500);
         let end = total.saturating_sub(args.offset);
         let start = end.saturating_sub(limit);
-        let window = &rendered[start..end];
-        Ok(json!({
+        let (window, dropped) = cap_messages(
+            rendered[start..end].to_vec(),
+            MAX_MESSAGE_BYTES,
+            MAX_RESULT_BYTES,
+        );
+        let start = start + dropped;
+        let truncated = dropped > 0 || window.iter().any(|m| m.text_omitted_bytes.is_some());
+        let mut result = json!({
             "chatId": chat.id,
             "title": chat.title,
             "total": total,
@@ -1448,7 +1466,12 @@ impl Tools {
             "newerSkipped": total - end,
             "pendingInput": last_pending_input(&rendered),
             "messages": window,
-        }))
+        });
+        if truncated {
+            result["truncated"] = json!(true);
+            result["nextOffset"] = json!(total - start);
+        }
+        Ok(result)
     }
 
     async fn send_message(
@@ -1508,7 +1531,7 @@ impl Tools {
                     &chat,
                     baseline.as_ref(),
                     true,
-                    wait_duration(args.timeout_secs),
+                    args.timeout_secs,
                     sent_at,
                 )
                 .await?;
@@ -1556,7 +1579,7 @@ impl Tools {
     ) -> anyhow::Result<Value> {
         let chat = self.reach_chat(origin, &args.chat, Reach::Child).await?;
         let turn = self
-            .await_turn(&chat, None, false, wait_duration(args.timeout_secs), 0)
+            .await_turn(&chat, None, false, args.timeout_secs, 0)
             .await?;
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
@@ -1793,13 +1816,15 @@ impl Tools {
         chat: &Chat,
         baseline: Option<&Session>,
         expect_turn: bool,
-        timeout: Duration,
+        requested_secs: Option<u64>,
         since_millis: i64,
     ) -> anyhow::Result<Value> {
+        let started = std::time::Instant::now();
         let (outcome, session) = self
             .zeron
-            .wait_for_turn(chat, baseline, expect_turn, timeout)
+            .wait_for_turn(chat, baseline, expect_turn, wait_duration(requested_secs))
             .await?;
+        let elapsed_secs = started.elapsed().as_secs();
         let entries = self.zeron.transcript(&chat.id).await.unwrap_or_default();
         let rendered = render_entries(&entries, RenderOptions::default());
         let replies: Vec<&RenderedMessage> = rendered
@@ -1818,13 +1843,44 @@ impl Tools {
             replies
         };
         let (status, _) = status_of(session.as_ref());
-        Ok(json!({
+        let pending_input = last_pending_input(&rendered);
+        let working = session
+            .as_ref()
+            .is_some_and(|s| s.status == SessionStatus::Working);
+        let (replies, dropped) = cap_messages(
+            replies.into_iter().cloned().collect(),
+            MAX_MESSAGE_BYTES,
+            MAX_RESULT_BYTES,
+        );
+        let truncated = dropped > 0 || replies.iter().any(|m| m.text_omitted_bytes.is_some());
+        let mut turn = json!({
             "outcome": outcome,
             "status": status,
             "timedOut": outcome == TurnOutcome::TimedOut,
-            "pendingInput": last_pending_input(&rendered),
+            "pendingInput": pending_input,
             "replies": replies,
-        }))
+        });
+        if outcome == TurnOutcome::TimedOut && working {
+            let session = session.as_ref().expect("working implies a session");
+            turn["status"] = json!("stillRunning");
+            turn["turnId"] = json!(format!(
+                "{}:{}",
+                chat.id,
+                session.started_at.map_or(0, |t| t.timestamp_millis())
+            ));
+            turn["elapsedSecs"] = json!(elapsed_secs);
+            turn["hint"] = json!("The turn is still running; call wait_for_turn again.");
+        }
+        if wait_was_capped(requested_secs) && outcome == TurnOutcome::TimedOut {
+            turn["waitCappedAtSecs"] = json!(WAIT_CAP.as_secs());
+        }
+        if truncated {
+            turn["truncated"] = json!(true);
+            turn["truncatedHint"] = json!(
+                "Only the tail of a long reply is returned; read earlier messages with read_chat."
+            );
+        }
+        Ok(turn)
     }
 }
 
@@ -1957,6 +2013,10 @@ mod tests {
         destination: Option<&'static str>,
         /// When set, chat-beta-2 (the agent) was started by this chat.
         beta_parent: Option<&'static str>,
+        /// When set, alpha's assistant reply is this many bytes long.
+        big_reply: Option<usize>,
+        /// When set, alpha has a working session row.
+        working: bool,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2030,6 +2090,10 @@ mod tests {
                     chats.extend(self.created.lock().unwrap().iter().cloned());
                     stream(Value::Array(chats))
                 }
+                methods::WATCH_SESSIONS if self.working => stream(json!([{
+                    "chatId": "chat-alpha-1", "deviceId": "dev-local", "status": "working",
+                    "startedAt": "2026-11-02T10:00:00Z", "updatedAt": "2026-11-02T10:00:05Z"
+                }])),
                 methods::WATCH_SESSIONS => stream(json!([])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
@@ -2045,7 +2109,9 @@ mod tests {
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
                     { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
                       "status": "complete",
-                      "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
+                      "parts": [{ "kind": "text", "id": "t",
+                                  "text": self.big_reply.map_or("hello back".to_string(),
+                                      |n| format!("HEAD{}TAIL", "x".repeat(n))) }] }
                 ]})),
                 agent_tools::AUTHENTICATE_METHOD => {
                     if params["token"] != BETA_TOKEN {
@@ -3276,5 +3342,80 @@ mod tests {
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
         );
+    }
+
+    #[test]
+    fn waits_are_capped_below_the_client_idle_limit() {
+        assert_eq!(wait_duration(Some(3600)), WAIT_CAP);
+        assert_eq!(wait_duration(Some(30)), Duration::from_secs(30));
+        assert!(wait_was_capped(Some(3600)));
+        assert!(!wait_was_capped(Some(30)));
+        assert!(!wait_was_capped(None));
+        assert!(WAIT_CAP < Duration::from_secs(1990));
+    }
+
+    #[tokio::test]
+    async fn a_wait_on_a_working_chat_reports_still_running_and_can_be_repeated() {
+        let world = Arc::new(World {
+            working: true,
+            ..World::default()
+        });
+        let tools = tools(world, None);
+        for _ in 0..2 {
+            let waited = tools
+                .call("wait_for_turn", json!({ "chat": "alpha", "timeout_secs": 1 }))
+                .await
+                .unwrap();
+            let turn = &waited["turn"];
+            assert_eq!(turn["status"], "stillRunning");
+            assert_eq!(turn["timedOut"], true);
+            assert_eq!(turn["turnId"], "chat-alpha-1:1793613600000");
+            assert!(turn["elapsedSecs"].as_u64().unwrap() <= 2);
+        }
+        let capped = tools
+            .call("wait_for_turn", json!({ "chat": "alpha", "timeout_secs": 1 }))
+            .await
+            .unwrap();
+        assert!(capped["turn"].get("waitCappedAtSecs").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_reply_is_cut_to_its_tail_with_a_pointer() {
+        let world = Arc::new(World {
+            big_reply: Some(100_000),
+            ..World::default()
+        });
+        let tools = tools(world, None);
+        let waited = tools
+            .call("wait_for_turn", json!({ "chat": "alpha", "timeout_secs": 5 }))
+            .await
+            .unwrap();
+        let turn = &waited["turn"];
+        assert_eq!(turn["outcome"], "completed");
+        assert_eq!(turn["truncated"], true);
+        let reply = &turn["replies"][0];
+        let text = reply["text"].as_str().unwrap();
+        assert!(text.len() <= MAX_MESSAGE_BYTES);
+        assert!(text.ends_with("TAIL") && !text.contains("HEAD"));
+        assert_eq!(
+            reply["textOmittedBytes"].as_u64().unwrap() as usize + text.len(),
+            100_008
+        );
+
+        let read = tools
+            .call("read_chat", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(read["truncated"], true);
+        let total: usize = read["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap().len())
+            .sum();
+        assert!(total <= MAX_RESULT_BYTES);
+        assert!(read["messages"][1]["text"].as_str().unwrap().ends_with("TAIL"));
+        // The small user message before it still fits: nothing paged out.
+        assert_eq!(read["olderRemaining"], 0);
     }
 }
