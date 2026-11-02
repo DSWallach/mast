@@ -822,7 +822,7 @@ pub mod agent_tools {
             [ARTIFACT_PUBLISH, ARTIFACT_GET_PLAN, ARTIFACT_RENDER_CHECK];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 10] = [
+        pub const WORK_OUTLINE: [&str; 11] = [
             READ_CURRENT,
             READ_SUBTREE,
             CREATE_CHILD,

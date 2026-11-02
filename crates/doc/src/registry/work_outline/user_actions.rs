@@ -1299,6 +1299,12 @@ impl RegistryDoc {
                     self.item_in_space(work_item_id, space)
                 }
             }),
+            WorkOutlineMutation::ApplyContainerTemplate(p) => {
+                ok_if(p.space_id == space && self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::SetContainerTemplate(p) => {
+                ok_if(p.space_id == space && self.item_in_space(&p.work_item_id, space))
+            }
             WorkOutlineMutation::SaveWorkItemTemplate(p) => ok_if(
                 p.space_id == space && self.item_in_space(&p.project_work_item_id, space),
             ),
