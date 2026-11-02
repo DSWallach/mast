@@ -1670,8 +1670,9 @@ descendants".
      project's Planning item may create into the sibling Tickets container);
    - `create_chat { workItemId }` targets;
    - `work_outline_read_subtree` targets.
-   It does **not** reach `setStatus`, `associateCurrentChat`, `proposeInstruction`, resolving
-   requests, or any other mutation: those keep the own-item/descendant rule. A Chat can never
+   It does **not** reach `setStatus`, `associateCurrentChat`, `proposeInstruction`, or any other
+   mutation: those keep the own-item/descendant rule. (Resolving or answering requests and
+   `read_chat` do reach it since the "relay user answer" amendment below.) A Chat can never
    reach outside its project (a sibling project, the project's parent, or another phase).
 3. **Destination resolution.** `work_outline_create_child` without `parentWorkItemId`, and
    `create_chat` whose `workItemId` is a project with a destination, resolve to the destination of
@@ -1685,6 +1686,58 @@ descendants".
 5. **Tests.** `crates/engine/tests/agent_tools.rs` (scope, resolution, limits),
    `crates/doc/src/registry/work_outline/` (field validation), `crates/proto/src/work_outline.rs`
    (snapshot helpers).
+
+## Amendment: relay user answer
+
+From the bug "a decision Mikey gave the orchestrator could not reach the planner's request". An
+orchestrator relayed "make linear tickets" with `send_message`; the planner rightly refused it
+(a relayed message is not the user), and nothing could carry the user's own words to the
+request with provenance. Amends the project-scope amendment (resolving requests) and the
+coordinator agent tools.
+
+1. **New MCP/engine tool `answer_user_action_request { requestId, userMessageId,
+   idempotencyKey }`** (a separate tool, not an extra argument of
+   `work_outline_resolve_user_action_request`: resolve takes free text from the agent and must
+   stay incapable of claiming to be the user; the answer tool takes only pointers). Engine
+   checks, in this order: the request exists, is open (a replay of the same key after success
+   returns the first result), and is within the caller's reach (below); `userMessageId` is an
+   entry of the CALLING Chat's own transcript; its role is `user` (assistant or system role is
+   refused); its text is not an agent relay (`[Message from Mast chat …`, the prefix
+   `send_message` always adds) or a Mast system message (`[Mast system message …`, the
+   orchestrator wake); it was created after the request; it has text and at most 1000
+   characters (`MAX_NOTE_CHARS`). The message authorship is a text-prefix check because the
+   transcript does not tag messages: the relay prefix is added by Mast on every agent
+   `send_message`, and an agent cannot send to its own chat or to its parent.
+2. **Effect.** Delivery comes first, exactly as Required Actions' Reply & resolve: the origin
+   Chat gets the user message `Re: "<request>": <message text>` (queued like a typed message; no
+   relay header), then the request resolves with `resolution.answer {chatId, messageId, text}`
+   and `note` = the text. `resolution.by` stays the recording agent; `answer` present means the
+   answer is the user's (`UserActionResolution::answered_by_user`). A failed delivery leaves the
+   request open; the same `idempotencyKey` never delivers twice (processed-command ledger). An
+   origin Chat that no longer exists (or a system request) is just resolved (`delivered:
+   false`). Only an agent actor may write `answer` (`resolveUserActionRequest.answer` is
+   `invalid` for users and the system).
+3. **Reach (requests).** An agent may resolve or answer a request when its origin Chat is the
+   caller or one the caller created (as before), or the request's item is inside the caller's
+   project scope (the nearest project at or above its item, itself included), or, for the call's
+   target request only, inside its own item's subtree. Other members of a dedupe group are closed
+   only by the first two project/origin rules, so a Chat's plain resolve still never closes a
+   sibling Chat's duplicate. Anything else is `work-outline/unauthorized`. Answering is the only
+   way an agent's resolve is shown as the user's.
+4. **Reach (reads).** `read_chat` also reaches (read-only) the Chats attached to items inside
+   the caller's project scope, via the engine-internal tool `chat_project_scope_chats`
+   (empty without a project). `send_message`, `wait_for_turn`, `interrupt_chat`,
+   `respond_to_input`, `archive_chat` and `get_chat` keep the created-by-me rule.
+5. **UI.** Required Actions history (global panel, Details, the Item tab) shows "Answered
+   <age> by you · <text>" for an answer and an "Open message" link that opens the source Chat
+   (no per-message anchor exists yet).
+6. **Tool text.** The `answer_user_action_request`, `work_outline_resolve_user_action_request`
+   and `read_chat` descriptions tell orchestrators to use the answer tool instead of relaying
+   approval wording.
+7. **Tests.** `crates/engine/tests/agent_tools.rs` (every check, delivery attribution, replay,
+   project scope and its limits), `crates/doc/src/registry/work_outline/user_actions/tests.rs`,
+   `crates/mcp/src/tools.rs` (read-only project reads), `crates/ui/src/work_outline/
+   required_actions{,_tests}.rs` (provenance row and link).
 
 ## Amendment: project templates
 

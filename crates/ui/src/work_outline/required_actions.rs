@@ -115,6 +115,16 @@ pub(crate) struct ResolutionLine {
     pub at: i64,
     pub by: &'static str,
     pub note: Option<String>,
+    /// The user's own chat message an agent carried here
+    /// (`answer_user_action_request`): shown as the user's answer.
+    pub answer: Option<ResolutionAnswer>,
+}
+
+/// Where the user's answer was typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolutionAnswer {
+    pub chat_id: String,
+    pub message_id: String,
 }
 
 /// Open rows (oldest first: the longest wait leads) and resolved history
@@ -273,7 +283,21 @@ fn row_for(
             let resolution = request.resolution.as_ref();
             ResolutionLine {
                 at: resolution.map_or(0, |r| r.at),
-                by: resolution.map_or("Mast", |r| actor_label(r.by.kind)),
+                // An answer carried from the user's chat message is theirs,
+                // whichever agent recorded it.
+                by: resolution.map_or("Mast", |r| {
+                    if r.answered_by_user() {
+                        actor_label(WorkOutlineActorKind::User)
+                    } else {
+                        actor_label(r.by.kind)
+                    }
+                }),
+                answer: resolution.and_then(|r| {
+                    r.answer.as_ref().map(|a| ResolutionAnswer {
+                        chat_id: a.chat_id.clone(),
+                        message_id: a.message_id.clone(),
+                    })
+                }),
                 note: resolution
                     .and_then(|r| r.note.clone())
                     .filter(|note| !note.trim().is_empty()),
@@ -290,7 +314,7 @@ pub(crate) fn age_label(at_millis: i64, now: chrono::DateTime<chrono::Utc>) -> S
 }
 
 /// How much of the request text a reply quotes.
-pub(crate) const REPLY_QUOTE_MAX_CHARS: usize = 120;
+pub(crate) const REPLY_QUOTE_MAX_CHARS: usize = mast_proto::REPLY_QUOTE_MAX_CHARS;
 
 /// Reply & resolve's role for the resolve operation id, derived from the
 /// reply intent's operation id (the reply's message id derives from the same
@@ -301,17 +325,7 @@ pub(crate) const REPLY_RESOLVE_ROLE: &str = "reply-resolve";
 /// `Re: "<request text>": <note>`. The quote is whitespace-collapsed and cut
 /// to [`REPLY_QUOTE_MAX_CHARS`] (with an ellipsis); the note is sent as typed.
 pub(crate) fn reply_message(request_text: &str, note: &str) -> String {
-    let collapsed = request_text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let quote = if collapsed.chars().count() > REPLY_QUOTE_MAX_CHARS {
-        let cut: String = collapsed.chars().take(REPLY_QUOTE_MAX_CHARS - 1).collect();
-        format!("{}\u{2026}", cut.trim_end())
-    } else {
-        collapsed
-    };
-    format!("Re: \"{quote}\": {}", note.trim())
+    mast_proto::user_reply_message(request_text, note)
 }
 
 /// Why Reply & resolve is unavailable for `row` (`None` when it can send).
@@ -739,6 +753,29 @@ pub(crate) mod fixture {
             },
             at,
             note: note.map(Into::into),
+            answer: None,
+        });
+    }
+
+    /// Resolve `request` the way `answer_user_action_request` does: an agent
+    /// recorded it, quoting the user's message in `source_chat`.
+    pub(crate) fn resolve_with_answer(
+        request: &mut UserActionRequestView,
+        at: i64,
+        source_chat: &str,
+        message_id: &str,
+        text: &str,
+    ) {
+        request.state = UserActionRequestState::Resolved;
+        request.resolution = Some(UserActionResolution {
+            by: agent(source_chat),
+            at,
+            note: Some(text.into()),
+            answer: Some(mast_proto::UserActionAnswer {
+                chat_id: source_chat.into(),
+                message_id: message_id.into(),
+                text: text.into(),
+            }),
         });
     }
 
@@ -919,6 +956,42 @@ mod tests {
             (resolution.by, resolution.note.as_deref()),
             ("you", Some("Done"))
         );
+    }
+
+    #[test]
+    fn an_answer_carried_from_a_user_message_reads_as_the_users() {
+        let mut snap = snapshot("s1");
+        let auth = snap
+            .user_action_requests
+            .iter_mut()
+            .find(|r| r.id == R_AUTH)
+            .unwrap();
+        resolve_with_answer(auth, NOW + 10, CHAT_UI, "msg-7", "make linear tickets");
+        let chats = vec![chat(CHAT_UI, false), chat(CHAT_AUTH, false)];
+        let rows = collect_rows(&spaces(snap), &chats, &RequestScope::Global);
+        let resolution = rows.resolved[0].resolution.as_ref().unwrap();
+        // Recorded by an agent, shown as the user's, with its source.
+        assert_eq!(resolution.by, "you");
+        assert_eq!(resolution.note.as_deref(), Some("make linear tickets"));
+        assert_eq!(
+            resolution.answer,
+            Some(ResolutionAnswer {
+                chat_id: CHAT_UI.into(),
+                message_id: "msg-7".into(),
+            })
+        );
+        // A plain agent resolve stays the agent's.
+        let mut snap = snapshot("s1");
+        let auth = snap
+            .user_action_requests
+            .iter_mut()
+            .find(|r| r.id == R_AUTH)
+            .unwrap();
+        resolve(auth, NOW + 10, Some("Done"));
+        auth.resolution.as_mut().unwrap().by = agent(CHAT_UI);
+        let rows = collect_rows(&spaces(snap), &chats, &RequestScope::Global);
+        let resolution = rows.resolved[0].resolution.as_ref().unwrap();
+        assert_eq!((resolution.by, resolution.answer.clone()), ("an agent", None));
     }
 
     #[test]

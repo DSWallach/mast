@@ -151,7 +151,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. Reads the chats you created, yourself, and (read-only) the chats on items inside your own project.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -306,7 +306,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::RESOLVE_USER_ACTION_REQUEST,
-            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Required: userActionRequestId. Optional: resolution (a note), idempotencyKey (derived when omitted).",
+            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Within your project you may also resolve requests of chats you did not create. When the user answered YOU in chat (not in Required Actions), use `answer_user_action_request` so their answer reaches the request's chat with provenance. Required: userActionRequestId. Optional: resolution (a note), idempotencyKey (derived when omitted).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -315,6 +315,19 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                     "idempotencyKey": optional_idempotency_key_schema()
                 },
                 "required": ["userActionRequestId"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::ANSWER_USER_ACTION_REQUEST,
+            description: "Carry the user's own answer to an open Required Action. When the user answers a request in YOUR chat (for example they tell you to go ahead), call this with the request id and the id of their message instead of relaying their wording with `send_message` (a relayed message is never accepted as approval). You pass only pointers: `userMessageId` must be a message the user typed in your own chat (find its id with `read_chat` on yourself), written after the request; assistant messages, messages from other agents, and Mast system or wake messages are refused. Mast delivers it to the request's origin chat as the user's own `Re: \"…\"` reply and resolves the request as the user's answer. Reaches requests of your own chat, chats you created, and items in your item's subtree or your project. Required: requestId, userMessageId, idempotencyKey.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "requestId": { "type": "string", "description": "The open request (see work_outline_read_subtree)." },
+                    "userMessageId": { "type": "string", "description": "The user's message in your own chat." },
+                    "idempotencyKey": idempotency_key_schema()
+                },
+                "required": ["requestId", "userMessageId", "idempotencyKey"]
             }),
         },
         ToolDef {
@@ -1408,7 +1421,7 @@ impl Tools {
         args: ReadChatArgs,
     ) -> anyhow::Result<Value> {
         let chat = self
-            .reach_chat(origin, &args.chat, Reach::SelfOrChild)
+            .reach_chat(origin, &args.chat, Reach::ReadScope)
             .await?;
         let entries = self.zeron.transcript(&chat.id).await?;
         let rendered = render_entries(
@@ -1588,20 +1601,35 @@ impl Tools {
         let Some(origin) = origin else {
             return self.zeron.resolve_chat(key).await;
         };
-        let allow_self = reach == Reach::SelfOrChild;
+        let allow_self = reach != Reach::Child;
+        let project_chats: Vec<String> = if reach == Reach::ReadScope {
+            self.zeron
+                .agent_tool(agent_tool_names::PROJECT_SCOPE_CHATS, json!({}))
+                .await
+                .ok()
+                .and_then(|v| serde_json::from_value(v["chatIds"].clone()).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let chats: Vec<Chat> = self
             .zeron
             .chats()
             .await?
             .into_iter()
-            .filter(|c| reachable(origin, c, allow_self))
+            .filter(|c| reachable(origin, c, allow_self) || project_chats.contains(&c.id))
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {
             anyhow::anyhow!(
                 "no chat this chat created{} matches {key:?}; agents can only reach the chats \
-                 they created (list_chats shows them)",
+                 they created (list_chats shows them){}",
                 if allow_self {
                     " (or this chat itself)"
+                } else {
+                    ""
+                },
+                if reach == Reach::ReadScope {
+                    ", and read the chats on items in their own project"
                 } else {
                     ""
                 }
@@ -1630,7 +1658,8 @@ impl Tools {
             _ => short(origin_id).to_owned(),
         };
         format!(
-            "[Message from Mast chat {label}. Reply to it with the Mast `send_message` tool, chat {}.]\n\n{text}",
+            "{} {label}. Reply to it with the Mast `send_message` tool, chat {}.]\n\n{text}",
+            mast_proto::RELAYED_MESSAGE_PREFIX,
             short(origin_id)
         )
     }
@@ -1762,6 +1791,9 @@ enum Reach {
     Child,
     /// Those, or the caller itself (reads).
     SelfOrChild,
+    /// Those, or any chat on an item inside the caller's project (read-only:
+    /// `read_chat` only, never a send).
+    ReadScope,
 }
 
 /// Whether the token's Chat may reach `chat`: one it created (Mast-created
@@ -1880,6 +1912,8 @@ mod tests {
         beta_sandbox: Option<&'static str>,
         /// When set, the agent's project has this worker destination.
         destination: Option<&'static str>,
+        /// Chats the engine says sit inside the agent's project scope.
+        project_chats: Vec<&'static str>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2005,6 +2039,9 @@ mod tests {
                             Some(id) => json!({ "workerDestinationId": id }),
                             None => json!({}),
                         }));
+                    }
+                    if params["tool"] == agent_tool_names::PROJECT_SCOPE_CHATS {
+                        return Ok(RpcReply::Value(json!({ "chatIds": self.project_chats })));
                     }
                     if params["tool"] == agent_tool_names::CREATE_CHILD {
                         return Ok(RpcReply::Value(json!({
@@ -2388,6 +2425,42 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// Chats on items inside the caller's project are readable, and only
+    /// readable: no send, wait, interrupt, or archive reaches them.
+    #[tokio::test]
+    async fn read_chat_reaches_the_chats_in_the_callers_project_read_only() {
+        let world = Arc::new(World {
+            project_chats: vec!["chat-alpha-1"],
+            ..World::default()
+        });
+        let scoped = tools(world.clone(), Some(BETA_TOKEN));
+        let read = scoped
+            .call("read_chat", json!({ "chat": "chat-alpha-1" }))
+            .await
+            .unwrap();
+        assert_eq!(read["chatId"], "chat-alpha-1");
+        assert_eq!(read["returned"], 2);
+        for (name, extra) in [
+            ("get_chat", json!({})),
+            ("send_message", json!({ "text": "hi" })),
+            ("wait_for_turn", json!({ "timeout_secs": 1 })),
+            ("interrupt_chat", json!({})),
+            ("archive_chat", json!({})),
+        ] {
+            let mut args = extra;
+            args["chat"] = json!("chat-alpha-1");
+            let err = scoped.call(name, args).await.unwrap_err();
+            assert!(err.contains("agents can only reach"), "{name}: {err}");
+        }
+        // Without project reach the same read is refused.
+        let plain = tools(Arc::new(World::default()), Some(BETA_TOKEN));
+        let err = plain
+            .call("read_chat", json!({ "chat": "chat-alpha-1" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("agents can only reach"), "{err}");
     }
 
     #[tokio::test]

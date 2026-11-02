@@ -289,6 +289,7 @@ fn system_origin_requests_need_the_system_actor_and_have_no_chat() {
         WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
             user_action_request_id: id.clone(),
             note: Some("Review submitted".into()),
+            answer: None,
             operation_id: "resolve".into(),
         }),
     )

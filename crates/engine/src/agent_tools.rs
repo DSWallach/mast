@@ -457,6 +457,13 @@ struct ResolveUserActionRequestArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AnswerUserActionRequestArgs {
+    request_id: String,
+    user_message_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProposeInstructionArgs {
     /// `item` (default), `parent`, or `spaceRoot`.
     #[serde(default)]
@@ -880,9 +887,13 @@ impl AgentToolsService {
             tools::RESOLVE_USER_ACTION_REQUEST => {
                 self.resolve_user_action_request(context, arguments)
             }
+            tools::ANSWER_USER_ACTION_REQUEST => {
+                self.answer_user_action_request(context, arguments)
+            }
             tools::PROPOSE_INSTRUCTION => self.propose_instruction(context, arguments),
             tools::QUEUE_CHILD_CHAT_TURN => self.queue_child_chat_turn(context, arguments),
             tools::CLAIM_CHILD_CHAT => self.claim_child_chat(context, arguments),
+            tools::PROJECT_SCOPE_CHATS => Ok(self.project_scope_chats(context)),
             tools::ARTIFACT_PUBLISH => {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_publish(&caller, arguments)?)
@@ -1260,6 +1271,7 @@ impl AgentToolsService {
             WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
                 user_action_request_id: args.user_action_request_id.clone(),
                 note: non_empty(args.resolution),
+                answer: None,
                 operation_id,
             });
         self.apply(context, &mutation)?;
@@ -1286,6 +1298,205 @@ impl AgentToolsService {
             .into());
         }
         Ok(json!({ "userActionRequestId": args.user_action_request_id, "resolved": true }))
+    }
+
+    /// `answer_user_action_request`: carry the human's own chat message to a
+    /// request. The caller supplies only pointers; the engine reads the
+    /// message from the caller's own transcript and requires it to be a
+    /// user-role message the human typed (not an agent relay, a Mast system
+    /// or wake message, or an assistant reply) created after the request.
+    /// Then, like Required Actions' Reply & resolve, it delivers
+    /// `Re: "<request>": <message>` to the request's origin Chat as a user
+    /// message and resolves the request, recording the answer (text, source
+    /// Chat and message) as the user's. Delivery comes first, so a failure
+    /// leaves the request open; a replay of the same key never delivers twice.
+    /// `chat_project_scope_chats`: the Chats on items inside the caller's
+    /// project (the nearest project at or above its item; the item itself
+    /// counts). Empty without a project. Read-only reach for `read_chat`.
+    fn project_scope_chats(&self, context: &CallContext) -> Value {
+        let chat_ids: Vec<String> = context
+            .current_item_id()
+            .and_then(|root| {
+                let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+                let project = snapshot.project_root(&root)?.id.clone();
+                Some(
+                    snapshot
+                        .assignments
+                        .iter()
+                        .filter(|a| {
+                            a.work_item_id
+                                .as_deref()
+                                .is_some_and(|item| snapshot.is_within(&project, item))
+                        })
+                        .map(|a| a.chat_id.clone())
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        json!({ "chatIds": chat_ids })
+    }
+
+    fn answer_user_action_request(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: AnswerUserActionRequestArgs = parse_args(arguments)?;
+        let request_id = args.request_id.trim().to_owned();
+        let message_id = args.user_message_id.trim().to_owned();
+        if request_id.is_empty() {
+            return Err(AgentToolError::invalid("requestId is empty"));
+        }
+        if message_id.is_empty() {
+            return Err(AgentToolError::invalid("userMessageId is empty"));
+        }
+        let operation_id = context.operation_id(arguments)?;
+        let ledger_key = format!("answer-user-action:{operation_id}");
+        let ledger = |e: crate::EngineError| AgentToolError::invalid(e.to_string());
+        let caller = &context.grant.chat_id;
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let request = snapshot
+            .user_action_requests
+            .iter()
+            .find(|r| r.id == request_id)
+            .ok_or_else(|| {
+                WorkOutlineError::new(
+                    mast_proto::work_outline::WorkOutlineErrorCode::NotFound,
+                    "Request not found",
+                )
+            })?;
+        let delivered_before = self.workspace.ledger_holds(&ledger_key);
+        if !request.is_open() && !delivered_before {
+            return Err(AgentToolError::invalid(
+                "the request is already resolved; nothing was changed",
+            ));
+        }
+        // Reach: the request's origin Chat is the caller or one it created, or
+        // the request sits in the caller's item subtree or project scope.
+        let origin_chat = (!request.chat_id.is_empty())
+            .then(|| self.workspace.chat(&request.chat_id).ok().flatten())
+            .flatten();
+        let own_item = context.require_item("answering a request")?;
+        let reaches = request.chat_id == *caller
+            || origin_chat
+                .as_ref()
+                .is_some_and(|c| c.parent_chat_id.as_deref() == Some(caller.as_str()))
+            || in_agent_scope(&snapshot, &own_item, &request.work_item_id);
+        if !reaches {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only answer requests of their own chat, a chat they created, or \
+                 items in their own item's subtree or project",
+            )
+            .into());
+        }
+        // The message, from the caller's own transcript.
+        let doc_host = self.doc_host.as_ref().ok_or_else(|| {
+            AgentToolError::refused(AgentToolErrorCode::Unsupported, "no chat host")
+        })?;
+        let entries = doc_host
+            .open(caller)
+            .map_err(|e| AgentToolError::invalid(e.to_string()))?
+            .doc()
+            .read_entries()
+            .map_err(|e| AgentToolError::invalid(e.to_string()))?;
+        let entry = entries.iter().find(|e| e.id == message_id).ok_or_else(|| {
+            AgentToolError::invalid(
+                "userMessageId is not a message in this chat (read_chat on yourself lists ids)",
+            )
+        })?;
+        let text = match entry.role {
+            mast_doc::MessageRole::User => entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    mast_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            mast_doc::MessageRole::Assistant => {
+                return Err(AgentToolError::invalid(
+                    "userMessageId is an assistant message; only a message the user typed counts",
+                ));
+            }
+            mast_doc::MessageRole::System => {
+                return Err(AgentToolError::invalid(
+                    "userMessageId is a system message; only a message the user typed counts",
+                ));
+            }
+        };
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            return Err(AgentToolError::invalid("the user message has no text"));
+        }
+        if mast_proto::is_relayed_or_system_message(&text) {
+            return Err(AgentToolError::invalid(
+                "userMessageId is a message from an agent or Mast, not one the user typed; only \
+                 their own words can answer a request. Ask them to reply in Required Actions.",
+            ));
+        }
+        if entry.created_at <= request.created_at {
+            return Err(AgentToolError::invalid(
+                "the user message is older than the request, so it cannot answer it",
+            ));
+        }
+        if text.chars().count() > mast_proto::user_action_limits::MAX_NOTE_CHARS {
+            return Err(AgentToolError::invalid(format!(
+                "the user message is longer than {} characters; ask the user to answer in \
+                 Required Actions",
+                mast_proto::user_action_limits::MAX_NOTE_CHARS
+            )));
+        }
+        // Deliver as the user's reply, then record it.
+        let mut delivered = false;
+        if !delivered_before && let Some(origin) = origin_chat.as_ref() {
+            doc_host
+                .queue_message(
+                    &origin.id,
+                    &mast_proto::user_reply_message(&request.text, &text),
+                    Vec::new(),
+                )
+                .map_err(|e| AgentToolError::invalid(e.to_string()))?;
+            delivered = true;
+        }
+        self.workspace.ledger_mark(&ledger_key).map_err(ledger)?;
+        let mutation =
+            WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+                user_action_request_id: request_id.clone(),
+                note: Some(text.clone()),
+                answer: Some(mast_proto::UserActionAnswer {
+                    chat_id: caller.clone(),
+                    message_id: message_id.clone(),
+                    text,
+                }),
+                operation_id,
+            });
+        self.apply(context, &mutation)?;
+        let resolved = self
+            .workspace
+            .registry_row(mast_doc::work_outline::KIND_USER_ACTION_REQUESTS, &request_id)
+            .and_then(|row| {
+                row.fields
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|state| state == "resolved");
+        if !resolved {
+            return Err(WorkOutlineError::new(
+                mast_proto::work_outline::WorkOutlineErrorCode::OperationConflict,
+                "the request is still open after the answer; nothing was changed",
+            )
+            .into());
+        }
+        Ok(json!({
+            "userActionRequestId": request_id,
+            "resolved": true,
+            "answeredBy": "user",
+            "delivered": delivered || delivered_before,
+            "sourceChatId": caller,
+            "sourceMessageId": message_id,
+        }))
     }
 
     fn propose_instruction(

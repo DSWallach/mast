@@ -2492,3 +2492,446 @@ async fn propose_edit_and_remove_target_instructions_the_chat_can_read() {
     assert_eq!(instruction.text, "Run the linter and tests.");
     assert_eq!(snap.instructions.len(), 2);
 }
+
+// ---- answering a request with the user's own message -------------------------------
+
+const OUTSIDER: &str = "chat-outsider";
+
+struct AnswerRig {
+    rig: Rig,
+    p: ProjectRig,
+    /// The orchestrator's token (CHAT, on the project item).
+    orchestrator: String,
+    /// The planner's token (OTHER_CHAT, on Planning).
+    planner: String,
+    /// A chat on another project's item.
+    outsider: String,
+    request: String,
+    /// Tokens stop working when their lease drops.
+    _leases: [mast_engine::agent_tools::AgentTokenLease; 3],
+}
+
+async fn answer_rig() -> AnswerRig {
+    let rig = rig().await;
+    let p = project_rig(&rig).await;
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createChat", "chatId": OUTSIDER, "spaceId": SPACE,
+                    "deviceId": rig.core.device_id }),
+        )
+        .await
+        .unwrap();
+    assign_chat(&rig, "assign-orch", CHAT, &p.project).await;
+    assign_chat(&rig, "assign-plan", OTHER_CHAT, &p.planning).await;
+    assign_chat(&rig, "assign-out", OUTSIDER, &p.other_tickets).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let leases = [
+        tokens.mint(CHAT, "run-o", SPACE, &rig.core.device_id),
+        tokens.mint(OTHER_CHAT, "run-p", SPACE, &rig.core.device_id),
+        tokens.mint(OUTSIDER, "run-x", SPACE, &rig.core.device_id),
+    ];
+    let [orchestrator, planner, outsider] = [0, 1, 2].map(|i| leases[i].token().to_owned());
+    let raised = tool(
+        &rig,
+        &planner,
+        "work_outline_create_user_action_request",
+        json!({ "request": "Approve plan and create tickets?", "dedupeKey": "approve-plan",
+                "idempotencyKey": "raise" }),
+    )
+    .await
+    .unwrap();
+    let request = raised["userActionRequestId"].as_str().unwrap().to_owned();
+    AnswerRig {
+        rig,
+        p,
+        orchestrator,
+        planner,
+        outsider,
+        request,
+        _leases: leases,
+    }
+}
+
+fn request_created_at(rig: &Rig, request: &str) -> i64 {
+    snapshot(rig)
+        .user_action_requests
+        .iter()
+        .find(|r| r.id == request)
+        .unwrap()
+        .created_at
+}
+
+/// Write a transcript message into `chat`'s doc.
+fn push_message(rig: &Rig, chat: &str, id: &str, role: mast_doc::MessageRole, text: &str, at: i64) {
+    rig.core
+        .doc_host
+        .open(chat)
+        .unwrap()
+        .doc()
+        .push_message(&mast_doc::SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![mast_doc::MessagePart::Text {
+                id: format!("{id}-part"),
+                text: text.into(),
+            }],
+            created_at: at,
+            device_id: rig.core.device_id.clone(),
+            status: None,
+            continuation_of: None,
+        })
+        .unwrap();
+}
+
+/// Every text delivered to `chat` (queued rows and transcript messages).
+fn delivered_texts(rig: &Rig, chat: &str) -> Vec<String> {
+    let handle = rig.core.doc_host.open(chat).unwrap();
+    let mut out: Vec<String> = handle
+        .doc()
+        .read_queue()
+        .unwrap()
+        .into_iter()
+        .map(|q| q.text)
+        .collect();
+    // An idle chat drains the row straight into a Run command.
+    for command in handle.doc().read_commands().unwrap() {
+        if let SessionCommandPayload::Run { request, .. } = command.payload {
+            out.push(request.prompt);
+        }
+    }
+    for entry in handle.doc().read_entries().unwrap() {
+        for part in entry.parts {
+            if let mast_doc::MessagePart::Text { text, .. } = part {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
+/// Every Re: reply the planner received, whether still queued, drained into a
+/// command, or already started as a Run (polled: an idle chat drains async).
+async fn replies_to_planner(rig: &Rig) -> Vec<String> {
+    let snapshot_of = || -> Vec<String> {
+        // The same message shows in the doc and as the Run the harness got,
+        // so take whichever view has more rather than adding them.
+        let in_doc: Vec<String> = delivered_texts(rig, OTHER_CHAT)
+            .into_iter()
+            .filter(|t| t.starts_with("Re:"))
+            .collect();
+        let started: Vec<String> = rig
+            .harness
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.prompt.clone())
+            .filter(|t| t.starts_with("Re:"))
+            .collect();
+        if started.len() > in_doc.len() {
+            started
+        } else {
+            in_doc
+        }
+    };
+    for _ in 0..200 {
+        if !snapshot_of().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Let a duplicate delivery, if any, show up before counting.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    snapshot_of()
+}
+
+fn answer_args(request: &str, message: &str, key: &str) -> Value {
+    json!({ "requestId": request, "userMessageId": message, "idempotencyKey": key })
+}
+
+const ANSWER: &str = "answer_user_action_request";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answering_with_the_users_own_message_delivers_it_and_resolves_as_theirs() {
+    let a = answer_rig().await;
+    let at = request_created_at(&a.rig, &a.request) + 1_000;
+    push_message(
+        &a.rig,
+        CHAT,
+        "u-1",
+        mast_doc::MessageRole::User,
+        "  make linear tickets  ",
+        at,
+    );
+    let reply = tool(
+        &a.rig,
+        &a.orchestrator,
+        ANSWER,
+        answer_args(&a.request, "u-1", "ans-1"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply["resolved"], true);
+    assert_eq!(reply["answeredBy"], "user");
+    assert_eq!(reply["delivered"], true);
+    assert_eq!(reply["sourceChatId"], CHAT);
+    assert_eq!(reply["sourceMessageId"], "u-1");
+
+    // The planner gets the user's reply, not a relay.
+    let expected = "Re: \"Approve plan and create tickets?\": make linear tickets";
+    let texts = replies_to_planner(&a.rig).await;
+    assert_eq!(texts, [expected], "{texts:?}");
+
+    // The row records the user's answer with its source.
+    let snap = snapshot(&a.rig);
+    let request = snap
+        .user_action_requests
+        .iter()
+        .find(|r| r.id == a.request)
+        .unwrap();
+    let resolution = request.resolution.as_ref().unwrap();
+    assert!(resolution.answered_by_user());
+    assert_eq!(resolution.note.as_deref(), Some("make linear tickets"));
+    let answer = resolution.answer.as_ref().unwrap();
+    assert_eq!(answer.chat_id, CHAT);
+    assert_eq!(answer.message_id, "u-1");
+    assert_eq!(answer.text, "make linear tickets");
+    assert!(request_is_resolved(&snap, &a.request));
+
+    // A replay with the same key neither delivers twice nor fails.
+    let again = tool(
+        &a.rig,
+        &a.orchestrator,
+        ANSWER,
+        answer_args(&a.request, "u-1", "ans-1"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["resolved"], true);
+    assert_eq!(replies_to_planner(&a.rig).await, [expected]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answering_refuses_anything_but_a_human_message_newer_than_the_request() {
+    let a = answer_rig().await;
+    let created = request_created_at(&a.rig, &a.request);
+    let later = created + 1_000;
+    use mast_doc::MessageRole::{Assistant, System, User};
+    push_message(&a.rig, CHAT, "m-assistant", Assistant, "go ahead", later);
+    push_message(&a.rig, CHAT, "m-system", System, "go ahead", later);
+    push_message(
+        &a.rig,
+        CHAT,
+        "m-relay",
+        User,
+        "[Message from Mast chat Orchestrator (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\nMichael, verbatim: make linear tickets",
+        later,
+    );
+    push_message(
+        &a.rig,
+        CHAT,
+        "m-wake",
+        User,
+        "[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- x",
+        later,
+    );
+    push_message(&a.rig, CHAT, "m-old", User, "make linear tickets", created - 1_000);
+    push_message(&a.rig, CHAT, "m-same", User, "make linear tickets", created);
+    push_message(&a.rig, OTHER_CHAT, "m-foreign", User, "make linear tickets", later);
+    let long = "x".repeat(1_001);
+    push_message(&a.rig, CHAT, "m-long", User, &long, later);
+    let cases = [
+        ("m-assistant", "assistant message"),
+        ("m-system", "system message"),
+        ("m-relay", "from an agent or Mast"),
+        ("m-wake", "from an agent or Mast"),
+        ("m-old", "older than the request"),
+        ("m-same", "older than the request"),
+        // Another chat's message is not in the caller's own transcript.
+        ("m-foreign", "not a message in this chat"),
+        ("nope", "not a message in this chat"),
+        ("m-long", "longer than"),
+    ];
+    for (i, (message, needle)) in cases.iter().enumerate() {
+        let err = tool(
+            &a.rig,
+            &a.orchestrator,
+            ANSWER,
+            answer_args(&a.request, message, &format!("bad-{i}")),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains(needle), "{message}: {err}");
+    }
+    // Nothing was delivered or resolved by any of those.
+    assert!(!request_is_resolved(&snapshot(&a.rig), &a.request));
+    assert!(
+        delivered_texts(&a.rig, OTHER_CHAT)
+            .iter()
+            .all(|t| !t.starts_with("Re:"))
+    );
+    // The caller cannot supply the text itself.
+    let err = tool(
+        &a.rig,
+        &a.orchestrator,
+        ANSWER,
+        json!({ "requestId": a.request, "userMessageId": "m-old", "text": "go",
+                "idempotencyKey": "extra" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("older than the request"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answering_refuses_resolved_and_out_of_reach_requests() {
+    let a = answer_rig().await;
+    let later = request_created_at(&a.rig, &a.request) + 1_000;
+    push_message(&a.rig, CHAT, "u-1", mast_doc::MessageRole::User, "go", later);
+    push_message(&a.rig, OUTSIDER, "u-x", mast_doc::MessageRole::User, "go", later);
+    // A chat in another project cannot answer this project's request.
+    let err = tool(
+        &a.rig,
+        &a.outsider,
+        ANSWER,
+        answer_args(&a.request, "u-x", "out-1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("work-outline/unauthorized"), "{err}");
+    assert!(!request_is_resolved(&snapshot(&a.rig), &a.request));
+    // An unknown request.
+    let err = tool(
+        &a.rig,
+        &a.orchestrator,
+        ANSWER,
+        answer_args("no-such-request", "u-1", "k-missing"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("not found") || err.contains("notFound"), "{err}");
+    // The planner's own request can be answered by the planner's own user
+    // message too (its own chat is in reach), but only once.
+    tool(
+        &a.rig,
+        &a.orchestrator,
+        ANSWER,
+        answer_args(&a.request, "u-1", "ans-1"),
+    )
+    .await
+    .unwrap();
+    let err = tool(
+        &a.rig,
+        &a.orchestrator,
+        ANSWER,
+        answer_args(&a.request, "u-1", "ans-2"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("already resolved"), "{err}");
+    // Only one reply ever reached the planner.
+    assert_eq!(replies_to_planner(&a.rig).await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_scope_reaches_other_chats_requests_and_nothing_wider() {
+    let a = answer_rig().await;
+    // The orchestrator did not create the planner, yet resolves its request.
+    let reach = tool(&a.rig, &a.orchestrator, "chat_project_scope_chats", json!({}))
+        .await
+        .unwrap();
+    let ids: Vec<&str> = reach["chatIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(ids.contains(&OTHER_CHAT) && ids.contains(&CHAT), "{ids:?}");
+    assert!(!ids.contains(&OUTSIDER), "{ids:?}");
+    // The planner is under the project too, but a chat outside it sees only
+    // its own project.
+    let out = tool(&a.rig, &a.outsider, "chat_project_scope_chats", json!({}))
+        .await
+        .unwrap();
+    let out_ids: Vec<&str> = out["chatIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(out_ids.contains(&OUTSIDER) && !out_ids.contains(&OTHER_CHAT), "{out_ids:?}");
+    // The outsider cannot resolve the planner's request.
+    let err = tool(
+        &a.rig,
+        &a.outsider,
+        "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": a.request, "idempotencyKey": "x-resolve" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("work-outline/unauthorized"), "{err}");
+    assert!(!request_is_resolved(&snapshot(&a.rig), &a.request));
+    // The orchestrator can.
+    let done = tool(
+        &a.rig,
+        &a.orchestrator,
+        "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": a.request, "resolution": "handled",
+                "idempotencyKey": "o-resolve" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(done["resolved"], true);
+    let snap = snapshot(&a.rig);
+    let resolution = snap
+        .user_action_requests
+        .iter()
+        .find(|r| r.id == a.request)
+        .unwrap()
+        .resolution
+        .clone()
+        .unwrap();
+    // A plain resolve is the agent's own, never marked as the user's.
+    assert!(!resolution.answered_by_user());
+    assert_eq!(resolution.by.kind, WorkOutlineActorKind::Agent);
+    // The planner's own scope without a project keeps the old rule: a chat on
+    // a project's Tickets item reaches only inside the project it belongs to
+    // (the bystander has no project at all).
+    let _ = (&a.planner, &a.p.bystander);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
+    let rig = rig().await;
+    let root = create_item(&rig, "np-root", "Plain", None).await;
+    let leaf = create_item(&rig, "np-leaf", "Leaf", Some(&root)).await;
+    let sibling = create_item(&rig, "np-sib", "Sibling", None).await;
+    assign_chat(&rig, "np-a", CHAT, &leaf).await;
+    assign_chat(&rig, "np-b", OTHER_CHAT, &sibling).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let other = tokens.mint(OTHER_CHAT, "run-2", SPACE, &rig.core.device_id);
+    let raised = tool(
+        &rig,
+        other.token(),
+        "work_outline_create_user_action_request",
+        json!({ "request": "Q?", "idempotencyKey": "q" }),
+    )
+    .await
+    .unwrap();
+    let request = raised["userActionRequestId"].as_str().unwrap().to_owned();
+    let reach = tool(&rig, lease.token(), "chat_project_scope_chats", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(reach["chatIds"], json!([]));
+    let err = tool(
+        &rig,
+        lease.token(),
+        "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": request, "idempotencyKey": "r" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("work-outline/unauthorized"), "{err}");
+}

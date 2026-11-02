@@ -144,6 +144,7 @@ fn resolve_params(op: &str, id: &str, note: Option<&str>) -> WorkOutlineMutation
     WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
         user_action_request_id: id.into(),
         note: note.map(str::to_owned),
+        answer: None,
         operation_id: op.into(),
     })
 }
@@ -1218,6 +1219,59 @@ fn agent_resolve_closes_only_its_own_members_of_a_dedupe_group() {
             .user_action_request(&theirs)
             .unwrap()
             .is_unresolved()
+    );
+}
+
+/// `answer` is the user's chat message carried by an agent: only an agent
+/// actor may write it, and the resolution records it with its source.
+#[test]
+fn an_answer_is_agent_only_and_recorded_with_its_source() {
+    let mut f = fixture();
+    let own = f.own.clone();
+    let id = as_agent(&mut f, request_params("a1", &own, "c1", None))
+        .unwrap()
+        .user_action_request_id
+        .unwrap();
+    let with_answer = |op: &str, request: &str| {
+        WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+            user_action_request_id: request.into(),
+            note: Some("go ahead".into()),
+            answer: Some(mast_proto::UserActionAnswer {
+                chat_id: "c1".into(),
+                message_id: "m-1".into(),
+                text: "go ahead".into(),
+            }),
+            operation_id: op.into(),
+        })
+    };
+    // A user (or system) never carries an answer: it is not theirs to relay.
+    let error = apply(&mut f.doc, with_answer("u1", &id)).unwrap_err();
+    assert_eq!(error.code, WorkOutlineErrorCode::Invalid, "{error:?}");
+    assert!(snap(&f.doc).user_action_request(&id).unwrap().is_open());
+    // An empty answer is invalid.
+    let mut empty = with_answer("e1", &id);
+    if let WorkOutlineMutation::ResolveUserActionRequest(p) = &mut empty {
+        p.answer.as_mut().unwrap().text = " ".into();
+    }
+    assert_eq!(
+        as_agent(&mut f, empty).unwrap_err().code,
+        WorkOutlineErrorCode::Invalid
+    );
+    as_agent(&mut f, with_answer("g1", &id)).unwrap();
+    let s = snap(&f.doc);
+    let resolution = s
+        .user_action_request(&id)
+        .unwrap()
+        .resolution
+        .clone()
+        .unwrap();
+    assert!(resolution.answered_by_user());
+    assert_eq!(resolution.by.kind, WorkOutlineActorKind::Agent);
+    assert_eq!(resolution.note.as_deref(), Some("go ahead"));
+    let answer = resolution.answer.unwrap();
+    assert_eq!(
+        (answer.chat_id.as_str(), answer.message_id.as_str()),
+        ("c1", "m-1")
     );
 }
 

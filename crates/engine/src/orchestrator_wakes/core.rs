@@ -60,11 +60,12 @@ pub struct Batch {
 impl Batch {
     /// The one message the orchestrator receives.
     pub fn render(&self) -> String {
-        let mut out = String::from(
-            "[Mast system message, not from the user: worker updates for you, the \
+        let mut out = format!(
+            "{}, not from the user: worker updates for you, the \
              orchestrator. Act on them with your Mast tools (work_outline_read_subtree, \
              read_chat, send_message, respond_to_input); ignore ones you've handled.]\n\
              Worker updates:",
+            mast_proto::SYSTEM_MESSAGE_PREFIX
         );
         for event in &self.events {
             out.push_str("\n- ");
