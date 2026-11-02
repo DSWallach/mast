@@ -29,6 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mast_doc::SessionCommandPayload;
 use mast_proto::agent_tools::{self, AgentOrigin, tools as agent_tool_names};
+use mast_rpc::methods;
 use mast_proto::{
     Chat, ChatConfig, ChatModelDisplay, HarnessId, ReasoningLevel, RunRequest, SandboxLevel,
     Session, SessionStatus, Space, UserInputAnswer,
@@ -127,7 +128,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. A child cannot message its parent: collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours.",
+            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -161,13 +162,22 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat. Messages are attributed to your chat, and a chat cannot message itself. mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes and returns the assistant's reply (the request/response pattern); if you did not wait, collect it later with `wait_for_turn`.",
+            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes and returns the assistant's reply (the request/response pattern); if you did not wait, collect it later with `wait_for_turn`.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
                 "wait": { "type": "boolean", "default": false },
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
+        },
+        ToolDef {
+            name: "report_to_parent",
+            description: "Send your final report (or an important update) to the chat that started you. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` and nothing is queued.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "text": { "type": "string", "description": "The report text." } },
+                "required": ["text"]
+            }),
         },
         ToolDef {
             name: "wait_for_turn",
@@ -556,6 +566,11 @@ struct SendArgs {
 }
 
 #[derive(Deserialize)]
+struct ReportArgs {
+    text: String,
+}
+
+#[derive(Deserialize)]
 struct WaitArgs {
     chat: String,
     timeout_secs: Option<u64>,
@@ -760,6 +775,7 @@ impl Tools {
             "create_chat" => self.create_chat(origin, parse(args)?).await,
             "read_chat" => self.read_chat(origin, parse(args)?).await,
             "send_message" => self.send_message(origin, parse(args)?).await,
+            "report_to_parent" => self.report_to_parent(origin, parse(args)?).await,
             "wait_for_turn" => self.wait_for_turn(origin, parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(origin, parse(args)?).await,
             "respond_to_input" => self.respond_to_input(origin, parse(args)?).await,
@@ -1445,13 +1461,26 @@ impl Tools {
             anyhow::bail!("text is empty");
         }
         let chat = self
-            .reach_chat(origin, &args.chat, Reach::SelfOrChild)
+            .reach_chat(origin, &args.chat, Reach::SelfChildOrParent)
             .await?;
         if origin.is_some_and(|o| o.chat_id == chat.id) {
             anyhow::bail!(
                 "refusing to send a message to your own chat ({})",
                 short(&chat.id)
             );
+        }
+        if let Some(origin) = origin
+            && chat.parent_chat_id.as_deref() != Some(origin.chat_id.as_str())
+        {
+            // Not one of its children, so reach_chat let it through as the
+            // caller's parent.
+            if args.wait {
+                anyhow::bail!(
+                    "wait is not supported when messaging your parent chat; the report is queued"
+                );
+            }
+            let sent = self.send_report(origin, text).await?;
+            return Ok(json!({ "chatId": chat.id, "title": chat.title, "sent": sent }));
         }
         let (spaces, sessions, harnesses) = tokio::try_join!(
             self.zeron.spaces(),
@@ -1485,6 +1514,39 @@ impl Tools {
                 .await?;
         }
         Ok(result)
+    }
+
+    async fn report_to_parent(
+        &self,
+        origin: Option<&AgentOrigin>,
+        args: ReportArgs,
+    ) -> anyhow::Result<Value> {
+        let Some(origin) = origin else {
+            anyhow::bail!("report_to_parent is only available to agents Mast started in a chat");
+        };
+        let text = args.text.trim();
+        if text.is_empty() {
+            anyhow::bail!("text is empty");
+        }
+        let me = self.zeron.resolve_chat(&origin.chat_id).await?;
+        let Some(parent) = me.parent_chat_id.as_deref() else {
+            anyhow::bail!(
+                "this chat has no parent chat (no chat started it), so there is nobody to report to"
+            );
+        };
+        let sent = self.send_report(origin, text).await?;
+        Ok(json!({ "parentChatId": parent, "sent": sent }))
+    }
+
+    /// Queue `text` as a worker report to the caller's parent (engine side:
+    /// the wake queue, same Space, parent's host device).
+    async fn send_report(&self, origin: &AgentOrigin, text: &str) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                methods::REPORT_TO_PARENT,
+                json!({ "chatId": origin.chat_id, "text": text }),
+            )
+            .await
     }
 
     async fn wait_for_turn(
@@ -1588,15 +1650,26 @@ impl Tools {
         let Some(origin) = origin else {
             return self.zeron.resolve_chat(key).await;
         };
-        let allow_self = reach == Reach::SelfOrChild;
-        let chats: Vec<Chat> = self
-            .zeron
-            .chats()
-            .await?
+        let allow_self = reach != Reach::Child;
+        let all = self.zeron.chats().await?;
+        let parent = (reach == Reach::SelfChildOrParent)
+            .then(|| {
+                all.iter()
+                    .find(|c| c.id == origin.chat_id)
+                    .and_then(|c| c.parent_chat_id.clone())
+            })
+            .flatten();
+        let chats: Vec<Chat> = all
             .into_iter()
-            .filter(|c| reachable(origin, c, allow_self))
+            .filter(|c| reachable(origin, c, allow_self) || parent.as_deref() == Some(c.id.as_str()))
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {
+            if reach == Reach::SelfChildOrParent {
+                return anyhow::anyhow!(
+                    "no chat matches {key:?}: you can message chats you created and your parent \
+                     chat (list_chats shows them)"
+                );
+            }
             anyhow::anyhow!(
                 "no chat this chat created{} matches {key:?}; agents can only reach the chats \
                  they created (list_chats shows them)",
@@ -1762,6 +1835,8 @@ enum Reach {
     Child,
     /// Those, or the caller itself (reads).
     SelfOrChild,
+    /// Those, the caller itself, or the caller's parent chat (`send_message`).
+    SelfChildOrParent,
 }
 
 /// Whether the token's Chat may reach `chat`: one it created (Mast-created
@@ -1862,7 +1937,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures::StreamExt;
-    use mast_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
+    use mast_rpc::{RpcError, RpcReply, RpcService, memory_client};
     use std::sync::Mutex;
 
     const BETA_TOKEN: &str = "tok-beta";
@@ -1880,6 +1955,8 @@ mod tests {
         beta_sandbox: Option<&'static str>,
         /// When set, the agent's project has this worker destination.
         destination: Option<&'static str>,
+        /// When set, chat-beta-2 (the agent) was started by this chat.
+        beta_parent: Option<&'static str>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1941,6 +2018,9 @@ mod tests {
                             "createdAt": "2026-09-02T00:00:00Z"
                         }),
                     ];
+                    if let Some(parent) = self.beta_parent {
+                        chats[1]["parentChatId"] = json!(parent);
+                    }
                     if let Some(sandbox) = self.beta_sandbox {
                         chats[1]["config"] = json!({
                             "harness": "claude-code", "model": "opus", "reasoning": null,
@@ -2049,6 +2129,16 @@ mod tests {
                         })));
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-agent", "queued": true }))
+                }
+                methods::REPORT_TO_PARENT => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(json!({
+                        "parentChatId": self.beta_parent, "delivery": "queuedForParent",
+                        "heldReason": "window", "truncated": false
+                    }))
                 }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     if params["op"] == "createChat"
@@ -2337,7 +2427,10 @@ mod tests {
             .call("send_message", json!({ "chat": "alpha", "text": "hi" }))
             .await
             .unwrap_err();
-        assert!(err.contains("agents can only reach"), "{err}");
+        assert!(
+            err.contains("you can message chats you created and your parent chat"),
+            "{err}"
+        );
         let child = tools
             .call(
                 "create_chat",
@@ -2368,6 +2461,70 @@ mod tests {
         assert_eq!(params["command"]["request"]["cwd"], "/repo/comet");
         assert_eq!(params["command"]["request"]["harness"], "claude-code");
         assert_eq!(params["command"]["request"]["model"], "opus");
+    }
+
+    #[tokio::test]
+    async fn an_agent_may_message_its_parent_and_nobody_else_it_did_not_create() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-alpha-1"),
+            ..World::default()
+        });
+        let tools = tools(world.clone(), Some(BETA_TOKEN));
+        let sent = tools
+            .call(
+                "send_message",
+                json!({ "chat": "alpha", "text": "all done", "wait": false }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["sent"]["delivery"], "queuedForParent");
+        assert_eq!(sent["sent"]["heldReason"], "window");
+        let reports = world.writes_of(methods::REPORT_TO_PARENT);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["chatId"], "chat-beta-2");
+        assert_eq!(reports[0]["text"], "all done");
+        assert!(
+            world.writes_of(methods::QUEUE_COMMAND).is_empty()
+                && world.writes_of(methods::QUEUE_MESSAGE).is_empty(),
+            "a parent message goes through the report queue, not a direct send"
+        );
+        // Waiting on a parent makes no sense.
+        let err = tools
+            .call("send_message", json!({ "chat": "alpha", "text": "x", "wait": true }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not supported"), "{err}");
+        // A chat that is neither created by nor the parent of the caller.
+        let child = tools
+            .call("create_chat", json!({ "idempotency_key": "k", "title": "Kid" }))
+            .await
+            .unwrap();
+        assert!(child["chatId"].is_string());
+        // report_to_parent resolves the parent itself.
+        let reported = tools
+            .call("report_to_parent", json!({ "text": "final report" }))
+            .await
+            .unwrap();
+        assert_eq!(reported["parentChatId"], "chat-alpha-1");
+        assert_eq!(reported["sent"]["delivery"], "queuedForParent");
+        assert_eq!(world.writes_of(methods::REPORT_TO_PARENT).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn report_to_parent_errors_clearly_without_a_parent_or_an_agent_token() {
+        let world = Arc::new(World::default());
+        let agent = tools(world.clone(), Some(BETA_TOKEN));
+        let err = agent
+            .call("report_to_parent", json!({ "text": "hi" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("no parent chat"), "{err}");
+        let err = tools(world.clone(), None)
+            .call("report_to_parent", json!({ "text": "hi" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("only available to agents"), "{err}");
+        assert!(world.writes_of(methods::REPORT_TO_PARENT).is_empty());
     }
 
     #[tokio::test]

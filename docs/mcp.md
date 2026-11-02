@@ -53,7 +53,9 @@ the original tools to the token's Chat, project, and device:
 | Tool | With a token |
 | --- | --- |
 | `create_chat` | Needs an `idempotency_key` (same key → same child chat, never a second first turn; same key with other inputs → `operationConflict`). Only in the token's project on the token's device, only as a child of the caller, `cwd` inside the project folder or the caller's cwd, sandbox never wider than the caller's (an omitted sandbox is capped, a wider one refused), approval mode always Ask. The child's first turn is rebuilt by the engine from the child's stored config. |
-| `send_message`, `interrupt_chat`, `respond_to_input`, `wait_for_turn`, `archive_chat` | Only chats the caller created. |
+| `interrupt_chat`, `respond_to_input`, `wait_for_turn`, `archive_chat` | Only chats the caller created. |
+| `send_message` | Chats the caller created, or its parent chat (`parentChatId`; see `report_to_parent`). Anything else: "you can message chats you created and your parent chat". |
+| `report_to_parent` | Needs a parent chat (errors clearly without one). Never crosses Spaces. |
 | `get_chat`, `read_chat` | Chats the caller created, or the caller itself. |
 | `list_chats` | Lists only the caller and the chats it created. |
 | `list_projects`, `list_devices` | Only the token's project / device. |
@@ -101,6 +103,7 @@ name (default: the local engine's device).
 | `create_chat`      | `Mutate createChat` (+ `renameChat`; optional first send) |
 | `read_chat`        | `WatchDocMessages` opening `reset` frame, rendered        |
 | `send_message`     | `QueueCommand` Run / Steer, or `QueueMessage`             |
+| `report_to_parent` | `ReportToParent` (wake queue, "worker report" event)      |
 | `wait_for_turn`    | `WatchSessions` until the chat settles                    |
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
@@ -109,6 +112,16 @@ name (default: the local engine's device).
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
 cancels server-side, exactly what the sidebar does on attach.
+
+A message to the parent chat (and `report_to_parent`) is not a direct send: the
+engine queues a "worker report" wake event (text capped at 4 KB, cut text marked)
+and delivers it in the parent's next "Worker updates:" batch, only while the
+parent is idle and the user is not drafting or recently active there (a user
+send interrupts a wake turn). Replies `{delivery: "queuedForParent",
+heldReason?}`, or `parentReportsOff` when the parent switched worker reports off
+in its Team tab (on by default). Only the device that hosts the parent delivers,
+so a worker on another device than its parent gets an error and should rely on
+`read_chat` / Required Actions.
 
 `send_message` mode `auto` mirrors the composer: idle → `run`; working → `steer`
 when the harness steers mid-turn (claude, codex), else a queue row held for the

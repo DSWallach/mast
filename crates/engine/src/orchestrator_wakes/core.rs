@@ -28,6 +28,8 @@ pub struct WakeEvent {
     pub kind: WakeEventKind,
     /// One line, as the orchestrator will read it.
     pub summary: String,
+    /// Full report text of a `WorkerReport` event (already capped).
+    pub report: Option<String>,
     pub at_ms: i64,
 }
 
@@ -69,6 +71,12 @@ impl Batch {
         for event in &self.events {
             out.push_str("\n- ");
             out.push_str(&event.summary);
+            if let Some(report) = &event.report {
+                for line in report.lines() {
+                    out.push_str("\n  | ");
+                    out.push_str(line);
+                }
+            }
         }
         out
     }
@@ -295,6 +303,7 @@ impl WakeCore {
             worker_title: e.worker_title.clone(),
             kind: e.kind,
             summary: e.summary.clone(),
+            report: e.report.clone(),
             at_ms: e.at_ms,
             delivered,
             unseen: e.at_ms >= o.last_turn_start_ms && !delivered,

@@ -541,3 +541,86 @@ async fn raised_and_resolved_inside_one_window_say_nothing() {
     assert!(rig.wakes.status(ORCH).held.is_empty());
     rig.core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_reports_batch_with_other_events_and_say_what_the_worker_said() {
+    let rig = Rig::new().await;
+    let sent = rig
+        .wakes
+        .report_to_parent("w1", "Done: fixed the bug\nPR is up.")
+        .await
+        .unwrap();
+    assert_eq!(sent.parent_chat_id, ORCH);
+    assert_eq!(sent.delivery, "queuedForParent");
+    assert_eq!(sent.held_reason, Some(mast_proto::WakeHoldReason::Window));
+    assert!(!sent.truncated);
+    rig.worker_errors("w2").await;
+    rig.advance(WAKE_WINDOW_MS);
+    rig.wakes.evaluate(ORCH, false).await;
+    rig.wait_for(|| !rig.wake_prompts().is_empty(), "the wake message")
+        .await;
+    let prompts = rig.wake_prompts();
+    assert_eq!(prompts.len(), 1, "ONE message for the report and the error");
+    assert!(prompts[0].contains("worker report: Done: fixed the bug"));
+    assert!(prompts[0].contains("| PR is up."), "full text follows the line");
+    assert!(prompts[0].contains("Title w2"));
+    assert!(rig.wakes.status(ORCH).held.is_empty());
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_reports_follow_the_user_first_holds() {
+    let rig = Rig::new().await;
+    rig.wakes.note_user_activity(ORCH, Some(true)).await;
+    rig.advance(10 * USER_QUIET_MS);
+    let sent = rig.wakes.report_to_parent("w1", "all done").await.unwrap();
+    assert_eq!(sent.held_reason, Some(mast_proto::WakeHoldReason::Draft));
+    rig.settle().await;
+    assert!(rig.wake_prompts().is_empty(), "held while the user drafts");
+    rig.wakes.note_user_activity(ORCH, Some(false)).await;
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate(ORCH, false).await;
+    rig.wait_for(|| !rig.wake_prompts().is_empty(), "delivery after the draft")
+        .await;
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_reports_can_be_turned_off() {
+    let rig = Rig::new().await;
+    rig.wakes
+        .set_settings(
+            ORCH,
+            WakeSettings {
+                worker_reports: false,
+                ..WakeSettings::default()
+            },
+        )
+        .await;
+    let sent = rig.wakes.report_to_parent("w1", "all done").await.unwrap();
+    assert_eq!(sent.delivery, "parentReportsOff");
+    rig.advance(10 * WAKE_WINDOW_MS);
+    rig.wakes.evaluate(ORCH, false).await;
+    rig.settle().await;
+    assert!(rig.wake_prompts().is_empty());
+    assert!(rig.wakes.status(ORCH).held.is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_reports_are_cut_and_marked_and_orphans_cannot_report() {
+    let rig = Rig::new().await;
+    let long = "x".repeat(10_000);
+    let sent = rig.wakes.report_to_parent("w1", &long).await.unwrap();
+    assert!(sent.truncated);
+    let status = rig.wakes.status(ORCH);
+    let report = status.held[0].report.as_deref().unwrap();
+    assert!(report.len() < 4_300 && report.contains("[truncated: first 4096 of 10000 bytes"));
+
+    let err = rig.wakes.report_to_parent("stranger", "hi").await.unwrap_err();
+    assert!(err.contains("no parent chat"), "{err}");
+    assert!(rig.wakes.report_to_parent("w1", "  ").await.is_err());
+    rig.core.shutdown().await;
+}

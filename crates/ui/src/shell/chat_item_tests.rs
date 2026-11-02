@@ -1356,6 +1356,7 @@ fn wake_event(id: &str, worker: &str, unseen: bool) -> mast_proto::WakeEventView
         worker_title: None,
         kind: mast_proto::WakeEventKind::Errored,
         summary: format!("{worker} errored ({id})"),
+        report: None,
         at_ms: 1,
         delivered: false,
         unseen,
@@ -1394,7 +1395,7 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    for key in ["enabled", "required-actions", "errors", "turn-finished", "prs"] {
+    for key in ["enabled", "required-actions", "errors", "worker-reports", "turn-finished", "prs"] {
         let selector: &'static str = Box::leak(format!("team-wake-toggle-{key}").into_boxed_str());
         assert!(has(vcx, selector), "{selector}");
     }
@@ -1416,6 +1417,52 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
             ["w-1 errored (e1)", "w-1 errored (e2)"]
         );
     });
+}
+
+#[gpui::test]
+fn a_workers_latest_report_is_its_activity_line_and_expands_to_the_full_text(
+    cx: &mut TestAppContext,
+) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "team-worker-activity-w-1") || !has(vcx, "team-worker-report-w-1"));
+    let report = |id: &str, text: &str| {
+        let mut e = wake_event(id, "w-1", false);
+        e.kind = mast_proto::WakeEventKind::WorkerReport;
+        e.report = Some(text.into());
+        e
+    };
+    set_wake_status(
+        &shell,
+        vcx,
+        mast_proto::WakeStatus {
+            chat_id: CHAT_API.into(),
+            is_orchestrator: true,
+            // Newest first: the second report wins.
+            recent: vec![
+                report("r2", "Done: merged the fix\nsecond line of detail"),
+                report("r1", "older report"),
+            ],
+            ..Default::default()
+        },
+    );
+    assert!(has(vcx, "team-worker-activity-w-1"));
+    assert!(!has(vcx, "team-worker-report-w-1"), "collapsed by default");
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(
+            shell.latest_report_for_worker("w-1").as_deref(),
+            Some("Done: merged the fix\nsecond line of detail")
+        );
+        assert_eq!(shell.latest_report_for_worker("w-0"), None);
+    });
+    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
+    draw(vcx);
+    assert!(has(vcx, "team-worker-report-w-1"), "expands to the full text");
+    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
+    draw(vcx);
+    assert!(!has(vcx, "team-worker-report-w-1"));
 }
 
 #[gpui::test]

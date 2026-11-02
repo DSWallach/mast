@@ -364,7 +364,46 @@ impl Shell {
                             .child(SharedString::from(age)),
                     ),
             );
-        if let Some(activity) = &worker.activity {
+        if let Some(report) = self.latest_report_for_worker(&id) {
+            // The worker's own report is its activity line; click for the full text.
+            let expanded = self.wakes.expanded_reports.contains(&id);
+            let line = crate::team::activity_line(&report).unwrap_or_default();
+            let toggle_id = id.clone();
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("{prefix}-report-toggle-{id}")))
+                    .debug_selector({
+                        let selector = format!("{prefix}-activity-{id}");
+                        move || selector.clone()
+                    })
+                    .pl(px(13.0))
+                    .truncate()
+                    .cursor_pointer()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "{} Report: {line}",
+                        if expanded { "\u{25be}" } else { "\u{25b8}" }
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_report_expanded(&toggle_id, cx);
+                    })),
+            );
+            if expanded {
+                row = row.child(
+                    div()
+                        .debug_selector({
+                            let selector = format!("{prefix}-report-{id}");
+                            move || selector.clone()
+                        })
+                        .pl(px(13.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from(report)),
+                );
+            }
+        } else if let Some(activity) = &worker.activity {
             row = row.child(
                 div()
                     .debug_selector({

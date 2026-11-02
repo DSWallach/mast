@@ -58,9 +58,9 @@ child items. Each mutating call (and `create_chat`) needs an idempotency \
 key: reuse it when retrying the same change, use a new one for a new change.\n\
 \n\
 Coordinating: `create_chat` with `workItemId` (your item or a descendant) \
-and a `prompt` runs work on a descendant. A child cannot message its parent: \
-collect results with `wait_for_turn` / `read_chat` or its Required Actions, \
-and poll `work_outline_read_subtree` for requests such as \"Ready to \
+and a `prompt` runs work on a descendant. Workers answer with \
+`report_to_parent`; also use `wait_for_turn` / `read_chat` or Required \
+Actions, and poll `work_outline_read_subtree` for requests such as \"Ready to \
 merge\".";
 
 const PARSE_ERROR: i64 = -32700;
