@@ -616,6 +616,16 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **PR review phases 1 + 2** (2026-11-03 evening, `pr-review-read-diff`, `pr-review-sidecar`; Codex
+  gpt-6.1-terra; brief mast-artifact:3e12f5d0be4cb1de57ed6b0f8be58992). Phase 1, Changes pane: filterable
+  file sidebar (renames old → new, +/- counts), J/K next/prev hunk, ⇧J/⇧K next/prev file, hunk count,
+  generated/lockfile auto-collapse, content-hash hunk identity, viewed state per PR (registry row; same-hash
+  hunks stay viewed across head moves, cleared on PR close) or per diff target. Phase 2: `mast.review/v1`,
+  `review_publish` (validates anchors against the real diff, lists valid hunks on error) / `review_get`,
+  artifact kind `review`, stale-on-head-drift (local PR ref, live PR cache when it knows the head), summary
+  + highlights card, review launcher prompt. Release run: nextest 2246/2247 (the 1 was a real
+  review_get staleness bug, fixed in 663473a3), UI 2411/0. Phase 3 (quick open/search) and 4
+  (walkthrough) next.
 - **Surface stalled workers** (2026-11-03 evening, `surface-stalled-workers`): orchestrator wakes for a
   worker waiting on a prompt/approval (with the question text) and for a worker turn that ended after
   refused/failed Mast tool calls; both default on, toggles in `orchestrator-wakes.json` / Team tab.
