@@ -23,13 +23,15 @@ pub(crate) enum WakeToggle {
     TurnFinished,
     Prs,
     WorkerReports,
+    AwaitingInput,
 }
 
 impl WakeToggle {
-    pub(crate) const KINDS: [WakeToggle; 5] = [
+    pub(crate) const KINDS: [WakeToggle; 6] = [
         Self::RequiredActions,
         Self::Errors,
         Self::WorkerReports,
+        Self::AwaitingInput,
         Self::TurnFinished,
         Self::Prs,
     ];
@@ -42,6 +44,7 @@ impl WakeToggle {
             Self::TurnFinished => "Turn finished",
             Self::Prs => "PRs",
             Self::WorkerReports => "Worker reports",
+            Self::AwaitingInput => "Awaiting input",
         }
     }
 
@@ -53,6 +56,7 @@ impl WakeToggle {
             Self::TurnFinished => "turn-finished",
             Self::Prs => "prs",
             Self::WorkerReports => "worker-reports",
+            Self::AwaitingInput => "awaiting-input",
         }
     }
 
@@ -64,6 +68,7 @@ impl WakeToggle {
             Self::TurnFinished => settings.turn_finished,
             Self::Prs => settings.prs,
             Self::WorkerReports => settings.worker_reports,
+            Self::AwaitingInput => settings.awaiting_input,
         }
     }
 
@@ -76,6 +81,7 @@ impl WakeToggle {
             Self::TurnFinished => &mut settings.turn_finished,
             Self::Prs => &mut settings.prs,
             Self::WorkerReports => &mut settings.worker_reports,
+            Self::AwaitingInput => &mut settings.awaiting_input,
         };
         *slot = !*slot;
         settings
@@ -269,10 +275,22 @@ mod tests {
     fn chip_and_reason_text() {
         assert_eq!(held_chip_text(1), "1 update held");
         assert_eq!(held_chip_text(3), "3 updates held");
-        assert_eq!(hold_reason_text(WakeHoldReason::Draft), "Waiting: you're typing");
-        assert_eq!(hold_reason_text(WakeHoldReason::Busy), "Waiting: turn running");
-        assert_eq!(hold_reason_text(WakeHoldReason::Queued), "Waiting: your queued message");
-        assert_eq!(hold_reason_text(WakeHoldReason::Window), "Waiting for batch window");
+        assert_eq!(
+            hold_reason_text(WakeHoldReason::Draft),
+            "Waiting: you're typing"
+        );
+        assert_eq!(
+            hold_reason_text(WakeHoldReason::Busy),
+            "Waiting: turn running"
+        );
+        assert_eq!(
+            hold_reason_text(WakeHoldReason::Queued),
+            "Waiting: your queued message"
+        );
+        assert_eq!(
+            hold_reason_text(WakeHoldReason::Window),
+            "Waiting for batch window"
+        );
         assert_eq!(
             hold_reason_text(WakeHoldReason::RecentActivity),
             "Waiting: you were here recently"
@@ -298,8 +316,15 @@ mod tests {
         let chip = control.held.unwrap();
         assert_eq!(chip.text, "2 updates held");
         assert_eq!(chip.reason, Some("Waiting: you're typing"));
-        assert_eq!(control.unseen.as_deref(), Some("2 events unseen by the orchestrator"));
-        let caught_up = WakeStatus { held: vec![], unseen_count: 0, ..status };
+        assert_eq!(
+            control.unseen.as_deref(),
+            Some("2 events unseen by the orchestrator")
+        );
+        let caught_up = WakeStatus {
+            held: vec![],
+            unseen_count: 0,
+            ..status
+        };
         let control = WakeControl::of(Some(&caught_up));
         assert!(control.held.is_none() && control.unseen.is_none());
     }
@@ -320,7 +345,11 @@ mod tests {
     #[test]
     fn unseen_events_map_to_their_worker() {
         let status = WakeStatus {
-            recent: vec![event("3", "w1", true), event("2", "w2", false), event("1", "w1", true)],
+            recent: vec![
+                event("3", "w1", true),
+                event("2", "w2", false),
+                event("1", "w1", true),
+            ],
             ..Default::default()
         };
         let map = unseen_by_worker(&status);
@@ -339,17 +368,23 @@ mod tests {
         assert_eq!(r.note("c", None, t0 + Duration::from_secs(3)), None);
         assert_eq!(r.note("c", Some(false), t0 + Duration::from_secs(4)), None);
         // Draft becomes non-empty: immediate.
-        let sent = r.note("c", Some(true), t0 + Duration::from_secs(5)).unwrap();
+        let sent = r
+            .note("c", Some(true), t0 + Duration::from_secs(5))
+            .unwrap();
         assert_eq!(sent.draft_non_empty, Some(true));
         // Still typing: throttled from the flip.
         assert_eq!(r.note("c", Some(true), t0 + Duration::from_secs(8)), None);
         // Cleared: immediate again.
         assert_eq!(
-            r.note("c", Some(false), t0 + Duration::from_secs(9)).unwrap().draft_non_empty,
+            r.note("c", Some(false), t0 + Duration::from_secs(9))
+                .unwrap()
+                .draft_non_empty,
             Some(false)
         );
         // After the window a plain ping goes out, without a flag.
-        let later = r.note("c", Some(false), t0 + Duration::from_secs(30)).unwrap();
+        let later = r
+            .note("c", Some(false), t0 + Duration::from_secs(30))
+            .unwrap();
         assert_eq!(later.draft_non_empty, None);
         // Other chats are independent.
         assert!(r.note("d", None, t0 + Duration::from_secs(30)).is_some());

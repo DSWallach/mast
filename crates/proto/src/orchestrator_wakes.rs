@@ -26,10 +26,12 @@ pub enum WakeEventKind {
     PrMerged,
     /// The worker sent a report to its parent chat (`report_to_parent`).
     WorkerReport,
+    /// A worker is waiting for the user to answer a prompt.
+    AwaitingInput,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 7] = [
+    pub const ALL: [WakeEventKind; 8] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -37,6 +39,7 @@ impl WakeEventKind {
         Self::PrOpened,
         Self::PrMerged,
         Self::WorkerReport,
+        Self::AwaitingInput,
     ];
 }
 
@@ -58,6 +61,8 @@ pub struct WakeSettings {
     pub prs: bool,
     /// A worker sent a report to this chat (`report_to_parent`).
     pub worker_reports: bool,
+    /// A worker is waiting for a question or approval.
+    pub awaiting_input: bool,
 }
 
 impl Default for WakeSettings {
@@ -69,6 +74,7 @@ impl Default for WakeSettings {
             turn_finished: false,
             prs: false,
             worker_reports: true,
+            awaiting_input: true,
         }
     }
 }
@@ -85,6 +91,7 @@ impl WakeSettings {
                 WakeEventKind::TurnFinished => self.turn_finished,
                 WakeEventKind::PrOpened | WakeEventKind::PrMerged => self.prs,
                 WakeEventKind::WorkerReport => self.worker_reports,
+                WakeEventKind::AwaitingInput => self.awaiting_input,
             }
     }
 }

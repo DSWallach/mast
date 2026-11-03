@@ -261,7 +261,9 @@ impl OrchestratorWakes {
             let mut markers: HashMap<String, (u64, u64, bool)> = HashMap::new();
             loop {
                 if this
-                    .watch_ended(tokio::time::sleep(std::time::Duration::from_millis(500)).map(Ok::<(), ()>))
+                    .watch_ended(
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).map(Ok::<(), ()>),
+                    )
                     .await
                 {
                     break;
@@ -277,7 +279,10 @@ impl OrchestratorWakes {
                     let space_id = space.id.clone();
                     let Ok((marker, snapshot)) = tokio::task::spawn_blocking(move || {
                         let (marker, inputs) = workspace.work_outline_inputs_marked(&space_id);
-                        (marker, mast_doc::materialize_work_outline(&space_id, &inputs))
+                        (
+                            marker,
+                            mast_doc::materialize_work_outline(&space_id, &inputs),
+                        )
                     })
                     .await
                     else {
@@ -366,7 +371,9 @@ impl OrchestratorWakes {
             let mut state = lock(&self.inner.state);
             let seeded = state.sessions_seeded;
             for session in sessions {
-                let prev = state.statuses.insert(session.chat_id.clone(), session.status);
+                let prev = state
+                    .statuses
+                    .insert(session.chat_id.clone(), session.status);
                 let in_flight = matches!(
                     session.status,
                     SessionStatus::Working | SessionStatus::AwaitingInput
@@ -382,24 +389,25 @@ impl OrchestratorWakes {
                 let kind = match (is_in_flight(prev), session.status) {
                     (_, s) if s == prev => continue,
                     (_, SessionStatus::Errored) => WakeEventKind::Errored,
+                    (_, SessionStatus::AwaitingInput) => WakeEventKind::AwaitingInput,
                     (true, SessionStatus::Idle) => WakeEventKind::TurnFinished,
                     _ => continue,
                 };
                 let summary = match kind {
                     WakeEventKind::Errored => "errored (read_chat for details)",
+                    WakeEventKind::AwaitingInput => "is waiting for input (get_chat for details)",
                     _ => "finished a turn",
                 };
-                let key = format!("{}:{}:{}", kind_tag(kind), session.chat_id, now / WAKE_WINDOW_MS);
+                let key = format!(
+                    "{}:{}:{}",
+                    kind_tag(kind),
+                    session.chat_id,
+                    now / WAKE_WINDOW_MS
+                );
                 let line = format!("{} — {summary}", label(&state, &session.chat_id));
                 for orch in parents_of(&state, &session.chat_id) {
-                    let event = make_event(
-                        &mut state,
-                        &session.chat_id,
-                        kind,
-                        key.clone(),
-                        &line,
-                        now,
-                    );
+                    let event =
+                        make_event(&mut state, &session.chat_id, kind, key.clone(), &line, now);
                     state.core.record(&orch, event, now);
                     recorded.insert(orch);
                 }
@@ -531,7 +539,14 @@ impl OrchestratorWakes {
                 truncate(first, 120)
             );
             let key = format!("rep:{from}:{}", report_hash(&report, now / WAKE_WINDOW_MS));
-            let mut event = make_event(&mut state, from, WakeEventKind::WorkerReport, key, &line, now);
+            let mut event = make_event(
+                &mut state,
+                from,
+                WakeEventKind::WorkerReport,
+                key,
+                &line,
+                now,
+            );
             event.report = Some(report);
             state.core.record(&parent_id, event, now);
         }
@@ -598,7 +613,11 @@ impl OrchestratorWakes {
                 };
                 let id8 = request.id.chars().take(8).collect::<String>();
                 let mut line = format!("{} — {text}", label(&state, &request.chat_id));
-                if let Some(pr) = state.chats.get(&request.chat_id).and_then(|c| c.pr_url.clone()) {
+                if let Some(pr) = state
+                    .chats
+                    .get(&request.chat_id)
+                    .and_then(|c| c.pr_url.clone())
+                {
                     line.push_str(&format!(" (PR {pr})"));
                 }
                 if kind == WakeEventKind::ActionRaised {
@@ -697,7 +716,11 @@ impl OrchestratorWakes {
         let now = self.now();
         {
             let mut state = lock(&self.inner.state);
-            if state.timers.get(orch).is_some_and(|&t| t > now && t <= at_ms) {
+            if state
+                .timers
+                .get(orch)
+                .is_some_and(|&t| t > now && t <= at_ms)
+            {
                 return; // an earlier timer re-evaluates (and re-arms) first
             }
             state.timers.insert(orch.to_owned(), at_ms);
@@ -719,7 +742,10 @@ impl OrchestratorWakes {
 }
 
 fn is_in_flight(status: SessionStatus) -> bool {
-    matches!(status, SessionStatus::Working | SessionStatus::AwaitingInput)
+    matches!(
+        status,
+        SessionStatus::Working | SessionStatus::AwaitingInput
+    )
 }
 
 fn kind_tag(kind: WakeEventKind) -> &'static str {
@@ -731,6 +757,7 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::PrOpened => "pr",
         WakeEventKind::PrMerged => "prm",
         WakeEventKind::WorkerReport => "rep",
+        WakeEventKind::AwaitingInput => "input",
     }
 }
 
@@ -872,9 +899,6 @@ mod firm_link_tests {
             firm_link(Some(&id), Some(ChatLinkSource::Manual)),
             Some(id.clone())
         );
-        assert_eq!(
-            firm_link(Some(&id), Some(ChatLinkSource::Branch)),
-            Some(id)
-        );
+        assert_eq!(firm_link(Some(&id), Some(ChatLinkSource::Branch)), Some(id));
     }
 }
