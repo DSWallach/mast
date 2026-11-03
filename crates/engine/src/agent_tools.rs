@@ -997,15 +997,16 @@ impl AgentToolsService {
                         (repo, number, reviewed_head)
                     {
                         let url = format!("https://github.com/{repo}/pull/{number}");
-                        if let Some(cache) = lock(&self.pr_ticket_cache).as_ref() {
-                            let current = cache
+                        // The live PR cache wins only when it knows the head;
+                        // otherwise keep the answer from the local PR ref.
+                        let current = lock(&self.pr_ticket_cache).as_ref().and_then(|cache| {
+                            cache
                                 .status_for(None, None, Some(&url), None)
                                 .pr
-                                .and_then(|pr| pr.head_sha);
-                            result["stale"] = current
-                                .as_ref()
-                                .map(|head| !head.eq_ignore_ascii_case(&reviewed_head))
-                                .into();
+                                .and_then(|pr| pr.head_sha)
+                        });
+                        if let Some(current) = current {
+                            result["stale"] = (!current.eq_ignore_ascii_case(&reviewed_head)).into();
                             result["currentHeadSha"] = current.into();
                         }
                     }
