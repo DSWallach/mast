@@ -247,6 +247,7 @@ pub(crate) enum Presenter {
     Web(WebKind),
     Image,
     Options,
+    Review,
     Text,
     Source,
     Compare,
@@ -503,6 +504,7 @@ impl ArtifactTab {
             (_, Some(ArtifactBody::Web { kind, .. })) => Presenter::Web(*kind),
             (_, Some(ArtifactBody::Image { .. })) => Presenter::Image,
             (_, Some(ArtifactBody::Options(_))) => Presenter::Options,
+            (_, Some(ArtifactBody::Review(_))) => Presenter::Review,
             (_, Some(ArtifactBody::Text(_))) => Presenter::Text,
             (_, Some(ArtifactBody::Invalid(message))) => Presenter::Message(message.clone()),
             _ if self.loading => Presenter::Loading,
@@ -620,7 +622,7 @@ impl ArtifactTab {
                     bytes,
                 )));
             }
-            ArtifactBody::Options(_) | ArtifactBody::Text(_) | ArtifactBody::Invalid(_) => {}
+            ArtifactBody::Options(_) | ArtifactBody::Review(_) | ArtifactBody::Text(_) | ArtifactBody::Invalid(_) => {}
         }
         self.document_changed(cx);
         cx.notify();
@@ -1405,6 +1407,33 @@ impl ArtifactTab {
                             .child("Compare two options with \u{201c}Compare options\u{201d}."),
                     )
                     .into_any_element()
+            }
+            Presenter::Review => {
+                let Some(ArtifactBody::Review(review)) = &self.body else {
+                    return message("Loading…".into());
+                };
+                let highlights = review.highlights.iter().enumerate().map(|(index, highlight)| {
+                    let selector = format!("review-highlight-{index}");
+                    div().id(SharedString::from(selector.clone()))
+                        .debug_selector(move || selector.clone())
+                        .p(px(10.0)).rounded(px(6.0)).border_1().border_color(theme.border)
+                        .flex().flex_col().gap(px(4.0))
+                        .child(div().text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(format!("{} · {}", highlight.kind, highlight.severity))))
+                        .child(div().text_size(crate::typography::ui_rems(12.5))
+                            .text_color(theme.text).child(SharedString::from(highlight.text.clone())))
+                });
+                div().id("artifact-review").debug_selector(|| "artifact-review".into())
+                    .size_full().overflow_y_scroll().p(px(12.0)).flex().flex_col().gap(px(8.0))
+                    .child(div().text_size(crate::typography::ui_rems(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD).child("Summary"))
+                    .child(div().text_size(crate::typography::ui_rems(12.5))
+                        .text_color(theme.text).child(SharedString::from(review.summary.clone())))
+                    .when(!review.highlights.is_empty(), |el| el.child(
+                        div().pt(px(4.0)).text_size(crate::typography::ui_rems(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD).child("Highlights")))
+                    .children(highlights).into_any_element()
             }
             Presenter::Text => match &self.body {
                 Some(ArtifactBody::Text(text)) => {

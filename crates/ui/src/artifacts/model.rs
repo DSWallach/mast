@@ -82,6 +82,7 @@ pub(crate) fn kind_icon(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Mermaid => crate::icons::WIDGET,
         ArtifactKind::Image => crate::icons::FILE_IMAGE,
         ArtifactKind::Options => crate::icons::SPLIT_COLUMNS,
+        ArtifactKind::Review => crate::icons::DOCUMENT,
         ArtifactKind::Unknown => crate::icons::DOCUMENT,
     }
 }
@@ -94,6 +95,7 @@ pub(crate) fn kind_label(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Mermaid => "Mermaid",
         ArtifactKind::Image => "Image",
         ArtifactKind::Options => "Options",
+        ArtifactKind::Review => "Review",
         ArtifactKind::Unknown => "File",
     }
 }
@@ -204,10 +206,25 @@ pub(crate) enum ArtifactBody {
     Image { bytes: Vec<u8>, mime_type: String },
     /// Phase 1: the options listed with links (side by side is phase 5).
     Options(OptionsManifest),
+    /// Review summary and highlights.
+    Review(ReviewCard),
     /// Plain text (unknown kinds).
     Text(String),
     /// The content could not be presented.
     Invalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct ReviewCard {
+    pub(crate) summary: String,
+    pub(crate) highlights: Vec<ReviewHighlight>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct ReviewHighlight {
+    pub(crate) kind: String,
+    pub(crate) severity: String,
+    pub(crate) text: String,
 }
 
 /// Which wrapper a web body uses.
@@ -265,6 +282,10 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                 ArtifactKind::Mermaid => ArtifactBody::Web {
                     kind: WebKind::Mermaid,
                     source: text,
+                },
+                ArtifactKind::Review => match serde_json::from_str::<ReviewCard>(&text) {
+                    Ok(review) => ArtifactBody::Review(review),
+                    Err(error) => ArtifactBody::Invalid(format!("Could not read the review ({error}).")),
                 },
                 ArtifactKind::Options => match OptionsManifest::parse(&text) {
                     Ok(manifest) => ArtifactBody::Options(manifest),

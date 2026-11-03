@@ -326,6 +326,19 @@ fn each_kind_renders_with_its_component(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn review_renders_summary_and_highlights(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let content = r#"{"summary":"A short summary", "highlights":[{"kind":"risk", "severity":"high", "text":"Check the migration"}]}"#;
+    let reply = reply_with(content_reply(ArtifactKind::Review, 1, content, ArtifactContentEncoding::Utf8));
+    let (tab, _, shown, vcx) = open_tab(cx, artifact(&id(1), "Review", ArtifactKind::Review), reply);
+    assert_eq!(tab.read_with(vcx, |tab, _| tab.presenter()), Presenter::Review);
+    assert!(vcx.debug_bounds("artifact-review").is_some());
+    assert!(vcx.debug_bounds("review-highlight-0").is_some());
+    assert!(shown.borrow().is_empty());
+    assert!(matches!(super::model::body_for(ArtifactKind::Review, &serde_json::from_value(content_reply(ArtifactKind::Review, 1, content, ArtifactContentEncoding::Utf8)).unwrap()), super::model::ArtifactBody::Review(review) if review.summary == "A short summary" && review.highlights[0].text == "Check the migration"));
+}
+
+#[gpui::test]
 fn options_open_their_fragment_through_the_companion_read(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     let manifest =
