@@ -616,6 +616,15 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Release 2026-11-03 morning** (installed 11:32): `faster-releases` (nextest config with
+  `release`/`quarantine` profiles, terminal-heavy tests capped at 2 at a time,
+  `scripts/run_release_tests.sh`, `release-testing.md`; engine suite ~20 min vs 3.5 h+ projected for
+  `cargo test`); `resolve-subtree-reach` (agents resolve requests on items in their own item's subtree,
+  so a new coordinator can resolve its predecessor's children's actions); `compact-row-grant-admin`
+  (Grant/Renew/Revoke admin on compact single-chat rows); `inherit-auto-approve` (Codex workspace-write
+  adds the worktree git dir and the git common dir as `writableRoots`, verified against the real
+  seatbelt sandbox, so commits/pushes don't prompt; `create_chat { autoApprove: true }` allowed only
+  from a caller on Auto, Ask otherwise).
 - **Archive finished workers** (2026-11-02, `archive-finished-workers`): shared rule in
   `engine/src/archivable.rs` (Team tab and agent tools): archivable = idle, no open Required Actions,
   and one of item completed / linked PR merged or closed / a resolved "Ready to merge" / idle > 3 days
@@ -694,33 +703,26 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-02 ~22:15; a fresh coordinator starts here)
+## In flight (snapshot 2026-11-03 ~11:35; a fresh coordinator starts here)
 
-**State of the branches.** `origin/work-outline-implementation` = evening release + `admin-chats` +
-`archive-finished-workers` + `099a3533` (usage text for `work_outline_admin`; the admin merge had
-broken a mast-proto test). Installed 2026-11-02 ~21:58 (backup
-`zeron-before-archive-finished-2026-11-02`). Tests on this head: UI 2389/0, mast-mcp + mast-proto green,
-engine `archivable` 9/0; the full engine suite was not rerun. `release-staging`, `admin-chats` and
-`archive-finished-workers` are deleted. Nothing is mid-release.
+**State of the branches.** `origin/work-outline-implementation` = the 2026-11-03 morning release:
+`faster-releases`, `resolve-subtree-reach`, `compact-row-grant-admin`, `inherit-auto-approve`, plus a
+test-helper fix (agent_tools launch children on Ask). Installed 2026-11-03 11:32 (backup
+`zeron-before-codex-git-roots-2026-11-03`). Tests: first release run with the new script — engine etc.
+under nextest `release` 2275 passed in 22 min (3 failures were the stale helper, now 43/43), UI 2391/0.
+All four feature branches deleted. Nothing is mid-release.
 
-**Paused for the night (2026-11-03 ~01:00).** Claude usage is low; prefer Codex `gpt-6.1-terra` for
-implementers once Codex children can commit unattended (see below).
-- Ready to merge (not merged): `compact-row-grant-admin` (Grant/Renew/Revoke admin on compact
-  single-chat rows; request fa8e7c36) and `resolve-subtree-reach` (agents resolve requests on items in
-  their own subtree; request dfced68f). Both small, tests by the children.
-- Still running when paused: `faster-releases` (nextest profiles + `release-test` script committed;
-  timing nextest vs cargo test) and `inherit-auto-approve` (primary: Codex workspace-write gets the
-  git common dir as a writable root so commits don't prompt; secondary: `create_chat { autoApprove }`
-  allowed only from an Auto parent).
-- PR review workflow (item 17137624; brief copied to `.worktrees/pr-review-brief/`): phase 1
-  (`pr-review-read-diff`) and phase 2 (`pr-review-sidecar`) Codex chats were interrupted at their first
-  step because Codex's sandbox prompts for every `.git` write. Their worktrees exist with no commits.
-  Restart them once Mikey sets them to Auto or `inherit-auto-approve` lands. Phase 3 (item 7125da84)
-  not started. Using the brief's suggested defaults; its Required Action 5241f29f stays open until
-  Mikey confirms.
+**Next for the coordinator.** Claude usage is low: use Codex `gpt-6.1-terra` for implementers. Codex
+chats in workspace-write can now commit/push without prompts (git dirs are writable roots); if one
+still stalls, check `pendingInput` with `read_chat` — approval prompts don't wake the orchestrator.
+- PR review workflow (item 17137624; brief + mockups copied to `.worktrees/pr-review-brief/`). Phases 1
+  (`pr-review-read-diff`, item 26e4768e) and 2 (`pr-review-sidecar`, item 7463e980) were interrupted at
+  their first step; their worktrees exist with no commits. Restart both on Codex (archive the old
+  chats 63d1abb5 / ae1de40e), then phase 3 (item 7125da84). Phase 4 after 1+2. Using the brief's
+  suggested defaults (recorded on item 17137624); Required Action 5241f29f stays open until Mikey
+  confirms.
 - Mikey's admin chat test: "Outline admin" item at the Cofactr Space root, stock lot traceability
   only, dry run + Required Action before applying.
-- Stale lines: "Next, agreed but not started" still lists Artifacts phases 4/5 (built 2026-10-28).
 
 **What Mikey is doing next:** using an admin chat in the Cofactr Space to set up the Projects container
 template (matching his current copy template), move existing projects under it with a preview, and
@@ -786,25 +788,8 @@ quarantine land.
 
 ## Next, agreed but not started
 
-- **Faster, more reliable releases** (offered 2026-11-02, Mikey agreed to queue it for a fresh
-  session; do it when nothing is mid-release). In order of payoff:
-  1. Run engine/MCP tests with cargo-nextest: test binaries in parallel (today `cargo test` runs ~85
-     engine test files one after another, 30–90 min) plus a per-test timeout (e.g. 3 min) so a hang
-     like `device_routing` fails fast instead of eating an hour. Expected: engine runs ~8–15 min.
-  2. Quarantine the known flaky/environmental failures (see "Known test failures") in release runs;
-     track them separately so new failures stand out.
-  3. Selective testing: only run the suites a branch touched (UI-only → UI suite); trust a child's
-     green full run when its branch is already rebased onto the release head and nothing changed
-     underneath.
-  4. Shared compile cache across worktrees (sccache) so each child doesn't recompile the same crates.
-  5. Overlap the installed build with the test run (different target dirs).
-  6. Process rules for children: only kill processes inside your own worktree (a child's
-     `pkill -f target/debug/deps` killed the coordinator's release run); stagger children so at most
-     two run full suites at once; don't start long runs under `nice` (can't be raised without root).
-
-- **Artifacts phase 4:** G (comments on HTML anchors).
-- **Artifacts phase 5:** F (side-by-side options + pick) and H (canonical plan with the linked
-  Linear project shown next to it; no mirroring into Linear).
+- **Container templates phases 2+** (plan mast-artifact:df5be7ef1a2fa657e3737f17dd0ef89a), after Mikey's
+  admin-chat test shows what is missing.
 
 ## Parked (do not start unasked)
 
@@ -831,9 +816,13 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   merging**; keep at least 100 GB free.
 - **Subagents:** one narrow task per agent with clear file ownership; read files in ≤200-line
   slices (they stall on huge files like `overview.rs` / `shell.rs`); commit early and often.
-- **Tests:** UI tests need `--test-threads=1`. Time-limit with `perl -e 'alarm N; exec @ARGV' cargo
-  test …` (macOS has no `timeout`). Known pre-existing failures are listed in the memory notes and
-  `m0-contract.md`; they are not regressions.
+- **Tests:** release runs use `caffeinate -i scripts/run_release_tests.sh [BASE_REF]` (nextest
+  `release` profile for non-UI crates with a 3-min per-test timeout and the known flaky tests
+  quarantined; UI via `cargo test -p mast-ui --lib -- --test-threads=1`; only the crates the diff
+  touches, `--all` for everything; `.config/` or Cargo changes select all). Any failure there is new.
+  `--quarantine` runs the flaky set separately. Always `caffeinate -i`: the Mac's maintenance sleep
+  pauses long runs. Details and timings: `release-testing.md`. Build the installed binary in parallel
+  with a plain `cargo build --profile installed -p mast` (incremental `target/installed`).
 - **Install:** `cargo build --profile installed -p mast` (optimised; since 2026-10-27, replaces the
   debug build); back up the current binary to `~/zeron-dev-app-backups/`;
   `cp target/installed/zeron "$M/.zeron.installing" && mv -f` it to
