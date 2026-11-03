@@ -49,7 +49,7 @@
 //!     There is no wall-clock timeout, like every other input-bridge question;
 //!     the main loop never blocks on a pending approval, so steering and
 //!     interrupt still work, and pending prompts are dropped with the session.
-//!     `mcpServer/elicitation/request` and the legacy v1 approval methods stay
+//!     Legacy v1 approval methods stay
 //!     unsupported (JSON-RPC error = denied).
 //!   - Title runs are always read-only + `"never"`.
 //! - Subagents are full child app-server threads. Parent spawn items establish
@@ -1865,6 +1865,22 @@ fn handle_server_request(
         });
         return;
     }
+    if method == "mcpServer/elicitation/request" && !auto_approve {
+        if params.get("serverName").and_then(Value::as_str) == Some("mast-agent") {
+            client.respond(&id, elicitation_response(Verdict::Accept));
+            return;
+        }
+        let question = elicitation_question(params);
+        let client = client.clone();
+        let request_input = Arc::clone(request_input);
+        let done = ctx.done.clone();
+        tokio::spawn(async move {
+            if let Some(verdict) = ask_yes_no(request_input, question, done).await {
+                client.respond(&id, elicitation_response(verdict));
+            }
+        });
+        return;
+    }
     let is_approval = matches!(
         method,
         "item/commandExecution/requestApproval"
@@ -1874,9 +1890,15 @@ fn handle_server_request(
     // Permission-profile grants only exist off the yolo path (policy "never"
     // never asks); keep the yolo branch's behavior exactly as it was.
     if !is_approval || (auto_approve && method == "item/permissions/requestApproval") {
-        tracing::debug!(
+        let server_name = params
+            .get("serverName")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        tracing::info!(
             target: "mast_harness::codex",
-            "unhandled server request: {method}"
+            server_name,
+            method,
+            "rejecting unsupported Codex server request"
         );
         client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
         return;
@@ -1924,6 +1946,42 @@ fn handle_server_request(
         };
         client.respond(&id, json!({ "decision": decision }));
     });
+}
+
+fn elicitation_response(verdict: Verdict) -> Value {
+    json!({ "action": match verdict {
+        Verdict::Accept => "accept",
+        Verdict::Decline => "decline",
+        Verdict::Gone => "cancel",
+    } })
+}
+
+fn elicitation_question(params: &Value) -> UserInputQuestion {
+    let server = params
+        .get("serverName")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown server");
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Approval requested");
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .map(|url| format!("\nURL: {url}"))
+        .unwrap_or_default();
+    let schema = params
+        .get("requestedSchema")
+        .filter(|schema| !schema.is_null())
+        .map(|schema| format!("\nRequested form: {schema}"))
+        .unwrap_or_default();
+    UserInputQuestion {
+        id: new_message_id(),
+        header: "MCP server request".into(),
+        question: format!("{server}: {message}{url}{schema}"),
+        options: vec!["Yes".into(), "No".into()],
+        multi_select: false,
+    }
 }
 
 /// Parse `item/tool/requestUserInput` questions into (wire id, question)
@@ -2211,6 +2269,28 @@ mod tests {
         assert!(!legacy_model_page(&page));
         assert!(legacy_model_page(&json!({"data":[{"model":"old"}]})));
         assert!(!legacy_model_page(&json!({"data":[]})));
+    }
+
+    #[test]
+    fn elicitation_responses_and_question() {
+        assert_eq!(
+            elicitation_response(Verdict::Accept),
+            json!({"action":"accept"})
+        );
+        assert_eq!(
+            elicitation_response(Verdict::Decline),
+            json!({"action":"decline"})
+        );
+        assert_eq!(
+            elicitation_response(Verdict::Gone),
+            json!({"action":"cancel"})
+        );
+        let question = elicitation_question(
+            &json!({"serverName":"other", "message":"Allow?", "url":"https://example.com"}),
+        );
+        assert!(question.question.contains("other: Allow?"));
+        assert!(question.question.contains("https://example.com"));
+        assert_eq!(question.options, vec!["Yes", "No"]);
     }
 
     #[test]

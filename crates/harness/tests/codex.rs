@@ -471,6 +471,47 @@ async fn approvals_round_trip_as_input_requests() {
 }
 
 #[tokio::test]
+async fn mast_elicitation_is_accepted_and_other_servers_require_input() {
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let (steer, steering) = mpsc::channel(8);
+    let _steer = steer;
+    let controls = RunControls {
+        request_input: Box::new(move |questions| {
+            seen.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(
+                questions
+                    .iter()
+                    .map(|q| UserInputAnswer {
+                        question_id: q.id.clone(),
+                        labels: vec!["No".into()],
+                    })
+                    .collect(),
+            );
+            rx
+        }),
+        steering,
+        interrupt: CancellationToken::new(),
+    };
+    let events = run_to_end(&harness(), gated_request("scenario:elicitation"), controls).await;
+    let questions = asked.lock().unwrap();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].question.contains("computer-use: Use Chrome?"));
+    assert_eq!(questions[0].options, vec!["Yes", "No"]);
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn approval_no_answer_becomes_decline() {
     let (controls, _steer, _token) = controls("No");
     let mut req = request("scenario:decline");

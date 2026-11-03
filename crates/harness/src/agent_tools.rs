@@ -56,6 +56,10 @@ impl AgentToolsInjection {
         overrides.insert(format!("{prefix}.args"), json!(self.args));
         overrides.insert(format!("{prefix}.env"), json!(self.env));
         overrides.insert(format!("{prefix}.enabled"), Value::Bool(true));
+        overrides.insert(
+            format!("{prefix}.default_tools_approval_mode"),
+            json!("approve"),
+        );
         overrides
     }
 }
@@ -284,6 +288,10 @@ mod tests {
             "secret-token"
         );
         assert_eq!(overrides["mcp_servers.mast-agent.enabled"], true);
+        assert_eq!(
+            overrides["mcp_servers.mast-agent.default_tools_approval_mode"],
+            "approve"
+        );
         assert!(
             overrides
                 .keys()

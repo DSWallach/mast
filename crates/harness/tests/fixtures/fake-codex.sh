@@ -278,6 +278,17 @@ case "$turnline" in
   fi
   ;;
 
+*scenario:elicitation*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"id":701,"method":"mcpServer/elicitation/request","params":{"serverName":"mast-agent","threadId":"th-1","turnId":"t-1","mode":"form","message":"Mast approval","requestedSchema":{"type":"object","properties":{}}}}'
+  read -r line || exit 1
+  has "$line" '"action":"accept"' || exit 1
+  emit '{"id":702,"method":"mcpServer/elicitation/request","params":{"serverName":"computer-use","threadId":"th-1","turnId":"t-1","mode":"form","message":"Use Chrome?","requestedSchema":{"type":"object","properties":{}}}}'
+  read -r line || exit 1
+  has "$line" '"action":"decline"' || exit 1
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:approve*)
   # Non-yolo runs (auto_approve=false) speak "on-request" + the request's own
   # sandbox (workspace-write here) on BOTH thread/start and turn/start;
