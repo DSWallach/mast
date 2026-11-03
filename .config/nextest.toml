@@ -16,6 +16,24 @@
 # Edit both together. Each entry is a `test(~name)` substring match, optionally
 # scoped by `binary(...)`.
 
+# Tests that open PTYs / spawn login shells and git processes time out when many
+# run at once (observed 2026-11-03: every m5_repos_diffs_terminals test hit the 3 min
+# limit at 8 threads). Limit them to two concurrent tests; the rest still run wide.
+[test-groups]
+terminal-heavy = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
+test-group = 'terminal-heavy'
+
+[[profile.release.overrides]]
+filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
+test-group = 'terminal-heavy'
+
+[[profile.quarantine.overrides]]
+filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
+test-group = 'terminal-heavy'
+
 [profile.default]
 test-threads = 8
 slow-timeout = { period = "60s", terminate-after = 3 }
