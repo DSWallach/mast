@@ -276,3 +276,39 @@ pub(super) fn logical_file_count(layout: &[DiffTreeNode]) -> usize {
         .sum()
 }
 
+/// Generated dependency snapshots are usually reviewed through their source manifests.
+pub(super) fn is_generated_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        name,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "bun.lock"
+            | "bun.lockb"
+            | "Gemfile.lock"
+            | "Pipfile.lock"
+            | "poetry.lock"
+            | "uv.lock"
+            | "composer.lock"
+            | "go.sum"
+            | "Podfile.lock"
+            | "mix.lock"
+    ) || name.ends_with(".min.js")
+        || name.ends_with(".min.css")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_generated_file;
+
+    #[test]
+    fn generated_file_detection_uses_file_names() {
+        assert!(is_generated_file("nested/Cargo.lock"));
+        assert!(is_generated_file("web/app.min.js"));
+        assert!(!is_generated_file("src/lock.rs"));
+        assert!(!is_generated_file("Cargo.toml"));
+    }
+}

@@ -2918,6 +2918,17 @@ impl Changes {
                 };
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
+                for file in &files {
+                    if is_generated_file(&file.path) {
+                        changes.folds.insert(
+                            file.path.clone(),
+                            FileFold {
+                                collapsed: true,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
                 changes.submodule_folds.clear();
                 changes.highlights.clear();
                 let staged = changes.staged_comments(cx);
@@ -2931,7 +2942,12 @@ impl Changes {
                         .as_ref()
                         .map(|(path, side, line)| (path.as_str(), *side, *line)),
                     changes.mode,
-                    |_| false,
+                    |index| {
+                        changes
+                            .folds
+                            .get(&files[index].path)
+                            .is_some_and(|fold| fold.collapsed)
+                    },
                     |_| false,
                 );
                 changes.comment_key = comment_state_key(&staged, draft.as_ref());
@@ -5665,6 +5681,15 @@ impl Changes {
                         .text_size(px(11.0))
                         .text_color(del_color(theme))
                         .child(SharedString::from(format!("−{}", parsed.deletions))),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!(
+                            "{} hunks",
+                            parsed.files.iter().map(|file| file.hunks.len()).sum::<usize>()
+                        ))),
                 )
                 .child(div().flex_1())
                 .when(parsed.truncated, |el| {
