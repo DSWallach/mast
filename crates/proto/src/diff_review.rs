@@ -13,3 +13,12 @@ pub struct DiffReviewState {
     #[serde(default)]
     pub viewed_files: BTreeSet<String>,
 }
+
+/// Changes relative to the snapshot the viewer read. Concurrent writers
+/// touching different marks do not erase one another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffReviewUpdate {
+    pub before: DiffReviewState,
+    pub after: DiffReviewState,
+}

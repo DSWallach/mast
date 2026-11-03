@@ -1433,6 +1433,7 @@ struct ParsedDiff {
     file_count: usize,
     /// Indexed like `files`; survives row virtualization and folding.
     horizontal: Vec<FileHorizontalState>,
+    hunk_identities: Arc<Vec<Vec<String>>>,
     files: Arc<Vec<FileDiff>>,
     origins: Arc<Vec<FileOrigin>>,
     submodules: Arc<Vec<SubmoduleGroup>>,
@@ -1977,11 +1978,23 @@ pub struct Changes {
     review_link_chat: Option<String>,
     review_pr: Option<String>,
     review_link_task: Option<Task<()>>,
+    review_head_task: Option<Task<()>>,
+    review_head_for: Option<String>,
+    review_head: Option<(String, String)>,
+    review_status_task: Option<Task<()>>,
+    review_status_checked: Option<std::time::Instant>,
+    review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
     review_task: Option<Task<()>>,
     review_save_task: Option<Task<()>>,
     review_pending: HashMap<String, mast_proto::DiffReviewState>,
+    review_acknowledged: HashMap<String, mast_proto::DiffReviewState>,
     review_error: Option<String>,
+    seen_candidates: HashMap<String, review_state::SeenCandidate>,
+    seen_hunks: std::collections::HashSet<String>,
+    seen_task: Option<Task<()>>,
+    seen_last_render: std::time::Instant,
+    seen_scroll_epoch: u64,
     _file_filter_events: Subscription,
     row_ranges: Vec<Option<std::ops::Range<usize>>>,
     /// Ordered file and submodule headers; sticky file headers stop at either.
@@ -2114,6 +2127,13 @@ impl Changes {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         let settings = crate::settings::current(cx);
         let mode = DiffMode::from_split(settings.diff_split);
+        let list = ListState::new(0, ListAlignment::Top, px(1024.0));
+        let weak = cx.weak_entity();
+        list.set_scroll_handler(move |_, window, cx| {
+            weak.update(cx, |this: &mut Changes, cx| {
+                this.note_seen_scroll(window, cx);
+            }).ok();
+        });
         let file_filter = cx.new(|cx| ComposerInput::with_context("Filter files…", "PaletteSearch", cx));
         let file_filter_events = cx.subscribe(&file_filter, |_: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) { cx.notify(); }
@@ -2141,18 +2161,30 @@ impl Changes {
             review_link_chat: None,
             review_pr: None,
             review_link_task: None,
+            review_head_task: None,
+            review_head_for: None,
+            review_head: None,
+            review_status_task: None,
+            review_status_checked: None,
+            review_closed: false,
             review_state: None,
             review_task: None,
             review_save_task: None,
             review_pending: HashMap::new(),
+            review_acknowledged: HashMap::new(),
             review_error: None,
+            seen_candidates: HashMap::new(),
+            seen_hunks: std::collections::HashSet::new(),
+            seen_task: None,
+            seen_last_render: std::time::Instant::now(),
+            seen_scroll_epoch: 0,
             _file_filter_events: file_filter_events,
             row_ranges: Vec::new(),
             section_headers: Vec::new(),
             fold_settle: None,
             // Rows are single lines now — a deep overdraw is cheap and keeps
             // fast wheel flicks from outrunning measurement.
-            list: ListState::new(0, ListAlignment::Top, px(1024.0)),
+            list,
             scope: DiffScope::default(),
             base_ref: None,
             branches: Vec::new(),
@@ -2927,9 +2959,13 @@ impl Changes {
         let file_count = diff.files.len();
         let submodules = diff.submodules.clone();
         self.parse_task = Some(cx.spawn(async move |this, cx| {
-            let (files, origins, submodules, layout) = cx
+            let (files, origins, submodules, layout, identities) = cx
                 .background_executor()
-                .spawn(async move { parse_diff_tree(&patch, &submodules) })
+                .spawn(async move {
+                    let (files, origins, submodules, layout) = parse_diff_tree(&patch, &submodules);
+                    let identities = hunk_identities(&files);
+                    (files, origins, submodules, layout, identities)
+                })
                 .await;
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
@@ -2947,6 +2983,7 @@ impl Changes {
                 };
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
+                changes.seen_candidates.clear();
                 for file in &files {
                     if is_generated_file(&file.path) {
                         changes.folds.insert(
@@ -2997,6 +3034,7 @@ impl Changes {
                     deletions,
                     file_count,
                     horizontal,
+                    hunk_identities: Arc::new(identities),
                     files: Arc::new(files),
                     origins: Arc::new(origins),
                     submodules: Arc::new(submodules),
@@ -3013,6 +3051,7 @@ impl Changes {
     /// `splice` shifts the logical scroll anchor by the count delta, so
     /// content below the fold stays put.
     fn replace_file_body(&mut self, file_ix: usize, new_body: Vec<DiffRow>) {
+        self.seen_candidates.clear();
         let Some(range) = self.row_ranges.get(file_ix).and_then(Clone::clone) else {
             return;
         };
@@ -3356,6 +3395,7 @@ impl Changes {
     }
 
     fn reflatten(&mut self, cx: &mut Context<Self>) {
+        self.seen_candidates.clear();
         let Some(parsed) = &self.parsed else {
             cx.notify();
             return;
@@ -4212,13 +4252,15 @@ impl Changes {
             DiffRow::HunkHeader { file, hunk } => {
                 let Some(file_diff) = files.get(file as usize) else { return gpui::Empty.into_any_element(); };
                 let Some(hunk_diff) = file_diff.hunks.get(hunk as usize) else { return gpui::Empty.into_any_element(); };
-                let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(&hunk_identity(&file_diff.path, hunk_diff)));
+                let Some(identity) = self.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.get(file as usize)).and_then(|items| items.get(hunk as usize)) else { return gpui::Empty.into_any_element(); };
+                let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
+                let seen = self.seen_hunks.contains(identity);
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
                         .text_size(px(10.0)).text_color(theme.text_muted)
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
-                        .child(if viewed { "Viewed" } else { "Mark viewed" }))
+                        .child(if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" }))
                     .into_any_element()
             },
             DiffRow::Line {
@@ -4668,8 +4710,9 @@ impl Changes {
             .bg(rest_bg)
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_fold(ix, cx);
+                window.focus(&this.diff_focus, cx);
                 cx.notify();
             }))
             .child(chevron)
@@ -6586,7 +6629,7 @@ fn render_file_body_upto(
 }
 
 impl Render for Changes {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.scope == DiffScope::History {
             let history = self.history_pane(cx);
             history.update(cx, |history, cx| history.ensure_loaded(cx));
@@ -6717,6 +6760,7 @@ impl Render for Changes {
                     .into_any_element(),
                 DiffPhase::List => {
                     if self.parsed.is_some() {
+                        self.ensure_seen_monitor(window, cx);
                         let sticky_header = self.render_sticky_file_header(&theme, cx);
                         div()
                             .flex_1()

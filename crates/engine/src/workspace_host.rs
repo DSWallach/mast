@@ -781,6 +781,10 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.put_diff_review_state(state))?)
     }
 
+    pub fn update_diff_review_state(&self, update: &mast_proto::DiffReviewUpdate) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.update_diff_review_state(&update.before, &update.after))?)
+    }
+
     pub fn delete_diff_review_state(&self, target: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| Ok::<_, mast_doc::DocError>(doc.delete_diff_review_state(target)))?)
     }

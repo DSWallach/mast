@@ -369,6 +369,7 @@ impl Changes {
         let mut indices = Vec::new();
         ordered_file_indices(&parsed.layout, &mut indices);
         let files = parsed.files.clone();
+        let identities = parsed.hunk_identities.clone();
         let review_state = self.review_state.clone();
         let entries = indices
             .into_iter()
@@ -383,11 +384,9 @@ impl Changes {
                     if file.hunks.is_empty() {
                         state.viewed_files.contains(&file.path)
                     } else {
-                        file.hunks.iter().all(|hunk| {
-                            state
-                                .viewed_hunks
-                                .contains(&hunk_identity(&file.path, hunk))
-                        })
+                        identities[index]
+                            .iter()
+                            .all(|identity| state.viewed_hunks.contains(identity))
                     }
                 });
                 let label = match &file.old_path {
@@ -630,23 +629,28 @@ mod navigation_tests {
             let state = cx.new(|_| AppState::new());
             Changes::new(state, cx)
         });
-        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+        vcx.update(|window, cx| changes.update(cx, |changes, cx| {
             let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n@@ -10 +10 @@\n-before\n+after\ndiff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n";
             let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
             let horizontal = files.iter().map(FileHorizontalState::new).collect();
             changes.parsed = Some(ParsedDiff {
                 key: "test".into(), truncated: false, additions: 3, deletions: 3, file_count: 2,
-                horizontal, files: Arc::new(files), origins: Arc::new(origins),
+                horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins),
                 submodules: Arc::new(submodules), layout: Arc::new(layout),
             });
             changes.reflatten(cx);
-            changes.step_diff(false, false, cx);
+            changes.review_state = Some(mast_proto::DiffReviewState { target: "test".into(), ..Default::default() });
+            window.focus(&changes.diff_focus, cx);
+            let key = |name| gpui::KeyDownEvent { keystroke: gpui::Keystroke::parse(name).unwrap(), is_held: false, prefer_character_input: false };
+            changes.diff_key_down(&key("k"), window, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::FileHeader { file: 0 }));
-            changes.step_diff(true, false, cx);
+            changes.diff_key_down(&key("j"), window, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 0 }));
-            changes.step_diff(true, false, cx);
+            changes.diff_key_down(&key("v"), window, cx);
+            assert_eq!(changes.review_state.as_ref().unwrap().viewed_hunks.len(), 1);
+            changes.diff_key_down(&key("j"), window, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 1 }));
-            changes.step_diff(true, true, cx);
+            changes.diff_key_down(&key("shift-j"), window, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::FileHeader { file: 1 }));
         }));
     }

@@ -37,15 +37,36 @@ impl RegistryDoc {
 
     /// Write only changed fields so large reviews remain below the per-op cap.
     pub fn put_diff_review_state(&mut self, state: &DiffReviewState) -> Result<bool, DocError> {
-        if state.target.trim().is_empty() {
-            return Err(DocError::Schema("diff review state needs a target".into()));
-        }
         let before = self
             .diff_review_state(&state.target)
             .unwrap_or_else(|| DiffReviewState {
                 target: state.target.clone(),
                 ..Default::default()
             });
+        self.update_diff_review_state(&before, state)
+    }
+
+    /// Apply the caller's changes relative to its snapshot, preserving
+    /// concurrent edits to other fields.
+    pub fn update_diff_review_state(
+        &mut self,
+        before: &DiffReviewState,
+        state: &DiffReviewState,
+    ) -> Result<bool, DocError> {
+        if state.target.trim().is_empty() || before.target != state.target {
+            return Err(DocError::Schema(
+                "diff review state needs matching targets".into(),
+            ));
+        }
+        if self.diff_review_state(&state.target).is_none()
+            && (before.head_sha.is_some()
+                || !before.viewed_hunks.is_empty()
+                || !before.viewed_files.is_empty())
+        {
+            return Err(DocError::Schema(
+                "diff review state was cleared; reload before editing".into(),
+            ));
+        }
         let id = row_id(&state.target);
         self.observe_row(KIND_DIFF_REVIEW_STATE, &id);
         let mut updates = Vec::new();
@@ -151,5 +172,24 @@ mod tests {
         }
         assert!(registry.put_diff_review_state(&state).unwrap());
         assert_eq!(registry.diff_review_state(&state.target), Some(state));
+    }
+    #[test]
+    fn concurrent_review_marks_preserve_each_other_and_clear_rejects_stale_updates() {
+        let mut registry = RegistryDoc::new("device");
+        let base = DiffReviewState {
+            target: "pr:owner/repo#42".into(),
+            ..Default::default()
+        };
+        let mut a = base.clone();
+        a.viewed_hunks.insert("a".repeat(64));
+        let mut b = base.clone();
+        b.viewed_hunks.insert("b".repeat(64));
+        assert!(registry.update_diff_review_state(&base, &a).unwrap());
+        assert!(registry.update_diff_review_state(&base, &b).unwrap());
+        let combined = registry.diff_review_state(&base.target).unwrap();
+        assert!(combined.viewed_hunks.contains(&"a".repeat(64)));
+        assert!(combined.viewed_hunks.contains(&"b".repeat(64)));
+        assert!(registry.delete_diff_review_state(&base.target));
+        assert!(registry.update_diff_review_state(&combined, &a).is_err());
     }
 }
