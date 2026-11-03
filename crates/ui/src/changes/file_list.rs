@@ -353,7 +353,10 @@ impl Changes {
             .and_then(|range| range.as_ref())
             .map(|range| range.start)
         {
-            self.list.scroll_to_reveal_item(start);
+            self.list.scroll_to(gpui::ListOffset {
+                item_ix: start,
+                offset_in_item: px(0.0),
+            });
         }
         cx.notify();
     }
@@ -388,7 +391,10 @@ impl Changes {
                     .py(px(4.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.element_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| this.jump_to_file(index, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.jump_to_file(index, cx);
+                        window.focus(&this.diff_focus, cx);
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -448,5 +454,103 @@ mod filter_tests {
         assert!(file_matches_filter(&file, "OLD"));
         assert!(file_matches_filter(&file, "new.rs"));
         assert!(!file_matches_filter(&file, "missing"));
+    }
+}
+
+impl Changes {
+    pub(super) fn diff_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let modifiers = event.keystroke.modifiers;
+        if !self.diff_focus.is_focused(window)
+            || modifiers.platform
+            || modifiers.control
+            || modifiers.alt
+        {
+            return;
+        }
+        let forward = match event.keystroke.key.as_str() {
+            "j" => true,
+            "k" => false,
+            _ => return,
+        };
+        self.step_diff(forward, modifiers.shift, cx);
+        cx.stop_propagation();
+        window.prevent_default();
+    }
+
+    fn step_diff(&mut self, forward: bool, files_only: bool, cx: &mut Context<Self>) {
+        let Some(parsed) = self.parsed.as_ref() else {
+            return;
+        };
+        let mut files = Vec::new();
+        ordered_file_indices(&parsed.layout, &mut files);
+        let top = self
+            .list
+            .logical_scroll_top()
+            .item_ix
+            .min(self.rows.len().saturating_sub(1));
+        let current_file = self.rows.get(top).and_then(|row| row.file());
+        if files_only {
+            let position =
+                current_file.and_then(|file| files.iter().position(|index| *index == file));
+            let target = match (position, forward) {
+                (Some(index), true) => files.get(index + 1),
+                (Some(index), false) => index.checked_sub(1).and_then(|index| files.get(index)),
+                (None, true) => files.first(),
+                (None, false) => files.last(),
+            }
+            .copied();
+            if let Some(index) = target {
+                self.jump_to_file(index, cx);
+            }
+            return;
+        }
+        let hunks: Vec<(usize, usize)> = files
+            .iter()
+            .flat_map(|index| (0..parsed.files[*index].hunks.len()).map(move |hunk| (*index, hunk)))
+            .collect();
+        let current_hunk = self
+            .rows
+            .iter()
+            .take(top + 1)
+            .rev()
+            .find_map(|row| match row {
+                DiffRow::HunkHeader { file, hunk } if Some(*file as usize) == current_file => {
+                    Some((*file as usize, *hunk as usize))
+                }
+                DiffRow::FileHeader { .. } => None,
+                _ => None,
+            });
+        let position =
+            current_hunk.and_then(|item| hunks.iter().position(|candidate| *candidate == item));
+        let target = match (position, forward) {
+            (Some(index), true) => hunks.get(index + 1),
+            (Some(index), false) => index.checked_sub(1).and_then(|index| hunks.get(index)),
+            (None, true) => current_file
+                .and_then(|file| hunks.iter().find(|(index, _)| *index == file))
+                .or_else(|| hunks.first()),
+            (None, false) => current_file
+                .and_then(|file| hunks.iter().rev().find(|(index, _)| *index < file))
+                .or_else(|| hunks.last()),
+        }
+        .copied();
+        if let Some((file, hunk)) = target {
+            self.jump_to_file(file, cx);
+            if let Some(row) = self.rows.iter().position(|row| {
+                *row == DiffRow::HunkHeader {
+                    file: file as u32,
+                    hunk: hunk as u32,
+                }
+            }) {
+                self.list.scroll_to(gpui::ListOffset {
+                    item_ix: row,
+                    offset_in_item: px(0.0),
+                });
+            }
+        }
     }
 }

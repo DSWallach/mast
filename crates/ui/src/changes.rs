@@ -1972,6 +1972,7 @@ pub struct Changes {
     /// collapsed bodies excluded) + each file's row span within it.
     rows: Vec<DiffRow>,
     file_filter: Entity<ComposerInput>,
+    diff_focus: FocusHandle,
     _file_filter_events: Subscription,
     row_ranges: Vec<Option<std::ops::Range<usize>>>,
     /// Ordered file and submodule headers; sticky file headers stop at either.
@@ -2126,6 +2127,7 @@ impl Changes {
             highlights: HashMap::new(),
             rows: Vec::new(),
             file_filter,
+            diff_focus: cx.focus_handle(),
             _file_filter_events: file_filter_events,
             row_ranges: Vec::new(),
             section_headers: Vec::new(),
@@ -6705,6 +6707,10 @@ impl Render for Changes {
                                     .child(self.render_file_list(&theme, cx))
                                     .child(
                                         div()
+                                            .track_focus(&self.diff_focus)
+                                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                                                this.diff_key_down(event, window, cx);
+                                            }))
                                             .relative()
                                             .flex_1()
                                             .min_w_0()
