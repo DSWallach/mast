@@ -607,6 +607,22 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   structure with live instructions, add + mute; moved-in items marked "doesn't follow template" with
   Apply; `work_outline_apply_container_template`; plan mast-artifact:df5be7ef1a2fa657e3737f17dd0ef89a lists
   the remaining phases). Merge conflicts in crates/mcp/src/tools.rs resolved by hand keeping both sides.
+- **Admin chats** (2026-11-02, `admin-chats`, installed 21:10): right-click a chat (outline/sidebar) or
+  the Item tab → "Grant admin for this Space…" (1 / 4 (default) / 8 / 24 h or until revoked; optional
+  "Skip bulk confirmations", off by default). Badge "Admin · <Space> · Nh left" + Revoke in the header
+  and Item tab; shield tag in the running popover and menu bar. Grants are re-checked per call and per
+  batch step and only cover the granted Space: list/get/read/send/wait/archive any chat, create_chat,
+  read_subtree and answer_user_action_request on any item, and `work_outline_admin` batches (incl.
+  container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
+  messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
+  per-turn undo from Recent Changes.
+- **Archive finished workers** (2026-11-02, `archive-finished-workers`): shared rule in
+  `engine/src/archivable.rs` (Team tab and agent tools): archivable = idle, no open Required Actions,
+  and one of item completed / linked PR merged or closed / a resolved "Ready to merge" / idle > 3 days
+  with the item completed or archived; returns a verdict + reason. Non-admin orchestrators archive their
+  children (no rule) and workers under their project worker destination (rule, or `force: true` +
+  reason, logged); admin chats archive any chat in their Space except themselves. Unarchive always
+  allowed. In-memory agent archive log. Team tab "Archive finished (N)".
 - **Known test failures** (pre-existing, not regressions):
   - Engine lib, on main `3801cb5b`: `capture_source_context_reads_the_dispatch_checkout`,
     `local_opening_tail_arrives_before_full_mirror_and_keeps_all_history`.
@@ -711,6 +727,26 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 **What Mikey is doing next:** using an admin chat in the Cofactr Space to set up the Projects container
 template (matching his current copy template), move existing projects under it with a preview, and
 run the stage-0 talk-budget pilot from the minimal-talk research (mast-artifact:37a6c5c807eb8fe30aa1b56044a8749a).
+
+**First admin chat (Cofactr Space): how and the drafted prompt.** Start a chat in the Cofactr Space →
+right-click it → "Grant admin for this Space…" (4 h, "Skip bulk confirmations" OFF the first time).
+Prompt, to adjust with Mikey:
+
+> Set up live container templates for my projects:
+> 1. Create a **Projects** item (or use the existing one) and configure its container template to
+>    reproduce my current copy project template exactly — same child items, same instructions per node,
+>    Tickets as the worker destination. (Find the current template in Space-root details → Templates.)
+> 2. Create a test project under it with New work item and check it has the full structure and live
+>    instructions; archive it afterwards.
+> 3. Move my existing projects (Basedash, Kit Line, the warehouse dashboard, the stock lot traceability
+>    one) under Projects and apply the template to each, mapping existing children by title. Show me the
+>    preview as a Required Action before applying.
+> 4. Apply the stage-0 "talk budget" pilot from the minimal-talk research
+>    (mast-artifact:37a6c5c807eb8fe30aa1b56044a8749a) to the warehouse dashboard's Planning/orchestrator
+>    instructions, as instruction edits I can see in the action log.
+> 5. Report back in ≤10 lines: what changed, what didn't map cleanly, decisions I need to make.
+> Rules: archive, never delete; bulk changes go through the preview → Required Action; everything must
+> be undoable from Recent Changes.
 
 **Waiting on Mikey (Required Actions open):** PR review brief (mast-artifact:3e12f5d0be4cb1de57ed6b0f8be58992;
 suggested defaults: Linear-style guided order + always drop to free diff; viewed = manual + soft
