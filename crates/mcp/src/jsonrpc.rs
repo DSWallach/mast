@@ -44,7 +44,7 @@ Planning artifacts: publish every file \
 the user should see with `artifact_publish`, linking the returned \
 `mast-artifact:<id>` URL, never a path. Under a work item, call \
 `artifact_get_plan` at chat start. After changing a visual artifact run \
-`artifact_render_check`, fix what it reports, and view the screenshot.\n\
+`artifact_render_check` and fix what it reports.\n\
 \n\
 Chats: reference by id, unique prefix, or exact title; `whoami` is yours. `send_message` with `wait: true` (or `wait_for_turn` later) returns \
 the reply once that turn finishes; answer an `awaitingInput` chat with \
@@ -52,13 +52,13 @@ the reply once that turn finishes; answer an `awaitingInput` chat with \
 \n\
 Work Outline tools (`work_outline_*`) manage your item, its subtree, and \
 child items. Each mutating call (and `create_chat`) needs an idempotency \
-key: reuse it when retrying the same change, use a new one for a new change.\n\
+key: reuse it to retry, use a new one for a new change.\n\
 \n\
 Coordinating: `create_chat` with `workItemId` (your item or a descendant) \
 and a `prompt` runs work on a descendant. Workers answer with \
 `report_to_parent`; also use `wait_for_turn` / `read_chat` or Required \
 Actions, and poll `work_outline_read_subtree` for requests such as \"Ready to \
-merge\".\n\
+merge\". Archive finished workers (`archivable: true`).\n\
 \n\
 Admin (user-granted only): `work_outline_admin` batches Space-wide outline \
 changes; bulk ones need the user's approval first.";

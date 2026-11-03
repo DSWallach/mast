@@ -18,7 +18,8 @@
 //!   caller's cwd, and a sandbox / approval mode never more permissive than
 //!   the caller's;
 //! - `send_message`, `interrupt_chat`, `respond_to_input`, `wait_for_turn`,
-//!   and `archive_chat` reach only Chats the caller created; `get_chat` and
+//!   reach only Chats the caller created (`archive_chat` also the workers in
+//!   the caller's project scope, if finished or forced); `get_chat` and
 //!   `read_chat` also the caller itself; `list_chats` lists only those;
 //! - `list_projects` / `list_devices` list only the token's Space / device;
 //!   `list_harnesses` / `list_models` (this device's capabilities) and
@@ -124,6 +125,7 @@ fn catalog() -> Vec<ToolDef> {
                     "device": { "type": "string", "description": "Only chats hosted on this device (id or name)." },
                     "include_archived": { "type": "boolean", "default": false },
                     "parent": { "type": "string", "description": "Only chats created by this chat (id, prefix, or title) — e.g. your own id to list the chats you spawned." },
+                    "workers": { "type": "boolean", "default": false, "description": "Also list the workers in your project scope (orchestrators)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
                 }
             }),
@@ -135,7 +137,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours.",
+            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. When a worker you started is finished (`archivable: true` in list_chats / get_chat), archive it with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -218,9 +220,11 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "archive_chat",
-            description: "Archive a chat (hide it from the active sidebar list); pass archived=false to restore. Use it to tidy up chats you created.",
+            description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches chats you created and, from a project's orchestrator, its workers (list_chats workers=true). When a worker you started is finished (archivable: true), archive it. A chat that isn't archivable is refused unless force=true with a short reason (logged). Mikey can undo.",
             input_schema: chat_key_schema(json!({
-                "archived": { "type": "boolean", "default": true }
+                "archived": { "type": "boolean", "default": true },
+                "force": { "type": "boolean", "default": false, "description": "Archive although archivable is false; needs reason." },
+                "reason": { "type": "string", "description": "Short why, for the action log (required with force)." }
             })),
         },
     ]
@@ -567,6 +571,8 @@ struct ListChatsArgs {
     #[serde(default)]
     include_archived: bool,
     parent: Option<String>,
+    #[serde(default)]
+    workers: bool,
     limit: Option<usize>,
 }
 
@@ -628,6 +634,9 @@ struct WaitArgs {
 struct ArchiveArgs {
     chat: String,
     archived: Option<bool>,
+    #[serde(default)]
+    force: bool,
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -729,6 +738,19 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "lastMessagePreview": chat.last_message_preview,
         "createdAt": chat.created_at,
     })
+}
+
+/// Add `archivable` and `reason` to a chat summary when the engine rated it.
+fn with_archivable(
+    mut summary: Value,
+    info: &std::collections::HashMap<String, Value>,
+    id: &str,
+) -> Value {
+    if let Some(verdict) = info.get(id) {
+        summary["archivable"] = verdict["archivable"].clone();
+        summary["archivableReason"] = verdict["reason"].clone();
+    }
+    summary
 }
 
 fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
@@ -959,7 +981,12 @@ impl Tools {
             self.zeron.sessions()
         )?;
         if let Some(origin) = origin {
-            chats.retain(|c| reachable(origin, c, true, true));
+            let scope = if args.workers {
+                self.archive_info(&[]).await.unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            chats.retain(|c| reachable(origin, c, true, true) || scope.contains_key(&c.id));
         }
         if let Some(project) = args.project.as_deref() {
             let space = self.zeron.resolve_space(project).await?;
@@ -983,10 +1010,12 @@ impl Tools {
         });
         let total = chats.len();
         let limit = args.limit.unwrap_or(50).clamp(1, 500);
+        let page: Vec<&Chat> = chats.iter().take(limit).collect();
+        let info = self.chat_archive_info(origin, &page).await;
         Ok(json!({
             "total": total,
-            "chats": chats.iter().take(limit)
-                .map(|c| summarize_chat(c, &spaces, &sessions))
+            "chats": page.iter()
+                .map(|c| with_archivable(summarize_chat(c, &spaces, &sessions), &info, &c.id))
                 .collect::<Vec<_>>()
         }))
     }
@@ -1005,7 +1034,8 @@ impl Tools {
             self.zeron.transcript(&chat.id)
         )?;
         let rendered = render_entries(&entries, RenderOptions::default());
-        let mut summary = summarize_chat(&chat, &spaces, &sessions);
+        let info = self.chat_archive_info(origin, &[&chat]).await;
+        let mut summary = with_archivable(summarize_chat(&chat, &spaces, &sessions), &info, &chat.id);
         summary["messageCount"] = json!(rendered.len());
         summary["pendingInput"] = last_pending_input(&rendered).unwrap_or(Value::Null);
         summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
@@ -1535,11 +1565,22 @@ impl Tools {
                 short(&chat.id)
             );
         }
+        let caller_parent = match origin {
+            Some(origin) => self
+                .zeron
+                .chats()
+                .await?
+                .into_iter()
+                .find(|c| c.id == origin.chat_id)
+                .and_then(|c| c.parent_chat_id),
+            None => None,
+        };
         if let Some(origin) = origin
             && chat.parent_chat_id.as_deref() != Some(origin.chat_id.as_str())
+            && caller_parent.as_deref() == Some(chat.id.as_str())
         {
             // Not one of its children, so reach_chat let it through as the
-            // caller's parent.
+            // caller's parent (an admin chat's other reach is an ordinary send).
             if args.wait {
                 anyhow::bail!(
                     "wait is not supported when messaging your parent chat; the report is queued"
@@ -1634,16 +1675,29 @@ impl Tools {
         origin: Option<&AgentOrigin>,
         args: ArchiveArgs,
     ) -> anyhow::Result<Value> {
-        let chat = self
-            .reach_chat(origin, &args.chat, Reach::ChildOrAdmin)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "agents can only archive chats they created (admin chats: any chat of \
-                     their Space): {e}"
-                )
-            })?;
         let archived = args.archived.unwrap_or(true);
+        if origin.is_some() {
+            let chat = self
+                .reach_chat(origin, &args.chat, Reach::ArchiveScope)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "agents can only archive chats they created and the workers in their \
+                         project (admin chats: any chat of their Space): {e}"
+                    )
+                })?;
+            return self
+                .zeron
+                .agent_tool(
+                    agent_tool_names::CHAT_ARCHIVE,
+                    json!({
+                        "chatId": chat.id, "archived": archived,
+                        "force": args.force, "reason": args.reason,
+                    }),
+                )
+                .await;
+        }
+        let chat = self.reach_chat(origin, &args.chat, Reach::Child).await?;
         self.zeron
             .mutate(json!({ "op": "setChatArchived", "chatId": chat.id, "archived": archived }))
             .await?;
@@ -1711,6 +1765,31 @@ impl Tools {
 
     // ---- shared pieces -------------------------------------------------------
 
+    /// Verdicts for `chats` when this server speaks for a Chat (only the ones
+    /// in its archive scope get one).
+    async fn chat_archive_info(
+        &self,
+        origin: Option<&AgentOrigin>,
+        chats: &[&Chat],
+    ) -> std::collections::HashMap<String, Value> {
+        if origin.is_none() || chats.is_empty() {
+            return Default::default();
+        }
+        let ids: Vec<String> = chats.iter().map(|c| c.id.clone()).collect();
+        self.archive_info(&ids).await.unwrap_or_default()
+    }
+
+    /// The engine's finished-worker verdicts (`archivable`, `reason`) for
+    /// `ids`, or for every chat in the caller's archive scope when empty.
+    async fn archive_info(&self, ids: &[String]) -> Option<std::collections::HashMap<String, Value>> {
+        let reply = self
+            .zeron
+            .agent_tool(agent_tool_names::CHAT_ARCHIVE_INFO, json!({ "chatIds": ids }))
+            .await
+            .ok()?;
+        serde_json::from_value(reply["chats"].clone()).ok()
+    }
+
     /// Resolve a chat key. Without a token: any chat. With one: only among
     /// the chats the token's Chat may reach (so a foreign chat is neither
     /// targeted nor revealed by an ambiguity error).
@@ -1723,7 +1802,7 @@ impl Tools {
         let Some(origin) = origin else {
             return self.zeron.resolve_chat(key).await;
         };
-        let allow_self = !matches!(reach, Reach::Child | Reach::ChildOrAdmin);
+        let allow_self = !matches!(reach, Reach::Child | Reach::ChildOrAdmin | Reach::ArchiveScope);
         // Admin chats reach their whole Space for everything but interrupt/respond.
         let admin_ok = reach != Reach::Child;
         let all = self.zeron.chats().await?;
@@ -1740,6 +1819,11 @@ impl Tools {
                 .await
                 .ok()
                 .and_then(|v| serde_json::from_value(v["chatIds"].clone()).ok())
+                .unwrap_or_default()
+        } else if reach == Reach::ArchiveScope {
+            self.archive_info(&[])
+                .await
+                .map(|info| info.into_keys().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -1769,6 +1853,8 @@ impl Tools {
                 },
                 if reach == Reach::ReadScope {
                     ", and read the chats on items in their own project"
+                } else if reach == Reach::ArchiveScope {
+                    ", and archive the workers in their own project"
                 } else {
                     ""
                 }
@@ -1977,6 +2063,9 @@ enum Reach {
     /// Children only, but an admin chat also reaches every chat of its Space
     /// (wait, archive). Interrupt and respond stay `Child`.
     ChildOrAdmin,
+    /// `archive_chat`: children, the workers in the caller's project scope, or
+    /// (admin chats) any chat of the Space.
+    ArchiveScope,
 }
 
 /// Whether the token's Chat may reach `chat`: one it created (Mast-created
@@ -2115,6 +2204,8 @@ mod tests {
         working: bool,
         /// Chats the engine says sit inside the agent's project scope.
         project_chats: Vec<&'static str>,
+        /// The engine's finished-worker verdicts for the agent's archive scope.
+        archive_info: Vec<(&'static str, Value)>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2227,7 +2318,7 @@ mod tests {
                     RpcReply::Value(origin)
                 }
                 agent_tools::TOOL_CALL_METHOD => {
-                    if params["token"] != BETA_TOKEN {
+                    if params["token"] != BETA_TOKEN && params["token"] != ADMIN_TOKEN {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -2256,6 +2347,23 @@ mod tests {
                     }
                     if params["tool"] == agent_tool_names::PROJECT_SCOPE_CHATS {
                         return Ok(RpcReply::Value(json!({ "chatIds": self.project_chats })));
+                    }
+                    if params["tool"] == agent_tool_names::CHAT_ARCHIVE_INFO {
+                        let ids = params["arguments"]["chatIds"].as_array().cloned().unwrap_or_default();
+                        let mut chats = serde_json::Map::new();
+                        for (id, verdict) in &self.archive_info {
+                            if ids.is_empty() || ids.iter().any(|i| i == id) {
+                                chats.insert((*id).to_owned(), verdict.clone());
+                            }
+                        }
+                        return Ok(RpcReply::Value(json!({ "chats": chats })));
+                    }
+                    if params["tool"] == agent_tool_names::CHAT_ARCHIVE {
+                        let args = &params["arguments"];
+                        return Ok(RpcReply::Value(json!({
+                            "chatId": args["chatId"], "archived": args["archived"],
+                            "forced": args["force"], "reason": args["reason"],
+                        })));
                     }
                     if params["tool"] == agent_tool_names::CREATE_CHILD {
                         return Ok(RpcReply::Value(json!({
@@ -2740,12 +2848,14 @@ mod tests {
             ("send_message", json!({ "text": "hi" })),
             ("wait_for_turn", json!({ "timeout_secs": 1 })),
             ("interrupt_chat", json!({})),
-            ("archive_chat", json!({})),
         ] {
             let mut args = extra;
             args["chat"] = json!("chat-alpha-1");
             let err = scoped.call(name, args).await.unwrap_err();
-            assert!(err.contains("agents can only reach"), "{name}: {err}");
+            assert!(
+                err.contains("agents can only reach") || err.contains("no chat matches"),
+                "{name}: {err}"
+            );
         }
         // Without project reach the same read is refused.
         let plain = tools(Arc::new(World::default()), Some(BETA_TOKEN));
@@ -2786,7 +2896,10 @@ mod tests {
                 .call(name, json!({ "chat": "chat-nova-3", "text": "hi" }))
                 .await
                 .unwrap_err();
-            assert!(err.contains("agents can only"), "{name}: {err}");
+            assert!(
+                err.contains("agents can only") || err.contains("no chat matches"),
+                "{name}: {err}"
+            );
         }
         let listed = admin
             .call("list_chats", json!({ "include_archived": true }))
@@ -3339,6 +3452,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(archived["archived"], true);
+    }
+
+    fn verdict(archivable: bool, reason: &str) -> Value {
+        json!({ "archivable": archivable, "reason": reason, "inScope": true })
+    }
+
+    #[tokio::test]
+    async fn archive_chat_reaches_project_workers_through_the_engine_with_force_and_reason() {
+        let world = Arc::new(World {
+            archive_info: vec![("chat-alpha-1", verdict(false, "not finished"))],
+            ..World::default()
+        });
+        let tools = tools(world.clone(), Some(BETA_TOKEN));
+        let done = tools
+            .call(
+                "archive_chat",
+                json!({ "chat": "chat-alpha-1", "force": true, "reason": "superseded" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(done["archived"], true);
+        let calls = world.agent_calls(agent_tool_names::CHAT_ARCHIVE);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0]["arguments"],
+            json!({ "chatId": "chat-alpha-1", "archived": true, "force": true, "reason": "superseded" })
+        );
+        // Restoring goes through the same tool.
+        tools
+            .call("archive_chat", json!({ "chat": "chat-alpha-1", "archived": false }))
+            .await
+            .unwrap();
+        assert_eq!(
+            world.agent_calls(agent_tool_names::CHAT_ARCHIVE)[1]["arguments"]["archived"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_chat_refuses_chats_outside_the_archive_scope_and_the_caller_itself() {
+        let world = Arc::new(World {
+            archive_info: vec![("chat-alpha-1", verdict(true, "its item is completed"))],
+            ..World::default()
+        });
+        let tools = tools(world.clone(), Some(BETA_TOKEN));
+        for target in ["chat-beta-2", "chat-gamma-3", "nope"] {
+            let err = tools
+                .call("archive_chat", json!({ "chat": target, "force": true, "reason": "x" }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("agents can only archive chats they created"), "{target}: {err}");
+        }
+        assert!(world.agent_calls(agent_tool_names::CHAT_ARCHIVE).is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_and_get_chat_carry_the_finished_verdict_for_orchestrators() {
+        let world = Arc::new(World {
+            archive_info: vec![("chat-alpha-1", verdict(true, "its PR is merged"))],
+            ..World::default()
+        });
+        let tools = tools(world.clone(), Some(BETA_TOKEN));
+        let child = tools
+            .call("create_chat", json!({ "project": "/repo/comet", "idempotency_key": "kid" }))
+            .await
+            .unwrap();
+        // Default list: own chats only, no verdict for chats outside the scope.
+        let listed = tools.call("list_chats", json!({})).await.unwrap();
+        let rows = listed["chats"].as_array().unwrap();
+        assert!(rows.iter().all(|c| c["id"] != "chat-alpha-1"));
+        assert!(rows.iter().all(|c| c.get("archivable").is_none()));
+        // `workers: true` adds the project's workers with archivable + reason.
+        let listed = tools.call("list_chats", json!({ "workers": true })).await.unwrap();
+        let alpha = listed["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "chat-alpha-1")
+            .expect("the project worker is listed");
+        assert_eq!(alpha["archivable"], true);
+        assert_eq!(alpha["archivableReason"], "its PR is merged");
+        assert!(listed["chats"].as_array().unwrap().iter().any(|c| c["id"] == child["chatId"]));
+        // Terminal callers get no verdict (no engine scope to apply).
+        let terminal = super::tests::tools(world.clone(), None);
+        let listed = terminal.call("list_chats", json!({})).await.unwrap();
+        assert!(listed["chats"].as_array().unwrap().iter().all(|c| c.get("archivable").is_none()));
+    }
+
+    #[test]
+    fn the_tool_descriptions_carry_the_archive_directive() {
+        let defs = catalog();
+        for name in ["archive_chat", "create_chat"] {
+            let def = defs.iter().find(|d| d.name == name).unwrap();
+            assert!(def.description.contains("archivable: true"), "{name}");
+        }
     }
 
     #[tokio::test]

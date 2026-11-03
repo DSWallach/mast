@@ -12,6 +12,7 @@ Every Claude Code and Codex chat in a project gets the `mast-agent` MCP server. 
 - `wait_for_turn`, `read_chat` and `list_chats` read a worker's progress and reply.
 - `send_message` sends a worker a follow-up.
 - `work_outline_resolve_user_action_request` resolves a request a direct child raised.
+- `archive_chat` archives a worker once it is finished (see below).
 
 Workers cannot message their coordinator. They finish by raising a Required Action, and the coordinator finds it with `work_outline_read_subtree`.
 
@@ -24,6 +25,16 @@ Workers cannot message their coordinator. They finish by raising a Required Acti
 5. Meanwhile the status light and Dock badge show you which chats are working and which need you. A **Ready to merge** action counts as ready, not as needing you.
 
 The merge step belongs to one chat. Say so in the instructions on the coordinator's item.
+
+## Archive finished workers
+
+On a big project the workers pile up. A worker is **finished** (`archivable: true` in `list_chats` / `get_chat`, with an `archivableReason`) when it is idle, has no open Required Actions, and any one of these holds: its item is completed; its linked PR is merged or closed; its **Ready to merge** was resolved; or it has been idle for more than 3 days with its item completed or archived.
+
+- A coordinator archives finished workers it started with `archive_chat`. Pass `workers: true` to `list_chats` to see the workers in the project scope (chats under the project's worker destination) and archive those too.
+- A chat that isn't finished is refused unless the call passes `force: true` and a short `reason`. The reason is logged.
+- Archiving hides a chat; it can always be restored. The Team tab's **Show archived (N)** lists archived workers, each with **Unarchive**.
+- In the Team tab, **Archive finished (N)** lists the chats and asks before archiving them all. With three or more finished workers the tab says so.
+- A coordinator never archives itself or chats outside its project.
 
 ## Coordinator tips
 
@@ -43,6 +54,8 @@ You are the coordinator for this project. Talk to me; delegate work.
 - Never wait on one worker in the foreground. Read the subtree for open
   "Ready to merge" actions.
 - Only you merge, release and edit the handoff doc.
+- Archive finished workers: when a worker you started shows
+  archivable: true, archive it with archive_chat.
 - Workers work on a feature branch in a git worktree, never on main.
 ```
 

@@ -801,6 +801,16 @@ pub mod agent_tools {
         /// items inside the caller's project scope (empty when its item has no
         /// project above it). The MCP `read_chat` reads those, read-only.
         pub const PROJECT_SCOPE_CHATS: &str = "chat_project_scope_chats";
+        /// Engine-internal (not an MCP tool): `{chatIds}` -> `{chats: {id:
+        /// {archivable, reason, inScope}}}` for the chats the caller may
+        /// archive (its children and the workers in its project scope), by
+        /// the engine's "finished" rule.
+        pub const CHAT_ARCHIVE_INFO: &str = "chat_archive_info";
+        /// Engine-internal (not an MCP tool): `{chatId, archived, force?,
+        /// reason?}`. Archives a child or project-scope worker of the caller
+        /// (workers must be archivable unless `force` with a `reason`),
+        /// records it in the agent archive log. Unarchiving is always allowed.
+        pub const CHAT_ARCHIVE: &str = "chat_archive";
 
         /// Copy a file the agent wrote into the work item's artifact folder
         /// and record a revision (`docs/planning-artifact-conventions.md`).

@@ -1497,3 +1497,164 @@ fn toggling_a_wake_switch_updates_the_cached_settings_at_once(cx: &mut TestAppCo
         assert!(settings.turn_finished && !settings.enabled && settings.errors);
     });
 }
+
+// ---- archive finished workers ----------------------------------------------------
+
+/// Idle workers `w-1..` whose Ready to merge was resolved: finished.
+fn finished_workers(count: usize) -> impl FnOnce(&mut WorkOutlineSnapshot) + 'static {
+    move |snapshot| {
+        for i in 1..=count {
+            let mut done = request(
+                &format!("done-{i}"),
+                "s1",
+                API,
+                &format!("w-{i}"),
+                &format!("Ready to merge: feature/w-{i}"),
+            );
+            done.state = mast_proto::UserActionRequestState::Resolved;
+            snapshot.user_action_requests.push(done);
+        }
+    }
+}
+
+type Sent = tokio::sync::mpsc::Receiver<String>;
+
+/// Give the shell an engine that records every request it is sent.
+fn record_engine(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> (Sent, tokio::runtime::Runtime) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let guard = runtime.enter();
+    let (out, requests) = tokio::sync::mpsc::channel(16);
+    let (_replies, inbound) = tokio::sync::mpsc::channel(16);
+    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    std::mem::forget(_replies);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| state.set_test_engine(engine));
+    });
+    drop(guard);
+    (requests, runtime)
+}
+
+/// The `setChatArchived` requests sent so far (other traffic is skipped).
+fn archive_requests(sent: &mut Sent) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    while let Ok(line) = sent.try_recv() {
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if request["params"]["op"] == "setChatArchived" {
+            out.push(request["params"].clone());
+        }
+    }
+    out
+}
+
+fn click_selector(vcx: &mut VisualTestContext, selector: &'static str) {
+    let at = vcx.debug_bounds(selector).unwrap().center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    draw(vcx);
+}
+
+#[gpui::test]
+fn the_team_tab_offers_archive_finished_and_suggests_it_from_three(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(2));
+    add_workers(&shell, vcx, 4);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // Two finished: the button, no suggestion; the working worker is not one.
+    assert!(has(vcx, "team-archive-finished"));
+    assert!(!has(vcx, "team-archive-suggest"));
+    assert!(has(vcx, "team-archivable-w-1") && has(vcx, "team-archivable-w-2"));
+    assert!(!has(vcx, "team-archivable-w-0") && !has(vcx, "team-archivable-w-3"));
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(3));
+    add_workers(&shell, vcx, 4);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "team-archive-suggest"));
+    // None finished: nothing to offer.
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 4);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(!has(vcx, "team-archive-finished") && !has(vcx, "team-archive-suggest"));
+}
+
+#[gpui::test]
+fn archive_finished_confirms_then_archives_exactly_the_listed_chats(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(3));
+    add_workers(&shell, vcx, 4);
+    let (mut sent, _runtime) = record_engine(&shell, vcx);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    click_selector(vcx, "team-archive-finished");
+    // Asks first, listing the chats; nothing is sent yet.
+    assert!(has(vcx, "team-archive-confirm"));
+    for id in ["w-1", "w-2", "w-3"] {
+        let selector: &'static str = Box::leak(format!("team-archive-confirm-row-{id}").into_boxed_str());
+        assert!(has(vcx, selector), "{id}");
+    }
+    assert!(!has(vcx, "team-archive-confirm-row-w-0"));
+    vcx.run_until_parked();
+    assert!(archive_requests(&mut sent).is_empty());
+    // Cancel leaves everything as it was.
+    click_selector(vcx, "team-archive-confirm-cancel");
+    assert!(!has(vcx, "team-archive-confirm") && has(vcx, "team-archive-finished"));
+    assert!(archive_requests(&mut sent).is_empty());
+    // Confirm archives each listed chat.
+    click_selector(vcx, "team-archive-finished");
+    click_selector(vcx, "team-archive-confirm-go");
+    vcx.run_until_parked();
+    let mut archived: Vec<String> = Vec::new();
+    for params in archive_requests(&mut sent) {
+        assert_eq!(params["archived"], true);
+        archived.push(params["chatId"].as_str().unwrap().to_owned());
+    }
+    archived.sort();
+    assert_eq!(archived, ["w-1", "w-2", "w-3"]);
+    assert!(!has(vcx, "team-archive-confirm"));
+}
+
+#[gpui::test]
+fn archived_workers_leave_the_rows_and_a_toggle_brings_them_back(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(1));
+    add_workers(&shell, vcx, 3);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats.iter_mut().find(|c| c.id == "w-1").unwrap().archived = true;
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "team-worker-w-0") && has(vcx, "team-worker-w-2"));
+    assert!(!has(vcx, "team-worker-w-1"), "archived workers drop out of the rows");
+    // Archived and thus no longer offered for archiving.
+    assert!(!has(vcx, "team-archive-finished"));
+    assert!(has(vcx, "team-show-archived"));
+    assert!(!has(vcx, "team-archived-w-1"));
+    click_selector(vcx, "team-show-archived");
+    assert!(has(vcx, "team-archived-w-1") && has(vcx, "team-unarchive-w-1"));
+    click_selector(vcx, "team-show-archived");
+    assert!(!has(vcx, "team-archived-w-1"));
+    // Archived workers don't count in the tab chip or the roll-up.
+    let facts = shell.update(vcx, |shell, cx| shell.team_facts(CHAT_API, cx));
+    assert_eq!(facts.live().count(), 2);
+    assert_eq!(facts.archived().count(), 1);
+}
+
+#[gpui::test]
+fn unarchive_sends_set_chat_archived_false(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 2);
+    let (mut sent, _runtime) = record_engine(&shell, vcx);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats.iter_mut().find(|c| c.id == "w-1").unwrap().archived = true;
+        });
+        shell.open_team_tab(cx);
+        shell.wakes.show_archived.insert(CHAT_API.into());
+    });
+    draw(vcx);
+    click_selector(vcx, "team-unarchive-w-1");
+    vcx.run_until_parked();
+    let requests = archive_requests(&mut sent);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["chatId"], "w-1");
+    assert_eq!(requests[0]["archived"], false);
+}

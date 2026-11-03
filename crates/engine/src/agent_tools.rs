@@ -51,6 +51,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod archive;
+
 use crate::diff_targets::DiffTargetError;
 use crate::doc_host::DocHost;
 use crate::sessions::SessionsEngine;
@@ -706,6 +708,10 @@ pub struct AgentToolsService {
     artifacts: Mutex<Option<crate::artifacts::ArtifactsService>>,
     /// Chat diff targets (`bind_chat_worktree`).
     diff_targets: Mutex<Option<crate::diff_targets::DiffTargets>>,
+    /// PR state for the finished-worker rule.
+    pr_ticket_cache: Mutex<Option<crate::pr_ticket_cache::PrTicketCache>>,
+    /// Agent archives, for Recent changes / undo in the UI.
+    archive_log: crate::archivable::AgentArchiveLog,
 }
 
 impl AgentToolsService {
@@ -724,6 +730,8 @@ impl AgentToolsService {
             child_claims: Mutex::new(()),
             linear: Mutex::new(None),
             artifacts: Mutex::new(None),
+            pr_ticket_cache: Mutex::new(None),
+            archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
         }
     }
@@ -935,6 +943,8 @@ impl AgentToolsService {
             tools::QUEUE_CHILD_CHAT_TURN => self.queue_child_chat_turn(context, arguments),
             tools::CLAIM_CHILD_CHAT => self.claim_child_chat(context, arguments),
             tools::PROJECT_SCOPE_CHATS => Ok(self.project_scope_chats(context)),
+            tools::CHAT_ARCHIVE_INFO => self.chat_archive_info(context, arguments),
+            tools::CHAT_ARCHIVE => self.chat_archive(context, arguments),
             tools::ARTIFACT_PUBLISH => {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_publish(&caller, arguments)?)
