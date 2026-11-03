@@ -3950,6 +3950,16 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
             }
+            methods::GET_DIFF_REVIEW_STATE => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.diff_review_state(target).map_err(|error| RpcError::Failed(error.to_string()))?)
+            }
+            methods::SET_DIFF_REVIEW_STATE => {
+                let state: mast_proto::DiffReviewState = parse_params(params)?;
+                RpcReply::value(&self.workspace.put_diff_review_state(&state).map_err(|error| RpcError::Failed(error.to_string()))?)
+            }
             methods::SET_CHAT_DIFF_TARGET => {
                 let p: mast_proto::SetChatDiffTargetParams = parse_params(params)?;
                 let targets = self.diff_targets.clone();

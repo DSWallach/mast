@@ -34,6 +34,7 @@ pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_CHAT_PR_LINKS: &str = "chatPrLinks";
 pub const KIND_CHAT_DIFF_TARGETS: &str = "chatDiffTargets";
+pub const KIND_DIFF_REVIEW_STATE: &str = "diffReviewState";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
 
@@ -42,6 +43,7 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 pub mod artifacts;
 mod chat_diff_targets;
+mod diff_review;
 mod sidebar_pins;
 mod sidebar_sections;
 pub mod work_outline;

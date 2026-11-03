@@ -773,6 +773,14 @@ impl WorkspaceHost {
         })?)
     }
 
+    pub fn diff_review_state(&self, target: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
+        Ok(self.read(|doc| doc.diff_review_state(target)))
+    }
+
+    pub fn put_diff_review_state(&self, state: &mast_proto::DiffReviewState) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.put_diff_review_state(state))?)
+    }
+
     pub fn read_devices(&self) -> Result<Vec<Device>, EngineError> {
         Ok(self.read(|doc| doc.read_devices())?)
     }
@@ -2794,6 +2802,19 @@ mod tests {
         host.create_chat("c1", None, Some("test-device"), None, None)
             .unwrap();
         (dir, host)
+    }
+
+    #[tokio::test]
+    async fn diff_review_state_roundtrip_in_workspace_host() {
+        let (_dir, host) = linkable_test_host();
+        let mut state = mast_proto::DiffReviewState {
+            target: "pr:owner/repo#42".into(),
+            head_sha: Some("abc".into()),
+            ..Default::default()
+        };
+        state.viewed_hunks.insert("a".repeat(64));
+        assert!(host.put_diff_review_state(&state).unwrap());
+        assert_eq!(host.diff_review_state(&state.target).unwrap(), Some(state));
     }
 
     #[tokio::test]
