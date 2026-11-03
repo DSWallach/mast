@@ -1077,6 +1077,21 @@ pub mod agent_tools {
             example: r#"{"workItemId": "<container or child id>"}"#,
         },
         ToolUsage {
+            tool: tools::ADMIN,
+            required: &[KEY_CREATE],
+            optional: &[
+                p("steps", "[{op, ...}], see the tool description for ops"),
+                p("dryRun", "boolean; preview only"),
+                p(
+                    "confirmToken",
+                    "from an approved bulk preview; repeat the same steps",
+                ),
+                p("read", "boolean; list the Space tree, requests and proposals"),
+                p("maxDepth", "with read"),
+            ],
+            example: r#"{"steps": [{"op": "rename", "itemId": "<item id>", "title": "New title"}], "idempotencyKey": "admin-rename-1"}"#,
+        },
+        ToolUsage {
             tool: tools::PROPOSE_INSTRUCTION,
             required: &[KEY_CREATE],
             optional: &[
