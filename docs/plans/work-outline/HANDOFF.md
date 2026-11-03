@@ -616,13 +616,20 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Surface stalled workers** (2026-11-03 evening, `surface-stalled-workers`): orchestrator wakes for a
+  worker waiting on a prompt/approval (with the question text) and for a worker turn that ended after
+  refused/failed Mast tool calls; both default on, toggles in `orchestrator-wakes.json` / Team tab.
+  `get_chat`/`list_chats` expose the pending question and last-turn tool failures; markers in the Team
+  tab and running popover; create_chat says which harnesses support Mast tools. Shipped on targeted
+  tests only (engine orchestrator_wakes + agent_tools 60/60, MCP/proto 304, child's UI 2393); no
+  overlap with the Codex MCP fix underneath.
 - **Codex MCP approvals** (2026-11-03 evening, `codex-mcp-approvals`, installed 17:06): Codex chats in Ask
   mode had every `mast-agent` tool call silently denied (Codex sends `mcpServer/elicitation/request`
   before MCP tool calls; the harness answered "unsupported"). Now the injected `mast-agent` server gets
   `default_tools_approval_mode = "approve"` and its elicitations are accepted; other servers'
   elicitations (e.g. Computer Use) become a Yes/No prompt via the input bridge; rejected server requests
-  log at INFO (`mast_harness::codex`). Harness 455/455, UI 2391/0. Verified against Codex 0.166 source,
-  not yet live with Computer Use.
+  log at INFO (`mast_harness::codex`). Harness 455/455, UI 2391/0. Verified live: a Codex Ask-mode chat
+  made 5/5 Mast tool calls without prompts; Computer Use not yet exercised.
 - **Release 2026-11-03 morning** (installed 11:32): `faster-releases` (nextest config with
   `release`/`quarantine` profiles, terminal-heavy tests capped at 2 at a time,
   `scripts/run_release_tests.sh`, `release-testing.md`; engine suite ~20 min vs 3.5 h+ projected for
