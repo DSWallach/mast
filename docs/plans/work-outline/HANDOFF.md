@@ -694,35 +694,14 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-02 ~22:00; a fresh coordinator starts here)
+## In flight (snapshot 2026-11-02 ~22:15; a fresh coordinator starts here)
 
-**State of the branches.**
-- `origin/work-outline-implementation` = the evening release (worker reports, wait cap + link
-  inference, relay-user-answer, container templates phase 1). Installed and confirmed.
-- `origin/release-staging` = that + `admin-chats` merge (b5b85e3a) + `archive-finished-workers`
-  merge (1e7dee9c) + this handoff commit. The local integration branch matches it.
-- **Admin chats are INSTALLED** (built from b5b85e3a, 2026-11-02 21:10). UI suite green (2385); the
-  engine check reached 49/85 test files with only known failures before a restart killed it.
-- **Archive finished workers is merged locally/staging but NOT tested or installed.** The child ran
-  its full suites on this exact base (release-staging with admin-chats), so a targeted run is enough.
-
-**Next steps for the new coordinator:**
-1. In zeron/: `git fetch`, check out `work-outline-implementation`, `git merge --ff-only
-   origin/release-staging`.
-2. Test: the UI suite, `cargo test --no-fail-fast -p mast-mcp -p mast-proto`, and the engine lib
-   `archivable` tests (optionally the full engine suite when the machine is quiet). Build
-   `cargo build --profile installed -p mast` in parallel (separate target dir).
-3. Install as usual, push work-outline-implementation, bump the submodule pointer on agent-mode-tools
-   `zeron-work-outline`, delete `admin-chats`, `archive-finished-workers` and `release-staging` from
-   origin and remove their worktrees.
-4. Resolve Ready to merge actions: admin-chats (request 41d60855…) and archive-finished-workers
-   (request 2f15457f…); mark items 32a087f6 (admin) and 18e07979 (archive) completed.
-5. Add "Built and installed" entries for admin chats and archive finished workers (details are in
-   their Ready to merge actions: grant UI "Grant admin for this Space…", 1/4/8/24 h or until revoked,
-   optional "Skip bulk confirmations"; `work_outline_admin` batches; attribution "admin chat … (granted
-   by Mikey)"; bulk preview → Required Action; per-turn undo; container-template actions for admins.
-   Archive: `archivable` + reason rule, orchestrators archive children/project workers, force + reason,
-   Team tab "Archive finished (N)").
+**State of the branches.** `origin/work-outline-implementation` = evening release + `admin-chats` +
+`archive-finished-workers` + `099a3533` (usage text for `work_outline_admin`; the admin merge had
+broken a mast-proto test). Installed 2026-11-02 ~21:58 (backup
+`zeron-before-archive-finished-2026-11-02`). Tests on this head: UI 2389/0, mast-mcp + mast-proto green,
+engine `archivable` 9/0; the full engine suite was not rerun. `release-staging`, `admin-chats` and
+`archive-finished-workers` are deleted. Nothing is mid-release.
 
 **What Mikey is doing next:** using an admin chat in the Cofactr Space to set up the Projects container
 template (matching his current copy template), move existing projects under it with a preview, and
