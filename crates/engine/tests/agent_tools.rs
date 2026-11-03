@@ -3307,6 +3307,7 @@ async fn an_admin_configures_a_container_template_and_applies_it_to_existing_ite
     let reply = rig.client.call(methods::ADMIN_UNDO_TURN, json!({ "turnId": "run-1" })).await.unwrap();
     assert_eq!(reply["skipped"].as_array().unwrap().len(), 1, "apply cannot be undone: {reply}");
     assert!(snapshot(&rig).item(&container).unwrap().container_template.is_none());
+}
 
 // ---- archiving finished workers ------------------------------------------------
 
