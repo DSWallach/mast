@@ -1396,6 +1396,12 @@ impl PrReviewSyncService {
                     }
                 }
             }
+            if matches!(request_state, PrReviewRequestState::Merged | PrReviewRequestState::Closed) {
+                let target = format!("pr:{}", pr.external_id().to_lowercase());
+                if let Err(error) = self.inner.workspace.delete_diff_review_state(&target) {
+                    tracing::warn!(%error, "pr review sync: could not clear diff review state");
+                }
+            }
             if matches!(
                 request_state,
                 PrReviewRequestState::Merged | PrReviewRequestState::Closed

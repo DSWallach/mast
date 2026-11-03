@@ -2488,7 +2488,7 @@ impl AppState {
     }
 
     /// One diff target RPC: the engine, or the test transport.
-    fn chat_diff_rpc(
+    pub(crate) fn chat_diff_rpc(
         &self,
         method: &'static str,
         params: serde_json::Value,

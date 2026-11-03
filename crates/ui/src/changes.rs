@@ -1973,6 +1973,15 @@ pub struct Changes {
     rows: Vec<DiffRow>,
     file_filter: Entity<ComposerInput>,
     diff_focus: FocusHandle,
+    review_target: Option<String>,
+    review_link_chat: Option<String>,
+    review_pr: Option<String>,
+    review_link_task: Option<Task<()>>,
+    review_state: Option<mast_proto::DiffReviewState>,
+    review_task: Option<Task<()>>,
+    review_save_task: Option<Task<()>>,
+    review_pending: HashMap<String, mast_proto::DiffReviewState>,
+    review_error: Option<String>,
     _file_filter_events: Subscription,
     row_ranges: Vec<Option<std::ops::Range<usize>>>,
     /// Ordered file and submodule headers; sticky file headers stop at either.
@@ -2128,6 +2137,15 @@ impl Changes {
             rows: Vec::new(),
             file_filter,
             diff_focus: cx.focus_handle(),
+            review_target: None,
+            review_link_chat: None,
+            review_pr: None,
+            review_link_task: None,
+            review_state: None,
+            review_task: None,
+            review_save_task: None,
+            review_pending: HashMap::new(),
+            review_error: None,
             _file_filter_events: file_filter_events,
             row_ranges: Vec::new(),
             section_headers: Vec::new(),
@@ -2895,6 +2913,7 @@ impl Changes {
             }
             return;
         };
+        self.ensure_review_state(cx);
         let key = self.parse_key(&diff);
         if self.parsed.as_ref().is_some_and(|p| p.key == key) {
             self.sync_comment_rows(cx);
@@ -4190,11 +4209,18 @@ impl Changes {
                 .and_then(|f| file_notices(f).into_iter().nth(notice as usize))
                 .map(|text| notice_row(text, &theme))
                 .unwrap_or_else(|| gpui::Empty.into_any_element()),
-            DiffRow::HunkHeader { file, hunk } => files
-                .get(file as usize)
-                .and_then(|f| f.hunks.get(hunk as usize))
-                .map(|h| hunk_header_row(&h.header, &theme))
-                .unwrap_or_else(|| gpui::Empty.into_any_element()),
+            DiffRow::HunkHeader { file, hunk } => {
+                let Some(file_diff) = files.get(file as usize) else { return gpui::Empty.into_any_element(); };
+                let Some(hunk_diff) = file_diff.hunks.get(hunk as usize) else { return gpui::Empty.into_any_element(); };
+                let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(&hunk_identity(&file_diff.path, hunk_diff)));
+                div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
+                    .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
+                        .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
+                        .text_size(px(10.0)).text_color(theme.text_muted)
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
+                        .child(if viewed { "Viewed" } else { "Mark viewed" }))
+                    .into_any_element()
+            },
             DiffRow::Line {
                 file,
                 hunk,
@@ -6755,6 +6781,13 @@ impl Render for Changes {
             .children(self.render_context_chrome(&theme, cx))
             .children(self.render_execution_selector(&theme, cx))
             .children(self.render_diff_target_error(&theme, cx))
+            .when_some(self.review_error.clone(), |el, message| {
+                el.child(div().flex().items_center().gap(px(8.0))
+                    .child(crate::error_notice::ErrorNotice::from_text("changes-review-state-error", &theme, &message))
+                    .child(div().id("changes-review-state-retry").cursor_pointer().text_color(theme.text_muted)
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_review_state(cx)))
+                        .child("Retry")))
+            })
             .when_some(error, |el, message| {
                 el.child(
                     div()

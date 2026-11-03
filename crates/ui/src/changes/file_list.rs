@@ -369,6 +369,7 @@ impl Changes {
         let mut indices = Vec::new();
         ordered_file_indices(&parsed.layout, &mut indices);
         let files = parsed.files.clone();
+        let review_state = self.review_state.clone();
         let entries = indices
             .into_iter()
             .filter(|index| {
@@ -378,6 +379,17 @@ impl Changes {
             })
             .map(|index| {
                 let file = &files[index];
+                let viewed = review_state.as_ref().is_some_and(|state| {
+                    if file.hunks.is_empty() {
+                        state.viewed_files.contains(&file.path)
+                    } else {
+                        file.hunks.iter().all(|hunk| {
+                            state
+                                .viewed_hunks
+                                .contains(&hunk_identity(&file.path, hunk))
+                        })
+                    }
+                });
                 let label = match &file.old_path {
                     Some(old) if old != &file.path => format!("{old} → {}", file.path),
                     _ => file.path.clone(),
@@ -395,6 +407,17 @@ impl Changes {
                         this.jump_to_file(index, cx);
                         window.focus(&this.diff_focus, cx);
                     }))
+                    .child(
+                        div()
+                            .id(("changes-file-viewed", index))
+                            .cursor_pointer()
+                            .text_color(theme.text_muted)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_review_file(index, cx);
+                            }))
+                            .child(if viewed { "☑" } else { "□" }),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -472,6 +495,33 @@ impl Changes {
         {
             return;
         }
+        if event.keystroke.key == "v" && !modifiers.shift {
+            let top = self
+                .list
+                .logical_scroll_top()
+                .item_ix
+                .min(self.rows.len().saturating_sub(1));
+            let current_file = self.rows.get(top).and_then(|row| row.file());
+            let current_hunk = self
+                .rows
+                .iter()
+                .take(top + 1)
+                .rev()
+                .find_map(|row| match row {
+                    DiffRow::HunkHeader { file, hunk } if Some(*file as usize) == current_file => {
+                        Some((*file as usize, *hunk as usize))
+                    }
+                    _ => None,
+                });
+            if let Some((file, hunk)) = current_hunk {
+                self.toggle_review_hunk(file, hunk, cx);
+            } else if let Some(file) = current_file {
+                self.toggle_review_file(file, cx);
+            }
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
         let forward = match event.keystroke.key.as_str() {
             "j" => true,
             "k" => false,
@@ -530,12 +580,23 @@ impl Changes {
         let target = match (position, forward) {
             (Some(index), true) => hunks.get(index + 1),
             (Some(index), false) => index.checked_sub(1).and_then(|index| hunks.get(index)),
-            (None, true) => current_file
-                .and_then(|file| hunks.iter().find(|(index, _)| *index == file))
-                .or_else(|| hunks.first()),
-            (None, false) => current_file
-                .and_then(|file| hunks.iter().rev().find(|(index, _)| *index < file))
-                .or_else(|| hunks.last()),
+            (None, true) => {
+                match current_file.and_then(|file| files.iter().position(|index| *index == file)) {
+                    Some(position) => files[position..]
+                        .iter()
+                        .find_map(|file| hunks.iter().find(|(index, _)| index == file)),
+                    None => hunks.first(),
+                }
+            }
+            (None, false) => {
+                match current_file.and_then(|file| files.iter().position(|index| *index == file)) {
+                    Some(position) => files[..position]
+                        .iter()
+                        .rev()
+                        .find_map(|file| hunks.iter().rev().find(|(index, _)| index == file)),
+                    None => hunks.last(),
+                }
+            }
         }
         .copied();
         if let Some((file, hunk)) = target {
@@ -579,6 +640,8 @@ mod navigation_tests {
                 submodules: Arc::new(submodules), layout: Arc::new(layout),
             });
             changes.reflatten(cx);
+            changes.step_diff(false, false, cx);
+            assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::FileHeader { file: 0 }));
             changes.step_diff(true, false, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 0 }));
             changes.step_diff(true, false, cx);

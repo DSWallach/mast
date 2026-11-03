@@ -781,6 +781,10 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.put_diff_review_state(state))?)
     }
 
+    pub fn delete_diff_review_state(&self, target: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| Ok::<_, mast_doc::DocError>(doc.delete_diff_review_state(target)))?)
+    }
+
     pub fn read_devices(&self) -> Result<Vec<Device>, EngineError> {
         Ok(self.read(|doc| doc.read_devices())?)
     }
@@ -2814,7 +2818,9 @@ mod tests {
         };
         state.viewed_hunks.insert("a".repeat(64));
         assert!(host.put_diff_review_state(&state).unwrap());
-        assert_eq!(host.diff_review_state(&state.target).unwrap(), Some(state));
+        assert_eq!(host.diff_review_state(&state.target).unwrap(), Some(state.clone()));
+        assert!(host.delete_diff_review_state(&state.target).unwrap());
+        assert_eq!(host.diff_review_state(&state.target).unwrap(), None);
     }
 
     #[tokio::test]
