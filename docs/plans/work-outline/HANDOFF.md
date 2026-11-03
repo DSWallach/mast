@@ -616,6 +616,13 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Codex MCP approvals** (2026-11-03 evening, `codex-mcp-approvals`, installed 17:06): Codex chats in Ask
+  mode had every `mast-agent` tool call silently denied (Codex sends `mcpServer/elicitation/request`
+  before MCP tool calls; the harness answered "unsupported"). Now the injected `mast-agent` server gets
+  `default_tools_approval_mode = "approve"` and its elicitations are accepted; other servers'
+  elicitations (e.g. Computer Use) become a Yes/No prompt via the input bridge; rejected server requests
+  log at INFO (`mast_harness::codex`). Harness 455/455, UI 2391/0. Verified against Codex 0.166 source,
+  not yet live with Computer Use.
 - **Release 2026-11-03 morning** (installed 11:32): `faster-releases` (nextest config with
   `release`/`quarantine` profiles, terminal-heavy tests capped at 2 at a time,
   `scripts/run_release_tests.sh`, `release-testing.md`; engine suite ~20 min vs 3.5 h+ projected for
