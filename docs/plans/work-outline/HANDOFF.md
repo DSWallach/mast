@@ -595,6 +595,18 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   errors; turn-finished and PR events off. Settings in `<data_dir>/orchestrator-wakes.json`. UI: Team
   tab header (toggles, "N updates held" + Deliver now, unseen marks), Item tab Wakes row. Gaps: PR
   merged not fed yet, held events in memory only, only the orchestrator's host device delivers.
+- **Release 2026-11-02 evening** (installed 18:20; tests confirmed later): `worker-report-to-parent`
+  (a chat may `send_message` its parent or call `report_to_parent`; reports go through the wake queue as
+  a "worker report" event, ≤4 KB, on by default, Team tab activity line), `wait-cap-and-link-inference`
+  (`wait_for_turn` / `send_message {wait}` stop at 1500 s with `stillRunning`; replies capped with
+  `truncated` + paging; stricter PR/ticket "mentioned" inference), `relay-user-answer`
+  (`answer_user_action_request { requestId, userMessageId }` delivers the user's own message as a
+  user-attributed Reply & resolve after checks: role=user, human-authored, newer than the request, in
+  reach; project-scope `read_chat`/resolve via `Reach::ReadScope`), and `container-templates` phase 1
+  (template rules in a container's Details; New work item under the container materializes the
+  structure with live instructions, add + mute; moved-in items marked "doesn't follow template" with
+  Apply; `work_outline_apply_container_template`; plan mast-artifact:df5be7ef1a2fa657e3737f17dd0ef89a lists
+  the remaining phases). Merge conflicts in crates/mcp/src/tools.rs resolved by hand keeping both sides.
 - **Known test failures** (pre-existing, not regressions):
   - Engine lib, on main `3801cb5b`: `capture_source_context_reads_the_dispatch_checkout`,
     `local_opening_tail_arrives_before_full_mirror_and_keeps_all_history`.
@@ -613,6 +625,7 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   - Flaky under full load with several child chats building (pass alone): `external_import_links_repair::repair_*`,
     `workspace_files::workspace_file_rpcs_list_search_read_write_and_watch`, harness `executable::tests::version_probe_bounds_hangs_and_rejects_nonzero`.
   - Engine integration, flaky under load (pass alone): `codex_login_resolution::{codex_login_honors_override_only_installation, login_child}`.
+  - Load-sensitive (pass alone; hard timeouts): `pr_ticket_cache_login_shell` (5 s), `managed_accounts` sign-in tests (PTY), `pr_review_sync::setting_the_destination_syncs_the_space`, `m5_repos_diffs_terminals::git_status_stream…`.
   - Harness integration, environmental: `codex::models_discovers_visible_catalog_with_pagination`
     (expects `/bin/false`, which macOS lacks); `shell_env::falls_back_when_interactive_attempt_hangs`
     (flaky on the integration head too).
@@ -667,7 +680,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-02 ~17:45; a new coordinator starts here)
 
-**Release being assembled** on local `work-outline-implementation` (also pushed as `origin/release-staging`,
+**Release (installed 18:20, pushed)** previously assembled on local `work-outline-implementation` (also pushed as `origin/release-staging`,
 head 90d76457; not yet on origin/work-outline-implementation): merges of `worker-report-to-parent`,
 `wait-cap-and-link-inference` (conflict in crates/mcp/src/tools.rs resolved by hand, both kept) and
 `relay-user-answer` (4 hunks in tools.rs resolved, both kept). UI suite green (2357). Full engine run in
