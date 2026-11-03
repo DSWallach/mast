@@ -24,14 +24,16 @@ pub(crate) enum WakeToggle {
     Prs,
     WorkerReports,
     AwaitingInput,
+    ToolCallsFailed,
 }
 
 impl WakeToggle {
-    pub(crate) const KINDS: [WakeToggle; 6] = [
+    pub(crate) const KINDS: [WakeToggle; 7] = [
         Self::RequiredActions,
         Self::Errors,
         Self::WorkerReports,
         Self::AwaitingInput,
+        Self::ToolCallsFailed,
         Self::TurnFinished,
         Self::Prs,
     ];
@@ -45,6 +47,7 @@ impl WakeToggle {
             Self::Prs => "PRs",
             Self::WorkerReports => "Worker reports",
             Self::AwaitingInput => "Awaiting input",
+            Self::ToolCallsFailed => "Tool calls failed",
         }
     }
 
@@ -57,6 +60,7 @@ impl WakeToggle {
             Self::Prs => "prs",
             Self::WorkerReports => "worker-reports",
             Self::AwaitingInput => "awaiting-input",
+            Self::ToolCallsFailed => "tool-calls-failed",
         }
     }
 
@@ -69,6 +73,7 @@ impl WakeToggle {
             Self::Prs => settings.prs,
             Self::WorkerReports => settings.worker_reports,
             Self::AwaitingInput => settings.awaiting_input,
+            Self::ToolCallsFailed => settings.tool_calls_failed,
         }
     }
 
@@ -82,6 +87,7 @@ impl WakeToggle {
             Self::Prs => &mut settings.prs,
             Self::WorkerReports => &mut settings.worker_reports,
             Self::AwaitingInput => &mut settings.awaiting_input,
+            Self::ToolCallsFailed => &mut settings.tool_calls_failed,
         };
         *slot = !*slot;
         settings

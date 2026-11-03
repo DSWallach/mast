@@ -141,6 +141,12 @@ struct RoutedSteer {
     message_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub enum WorkerSignal {
+    Input { chat_id: String, input: mast_proto::AwaitingInput },
+    ToolFailures { chat_id: String, failures: mast_proto::ToolFailures },
+}
+
 struct Inner {
     device_id: String,
     journal: Arc<RunJournal>,
@@ -155,6 +161,9 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    worker_signals: broadcast::Sender<WorkerSignal>,
+    awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
+    turn_failures: Mutex<HashMap<String, mast_proto::ToolFailures>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -263,6 +272,7 @@ impl SessionsEngine {
         registry: Arc<HarnessRegistry>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
+        let (worker_signals, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(Inner {
                 device_id,
@@ -273,6 +283,9 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                worker_signals,
+                awaiting_inputs: Mutex::new(HashMap::new()),
+                turn_failures: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -483,6 +496,22 @@ impl SessionsEngine {
     /// Status watch: the full session list, re-sent on every transition.
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
         self.inner.sessions_tx.subscribe()
+    }
+
+    pub fn watch_worker_signals(&self) -> broadcast::Receiver<WorkerSignal> {
+        self.inner.worker_signals.subscribe()
+    }
+
+    /// Record a failed agent-tool dispatch only while its token's run is live.
+    pub fn note_agent_tool_failure(&self, chat_id: &str, run_id: &str, tool: &str) {
+        let runs = lock(&self.inner.runs);
+        if !runs.get(chat_id).is_some_and(|run| run.run_id == run_id) { return; }
+        let mut failures = lock(&self.inner.turn_failures);
+        let failure = failures.entry(chat_id.to_owned()).or_default();
+        failure.count += 1;
+        if failure.tools.len() < 10 && !failure.tools.iter().any(|name| name == tool) {
+            failure.tools.push(tool.to_owned());
+        }
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -1651,6 +1680,8 @@ impl Inner {
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
                     last_completed_turn: None,
+                    awaiting_input: None,
+                    last_turn_tool_failures: None,
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
                     status,
@@ -1670,6 +1701,19 @@ impl Inner {
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
             }
+            if !was_active && matches!(status, SessionStatus::Working | SessionStatus::AwaitingInput) {
+                lock(&self.turn_failures).remove(chat_id);
+            }
+            if was_active && matches!(status, SessionStatus::Idle | SessionStatus::Errored) {
+                let failures = lock(&self.turn_failures).remove(chat_id);
+                entry.last_turn_tool_failures = failures.clone();
+                if let Some(failures) = failures {
+                    let _ = self.worker_signals.send(WorkerSignal::ToolFailures { chat_id: chat_id.to_owned(), failures });
+                }
+            }
+            entry.awaiting_input = if status == SessionStatus::AwaitingInput {
+                lock(&self.awaiting_inputs).get(chat_id).cloned()
+            } else { None };
             entry.status = status;
             entry.updated_at = now;
             match status {
@@ -3326,12 +3370,16 @@ async fn drive_run(
             } => {
                 inner.remember_harness_session(&chat_id, session_id, &run_cwd);
             }
-            AgentEvent::InputRequested { .. } => {
+            AgentEvent::InputRequested { request_id, questions } => {
+                let input = mast_proto::AwaitingInput { request_id: request_id.clone(), questions: questions.clone() };
+                lock(&inner.awaiting_inputs).insert(chat_id.clone(), input.clone());
+                let _ = inner.worker_signals.send(WorkerSignal::Input { chat_id: chat_id.clone(), input });
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
                 inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
             }
             AgentEvent::InputResolved { .. } => {
+                lock(&inner.awaiting_inputs).remove(&chat_id);
                 inner.set_status(&chat_id, SessionStatus::Working, false);
             }
             _ => {}

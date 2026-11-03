@@ -1089,6 +1089,7 @@ async fn respond_input_resolves_pending_question() {
 
     let dir = tempfile::tempdir().unwrap();
     let core = assemble(dir.path(), Arc::new(AskingHarness));
+    let mut signals = core.sessions.watch_worker_signals();
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1125,6 +1126,11 @@ async fn respond_input_resolves_pending_question() {
         "input part in doc",
     )
     .await;
+
+    let input = core.sessions.session_status(CHAT).unwrap().awaiting_input.unwrap();
+    assert_eq!(input.questions[0].question, "Which one?");
+    let signal = tokio::time::timeout(Duration::from_secs(5), signals.recv()).await.unwrap().unwrap();
+    assert!(matches!(signal, mast_engine::sessions::WorkerSignal::Input { input: observed, .. } if observed == input));
 
     // A viewer answers through the durable command queue.
     let request_id = entries(&core)
@@ -1177,6 +1183,7 @@ async fn respond_input_resolves_pending_question() {
         "session to settle idle",
     )
     .await;
+    assert!(core.sessions.session_status(CHAT).unwrap().awaiting_input.is_none());
 }
 
 /// Resilience: a RespondInput whose id matches no pending request is REJECTED

@@ -301,6 +301,8 @@ pub(super) fn space(id: &str, device_id: &str, path: &str) -> Space {
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
+        awaiting_input: None,
+        last_turn_tool_failures: None,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,

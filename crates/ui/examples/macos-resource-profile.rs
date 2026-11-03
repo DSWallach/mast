@@ -150,6 +150,8 @@ fn main() -> anyhow::Result<()> {
                             .any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming));
                         state.apply_sessions(vec![mast_proto::Session {
                             last_completed_turn: None,
+                            awaiting_input: None,
+                            last_turn_tool_failures: None,
                             chat_id: "profile".into(),
                             device_id: "local".into(),
                             status: if streaming {

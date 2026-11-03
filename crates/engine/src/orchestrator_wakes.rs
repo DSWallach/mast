@@ -233,6 +233,23 @@ impl OrchestratorWakes {
     }
 
     fn spawn_watchers(&self) {
+        let mut signals = self.inner.sessions.watch_worker_signals();
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Ok(chats) = this.inner.workspace.read_chats() {
+                this.ingest_chats(&chats).await;
+            }
+            loop {
+                tokio::select! {
+                    _ = this.inner.cancel.cancelled() => break,
+                    signal = signals.recv() => match signal {
+                        Ok(signal) => this.ingest_worker_signal(signal).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => tracing::warn!(n, "worker wake signals dropped"),
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        });
         let this = self.clone();
         tokio::spawn(async move {
             let mut rx = this.inner.sessions.watch_sessions();
@@ -362,6 +379,43 @@ impl OrchestratorWakes {
 
     // ── ingestion (event driven) ──────────────────────────────────────────
 
+    /// Consume the input bridge and end-of-turn signals, without relying on a
+    /// coalescing session watch to observe every prompt or completed turn.
+    pub async fn ingest_worker_signal(&self, signal: crate::sessions::WorkerSignal) {
+        use crate::sessions::WorkerSignal;
+        // The worker can ask before the asynchronous chat watcher catches up.
+        if let Ok(chats) = self.inner.workspace.read_chats() {
+            self.ingest_chats(&chats).await;
+        }
+        let now = self.now();
+        let (worker, kind, detail, key) = match signal {
+            WorkerSignal::Input { chat_id, input } => {
+                let question = input.questions.iter().map(|q| q.question.as_str()).collect::<Vec<_>>().join("; ");
+                let approval = input.questions.iter().any(|q| { let header = q.header.to_lowercase(); header.contains("approval") || header.contains("permission") });
+                let kind = if approval { "approval" } else { "input" };
+                let detail = format!("is waiting for {kind}: {}", truncate(&question, 300));
+                let key = format!("input:{}:{}", chat_id, input.request_id);
+                (chat_id, WakeEventKind::AwaitingInput, detail, key)
+            }
+            WorkerSignal::ToolFailures { chat_id, failures } => {
+                let detail = format!("turn ended after {} failed Mast tool call{} ({})", failures.count, if failures.count == 1 { "" } else { "s" }, failures.tools.join(", "));
+                let key = format!("tool-fail:{}:{}", chat_id, uuid::Uuid::new_v4());
+                (chat_id, WakeEventKind::ToolCallsFailed, detail, key)
+            }
+        };
+        let mut recorded = HashSet::new();
+        {
+            let mut state = lock(&self.inner.state);
+            let line = format!("{} — {detail}", label(&state, &worker));
+            for orch in parents_of(&state, &worker) {
+                let event = make_event(&mut state, &worker, kind, key.clone(), &line, now);
+                state.core.record(&orch, event, now);
+                recorded.insert(orch);
+            }
+        }
+        self.after_ingest(recorded).await;
+    }
+
     /// Session transitions of workers (errored, turn finished) and of
     /// orchestrators (turn start/end re-evaluates held events).
     pub async fn ingest_sessions(&self, sessions: &[Session]) {
@@ -389,13 +443,11 @@ impl OrchestratorWakes {
                 let kind = match (is_in_flight(prev), session.status) {
                     (_, s) if s == prev => continue,
                     (_, SessionStatus::Errored) => WakeEventKind::Errored,
-                    (_, SessionStatus::AwaitingInput) => WakeEventKind::AwaitingInput,
                     (true, SessionStatus::Idle) => WakeEventKind::TurnFinished,
                     _ => continue,
                 };
                 let summary = match kind {
                     WakeEventKind::Errored => "errored (read_chat for details)",
-                    WakeEventKind::AwaitingInput => "is waiting for input (get_chat for details)",
                     _ => "finished a turn",
                 };
                 let key = format!(
@@ -758,6 +810,7 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::PrMerged => "prm",
         WakeEventKind::WorkerReport => "rep",
         WakeEventKind::AwaitingInput => "input",
+        WakeEventKind::ToolCallsFailed => "tool-fail",
     }
 }
 

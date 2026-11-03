@@ -196,6 +196,8 @@ impl Rig {
 fn session(chat: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
+        awaiting_input: None,
+        last_turn_tool_failures: None,
         chat_id: chat.into(),
         device_id: "d".into(),
         status,
@@ -429,15 +431,24 @@ async fn settings_default_and_gate_event_kinds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn awaiting_input_wakes_the_parent_by_default() {
+async fn awaiting_input_and_failed_tool_calls_wake_the_parent() {
+    use mast_engine::sessions::WorkerSignal;
     let rig = Rig::new().await;
-    rig.wakes
-        .ingest_sessions(&[session("w1", SessionStatus::AwaitingInput)])
-        .await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input {
+        chat_id: "w1".into(),
+        input: mast_proto::AwaitingInput { request_id: "request-1".into(), questions: vec![mast_proto::UserInputQuestion {
+            id: "q1".into(), header: "Approval".into(), question: "Run cargo clean?".into(), options: vec![], multi_select: false,
+        }] },
+    }).await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::ToolFailures {
+        chat_id: "w2".into(), failures: mast_proto::ToolFailures { count: 3, tools: vec!["bind_chat_worktree".into()] },
+    }).await;
     let held = rig.wakes.status(ORCH).held;
-    assert_eq!(held.len(), 1);
+    assert_eq!(held.len(), 2);
     assert_eq!(held[0].kind, WakeEventKind::AwaitingInput);
-    assert!(held[0].summary.contains("waiting for input"));
+    assert!(held[0].summary.contains("Run cargo clean?"));
+    assert_eq!(held[1].kind, WakeEventKind::ToolCallsFailed);
+    assert!(held[1].summary.contains("3 failed Mast tool calls (bind_chat_worktree)"));
     rig.core.shutdown().await;
 }
 

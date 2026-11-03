@@ -137,7 +137,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. When a worker you started is finished (`archivable: true` in list_chats / get_chat), archive it with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
+            description: "Create a chat in a project (or project-less on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. When a worker you started is finished (`archivable: true` in list_chats / get_chat), archive it with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -736,6 +736,8 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "archived": chat.archived,
         "parentChatId": chat.parent_chat_id,
         "status": status,
+        "awaitingInput": session.as_ref().and_then(|s| s.awaiting_input.as_ref()),
+        "lastTurnToolFailures": session.as_ref().and_then(|s| s.last_turn_tool_failures.as_ref()),
         "statusAgeSecs": status_age,
         "lastMessageAt": chat.last_message_at,
         "lastMessagePreview": chat.last_message_preview,
@@ -2035,6 +2037,8 @@ impl Tools {
         let mut turn = json!({
             "outcome": outcome,
             "status": status,
+        "awaitingInput": session.as_ref().and_then(|s| s.awaiting_input.as_ref()),
+        "lastTurnToolFailures": session.as_ref().and_then(|s| s.last_turn_tool_failures.as_ref()),
             "timedOut": outcome == TurnOutcome::TimedOut,
             "pendingInput": pending_input,
             "replies": replies,
@@ -2297,7 +2301,9 @@ mod tests {
                 }
                 methods::WATCH_SESSIONS if self.working => stream(json!([{
                     "chatId": "chat-alpha-1", "deviceId": "dev-local", "status": "working",
-                    "startedAt": "2026-11-02T10:00:00Z", "updatedAt": "2026-11-02T10:00:05Z"
+                    "startedAt": "2026-11-02T10:00:00Z", "updatedAt": "2026-11-02T10:00:05Z",
+                    "awaitingInput": { "requestId": "request-1", "questions": [{ "id": "q", "header": "Approval", "question": "Run build?", "options": [], "multiSelect": false }] },
+                    "lastTurnToolFailures": { "count": 2, "tools": ["bind_chat_worktree"] }
                 }])),
                 methods::WATCH_SESSIONS => stream(json!([])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
@@ -2680,6 +2686,19 @@ mod tests {
         );
         assert_eq!(props["themes"]["items"]["enum"], json!(["light", "dark"]));
         assert!(props.get("viewport").is_some() && props.get("theme").is_some());
+    }
+
+    #[tokio::test]
+    async fn chat_summaries_include_worker_blockers() {
+        let world = Arc::new(World { working: true, ..World::default() });
+        let tools = tools(world, None);
+        let listed = tools.call("list_chats", json!({})).await.unwrap();
+        let alpha = listed["chats"].as_array().unwrap().iter().find(|c| c["id"] == "chat-alpha-1").unwrap();
+        assert_eq!(alpha["awaitingInput"]["questions"][0]["question"], "Run build?");
+        assert_eq!(alpha["lastTurnToolFailures"]["count"], 2);
+        let chat = tools.call("get_chat", json!({ "chat": "alpha" })).await.unwrap();
+        assert_eq!(chat["awaitingInput"], alpha["awaitingInput"]);
+        assert_eq!(chat["lastTurnToolFailures"], alpha["lastTurnToolFailures"]);
     }
 
     #[tokio::test]

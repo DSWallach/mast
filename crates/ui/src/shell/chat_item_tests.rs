@@ -1089,6 +1089,8 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
                 if i == 0 {
                     state.sessions.push(mast_proto::Session {
                         last_completed_turn: None,
+                        awaiting_input: None,
+                        last_turn_tool_failures: None,
                         chat_id: id.clone(),
                         device_id: "device".into(),
                         status: mast_proto::SessionStatus::Working,
@@ -1397,7 +1399,7 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    for key in ["enabled", "required-actions", "errors", "worker-reports", "turn-finished", "prs"] {
+    for key in ["enabled", "required-actions", "errors", "worker-reports", "awaiting-input", "tool-calls-failed", "turn-finished", "prs"] {
         let selector: &'static str = Box::leak(format!("team-wake-toggle-{key}").into_boxed_str());
         assert!(has(vcx, selector), "{selector}");
     }
@@ -1419,6 +1421,26 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
             ["w-1 errored (e1)", "w-1 errored (e2)"]
         );
     });
+}
+
+#[gpui::test]
+fn team_rows_mark_waiting_and_failed_workers(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 3);
+    let state = shell.read_with(vcx, |shell, _| shell.state.clone());
+    state.update(vcx, |state, _| {
+        let failed = state.sessions.iter_mut().find(|s| s.chat_id == "w-0").unwrap();
+        failed.last_turn_tool_failures = Some(mast_proto::ToolFailures { count: 2, tools: vec!["bind_chat_worktree".into()] });
+        let mut waiting = state.sessions.iter().find(|s| s.chat_id == "w-0").unwrap().clone();
+        waiting.chat_id = "w-1".into();
+        waiting.last_turn_tool_failures = None;
+        waiting.status = mast_proto::SessionStatus::AwaitingInput;
+        state.sessions.push(waiting);
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "team-worker-stalled-w-0"));
+    assert!(has(vcx, "team-worker-stalled-w-1"));
 }
 
 #[gpui::test]

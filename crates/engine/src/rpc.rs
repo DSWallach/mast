@@ -3300,27 +3300,29 @@ impl RpcService for EngineRpc {
             mast_proto::agent_tools::TOOL_CALL_METHOD => {
                 let p: mast_proto::agent_tools::AgentToolCallParams = parse_params(params)?;
                 let service = self.agent_tools.clone();
-                if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
-                    // A child Chat started for a work item: authorize and
-                    // shape it as the caller's token, then run the UI's
-                    // Start Chat workflow (async, so not in `call`).
-                    let launch =
-                        tokio::task::spawn_blocking(move || service.prepare_child_launch(&p))
-                            .await
-                            .map_err(|e| RpcError::Failed(e.to_string()))?
-                            .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
-                    let reply = self
-                        .launch
-                        .create_chat_for_work_item(&launch)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
-                    return RpcReply::value(&reply);
+                // Resolve the grant before dispatch; even a refused authorization is
+                // attributable when the per-run token itself is still valid.
+                let grant = service.tokens().authenticate(&p.token).ok();
+                let tool = p.tool.clone();
+                let result: Result<serde_json::Value, RpcError> = if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
+                    match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p)).await {
+                        Ok(Ok(launch)) => self.launch.create_chat_for_work_item(&launch).await
+                            .map_err(|e| RpcError::Failed(e.to_wire_message()))
+                            .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string()))),
+                        Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
+                        Err(e) => Err(RpcError::Failed(e.to_string())),
+                    }
+                } else {
+                    match tokio::task::spawn_blocking(move || service.call(&p)).await {
+                        Ok(Ok(reply)) => Ok(reply),
+                        Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
+                        Err(e) => Err(RpcError::Failed(e.to_string())),
+                    }
+                };
+                if result.is_err() && let Some(grant) = grant {
+                    self.sessions.note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool);
                 }
-                let reply = tokio::task::spawn_blocking(move || service.call(&p))
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
-                RpcReply::value(&reply)
+                RpcReply::value(&result?)
             }
             methods::VALIDATE_EXECUTION_CONFIGURATION => {
                 let p: mast_proto::ValidateExecutionConfigurationParams = parse_params(params)?;
