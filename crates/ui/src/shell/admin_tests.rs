@@ -9,7 +9,9 @@ use super::chat_item_tests::{draw, has, mount};
 use super::*;
 use crate::admin::tests::Wire;
 use crate::admin::{DurationChoice, now_ms};
-use crate::work_outline::outline_view::context_menu::{MenuAction, MenuKind, OutlineContextMenu};
+use crate::work_outline::outline_view::context_menu::{
+    MenuAction, MenuEntry, MenuKind, OutlineContextMenu,
+};
 use crate::work_outline::store::fixture_ids::*;
 
 fn grant_for(chat: &str, expires_at_ms: Option<i64>) -> AdminGrant {
@@ -218,4 +220,76 @@ fn the_outline_chat_menu_offers_grant_then_renew_and_revoke(cx: &mut TestAppCont
             ("revoke-admin", "Revoke admin".to_owned())
         ]
     );
+}
+
+/// A compact row's Item menu, as the builder leaves it: the one Chat's
+/// Archive entry is what the Shell finds the Chat by.
+fn compact_item_admin_entries(
+    shell: &Entity<Shell>,
+    vcx: &mut VisualTestContext,
+) -> Vec<(&'static str, String)> {
+    shell.read_with(vcx, |shell, cx| {
+        let mut menu = OutlineContextMenu {
+            kind: MenuKind::Item,
+            row_key: Some("row".into()),
+            space_id: Some("s1".into()),
+            item_id: Some("i1".into()),
+            chat_id: None,
+            entries: vec![
+                MenuEntry::new("open-chat", "Open Chat", "", MenuAction::AddInstruction),
+                MenuEntry::new(
+                    "archive-chat",
+                    "Archive Chat",
+                    "",
+                    MenuAction::ArchiveChat(CHAT_API.into()),
+                ),
+                MenuEntry::new("copy-path", "Copy Path", "", MenuAction::CopyPath("p".into())),
+            ],
+            status_entries: Vec::new(),
+        };
+        shell.add_sidebar_chat_entries(&mut menu, cx);
+        let ids: Vec<_> = menu.entries.iter().map(|e| e.id).collect();
+        // Spliced right after the Chat's Archive; the rest is unchanged.
+        if ids.contains(&"grant-admin") {
+            assert_eq!(&ids[..3], ["open-chat", "archive-chat", "grant-admin"]);
+            assert_eq!(*ids.last().unwrap(), "copy-path");
+        }
+        menu.entries
+            .into_iter()
+            .filter(|e| matches!(e.action, MenuAction::GrantAdmin(_) | MenuAction::RevokeAdmin(_)))
+            .map(|e| (e.id, e.label))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn a_compact_row_menu_offers_grant_then_renew_and_revoke(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    prepare(&shell, vcx, None);
+    assert_eq!(
+        compact_item_admin_entries(&shell, vcx),
+        [("grant-admin", "Grant admin for this Space\u{2026}".to_owned())]
+    );
+    set_grants(&shell, vcx, vec![grant_for(CHAT_API, None)]);
+    assert_eq!(
+        compact_item_admin_entries(&shell, vcx),
+        [
+            ("grant-admin", "Renew admin\u{2026}".to_owned()),
+            ("revoke-admin", "Revoke admin".to_owned())
+        ]
+    );
+}
+
+#[gpui::test]
+fn a_compact_row_chat_without_a_space_gets_no_admin_entries(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    prepare(&shell, vcx, None);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            for chat in &mut state.chats {
+                chat.space_id = None;
+            }
+        });
+    });
+    assert!(compact_item_admin_entries(&shell, vcx).is_empty());
 }

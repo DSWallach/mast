@@ -141,9 +141,62 @@ impl Shell {
         self.open_work_outline_menu(menu, position, outline.downgrade(), focus, true, cx);
     }
 
+    /// Grant/Renew/Revoke admin for a Chat in a Space (none otherwise).
+    fn admin_menu_entries(
+        &self,
+        chat: &mast_proto::Chat,
+        chat_id: &str,
+        cx: &App,
+    ) -> Vec<MenuEntry> {
+        let mut entries = Vec::new();
+        if chat.space_id.is_none() {
+            return entries;
+        }
+        let is_admin = self.chat_is_admin(chat_id, cx);
+        entries.push(
+            MenuEntry::new(
+                "grant-admin",
+                crate::admin::grant_entry_label(is_admin),
+                icons::SHIELD,
+                MenuAction::GrantAdmin(chat_id.to_owned()),
+            )
+            .separated(),
+        );
+        if is_admin {
+            entries.push(MenuEntry::new(
+                "revoke-admin",
+                crate::admin::REVOKE_LABEL,
+                icons::SHIELD,
+                MenuAction::RevokeAdmin(chat_id.to_owned()),
+            ));
+        }
+        entries
+    }
+
+    /// A compact row's Item menu carries its one Chat's entries (spliced in
+    /// by the menu builder); the admin ones follow the Chat's Archive.
+    fn add_compact_chat_admin_entries(&self, menu: &mut OutlineContextMenu, cx: &App) {
+        let Some((at, chat_id)) = menu.entries.iter().enumerate().find_map(|(i, e)| match &e.action {
+            MenuAction::ArchiveChat(id) => Some((i, id.clone())),
+            _ => None,
+        }) else {
+            return;
+        };
+        let state = self.state.read(cx);
+        let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else {
+            return;
+        };
+        let entries = self.admin_menu_entries(chat, &chat_id, cx);
+        menu.entries.splice(at + 1..at + 1, entries);
+    }
+
     /// The sidebar Chat menu's own actions, reused on Chat rows (only for
     /// Chats this device knows), and Apply's host blocker.
     pub(super) fn add_sidebar_chat_entries(&self, menu: &mut OutlineContextMenu, cx: &App) {
+        if menu.kind == MenuKind::Item {
+            self.add_compact_chat_admin_entries(menu, cx);
+            return;
+        }
         if menu.kind != MenuKind::Chat {
             return;
         }
@@ -162,26 +215,8 @@ impl Shell {
             return;
         };
         let closeable = crate::chat_closeout::is_closeout_candidate(chat.cwd.as_deref());
-        if chat.space_id.is_some() {
-            let is_admin = self.chat_is_admin(&chat_id, cx);
-            menu.entries.push(
-                MenuEntry::new(
-                    "grant-admin",
-                    crate::admin::grant_entry_label(is_admin),
-                    icons::SHIELD,
-                    MenuAction::GrantAdmin(chat_id.clone()),
-                )
-                .separated(),
-            );
-            if is_admin {
-                menu.entries.push(MenuEntry::new(
-                    "revoke-admin",
-                    crate::admin::REVOKE_LABEL,
-                    icons::SHIELD,
-                    MenuAction::RevokeAdmin(chat_id.clone()),
-                ));
-            }
-        }
+        menu.entries
+            .extend(self.admin_menu_entries(chat, &chat_id, cx));
         let pinned = self.active_sidebar_pins(cx).contains(&chat_id);
         menu.entries.push(
             MenuEntry::new(
