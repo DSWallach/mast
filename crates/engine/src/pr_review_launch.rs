@@ -522,13 +522,13 @@ pub fn seeded_prompt(
 ) -> String {
     match action {
         PrReviewAction::CodeReview if self_review => format!(
-            "/code-review {url} — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Report findings to me here. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub."
+            "/code-review {url} — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub."
         ),
         PrReviewAction::FixCi => format!(
             "/fix-ci {url} — my PR. Its branch `{branch}` is checked out at {location}; do all the work there."
         ),
         PrReviewAction::CodeReview => format!(
-            "/code-review {url} — someone else's PR; review it as a reviewer. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Report findings to me here and don't post anything to GitHub unless I ask."
+            "/code-review {url} — someone else's PR; review it as a reviewer. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Don't post anything to GitHub unless I ask."
         ),
     }
 }

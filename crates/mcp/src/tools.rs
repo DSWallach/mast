@@ -466,6 +466,19 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 }
             }),
         },
+        ToolDef {
+            name: agent_tool_names::REVIEW_PUBLISH,
+            description: "Publish a PR review sidecar scoped to this chat. Mast validates every step hunk and anchor against the actual diff at headSha and reports valid hunks on errors. review is mast.review/v1: schema, pr {repo, number, headSha, baseSha}, summary (3–8 lines), optional verdictHint, steps [{id, title, file, hunks [{newStart, newEnd}], what, why, risk (none|low|med|high), riskNote, tags, optional group}], highlights [{kind (risk|missing-tests|behaviour-change|security|migration|perf|style), severity, text, anchor}], questions, suggestedComments [{anchor, body, severity, optional suggestion}]. An anchor is {file, side (left|right), startLine, endLine}. Anchors refer to the diff at headSha; Mast stores their hunk hashes. Verdict hints and suggested comments are never posted.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prUrl": { "type": "string", "description": "Pull request URL." },
+                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA." },
+                    "review": { "type": "object", "description": "The mast.review/v1 object described above." }
+                },
+                "required": ["prUrl", "headSha", "review"]
+            }),
+        },
     ]
 }
 
