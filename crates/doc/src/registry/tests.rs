@@ -301,6 +301,8 @@ pub(super) fn space(id: &str, device_id: &str, path: &str) -> Space {
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
+        awaiting_input: None,
+        last_turn_tool_failures: None,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,
@@ -1336,6 +1338,8 @@ fn completion_marker_replicates_and_survives_next_turn() {
     let mut seq = 0;
     let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
     row.last_completed_turn = Some("turn-one".into());
+    row.awaiting_input = Some(mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion { id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false }] });
+    row.last_turn_tool_failures = Some(mast_proto::ToolFailures { count: 2, tools: vec!["bind_chat_worktree".into()] });
     source.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);

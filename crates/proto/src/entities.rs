@@ -436,6 +436,22 @@ pub enum SessionStatus {
     Errored,
 }
 
+/// Prompt currently blocking a worker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwaitingInput {
+    pub request_id: String,
+    pub questions: Vec<crate::UserInputQuestion>,
+}
+
+/// Mast agent-tool calls that failed during a completed turn.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolFailures {
+    pub count: u64,
+    pub tools: Vec<String>,
+}
+
 /// Live run status for a chat — drives the Working indicator and sidebar status dots.
 /// Staleness-checked client-side against `updated_at` so a crashed backend never shows
 /// an eternal "Working".
@@ -447,6 +463,10 @@ pub struct Session {
     /// Interrupts, failures and liveness expiry never advance this marker.
     #[serde(default)]
     pub last_completed_turn: Option<String>,
+    #[serde(default)]
+    pub awaiting_input: Option<AwaitingInput>,
+    #[serde(default)]
+    pub last_turn_tool_failures: Option<ToolFailures>,
     pub chat_id: String,
     pub device_id: String,
     pub status: SessionStatus,

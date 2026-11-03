@@ -26,11 +26,13 @@ pub enum RunState {
     Working,
     /// Turn over, but background work (a shell, a subagent) is still going.
     IdleBackground,
+    /// An idle worker ended its last turn with failed Mast tool calls.
+    ToolFailed,
 }
 
 impl RunState {
     pub fn needs_you(self) -> bool {
-        matches!(self, Self::Awaiting | Self::Errored)
+        matches!(self, Self::Awaiting | Self::Errored | Self::ToolFailed)
     }
 
     pub fn label(self) -> &'static str {
@@ -39,6 +41,7 @@ impl RunState {
             Self::Errored => "errored",
             Self::Working => "working",
             Self::IdleBackground => "idle",
+            Self::ToolFailed => "tool calls failed",
         }
     }
 }

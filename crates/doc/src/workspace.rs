@@ -851,6 +851,10 @@ impl From<RawChat> for Chat {
 pub(crate) struct RawSession {
     #[serde(default)]
     last_completed_turn: Option<String>,
+    #[serde(default)]
+    awaiting_input: Option<mast_proto::AwaitingInput>,
+    #[serde(default)]
+    last_turn_tool_failures: Option<mast_proto::ToolFailures>,
     chat_id: String,
     device_id: String,
     status: SessionStatus,
@@ -864,6 +868,8 @@ impl From<RawSession> for Session {
     fn from(raw: RawSession) -> Self {
         Session {
             last_completed_turn: raw.last_completed_turn,
+            awaiting_input: raw.awaiting_input,
+            last_turn_tool_failures: raw.last_turn_tool_failures,
             chat_id: raw.chat_id,
             device_id: raw.device_id,
             status: raw.status,
@@ -976,6 +982,8 @@ mod tests {
     fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         Session {
             last_completed_turn: None,
+            awaiting_input: None,
+            last_turn_tool_failures: None,
             chat_id: chat_id.into(),
             device_id: device_id.into(),
             status,

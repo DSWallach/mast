@@ -26,10 +26,14 @@ pub enum WakeEventKind {
     PrMerged,
     /// The worker sent a report to its parent chat (`report_to_parent`).
     WorkerReport,
+    /// A worker is waiting for the user to answer a prompt.
+    AwaitingInput,
+    /// A completed worker turn had failed Mast tool calls.
+    ToolCallsFailed,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 7] = [
+    pub const ALL: [WakeEventKind; 9] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -37,12 +41,14 @@ impl WakeEventKind {
         Self::PrOpened,
         Self::PrMerged,
         Self::WorkerReport,
+        Self::AwaitingInput,
+        Self::ToolCallsFailed,
     ];
 }
 
 /// Per-orchestrator-chat wake settings. Required Actions (raised and
-/// resolved), errors and worker reports are on by default; turn-finished and
-/// PR events are off by default.
+/// resolved), errors, worker reports, awaiting input and tool failures are on
+/// by default; turn-finished and PR events are off by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WakeSettings {
@@ -58,6 +64,10 @@ pub struct WakeSettings {
     pub prs: bool,
     /// A worker sent a report to this chat (`report_to_parent`).
     pub worker_reports: bool,
+    /// A worker is waiting for a question or approval.
+    pub awaiting_input: bool,
+    /// Failed Mast agent-tool calls in a worker turn.
+    pub tool_calls_failed: bool,
 }
 
 impl Default for WakeSettings {
@@ -69,6 +79,8 @@ impl Default for WakeSettings {
             turn_finished: false,
             prs: false,
             worker_reports: true,
+            awaiting_input: true,
+            tool_calls_failed: true,
         }
     }
 }
@@ -85,6 +97,8 @@ impl WakeSettings {
                 WakeEventKind::TurnFinished => self.turn_finished,
                 WakeEventKind::PrOpened | WakeEventKind::PrMerged => self.prs,
                 WakeEventKind::WorkerReport => self.worker_reports,
+                WakeEventKind::AwaitingInput => self.awaiting_input,
+                WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
             }
     }
 }
@@ -221,4 +235,24 @@ pub fn cap_worker_report(text: &str) -> (String, bool) {
         ),
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_enable_worker_blocker_wakes_and_allow_disabling_each() {
+        let mut settings: WakeSettings = serde_json::from_str(r#"{"enabled":true,"errors":false}"#).unwrap();
+        assert!(settings.wakes_for(WakeEventKind::AwaitingInput));
+        assert!(settings.wakes_for(WakeEventKind::ToolCallsFailed));
+        settings.awaiting_input = false;
+        assert!(!settings.wakes_for(WakeEventKind::AwaitingInput));
+        assert!(settings.wakes_for(WakeEventKind::ToolCallsFailed));
+        settings.tool_calls_failed = false;
+        assert!(!settings.wakes_for(WakeEventKind::ToolCallsFailed));
+        let encoded = serde_json::to_value(settings).unwrap();
+        assert_eq!(encoded["awaitingInput"], false);
+        assert_eq!(encoded["toolCallsFailed"], false);
+    }
 }

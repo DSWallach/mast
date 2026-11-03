@@ -12029,6 +12029,8 @@ mod tests {
                     this.state.update(cx, |state, _| {
                         state.sessions.push(mast_proto::Session {
                             last_completed_turn: None,
+                            awaiting_input: None,
+                            last_turn_tool_failures: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: mast_proto::SessionStatus::Working,

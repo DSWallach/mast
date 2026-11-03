@@ -77,12 +77,13 @@ thread_local! {
     pub(super) static RELAUNCHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-fn run_state(indicator: crate::state::Indicator, background: u32) -> Option<RunState> {
+fn run_state(indicator: crate::state::Indicator, background: u32, failed: bool) -> Option<RunState> {
     use crate::state::Indicator;
     match indicator {
         Indicator::Working => Some(RunState::Working),
         Indicator::AwaitingInput => Some(RunState::Awaiting),
         Indicator::Errored => Some(RunState::Errored),
+        Indicator::None if failed => Some(RunState::ToolFailed),
         Indicator::None if background > 0 => Some(RunState::IdleBackground),
         Indicator::None => None,
     }
@@ -96,10 +97,11 @@ impl Shell {
         let mut inputs = Vec::new();
         for chat in state.chats.iter().filter(|chat| !chat.archived) {
             let background = 0; // not tracked at session level yet
-            let Some(run) = run_state(state.indicator_for(&chat.id, now), background) else {
+            let session = state.session_for(&chat.id);
+            let failed = session.is_some_and(|s| s.last_turn_tool_failures.is_some());
+            let Some(run) = run_state(state.indicator_for(&chat.id, now), background, failed) else {
                 continue;
             };
-            let session = state.session_for(&chat.id);
             let facts = self.chat_item_facts(&chat.id, cx);
             let item_path = facts
                 .as_ref()
@@ -963,7 +965,7 @@ impl Shell {
     ) -> AnyElement {
         let dot = match row.state {
             RunState::Awaiting => theme.warning,
-            RunState::Errored => theme.danger,
+            RunState::Errored | RunState::ToolFailed => theme.danger,
             RunState::Working => theme.busy,
             RunState::IdleBackground => theme.text_faint,
         };
@@ -979,6 +981,7 @@ impl Shell {
         };
         let chat_id = row.chat_id.clone();
         let pane_id = row.chat_id.clone();
+        let failed = self.state.read(cx).session_for(&row.chat_id).is_some_and(|s| s.last_turn_tool_failures.is_some());
         popover::menu_row_nav(theme, false, active, format!("running-row-{}", row.chat_id))
             .id(SharedString::from(format!("running-row-{}", row.chat_id)))
             .items_start()
@@ -1017,6 +1020,10 @@ impl Shell {
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .child(SharedString::from(row.title.clone())),
                             )
+                            .when(row.state == RunState::Awaiting || failed, |el| {
+                                let (label, color) = if row.state == RunState::Awaiting { ("waiting for input", theme.warning) } else { ("tool calls failed", theme.danger) };
+                                el.child(div().debug_selector({ let selector = format!("running-stalled-{}", row.chat_id); move || selector.clone() }).text_color(color).text_size(crate::typography::ui_rems(10.5)).child(label))
+                            })
                             .when(row.admin, |el| {
                                 el.child(
                                     div()
@@ -1191,6 +1198,8 @@ mod tests {
     fn session(id: &str, status: SessionStatus, mins_ago: i64) -> mast_proto::Session {
         mast_proto::Session {
             last_completed_turn: None,
+            awaiting_input: None,
+            last_turn_tool_failures: None,
             chat_id: id.into(),
             device_id: "d".into(),
             status,
@@ -1242,6 +1251,22 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
+    }
+
+    #[gpui::test]
+    fn popover_marks_waiting_and_idle_failed_workers(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, 2);
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        state.update(cx, |state, _| {
+            state.sessions[1].status = SessionStatus::Idle;
+            state.sessions[1].last_turn_tool_failures = Some(mast_proto::ToolFailures { count: 1, tools: vec!["bind_chat_worktree".into()] });
+        });
+        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        redraw(cx);
+        assert!(cx.debug_bounds("running-stalled-c0").is_some());
+        assert!(cx.debug_bounds("running-stalled-c1").is_some());
     }
 
     #[gpui::test]

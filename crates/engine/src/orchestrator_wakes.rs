@@ -233,6 +233,23 @@ impl OrchestratorWakes {
     }
 
     fn spawn_watchers(&self) {
+        let mut signals = self.inner.sessions.watch_worker_signals();
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Ok(chats) = this.inner.workspace.read_chats() {
+                this.ingest_chats(&chats).await;
+            }
+            loop {
+                tokio::select! {
+                    _ = this.inner.cancel.cancelled() => break,
+                    signal = signals.recv() => match signal {
+                        Ok(signal) => this.ingest_worker_signal(signal).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => tracing::warn!(n, "worker wake signals dropped"),
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        });
         let this = self.clone();
         tokio::spawn(async move {
             let mut rx = this.inner.sessions.watch_sessions();
@@ -261,7 +278,9 @@ impl OrchestratorWakes {
             let mut markers: HashMap<String, (u64, u64, bool)> = HashMap::new();
             loop {
                 if this
-                    .watch_ended(tokio::time::sleep(std::time::Duration::from_millis(500)).map(Ok::<(), ()>))
+                    .watch_ended(
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).map(Ok::<(), ()>),
+                    )
                     .await
                 {
                     break;
@@ -277,7 +296,10 @@ impl OrchestratorWakes {
                     let space_id = space.id.clone();
                     let Ok((marker, snapshot)) = tokio::task::spawn_blocking(move || {
                         let (marker, inputs) = workspace.work_outline_inputs_marked(&space_id);
-                        (marker, mast_doc::materialize_work_outline(&space_id, &inputs))
+                        (
+                            marker,
+                            mast_doc::materialize_work_outline(&space_id, &inputs),
+                        )
                     })
                     .await
                     else {
@@ -357,6 +379,58 @@ impl OrchestratorWakes {
 
     // ── ingestion (event driven) ──────────────────────────────────────────
 
+    /// Consume the input bridge and end-of-turn signals, without relying on a
+    /// coalescing session watch to observe every prompt or completed turn.
+    pub async fn ingest_worker_signal(&self, signal: crate::sessions::WorkerSignal) {
+        use crate::sessions::WorkerSignal;
+        // A newly assigned worker can ask before either workspace watcher
+        // catches up. Refresh its Space so project-destination orchestrators
+        // receive the event as well as its direct parent.
+        let worker = match &signal {
+            WorkerSignal::Input { chat_id, .. } | WorkerSignal::ToolFailures { chat_id, .. } => chat_id,
+        };
+        if let Ok(chats) = self.inner.workspace.read_chats() {
+            let space_id = chats.iter().find(|chat| &chat.id == worker).and_then(|chat| chat.space_id.clone());
+            self.ingest_chats(&chats).await;
+            if let Some(space_id) = space_id {
+                let workspace = self.inner.workspace.clone();
+                if let Ok(snapshot) = tokio::task::spawn_blocking(move || {
+                    let inputs = workspace.work_outline_inputs(&space_id);
+                    mast_doc::materialize_work_outline(&space_id, &inputs)
+                }).await {
+                    self.ingest_snapshot(&snapshot).await;
+                }
+            }
+        }
+        let now = self.now();
+        let (worker, kind, detail, key) = match signal {
+            WorkerSignal::Input { chat_id, input } => {
+                let question = input.questions.iter().map(|q| q.question.as_str()).collect::<Vec<_>>().join("; ");
+                let approval = input.questions.iter().any(|q| { let header = q.header.to_lowercase(); header.contains("approval") || header.contains("permission") });
+                let kind = if approval { "approval" } else { "input" };
+                let detail = format!("is waiting for {kind}: {}", truncate(&question, 300));
+                let key = format!("input:{}:{}", chat_id, input.request_id);
+                (chat_id, WakeEventKind::AwaitingInput, detail, key)
+            }
+            WorkerSignal::ToolFailures { chat_id, failures } => {
+                let detail = format!("turn ended after {} failed Mast tool call{} ({})", failures.count, if failures.count == 1 { "" } else { "s" }, failures.tools.join(", "));
+                let key = format!("tool-fail:{}:{}", chat_id, uuid::Uuid::new_v4());
+                (chat_id, WakeEventKind::ToolCallsFailed, detail, key)
+            }
+        };
+        let mut recorded = HashSet::new();
+        {
+            let mut state = lock(&self.inner.state);
+            let line = format!("{} — {detail}", label(&state, &worker));
+            for orch in parents_of(&state, &worker) {
+                let event = make_event(&mut state, &worker, kind, key.clone(), &line, now);
+                state.core.record(&orch, event, now);
+                recorded.insert(orch);
+            }
+        }
+        self.after_ingest(recorded).await;
+    }
+
     /// Session transitions of workers (errored, turn finished) and of
     /// orchestrators (turn start/end re-evaluates held events).
     pub async fn ingest_sessions(&self, sessions: &[Session]) {
@@ -366,7 +440,9 @@ impl OrchestratorWakes {
             let mut state = lock(&self.inner.state);
             let seeded = state.sessions_seeded;
             for session in sessions {
-                let prev = state.statuses.insert(session.chat_id.clone(), session.status);
+                let prev = state
+                    .statuses
+                    .insert(session.chat_id.clone(), session.status);
                 let in_flight = matches!(
                     session.status,
                     SessionStatus::Working | SessionStatus::AwaitingInput
@@ -389,17 +465,16 @@ impl OrchestratorWakes {
                     WakeEventKind::Errored => "errored (read_chat for details)",
                     _ => "finished a turn",
                 };
-                let key = format!("{}:{}:{}", kind_tag(kind), session.chat_id, now / WAKE_WINDOW_MS);
+                let key = format!(
+                    "{}:{}:{}",
+                    kind_tag(kind),
+                    session.chat_id,
+                    now / WAKE_WINDOW_MS
+                );
                 let line = format!("{} — {summary}", label(&state, &session.chat_id));
                 for orch in parents_of(&state, &session.chat_id) {
-                    let event = make_event(
-                        &mut state,
-                        &session.chat_id,
-                        kind,
-                        key.clone(),
-                        &line,
-                        now,
-                    );
+                    let event =
+                        make_event(&mut state, &session.chat_id, kind, key.clone(), &line, now);
                     state.core.record(&orch, event, now);
                     recorded.insert(orch);
                 }
@@ -531,7 +606,14 @@ impl OrchestratorWakes {
                 truncate(first, 120)
             );
             let key = format!("rep:{from}:{}", report_hash(&report, now / WAKE_WINDOW_MS));
-            let mut event = make_event(&mut state, from, WakeEventKind::WorkerReport, key, &line, now);
+            let mut event = make_event(
+                &mut state,
+                from,
+                WakeEventKind::WorkerReport,
+                key,
+                &line,
+                now,
+            );
             event.report = Some(report);
             state.core.record(&parent_id, event, now);
         }
@@ -598,7 +680,11 @@ impl OrchestratorWakes {
                 };
                 let id8 = request.id.chars().take(8).collect::<String>();
                 let mut line = format!("{} — {text}", label(&state, &request.chat_id));
-                if let Some(pr) = state.chats.get(&request.chat_id).and_then(|c| c.pr_url.clone()) {
+                if let Some(pr) = state
+                    .chats
+                    .get(&request.chat_id)
+                    .and_then(|c| c.pr_url.clone())
+                {
                     line.push_str(&format!(" (PR {pr})"));
                 }
                 if kind == WakeEventKind::ActionRaised {
@@ -697,7 +783,11 @@ impl OrchestratorWakes {
         let now = self.now();
         {
             let mut state = lock(&self.inner.state);
-            if state.timers.get(orch).is_some_and(|&t| t > now && t <= at_ms) {
+            if state
+                .timers
+                .get(orch)
+                .is_some_and(|&t| t > now && t <= at_ms)
+            {
                 return; // an earlier timer re-evaluates (and re-arms) first
             }
             state.timers.insert(orch.to_owned(), at_ms);
@@ -719,7 +809,10 @@ impl OrchestratorWakes {
 }
 
 fn is_in_flight(status: SessionStatus) -> bool {
-    matches!(status, SessionStatus::Working | SessionStatus::AwaitingInput)
+    matches!(
+        status,
+        SessionStatus::Working | SessionStatus::AwaitingInput
+    )
 }
 
 fn kind_tag(kind: WakeEventKind) -> &'static str {
@@ -731,6 +824,8 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::PrOpened => "pr",
         WakeEventKind::PrMerged => "prm",
         WakeEventKind::WorkerReport => "rep",
+        WakeEventKind::AwaitingInput => "input",
+        WakeEventKind::ToolCallsFailed => "tool-fail",
     }
 }
 
@@ -872,9 +967,6 @@ mod firm_link_tests {
             firm_link(Some(&id), Some(ChatLinkSource::Manual)),
             Some(id.clone())
         );
-        assert_eq!(
-            firm_link(Some(&id), Some(ChatLinkSource::Branch)),
-            Some(id)
-        );
+        assert_eq!(firm_link(Some(&id), Some(ChatLinkSource::Branch)), Some(id));
     }
 }

@@ -2070,7 +2070,8 @@ impl SubtreeWalk<'_> {
                 omitted += 1;
                 continue;
             }
-            let status = match self.sessions.and_then(|s| s.session_status(chat_id)) {
+            let session = self.sessions.and_then(|s| s.session_status(chat_id));
+            let status = match &session {
                 Some(session) => match session.status {
                     mast_proto::SessionStatus::Working => "working",
                     mast_proto::SessionStatus::AwaitingInput => "awaitingInput",
@@ -2083,6 +2084,8 @@ impl SubtreeWalk<'_> {
                 "id": chat.id,
                 "title": chat.title,
                 "status": status,
+                "awaitingInput": session.as_ref().and_then(|s| s.awaiting_input.as_ref()),
+                "lastTurnToolFailures": session.as_ref().and_then(|s| s.last_turn_tool_failures.as_ref()),
                 "lastMessageAt": chat.last_message_at,
             });
             if chat.archived {

@@ -299,6 +299,13 @@ impl Shell {
         let color = Self::state_color(theme, worker.state);
         let open_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
+        let stalled = self.state.read(cx).session_for(&id).and_then(|session| {
+            if session.status == mast_proto::SessionStatus::AwaitingInput {
+                Some(("waiting for input".to_owned(), theme.warning))
+            } else {
+                session.last_turn_tool_failures.as_ref().map(|failure| (format!("{} tool calls failed", failure.count), theme.danger))
+            }
+        });
         let mut row = div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
@@ -329,6 +336,10 @@ impl Shell {
                             .text_color(theme.text)
                             .child(SharedString::from(worker.title.clone())),
                     )
+                    .children(stalled.map(|(label, color)| {
+                        div().debug_selector({ let selector = format!("{prefix}-stalled-{id}"); move || selector.clone() })
+                            .flex_none().text_size(crate::typography::ui_rems(10.5)).text_color(color).child(SharedString::from(label))
+                    }))
                     .children((!unseen.is_empty()).then(|| {
                         let tip = SharedString::from(format!(
                             "Unseen by the orchestrator:\n{}",

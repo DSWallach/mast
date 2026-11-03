@@ -340,6 +340,28 @@ async fn space_chat_runs_get_a_run_scoped_token_and_projectless_runs_get_none() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn refused_tool_calls_are_recorded_on_the_completed_turn() {
+    let rig = rig().await;
+    rig.core.doc_host.queue_command(CHAT, run_command("hello", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "run").await;
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[0].clone() else { panic!("missing tools") };
+    let token = &tools.env["MAST_AGENT_TOKEN"];
+    assert!(tool(&rig, token, "missing_tool", json!({})).await.is_err());
+    assert!(tool(&rig, token, "missing_tool", json!({})).await.is_err());
+    rig.harness.release.notify_one();
+    wait_for(|| rig.core.sessions.session_status(CHAT).is_some_and(|s| s.status == mast_proto::SessionStatus::Idle), "completed turn").await;
+    let session = rig.core.sessions.session_status(CHAT).unwrap();
+    let failures = session.last_turn_tool_failures.unwrap();
+    assert_eq!(failures.count, 2);
+    assert_eq!(failures.tools, ["missing_tool"]);
+    rig.core.doc_host.queue_command(CHAT, run_command("next", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "second run").await;
+    rig.harness.release.notify_one();
+    wait_for(|| rig.core.sessions.session_status(CHAT).is_some_and(|s| s.status == mast_proto::SessionStatus::Idle && s.last_turn_tool_failures.is_none()), "clean completed turn").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn forged_or_absent_tokens_reach_no_tool() {
     let rig = rig().await;
     let lease = rig
@@ -2076,6 +2098,26 @@ async fn project_rig(rig: &Rig) -> ProjectRig {
         other_tickets,
         bystander,
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_destination_worker_prompt_wakes_without_watcher_delay() {
+    let rig = rig().await;
+    let project = project_rig(&rig).await;
+    assign_chat(&rig, "wake-orchestrator", CHAT, &project.planning).await;
+    assign_chat(&rig, "wake-worker", OTHER_CHAT, &project.ticket).await;
+    let wakes = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(), None, Arc::new(|| 1_000_000),
+    );
+    wakes.ingest_worker_signal(mast_engine::sessions::WorkerSignal::Input {
+        chat_id: OTHER_CHAT.into(), input: mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion {
+            id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false,
+        }] },
+    }).await;
+    let held = wakes.status(CHAT).held;
+    assert_eq!(held.len(), 1);
+    assert!(held[0].summary.contains("waiting for approval: Run build?"));
+    rig.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -188,6 +188,8 @@ mod status_light_tests {
         state.update(cx, |state, _| {
             state.sessions = vec![mast_proto::Session {
                 last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
                 chat_id: "c1".into(),
                 device_id: "d".into(),
                 status: SessionStatus::Errored,

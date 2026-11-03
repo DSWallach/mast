@@ -157,6 +157,8 @@ fn streaming_one_chat_among_many_notifies_few_views(cx: &mut TestAppContext) {
         state.update(cx, |state, cx| {
             state.sessions = vec![mast_proto::Session {
                 last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
                 chat_id: "c1".into(),
                 device_id: "local".into(),
                 status: mast_proto::SessionStatus::Working,
