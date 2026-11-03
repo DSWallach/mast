@@ -817,6 +817,8 @@ pub mod agent_tools {
         pub const ARTIFACT_PUBLISH: &str = "artifact_publish";
         /// Publish a validated PR review sidecar for the calling Chat.
         pub const REVIEW_PUBLISH: &str = "review_publish";
+        /// Read the calling Chat's published review.
+        pub const REVIEW_GET: &str = "review_get";
         /// The pinned plan of the Chat's work item (or of the Chat).
         pub const ARTIFACT_GET_PLAN: &str = "artifact_get_plan";
         /// Render an artifact offscreen in the headed app and return a
@@ -830,11 +832,12 @@ pub mod agent_tools {
         pub const BIND_CHAT_WORKTREE: &str = "bind_chat_worktree";
 
         /// The planning artifact tools, in catalog order.
-        pub const ARTIFACTS: [&str; 4] = [
+        pub const ARTIFACTS: [&str; 5] = [
             ARTIFACT_PUBLISH,
             ARTIFACT_GET_PLAN,
             ARTIFACT_RENDER_CHECK,
             REVIEW_PUBLISH,
+            REVIEW_GET,
         ];
 
         /// The Work Outline tools, in catalog order.
@@ -1150,6 +1153,12 @@ pub mod agent_tools {
             ],
             optional: &[],
             example: r#"{"prUrl": "https://github.com/owner/repo/pull/1", "headSha": "<head sha>", "review": {}}"#,
+        },
+        ToolUsage {
+            tool: tools::REVIEW_GET,
+            required: &[],
+            optional: &[],
+            example: "{}",
         },
         ToolUsage {
             tool: tools::ARTIFACT_GET_PLAN,

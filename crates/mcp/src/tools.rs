@@ -479,6 +479,11 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "required": ["prUrl", "headSha", "review"]
             }),
         },
+        ToolDef {
+            name: agent_tool_names::REVIEW_GET,
+            description: "Read the calling chat's published review artifact and content, or null when none exists.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
     ]
 }
 
