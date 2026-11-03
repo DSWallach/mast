@@ -985,7 +985,32 @@ impl AgentToolsService {
             tools::CHAT_ARCHIVE => self.chat_archive(context, arguments),
             tools::REVIEW_GET => {
                 let (service, caller) = self.artifact_call(context)?;
-                Ok(service.agent_review_get(&caller, arguments)?)
+                let mut result = service.agent_review_get(&caller, arguments)?;
+                if let Some(review) = result.get("review") {
+                    let repo = review.pointer("/pr/repo").and_then(Value::as_str);
+                    let number = review.pointer("/pr/number").and_then(Value::as_u64);
+                    let reviewed_head = review
+                        .pointer("/pr/headSha")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    if let (Some(repo), Some(number), Some(reviewed_head)) =
+                        (repo, number, reviewed_head)
+                    {
+                        let url = format!("https://github.com/{repo}/pull/{number}");
+                        if let Some(cache) = lock(&self.pr_ticket_cache).as_ref() {
+                            let current = cache
+                                .status_for(None, None, Some(&url), None)
+                                .pr
+                                .and_then(|pr| pr.head_sha);
+                            result["stale"] = current
+                                .as_ref()
+                                .map(|head| !head.eq_ignore_ascii_case(&reviewed_head))
+                                .into();
+                            result["currentHeadSha"] = current.into();
+                        }
+                    }
+                }
+                Ok(result)
             }
             tools::REVIEW_PUBLISH => {
                 let (service, caller) = self.artifact_call(context)?;
