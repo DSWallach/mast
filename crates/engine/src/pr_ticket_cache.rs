@@ -47,7 +47,7 @@ const KEYS_PER_SWEEP: usize = 3;
 
 /// `gh pr view --json` field set, matching `PR_VIEW_JSON_FIELDS` in
 /// `session_canvas_server.py:1399`.
-const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,mergeable,reviewRequests,author";
+const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,headRefOid,mergeable,reviewRequests,author";
 
 /// Checks-rollup summary, matching `summarize_checks` (`session_canvas_server.py:1377`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +84,9 @@ pub struct PrStatus {
     pub checks: Option<ChecksStatus>,
     pub title: Option<String>,
     pub branch: Option<String>,
+    /// Last successfully fetched PR head; absent when unavailable.
+    #[serde(default)]
+    pub head_sha: Option<String>,
     pub mergeable: String,
     pub has_reviewer_requested: bool,
 }
@@ -903,6 +906,11 @@ fn pr_json_to_status(data: &Value) -> PrStatus {
             .get("headRefName")
             .and_then(Value::as_str)
             .map(str::to_string),
+        head_sha: data
+            .get("headRefOid")
+            .and_then(Value::as_str)
+            .filter(|sha| !sha.is_empty())
+            .map(str::to_string),
         mergeable: data
             .get("mergeable")
             .and_then(Value::as_str)
@@ -1291,6 +1299,18 @@ mod tests {
     }
 
     #[test]
+    fn pr_status_head_sha_is_optional_and_round_trips() {
+        let sha = "0123456789012345678901234567890123456789";
+        let status = pr_json_to_status(&serde_json::json!({"headRefOid": sha}));
+        assert_eq!(status.head_sha.as_deref(), Some(sha));
+        let decoded: PrStatus =
+            serde_json::from_value(serde_json::to_value(&status).unwrap()).unwrap();
+        assert_eq!(decoded.head_sha.as_deref(), Some(sha));
+        assert_eq!(pr_json_to_status(&serde_json::json!({})).head_sha, None);
+        assert!(PR_VIEW_JSON_FIELDS.split(',').any(|field| field == "headRefOid"));
+    }
+
+    #[test]
     fn action_reasons_matches_reference_classification() {
         let mut pr = PrStatus {
             number: 1,
@@ -1302,6 +1322,7 @@ mod tests {
             checks: Some(ChecksStatus::Failing),
             title: None,
             branch: None,
+            head_sha: None,
             mergeable: "mergeable".into(),
             has_reviewer_requested: true,
         };
@@ -1357,6 +1378,7 @@ mod tests {
                     checks: None,
                     title: None,
                     branch: None,
+                    head_sha: None,
                     mergeable: "unknown".into(),
                     has_reviewer_requested: false,
                 }),
@@ -1404,6 +1426,7 @@ mod tests {
                     checks: None,
                     title: Some("Second PR".into()),
                     branch: None,
+                    head_sha: None,
                     mergeable: "unknown".into(),
                     has_reviewer_requested: true,
                 }),
@@ -1774,6 +1797,7 @@ mod tests {
                     checks: Some(ChecksStatus::Failing),
                     title: None,
                     branch: None,
+                    head_sha: None,
                     mergeable: "unknown".into(),
                     // `true` here isolates this test's actual point (detail
                     // pairing, not action-classification breadth) — `false`
