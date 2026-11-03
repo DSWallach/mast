@@ -703,6 +703,25 @@ broken a mast-proto test). Installed 2026-11-02 ~21:58 (backup
 engine `archivable` 9/0; the full engine suite was not rerun. `release-staging`, `admin-chats` and
 `archive-finished-workers` are deleted. Nothing is mid-release.
 
+**Paused for the night (2026-11-03 ~01:00).** Claude usage is low; prefer Codex `gpt-6.1-terra` for
+implementers once Codex children can commit unattended (see below).
+- Ready to merge (not merged): `compact-row-grant-admin` (Grant/Renew/Revoke admin on compact
+  single-chat rows; request fa8e7c36) and `resolve-subtree-reach` (agents resolve requests on items in
+  their own subtree; request dfced68f). Both small, tests by the children.
+- Still running when paused: `faster-releases` (nextest profiles + `release-test` script committed;
+  timing nextest vs cargo test) and `inherit-auto-approve` (primary: Codex workspace-write gets the
+  git common dir as a writable root so commits don't prompt; secondary: `create_chat { autoApprove }`
+  allowed only from an Auto parent).
+- PR review workflow (item 17137624; brief copied to `.worktrees/pr-review-brief/`): phase 1
+  (`pr-review-read-diff`) and phase 2 (`pr-review-sidecar`) Codex chats were interrupted at their first
+  step because Codex's sandbox prompts for every `.git` write. Their worktrees exist with no commits.
+  Restart them once Mikey sets them to Auto or `inherit-auto-approve` lands. Phase 3 (item 7125da84)
+  not started. Using the brief's suggested defaults; its Required Action 5241f29f stays open until
+  Mikey confirms.
+- Mikey's admin chat test: "Outline admin" item at the Cofactr Space root, stock lot traceability
+  only, dry run + Required Action before applying.
+- Stale lines: "Next, agreed but not started" still lists Artifacts phases 4/5 (built 2026-10-28).
+
 **What Mikey is doing next:** using an admin chat in the Cofactr Space to set up the Projects container
 template (matching his current copy template), move existing projects under it with a preview, and
 run the stage-0 talk-budget pilot from the minimal-talk research (mast-artifact:37a6c5c807eb8fe30aa1b56044a8749a).
