@@ -15,8 +15,8 @@ use mast_rpc::{RpcError, RpcReply, RpcService, methods};
 
 use mast_sync::DocsStore;
 
-pub mod agent_accounts;
 pub mod admin;
+pub mod agent_accounts;
 pub mod agent_tools;
 pub mod archivable;
 pub mod artifact_questions;
@@ -41,11 +41,12 @@ pub mod linear;
 pub mod liveness;
 pub mod local_import;
 pub mod managed_accounts;
-pub mod orchestrator_wakes;
 mod model_catalogs;
+pub mod orchestrator_wakes;
 pub mod pr_chat_links;
 pub mod pr_dash;
 pub mod pr_review_launch;
+pub mod review_sidecar;
 pub mod pr_review_sync;
 pub mod pr_ticket_cache;
 pub mod profile;
