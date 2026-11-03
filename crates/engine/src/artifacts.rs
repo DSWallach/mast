@@ -1999,6 +1999,111 @@ impl ArtifactsService {
         self.authorize_source(&path)
     }
 
+    /// Publish a validated pull request review as a chat-scoped artifact.
+    pub fn agent_review_publish(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
+        let url = arguments
+            .get("prUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ArtifactError::invalid("prUrl is required"))?;
+        let head = arguments
+            .get("headSha")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ArtifactError::invalid("headSha is required"))?;
+        let mut review: mast_proto::ReviewSidecar = serde_json::from_value(
+            arguments
+                .get("review")
+                .cloned()
+                .ok_or_else(|| ArtifactError::invalid("review is required"))?,
+        )
+        .map_err(|e| ArtifactError::invalid(format!("invalid review: {e}")))?;
+        let pr = crate::work_outline_pr_links::pull_request_from_url(url)
+            .ok_or_else(|| ArtifactError::invalid("prUrl must identify a GitHub pull request"))?;
+        if !review
+            .pr
+            .repo
+            .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
+            || review.pr.number != pr.number
+        {
+            return Err(ArtifactError::invalid("review.pr does not match prUrl"));
+        }
+        let space = self.local_space(&caller.space_id)?;
+        let cwd = self
+            .workspace()
+            .chat(&caller.chat_id)
+            .ok()
+            .flatten()
+            .and_then(|c| c.cwd)
+            .filter(|c| !c.is_empty())
+            .unwrap_or(space.path);
+        crate::review_sidecar::validate_review(Path::new(&cwd), &mut review, head)
+            .map_err(ArtifactError::invalid)?;
+        let dir = tempfile::tempdir().map_err(|e| ArtifactError::io(e.to_string()))?;
+        let source = dir.path().join("pull-request.review.json");
+        let bytes = serde_json::to_vec_pretty(&review)
+            .map_err(|e| ArtifactError::invalid(e.to_string()))?;
+        std::fs::write(&source, bytes).map_err(|e| io_error("write review", &source, e))?;
+        let title = format!("Review {}#{}", review.pr.repo, review.pr.number);
+        let reply = self.record(PublishRequest {
+            space_id: caller.space_id.clone(),
+            work_item_id: None,
+            chat_id: Some(caller.chat_id.clone()),
+            source,
+            title,
+            kind: Some(ArtifactKind::Review),
+            role: None,
+            note: String::new(),
+            pin_as_plan: false,
+            operation_id: None,
+            by: caller.actor(),
+        })?;
+        Ok(
+            json!({"artifactId": reply.artifact_id, "revision": reply.revision,
+            "url": reply.url, "storedPath": reply.stored_path, "changed": reply.changed}),
+        )
+    }
+
+    /// Read the latest review published by this chat, optionally for one PR.
+    pub fn agent_review_get(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
+        let requested = arguments
+            .get("prUrl")
+            .and_then(Value::as_str)
+            .map(|url| {
+                crate::work_outline_pr_links::pull_request_from_url(url).ok_or_else(|| {
+                    ArtifactError::invalid("prUrl must identify a GitHub pull request")
+                })
+            })
+            .transpose()?;
+        let mut artifacts: Vec<_> = self
+            .workspace()
+            .artifacts_of_space(&caller.space_id)
+            .into_iter()
+            .filter(|a| {
+                a.kind == ArtifactKind::Review
+                    && a.archived_at.is_none()
+                    && a.chat_id.as_deref() == Some(caller.chat_id.as_str())
+            })
+            .collect();
+        artifacts.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
+        for artifact in artifacts {
+            let bytes = self.current_bytes(&artifact)?;
+            let review: mast_proto::ReviewSidecar = serde_json::from_slice(&bytes)
+                .map_err(|e| ArtifactError::invalid(format!("invalid stored review: {e}")))?;
+            if let Some(pr) = &requested {
+                if review.pr.number != pr.number
+                    || !review
+                        .pr
+                        .repo
+                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
+                {
+                    continue;
+                }
+            }
+            return Ok(json!({"artifactId": artifact.id, "title": artifact.title,
+                "revision": artifact.revisions.last().map(|r| r.id), "review": review}));
+        }
+        Ok(json!({"artifactId": null}))
+    }
+
     /// `artifact_publish`.
     pub fn agent_publish(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
         let args: PublishArgs = parse_args(arguments)?;
