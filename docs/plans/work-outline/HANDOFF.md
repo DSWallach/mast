@@ -678,48 +678,63 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-02 ~17:45; a new coordinator starts here)
+## In flight (snapshot 2026-11-02 ~22:00; a fresh coordinator starts here)
 
-**Release (installed 18:20, pushed)** previously assembled on local `work-outline-implementation` (also pushed as `origin/release-staging`,
-head 90d76457; not yet on origin/work-outline-implementation): merges of `worker-report-to-parent`,
-`wait-cap-and-link-inference` (conflict in crates/mcp/src/tools.rs resolved by hand, both kept) and
-`relay-user-answer` (4 hunks in tools.rs resolved, both kept). UI suite green (2357). Full engine run in
-progress (/tmp/mast-release-batch9); the previous one hit a 56-min hang in `device_routing` and its
-other new failures passed alone. Next: if green, `cargo build --profile installed -p mast`, install,
-record in this file, push work-outline-implementation, delete those three branches and release-staging
-when nothing is based on it, resolve their Ready to merge actions (relay: f11c5c68; wait-cap: c1ba237b;
-worker report: af4f853d).
+**State of the branches.**
+- `origin/work-outline-implementation` = the evening release (worker reports, wait cap + link
+  inference, relay-user-answer, container templates phase 1). Installed and confirmed.
+- `origin/release-staging` = that + `admin-chats` merge (b5b85e3a) + `archive-finished-workers`
+  merge (1e7dee9c) + this handoff commit. The local integration branch matches it.
+- **Admin chats are INSTALLED** (built from b5b85e3a, 2026-11-02 21:10). UI suite green (2385); the
+  engine check reached 49/85 test files with only known failures before a restart killed it.
+- **Archive finished workers is merged locally/staging but NOT tested or installed.** The child ran
+  its full suites on this exact base (release-staging with admin-chats), so a targeted run is enough.
 
-**Children (Sonnet) building, all told to rebase onto origin/release-staging:**
-- `admin-chats` (chat 1a8720fe, item 32a087f6): user-granted, Space-scoped admin chats with parity with
-  every user action in the app (incl. accepting instruction proposals); attributed "admin chat … (granted by
-  Mikey)"; bulk preview → Required Action unless "Skip bulk confirmations"; audit + per-turn undo. Was
-  Ready to merge, conflicted with the release; rebasing.
-- `archive-finished-workers` (chat 1413b9c9, item 18e07979): `archivable` rule + reason, orchestrators
-  archive children/project workers (force + reason otherwise), Team tab "Archive finished (N)".
-- `container-templates` (chat 4b5a7f5b, item 68df9c98; plan mast-artifact:df5be7ef1a2fa657e3737f17dd0ef89a):
-  live templates configured in a container's Details; every direct child gets materialized items with
-  live instructions (add + mute), removal detaches and keeps instruction copies, moved-in items marked
-  "doesn't follow template" + Apply (admin chats do cleanup), all direct children, keep copy templates,
-  only admin/Mikey edit templates, nesting later. Phase 1 = Projects → New work item → named → full
-  structure. Building now.
+**Next steps for the new coordinator:**
+1. In zeron/: `git fetch`, check out `work-outline-implementation`, `git merge --ff-only
+   origin/release-staging`.
+2. Test: the UI suite, `cargo test --no-fail-fast -p mast-mcp -p mast-proto`, and the engine lib
+   `archivable` tests (optionally the full engine suite when the machine is quiet). Build
+   `cargo build --profile installed -p mast` in parallel (separate target dir).
+3. Install as usual, push work-outline-implementation, bump the submodule pointer on agent-mode-tools
+   `zeron-work-outline`, delete `admin-chats`, `archive-finished-workers` and `release-staging` from
+   origin and remove their worktrees.
+4. Resolve Ready to merge actions: admin-chats (request 41d60855…) and archive-finished-workers
+   (request 2f15457f…); mark items 32a087f6 (admin) and 18e07979 (archive) completed.
+5. Add "Built and installed" entries for admin chats and archive finished workers (details are in
+   their Ready to merge actions: grant UI "Grant admin for this Space…", 1/4/8/24 h or until revoked,
+   optional "Skip bulk confirmations"; `work_outline_admin` batches; attribution "admin chat … (granted
+   by Mikey)"; bulk preview → Required Action; per-turn undo; container-template actions for admins.
+   Archive: `archivable` + reason rule, orchestrators archive children/project workers, force + reason,
+   Team tab "Archive finished (N)").
 
-**Waiting on Mikey (Required Actions open):** PR review brief (mast-artifact:3e12f5d0…; my suggested
-defaults given), minimal-talk research (mast-artifact:37a6c5c8…; Mikey wants an admin chat to run the
-stage-0 pilot once admin chats ship), repo cleanup proposal (mast-artifact:bacfa5c9…), active-checkout
-design (mast-artifact:679f61de…).
+**What Mikey is doing next:** using an admin chat in the Cofactr Space to set up the Projects container
+template (matching his current copy template), move existing projects under it with a preview, and
+run the stage-0 talk-budget pilot from the minimal-talk research (mast-artifact:37a6c5c807eb8fe30aa1b56044a8749a).
 
-**Known issues to pick up:** wake dedupe delivered the same Ready-to-merge twice; wake labels came from
-bad link inference (fixed in this release); test runs need per-test timeouts (nextest) and a flaky
-quarantine (offered, not started); running several children's full test suites at once plus Docker
-saturates the Mac — stagger them.
+**Waiting on Mikey (Required Actions open):** PR review brief (mast-artifact:3e12f5d0be4cb1de57ed6b0f8be58992;
+suggested defaults: Linear-style guided order + always drop to free diff; viewed = manual + soft
+"seen"; ⌘O quick open, ⇧⌘F search, keep ⌘P = PR page; GitHub posting last, behind a setting,
+human-click only, batched, head-sha guarded, no footer), minimal-talk research (held until the admin
+chat runs stage 0), repo cleanup proposal (mast-artifact:bacfa5c96fe27d73a2821e8f4e2aa446), active-checkout
+design (mast-artifact:679f61de127b3519c16de37f8d90f99b).
 
-**Coordinator lessons from this session:** design-only children never push, so check Required Actions
-whenever a child goes idle (orchestrator wakes now deliver these as "Worker updates"); when several
-branches conflict, push an integration snapshot as `release-staging` and have children rebase onto it;
-session restarts kill background shells, so re-arm watchers and resend children after a restart;
-`nice` can't be undone without root, so don't start long runs niced; non-UI logs are now
-`~/.zeron/logs/mast-headed.log`.
+**Queued:** "Faster releases" (see Next, agreed but not started) — do it first in the new session, when
+nothing is mid-release. Container templates phases 2+ (see its plan artifact).
+
+**Known issues:** wake dedupe can deliver the same Ready to merge / resolved notice twice; full
+engine runs are slow and load-sensitive (several tests have hard timeouts) until nextest +
+quarantine land.
+
+**Coordinator lessons from this session:**
+- Design-only children never push, so check Required Actions whenever a child goes idle. Orchestrator
+  wakes now deliver these as "Worker updates".
+- When several branches conflict, push an integration snapshot as `release-staging` and have the
+  children rebase onto it. Merge the most foundational one first.
+- Session and Mast restarts kill background shells: re-arm watchers, resend children, rerun tests.
+- When you say "right after", queue it in the same step.
+- Never start long runs under `nice`. Children must only kill processes inside their own worktree.
+- Logs: `~/.zeron/logs/mast-headed.log`.
 
 ## Known gaps
 
