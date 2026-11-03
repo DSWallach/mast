@@ -326,6 +326,82 @@ fn each_kind_renders_with_its_component(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn review_renders_summary_and_highlights(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let content = r#"{"pr":{"repo":"o/r","number":1,"headSha":"abc","baseSha":"def"},"summary":"A short summary", "highlights":[{"kind":"risk", "severity":"high", "text":"Check the migration"}]}"#;
+    let reply = reply_with(content_reply(
+        ArtifactKind::Review,
+        1,
+        content,
+        ArtifactContentEncoding::Utf8,
+    ));
+    let (tab, _, shown, vcx) =
+        open_tab(cx, artifact(&id(1), "Review", ArtifactKind::Review), reply);
+    assert_eq!(
+        tab.read_with(vcx, |tab, _| tab.presenter()),
+        Presenter::Review
+    );
+    assert!(vcx.debug_bounds("artifact-review").is_some());
+    assert!(vcx.debug_bounds("review-highlight-0").is_some());
+    assert!(shown.borrow().is_empty());
+    assert!(
+        matches!(super::model::body_for(ArtifactKind::Review, &serde_json::from_value(content_reply(ArtifactKind::Review, 1, content, ArtifactContentEncoding::Utf8)).unwrap()), super::model::ArtifactBody::Review(review) if review.summary == "A short summary" && review.highlights[0].text == "Check the migration")
+    );
+}
+
+#[test]
+fn review_head_drift_requires_a_matching_pr_and_changed_head() {
+    let review: super::model::ReviewCard = serde_json::from_str(r#"{"pr":{"repo":"o/r","number":1,"headSha":"abc","baseSha":"def"},"summary":"Summary","highlights":[]}"#).unwrap();
+    let mut target: mast_proto::ChatRefTargetView = serde_json::from_value(serde_json::json!({
+        "id":"ref", "kind":"pr", "label":"PR #1", "path":"/repo", "checkoutId":"c",
+        "repoName":"r", "headBranch":"feature", "headRef":"refs/heads/feature",
+        "baseBranch":"main", "baseRef":"refs/heads/main", "prNumber":1,
+        "prUrl":"https://github.com/o/r/pull/1", "headSha":"abc"
+    }))
+    .unwrap();
+    assert_eq!(
+        super::model::review_head_drift(&review, &[target.clone()]),
+        None
+    );
+    target.head_sha = Some("123".into());
+    assert_eq!(
+        super::model::review_head_drift(&review, &[target.clone()]),
+        Some("123")
+    );
+    target.pr_url = Some("https://github.com/o/other/pull/1".into());
+    assert_eq!(super::model::review_head_drift(&review, &[target]), None);
+}
+
+#[test]
+fn review_head_reads_only_the_matching_cached_pr() {
+    let review: mast_proto::ReviewPullRequest = serde_json::from_value(serde_json::json!({
+        "repo":"o/r", "number":1, "headSha":"abc", "baseSha":"def"
+    }))
+    .unwrap();
+    let detail = |url: &str, head: &str| {
+        serde_json::json!({
+            "number":1,"url":url,"state":"OPEN","isDraft":false,
+            "reviewDecision":null,"reviewers":[],"checks":null,"title":null,"branch":null,
+            "headSha":head,"mergeable":"UNKNOWN","hasReviewerRequested":false
+        })
+    };
+    let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+        "pr":null,"ticket":null,"isWorktree":false,"diffStat":null,"prSource":null,"ticketSource":null,
+        "prLinks":[
+            {"url":"https://github.com/o/other/pull/1","source":null,"detail":detail("https://github.com/o/other/pull/1", "wrong")},
+            {"url":"https://github.com/o/r/pull/1","source":null,"detail":detail("https://github.com/o/r/pull/1", "moved")}
+        ]
+    })).unwrap();
+    assert_eq!(
+        super::model::cached_review_head(&status, &review),
+        Some("moved")
+    );
+    let mut unknown = status.clone();
+    unknown.pr_links[1].detail.as_mut().unwrap().head_sha = None;
+    assert_eq!(super::model::cached_review_head(&unknown, &review), None);
+}
+
+#[gpui::test]
 fn options_open_their_fragment_through_the_companion_read(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     let manifest =

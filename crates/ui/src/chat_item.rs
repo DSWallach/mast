@@ -154,6 +154,7 @@ pub(crate) struct ChatItemFacts {
     pub branch: Option<String>,
     pub prs: Vec<HeaderPr>,
     pub ticket: Option<HeaderTicket>,
+    pub reviews: Vec<PlanFacts>,
     pub item: Option<ItemSection>,
 }
 
@@ -227,6 +228,21 @@ pub(crate) fn facts(input: &FactsInput<'_>) -> ChatItemFacts {
         branch,
         prs,
         ticket,
+        reviews: input
+            .artifacts
+            .map(|snapshot| {
+                snapshot
+                    .for_chat(&chat.id)
+                    .into_iter()
+                    .filter(|artifact| artifact.kind == mast_proto::ArtifactKind::Review)
+                    .map(|artifact| PlanFacts {
+                        artifact_id: artifact.id.clone(),
+                        title: artifact.title.clone(),
+                        revision: artifact.current_revision,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         item,
     }
 }
@@ -311,7 +327,9 @@ fn item_section(
             .len(),
             entries: instructions::live_instructions(snapshot, Some(item_id))
                 .iter()
-                .filter_map(|instruction| crate::team::activity_line_max(&instruction.text, INSTRUCTION_ENTRY_CHARS))
+                .filter_map(|instruction| {
+                    crate::team::activity_line_max(&instruction.text, INSTRUCTION_ENTRY_CHARS)
+                })
                 .collect(),
         },
         actions,
@@ -455,6 +473,34 @@ mod tests {
             snapshot: Some(snapshot),
             artifacts: None,
         })
+    }
+
+    #[test]
+    fn review_artifacts_are_scoped_to_the_publishing_chat() {
+        let chat = chat("review-chat");
+        let mut review = crate::artifacts::tests::artifact(
+            &crate::artifacts::tests::id(1),
+            "Review",
+            mast_proto::ArtifactKind::Review,
+        );
+        review.chat_id = Some(chat.id.clone());
+        let mut other = crate::artifacts::tests::artifact(
+            &crate::artifacts::tests::id(2),
+            "Other",
+            mast_proto::ArtifactKind::Review,
+        );
+        other.chat_id = Some("other-chat".into());
+        let snapshot = crate::artifacts::tests::snapshot(vec![review, other]);
+        let facts = facts(&FactsInput {
+            chat: &chat,
+            space_path: None,
+            account: None,
+            links: None,
+            snapshot: None,
+            artifacts: Some(&snapshot),
+        });
+        assert_eq!(facts.reviews.len(), 1);
+        assert_eq!(facts.reviews[0].title, "Review");
     }
 
     #[test]

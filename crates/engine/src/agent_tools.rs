@@ -983,6 +983,39 @@ impl AgentToolsService {
             tools::PROJECT_SCOPE_CHATS => Ok(self.project_scope_chats(context)),
             tools::CHAT_ARCHIVE_INFO => self.chat_archive_info(context, arguments),
             tools::CHAT_ARCHIVE => self.chat_archive(context, arguments),
+            tools::REVIEW_GET => {
+                let (service, caller) = self.artifact_call(context)?;
+                let mut result = service.agent_review_get(&caller, arguments)?;
+                if let Some(review) = result.get("review") {
+                    let repo = review.pointer("/pr/repo").and_then(Value::as_str);
+                    let number = review.pointer("/pr/number").and_then(Value::as_u64);
+                    let reviewed_head = review
+                        .pointer("/pr/headSha")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    if let (Some(repo), Some(number), Some(reviewed_head)) =
+                        (repo, number, reviewed_head)
+                    {
+                        let url = format!("https://github.com/{repo}/pull/{number}");
+                        if let Some(cache) = lock(&self.pr_ticket_cache).as_ref() {
+                            let current = cache
+                                .status_for(None, None, Some(&url), None)
+                                .pr
+                                .and_then(|pr| pr.head_sha);
+                            result["stale"] = current
+                                .as_ref()
+                                .map(|head| !head.eq_ignore_ascii_case(&reviewed_head))
+                                .into();
+                            result["currentHeadSha"] = current.into();
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            tools::REVIEW_PUBLISH => {
+                let (service, caller) = self.artifact_call(context)?;
+                Ok(service.agent_review_publish(&caller, arguments)?)
+            }
             tools::ARTIFACT_PUBLISH => {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_publish(&caller, arguments)?)
@@ -1600,7 +1633,10 @@ impl AgentToolsService {
         self.apply(context, &mutation)?;
         let resolved = self
             .workspace
-            .registry_row(mast_doc::work_outline::KIND_USER_ACTION_REQUESTS, &request_id)
+            .registry_row(
+                mast_doc::work_outline::KIND_USER_ACTION_REQUESTS,
+                &request_id,
+            )
             .and_then(|row| {
                 row.fields
                     .get("state")
@@ -1926,7 +1962,8 @@ impl AgentToolsService {
         };
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         if snapshot.item(&args.work_item_id).is_none()
-            || (context.admin_space.is_none() && !in_agent_scope(&snapshot, &root, &args.work_item_id))
+            || (context.admin_space.is_none()
+                && !in_agent_scope(&snapshot, &root, &args.work_item_id))
         {
             return Err(WorkOutlineError::unauthorized(
                 "Agents may only start chats for their own work item, its descendants, and \
@@ -2283,7 +2320,10 @@ mod tests {
         // An Ask parent is refused, even with a full-access sandbox.
         for parent in [cfg(WorkspaceWrite, false), cfg(DangerFullAccess, false)] {
             let err = check_child_config(Some(&parent), &cfg(WorkspaceWrite, true)).unwrap_err();
-            assert!(format!("{err:?}").contains("autoApprove refused"), "{err:?}");
+            assert!(
+                format!("{err:?}").contains("autoApprove refused"),
+                "{err:?}"
+            );
         }
         assert!(check_child_config(None, &cfg(WorkspaceWrite, true)).is_err());
         // Omitted (Ask) stays allowed under either parent.

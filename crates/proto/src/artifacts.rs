@@ -140,6 +140,8 @@ pub enum ArtifactKind {
     Image,
     /// A manifest of option fragments (conventions section 6).
     Options,
+    /// A structured pull request review.
+    Review,
     #[default]
     #[serde(other)]
     Unknown,
@@ -154,6 +156,7 @@ impl ArtifactKind {
             Self::Mermaid => "mermaid",
             Self::Image => "image",
             Self::Options => "options",
+            Self::Review => "review",
             Self::Unknown => "unknown",
         }
     }
@@ -168,6 +171,7 @@ impl ArtifactKind {
             "mermaid" => Some(Self::Mermaid),
             "image" => Some(Self::Image),
             "options" => Some(Self::Options),
+            "review" => Some(Self::Review),
             _ => None,
         }
     }
@@ -182,6 +186,9 @@ impl ArtifactKind {
             || lower.ends_with(crate::visualize::PREVIEW_SUFFIX)
         {
             return Self::HtmlFragment;
+        }
+        if lower.ends_with(".review.json") {
+            return Self::Review;
         }
         if lower.ends_with(".options.json") {
             return Self::Options;

@@ -24,7 +24,7 @@ const OTHER_CHAT: &str = "chat-other";
 const LONE_CHAT: &str = "chat-lone";
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = mast_harness::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -181,6 +181,123 @@ async fn publish(rig: &Rig, token: &str, arguments: Value) -> Value {
 
 fn artifact(rig: &Rig, id: &str) -> ArtifactView {
     rig.core.workspace.artifact(id).expect("artifact row")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_publish_and_get_validate_identity_and_scope() {
+    let rig = rig().await;
+    let base = git(&rig.worktree, &["rev-parse", "HEAD"]);
+    std::fs::write(rig.worktree.join("README.md"), "changed\n").unwrap();
+    git(&rig.worktree, &["commit", "-qam", "change"]);
+    let head = git(&rig.worktree, &["rev-parse", "HEAD"]);
+    let review = json!({
+        "schema": "mast.review/v1",
+        "pr": {"repo": "owner/repo", "number": 42, "headSha": head, "baseSha": base},
+        "summary": "Changes the readme.", "steps": [], "questions": [],
+        "highlights": [{"kind": "risk", "severity": "low", "text": "Check the change",
+            "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}],
+        "suggestedComments": []
+    });
+    let url = "https://github.com/owner/repo/pull/42";
+    let reply = tool(
+        &rig,
+        &rig.token,
+        "review_publish",
+        json!({
+            "prUrl": url, "headSha": head, "review": review
+        }),
+    )
+    .await
+    .unwrap();
+    let id = reply["artifactId"].as_str().unwrap();
+    assert_eq!(artifact(&rig, id).kind, ArtifactKind::Review);
+    let read = tool(&rig, &rig.token, "review_get", json!({"prUrl": url}))
+        .await
+        .unwrap();
+    assert_eq!(read["artifactId"], id);
+    assert_eq!(read["review"]["summary"], "Changes the readme.");
+    assert_eq!(
+        read["review"]["highlights"][0]["anchor"]["hunkHash"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    git(
+        &rig.worktree,
+        &["update-ref", "refs/remotes/origin/review", &head],
+    );
+    rig.core
+        .workspace
+        .update_chat_diff_targets(CHAT, |row| {
+            row.ref_targets.push(mast_proto::StoredRefDiffTarget {
+                id: "pr-42".into(),
+                kind: mast_proto::RefDiffKind::Pr,
+                path: rig.worktree.to_string_lossy().into_owned(),
+                repo_id: "repo-test".into(),
+                head_branch: "review".into(),
+                head_ref: "refs/remotes/origin/review".into(),
+                base_branch: "main".into(),
+                base_ref: "refs/heads/main".into(),
+                pr_number: Some(42),
+                pr_url: Some(url.into()),
+                bound_at: 0,
+            });
+        })
+        .unwrap();
+    let fresh = tool(&rig, &rig.token, "review_get", json!({"prUrl": url}))
+        .await
+        .unwrap();
+    assert_eq!(fresh["stale"], false);
+    assert_eq!(fresh["currentHeadSha"], head);
+    std::fs::write(rig.worktree.join("README.md"), "changed again\n").unwrap();
+    git(&rig.worktree, &["commit", "-qam", "advance head"]);
+    let advanced = git(&rig.worktree, &["rev-parse", "HEAD"]);
+    git(
+        &rig.worktree,
+        &["update-ref", "refs/remotes/origin/review", &advanced],
+    );
+    let stale = tool(&rig, &rig.token, "review_get", json!({"prUrl": url}))
+        .await
+        .unwrap();
+    assert_eq!(stale["artifactId"], id);
+    assert_eq!(stale["stale"], true);
+    assert_eq!(stale["currentHeadSha"], advanced);
+    assert_eq!(stale["review"]["pr"]["headSha"], head);
+    let other = tool(&rig, &rig.other_token, "review_get", json!({"prUrl": url}))
+        .await
+        .unwrap();
+    assert!(other["artifactId"].is_null());
+
+    let mut wrong = review.clone();
+    wrong["pr"]["number"] = json!(43);
+    let error = tool(
+        &rig,
+        &rig.token,
+        "review_publish",
+        json!({
+            "prUrl": url, "headSha": head, "review": wrong
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("does not match prUrl"), "{error}");
+    let mut bad_anchor = review.clone();
+    bad_anchor["highlights"][0]["anchor"]["file"] = json!("missing.txt");
+    let error = tool(
+        &rig,
+        &rig.token,
+        "review_publish",
+        json!({
+            "prUrl": url, "headSha": head, "review": bad_anchor
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("Valid hunks per file") && error.contains("README.md"),
+        "{error}"
+    );
 }
 
 /// `<profile store>/artifacts/<id>/<hash>` somewhere under the data dir.
@@ -1388,7 +1505,10 @@ async fn recreating_a_request_with_a_changed_origin_gets_a_new_operation_id() {
     // The publishing chat goes away, so the next request has another origin
     // but the same artifact, question and revision.
     rig.core.workspace.set_chat_archived(CHAT, true).unwrap();
-    assert!(sync.reconcile(&id) > 0, "the changed request must be written");
+    assert!(
+        sync.reconcile(&id) > 0,
+        "the changed request must be written"
+    );
     let open = open_texts(&rig, &id);
     assert!(open.contains(&"Q-1: Merge by MPN?".to_owned()), "{open:?}");
 }

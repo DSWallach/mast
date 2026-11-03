@@ -466,6 +466,24 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 }
             }),
         },
+        ToolDef {
+            name: agent_tool_names::REVIEW_PUBLISH,
+            description: "Publish a PR review sidecar scoped to this chat. Mast validates every step hunk and anchor against the actual diff at headSha and reports valid hunks on errors. review is mast.review/v1: schema, pr {repo, number, headSha, baseSha}, summary (3–8 lines), optional verdictHint, steps [{id, title, file, hunks [{newStart, newEnd}], what, why, risk (none|low|med|high), riskNote, tags, optional group}], highlights [{kind (risk|missing-tests|behaviour-change|security|migration|perf|style), severity, text, anchor}], questions, suggestedComments [{anchor, body, severity, optional suggestion}]. An anchor is {file, side (left|right), startLine, endLine}. Anchors refer to the diff at headSha; Mast stores their hunk hashes. Verdict hints and suggested comments are never posted.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prUrl": { "type": "string", "description": "Pull request URL." },
+                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA." },
+                    "review": { "type": "object", "description": "The mast.review/v1 object described above." }
+                },
+                "required": ["prUrl", "headSha", "review"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::REVIEW_GET,
+            description: "Read the calling chat's published review artifact and content, or null when none exists. Pass prUrl to select a pull request; otherwise the latest review is returned.",
+            input_schema: json!({ "type": "object", "properties": { "prUrl": { "type": "string" } } }),
+        },
     ]
 }
 
@@ -2593,6 +2611,20 @@ mod tests {
             .find(|d| d.name == agent_tool_names::ARTIFACT_GET_PLAN)
             .expect("artifact_get_plan is defined");
         assert!(plan.description.contains("addressedComments"));
+    }
+
+    #[tokio::test]
+    async fn review_publish_forwards_review_to_engine() {
+        let def = artifact_catalog().into_iter()
+            .find(|def| def.name == agent_tool_names::REVIEW_PUBLISH).unwrap();
+        assert_eq!(def.input_schema["required"], json!(["prUrl", "headSha", "review"]));
+        let world = Arc::new(World::default());
+        let agent = tools(world.clone(), Some(BETA_TOKEN));
+        let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1"}});
+        agent.call(agent_tool_names::REVIEW_PUBLISH, arguments.clone()).await.unwrap();
+        let calls = world.agent_calls(agent_tool_names::REVIEW_PUBLISH);
+        assert_eq!(calls[0]["token"], BETA_TOKEN);
+        assert_eq!(calls[0]["arguments"], arguments);
     }
 
     #[tokio::test]

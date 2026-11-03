@@ -1102,6 +1102,7 @@ fn placeholder_pr(url: &str) -> PrStatus {
         checks: None,
         title: None,
         branch: None,
+        head_sha: None,
         mergeable: String::new(),
         has_reviewer_requested: true,
     }

@@ -174,7 +174,7 @@ pub(crate) fn request_document(
             }
             Ok(web(WebKind::Fragment, &body, "text/html"))
         }
-        ArtifactKind::Markdown | ArtifactKind::Unknown => Err(RenderSkip::Native),
+        ArtifactKind::Markdown | ArtifactKind::Review | ArtifactKind::Unknown => Err(RenderSkip::Native),
     }
 }
 

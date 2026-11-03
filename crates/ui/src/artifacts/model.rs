@@ -82,6 +82,7 @@ pub(crate) fn kind_icon(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Mermaid => crate::icons::WIDGET,
         ArtifactKind::Image => crate::icons::FILE_IMAGE,
         ArtifactKind::Options => crate::icons::SPLIT_COLUMNS,
+        ArtifactKind::Review => crate::icons::DOCUMENT,
         ArtifactKind::Unknown => crate::icons::DOCUMENT,
     }
 }
@@ -94,6 +95,7 @@ pub(crate) fn kind_label(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Mermaid => "Mermaid",
         ArtifactKind::Image => "Image",
         ArtifactKind::Options => "Options",
+        ArtifactKind::Review => "Review",
         ArtifactKind::Unknown => "File",
     }
 }
@@ -204,10 +206,74 @@ pub(crate) enum ArtifactBody {
     Image { bytes: Vec<u8>, mime_type: String },
     /// Phase 1: the options listed with links (side by side is phase 5).
     Options(OptionsManifest),
+    /// Review summary and highlights.
+    Review(ReviewCard),
     /// Plain text (unknown kinds).
     Text(String),
     /// The content could not be presented.
     Invalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct ReviewCard {
+    pub(crate) pr: mast_proto::review_sidecar::ReviewPullRequest,
+    pub(crate) summary: String,
+    pub(crate) highlights: Vec<ReviewHighlight>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct ReviewHighlight {
+    pub(crate) kind: String,
+    pub(crate) severity: String,
+    pub(crate) text: String,
+}
+
+/// Find a PR's head in the existing chat-link cache, matching the full identity.
+pub(crate) fn cached_review_head<'a>(
+    status: &'a mast_engine::pr_ticket_cache::ChatLinkStatus,
+    review: &mast_proto::ReviewPullRequest,
+) -> Option<&'a str> {
+    let matches = |url: &str| {
+        crate::chat_work_context::parse_pr_url(url).is_some_and(|pr| {
+            pr.number == review.number
+                && format!("{}/{}", pr.owner, pr.repo).eq_ignore_ascii_case(&review.repo)
+        })
+    };
+    status
+        .pr_links
+        .iter()
+        .find_map(|link| {
+            if matches(&link.url) {
+                link.detail.as_ref()?.head_sha.as_deref()
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            let pr = status.pr.as_ref()?;
+            if matches(pr.url.as_deref()?) {
+                pr.head_sha.as_deref()
+            } else {
+                None
+            }
+        })
+}
+
+/// A matching live PR ref can establish that this review is stale.
+pub(crate) fn review_head_drift<'a>(
+    review: &ReviewCard,
+    targets: &'a [mast_proto::ChatRefTargetView],
+) -> Option<&'a str> {
+    targets.iter().find_map(|target| {
+        let pr = crate::chat_work_context::parse_pr_url(target.pr_url.as_deref()?)?;
+        if pr.number != review.pr.number
+            || !format!("{}/{}", pr.owner, pr.repo).eq_ignore_ascii_case(&review.pr.repo)
+        {
+            return None;
+        }
+        let head = target.head_sha.as_deref()?;
+        (!head.eq_ignore_ascii_case(&review.pr.head_sha)).then_some(head)
+    })
 }
 
 /// Which wrapper a web body uses.
@@ -265,6 +331,12 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                 ArtifactKind::Mermaid => ArtifactBody::Web {
                     kind: WebKind::Mermaid,
                     source: text,
+                },
+                ArtifactKind::Review => match serde_json::from_str::<ReviewCard>(&text) {
+                    Ok(review) => ArtifactBody::Review(review),
+                    Err(error) => {
+                        ArtifactBody::Invalid(format!("Could not read the review ({error})."))
+                    }
                 },
                 ArtifactKind::Options => match OptionsManifest::parse(&text) {
                     Ok(manifest) => ArtifactBody::Options(manifest),

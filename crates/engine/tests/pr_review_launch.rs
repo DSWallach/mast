@@ -261,13 +261,13 @@ fn gh_calls(rig: &Rig) -> Vec<String> {
 
 fn review_prompt(branch: &str, location: &str) -> String {
     format!(
-        "/code-review https://github.com/acme/flagship/pull/7 — someone else's PR; review it as a reviewer. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Report findings to me here and don't post anything to GitHub unless I ask."
+        "/code-review https://github.com/acme/flagship/pull/7 — someone else's PR; review it as a reviewer. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Don't post anything to GitHub unless I ask."
     )
 }
 
 fn self_review_prompt(branch: &str, location: &str) -> String {
     format!(
-        "/code-review https://github.com/acme/flagship/pull/7 — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Report findings to me here. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub."
+        "/code-review https://github.com/acme/flagship/pull/7 — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub."
     )
 }
 
@@ -317,7 +317,7 @@ async fn clean_main_checks_out_with_gh_and_starts_the_review_at_the_workspace_ro
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert!(
         calls[0].ends_with(
-            "|pr view 7 --repo acme/flagship --json headRefName,isCrossRepository,title,author"
+            "|pr view 7 --repo acme/flagship --json headRefName,baseRefName,isCrossRepository,title,author"
         ),
         "{calls:?}"
     );
@@ -344,6 +344,14 @@ async fn clean_main_checks_out_with_gh_and_starts_the_review_at_the_workspace_ro
         chat.linked_pr_url.as_deref(),
         Some("https://github.com/acme/flagship/pull/7")
     );
+
+    // The already fetched PR head is tracked without another gh call.
+    let targets = rig.core.workspace.chat_diff_targets(&reply.chat_id).unwrap().unwrap();
+    assert_eq!(targets.ref_targets.len(), 1);
+    let target = &targets.ref_targets[0];
+    assert_eq!(target.pr_url.as_deref(), Some(reply.pr_url.as_str()));
+    assert_eq!(target.head_ref, format!("refs/remotes/origin/{BRANCH}"));
+    assert_eq!(target.base_ref, "refs/remotes/origin/main");
 
     // The first Turn runs the seeded prompt at the workspace root.
     wait_for(|| !rig.mock.runs().is_empty(), "the review Run starts").await;

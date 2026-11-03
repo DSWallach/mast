@@ -391,6 +391,46 @@ impl DiffTargets {
         })
     }
 
+    /// Bind the already fetched PR head from the review launcher without another
+    /// GitHub lookup or fetch. The launcher supplies the base from its PR lookup.
+    pub fn bind_launched_pr(
+        &self, chat_id: &str, repo_path: &Path, number: u64, url: &str,
+        head_branch: &str, base_branch: &str,
+    ) -> Result<RefBindOutcome, DiffTargetError> {
+        let chat = self.local_chat(chat_id)?;
+        let family = Family::resolve(&chat, false)?;
+        let repo = self.repo_checkouts(&family).into_iter()
+            .find(|repo| canonical_lenient(&repo.path) == canonical_lenient(repo_path))
+            .ok_or_else(|| DiffTargetError::NoCheckout("PR repository is not in the chat's checkout family.".into()))?;
+        if !valid_branch(&repo.path, head_branch) || !valid_branch(&repo.path, base_branch) {
+            return Err(DiffTargetError::Invalid("Invalid PR branch name.".into()));
+        }
+        let resolved = Resolved {
+            repo, kind: RefDiffKind::Pr, head_branch: head_branch.into(),
+            head_ref: format!("refs/remotes/origin/{head_branch}"),
+            base_branch: base_branch.into(), base_ref: format!("refs/remotes/origin/{base_branch}"),
+            pr_number: Some(number), pr_url: Some(url.into()),
+        };
+        let id = ref_target_id(&resolved);
+        let target = StoredRefDiffTarget {
+            id: id.clone(), kind: resolved.kind,
+            path: path_string(&canonical_lenient(&resolved.repo.path)),
+            repo_id: resolved.repo.repo_id, head_branch: resolved.head_branch,
+            head_ref: resolved.head_ref, base_branch: resolved.base_branch,
+            base_ref: resolved.base_ref, pr_number: resolved.pr_number,
+            pr_url: resolved.pr_url, bound_at: crate::now_ms(),
+        };
+        let changed = self.workspace.update_chat_diff_targets(chat_id, |row| {
+            if let Some(existing) = row.ref_targets.iter_mut().find(|item| item.id == id) {
+                *existing = target.clone();
+            } else if row.ref_targets.len() < MAX_CHAT_REF_TARGETS {
+                row.ref_targets.push(target.clone());
+            }
+        }).map_err(internal)?;
+        if changed { self.bump(); }
+        Ok(RefBindOutcome { reply: self.stored(chat_id), target })
+    }
+
     /// Select a stored ref target (clears the checkout selection).
     pub fn select_ref(
         &self,

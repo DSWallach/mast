@@ -815,6 +815,10 @@ pub mod agent_tools {
         /// Copy a file the agent wrote into the work item's artifact folder
         /// and record a revision (`docs/planning-artifact-conventions.md`).
         pub const ARTIFACT_PUBLISH: &str = "artifact_publish";
+        /// Publish a validated PR review sidecar for the calling Chat.
+        pub const REVIEW_PUBLISH: &str = "review_publish";
+        /// Read the calling Chat's published review.
+        pub const REVIEW_GET: &str = "review_get";
         /// The pinned plan of the Chat's work item (or of the Chat).
         pub const ARTIFACT_GET_PLAN: &str = "artifact_get_plan";
         /// Render an artifact offscreen in the headed app and return a
@@ -828,8 +832,13 @@ pub mod agent_tools {
         pub const BIND_CHAT_WORKTREE: &str = "bind_chat_worktree";
 
         /// The planning artifact tools, in catalog order.
-        pub const ARTIFACTS: [&str; 3] =
-            [ARTIFACT_PUBLISH, ARTIFACT_GET_PLAN, ARTIFACT_RENDER_CHECK];
+        pub const ARTIFACTS: [&str; 5] = [
+            ARTIFACT_PUBLISH,
+            ARTIFACT_GET_PLAN,
+            ARTIFACT_RENDER_CHECK,
+            REVIEW_PUBLISH,
+            REVIEW_GET,
+        ];
 
         /// The Work Outline tools, in catalog order.
         pub const WORK_OUTLINE: [&str; 11] = [
@@ -1086,7 +1095,10 @@ pub mod agent_tools {
                     "confirmToken",
                     "from an approved bulk preview; repeat the same steps",
                 ),
-                p("read", "boolean; list the Space tree, requests and proposals"),
+                p(
+                    "read",
+                    "boolean; list the Space tree, requests and proposals",
+                ),
                 p("maxDepth", "with read"),
             ],
             example: r#"{"steps": [{"op": "rename", "itemId": "<item id>", "title": "New title"}], "idempotencyKey": "admin-rename-1"}"#,
@@ -1131,6 +1143,22 @@ pub mod agent_tools {
                 ),
             ],
             example: r#"{"path": "plan.md", "title": "Importer plan", "note": "first draft", "idempotencyKey": "publish-plan-1"}"#,
+        },
+        ToolUsage {
+            tool: tools::REVIEW_PUBLISH,
+            required: &[
+                p("prUrl", "pull request URL"),
+                p("headSha", "reviewed head commit"),
+                p("review", "mast.review/v1 review object"),
+            ],
+            optional: &[],
+            example: r#"{"prUrl": "https://github.com/owner/repo/pull/1", "headSha": "<head sha>", "review": {}}"#,
+        },
+        ToolUsage {
+            tool: tools::REVIEW_GET,
+            required: &[],
+            optional: &[p("prUrl", "select a pull request; defaults to latest")],
+            example: "{}",
         },
         ToolUsage {
             tool: tools::ARTIFACT_GET_PLAN,
