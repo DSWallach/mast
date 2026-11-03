@@ -554,3 +554,37 @@ impl Changes {
         }
     }
 }
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn navigation_moves_between_hunks_and_files(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n@@ -10 +10 @@\n-before\n+after\ndiff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff {
+                key: "test".into(), truncated: false, additions: 3, deletions: 3, file_count: 2,
+                horizontal, files: Arc::new(files), origins: Arc::new(origins),
+                submodules: Arc::new(submodules), layout: Arc::new(layout),
+            });
+            changes.reflatten(cx);
+            changes.step_diff(true, false, cx);
+            assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 0 }));
+            changes.step_diff(true, false, cx);
+            assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 1 }));
+            changes.step_diff(true, true, cx);
+            assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::FileHeader { file: 1 }));
+        }));
+    }
+}
