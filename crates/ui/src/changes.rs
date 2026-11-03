@@ -1971,6 +1971,8 @@ pub struct Changes {
     /// The flattened row model the list virtualizes over (line granularity;
     /// collapsed bodies excluded) + each file's row span within it.
     rows: Vec<DiffRow>,
+    file_filter: Entity<ComposerInput>,
+    _file_filter_events: Subscription,
     row_ranges: Vec<Option<std::ops::Range<usize>>>,
     /// Ordered file and submodule headers; sticky file headers stop at either.
     section_headers: Vec<usize>,
@@ -2102,6 +2104,10 @@ impl Changes {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         let settings = crate::settings::current(cx);
         let mode = DiffMode::from_split(settings.diff_split);
+        let file_filter = cx.new(|cx| ComposerInput::with_context("Filter files…", "PaletteSearch", cx));
+        let file_filter_events = cx.subscribe(&file_filter, |_: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) { cx.notify(); }
+        });
         Self {
             state,
             owner,
@@ -2119,6 +2125,8 @@ impl Changes {
             submodule_folds: HashMap::new(),
             highlights: HashMap::new(),
             rows: Vec::new(),
+            file_filter,
+            _file_filter_events: file_filter_events,
             row_ranges: Vec::new(),
             section_headers: Vec::new(),
             fold_settle: None,
@@ -6690,16 +6698,25 @@ impl Render for Changes {
                             .children(self.render_header_strip(&theme))
                             .child(
                                 div()
-                                    .relative()
+                                    .flex()
+                                    .flex_row()
                                     .flex_1()
                                     .min_h_0()
-                                    .overflow_hidden()
+                                    .child(self.render_file_list(&theme, cx))
                                     .child(
-                                        list(self.list.clone(), cx.processor(Self::render_row))
-                                            .size_full()
-                                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
-                                    )
-                                    .when_some(sticky_header, |el, header| el.child(header)),
+                                        div()
+                                            .relative()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .min_h_0()
+                                            .overflow_hidden()
+                                            .child(
+                                                list(self.list.clone(), cx.processor(Self::render_row))
+                                                    .size_full()
+                                                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                                            )
+                                            .when_some(sticky_header, |el, header| el.child(header)),
+                                    ),
                             )
                             .into_any_element()
                     } else {

@@ -312,3 +312,141 @@ mod tests {
         assert!(!is_generated_file("Cargo.toml"));
     }
 }
+
+fn ordered_file_indices(nodes: &[DiffTreeNode], output: &mut Vec<usize>) {
+    for node in nodes {
+        match node {
+            DiffTreeNode::File(index) => output.push(*index as usize),
+            DiffTreeNode::Submodule { children, .. } => ordered_file_indices(children, output),
+        }
+    }
+}
+
+fn file_matches_filter(file: &FileDiff, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || file.path.to_lowercase().contains(&query)
+        || file
+            .old_path
+            .as_ref()
+            .is_some_and(|path| path.to_lowercase().contains(&query))
+}
+
+impl Changes {
+    fn jump_to_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(file) = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.get(index))
+        else {
+            return;
+        };
+        if let Some(fold) = self.folds.get_mut(&file.path) {
+            fold.collapsed = false;
+            fold.toggled_at = None;
+        }
+        self.submodule_folds.clear();
+        self.reflatten(cx);
+        if let Some(start) = self
+            .row_ranges
+            .get(index)
+            .and_then(|range| range.as_ref())
+            .map(|range| range.start)
+        {
+            self.list.scroll_to_reveal_item(start);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn render_file_list(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(parsed) = self.parsed.as_ref() else {
+            return div().into_any_element();
+        };
+        let query = self.file_filter.read(cx).text().to_string();
+        let mut indices = Vec::new();
+        ordered_file_indices(&parsed.layout, &mut indices);
+        let files = parsed.files.clone();
+        let entries = indices
+            .into_iter()
+            .filter(|index| {
+                files
+                    .get(*index)
+                    .is_some_and(|file| file_matches_filter(file, &query))
+            })
+            .map(|index| {
+                let file = &files[index];
+                let label = match &file.old_path {
+                    Some(old) if old != &file.path => format!("{old} → {}", file.path),
+                    _ => file.path.clone(),
+                };
+                div()
+                    .id(("changes-file-list-entry", index))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.element_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| this.jump_to_file(index, cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_dim)
+                            .child(SharedString::from(label)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(add_color(theme))
+                            .child(SharedString::from(format!("+{}", file.additions))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(del_color(theme))
+                            .child(SharedString::from(format!("−{}", file.deletions))),
+                    )
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id("changes-file-list")
+            .w(px(240.0))
+            .flex_none()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(theme.border)
+            .child(popover::search_input_frame(
+                theme,
+                self.file_filter.clone().into_any_element(),
+            ))
+            .child(
+                div()
+                    .id("changes-file-list-entries")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(entries),
+            )
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn filter_matches_both_rename_paths_case_insensitively() {
+        let mut file = FileDiff::new("src/new.rs".into(), Some("src/old.rs".into()));
+        file.status = FileStatus::Renamed;
+        assert!(file_matches_filter(&file, "OLD"));
+        assert!(file_matches_filter(&file, "new.rs"));
+        assert!(!file_matches_filter(&file, "missing"));
+    }
+}
