@@ -2940,6 +2940,67 @@ async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
     assert!(err.contains("work-outline/unauthorized"), "{err}");
 }
 
+/// A coordinator on a root item resolves requests raised by chats another
+/// coordinator created, on descendant items; never on items outside its subtree.
+#[tokio::test]
+async fn resolve_reaches_requests_on_descendant_items_but_not_outside_the_subtree() {
+    let rig = rig().await;
+    let root = create_item(&rig, "rs-root", "Root", None).await;
+    let feature = create_item(&rig, "rs-feature", "Feature", Some(&root)).await;
+    let outside = create_item(&rig, "rs-outside", "Outside", None).await;
+    assign_chat(&rig, "rs-a", CHAT, &root).await;
+    assign_chat(&rig, "rs-b", OTHER_CHAT, &outside).await;
+    // Two chats created by chat B (not by A), one under A's subtree, one outside.
+    for (chat, item, op) in [
+        ("chat-rs-inside", &feature, "rs-c1"),
+        ("chat-rs-outside", &outside, "rs-c2"),
+    ] {
+        rig.client
+            .call(
+                methods::MUTATE,
+                json!({ "op": "createChat", "chatId": chat, "spaceId": SPACE,
+                        "deviceId": rig.core.device_id, "parentChatId": OTHER_CHAT }),
+            )
+            .await
+            .unwrap();
+        assign_chat(&rig, op, chat, item).await;
+    }
+    let tokens = rig.core.sessions.agent_tokens();
+    let a = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let mut ids = Vec::new();
+    for (chat, key) in [("chat-rs-inside", "q-in"), ("chat-rs-outside", "q-out")] {
+        let lease = tokens.mint(chat, "run-x", SPACE, &rig.core.device_id);
+        let raised = tool(
+            &rig,
+            lease.token(),
+            "work_outline_create_user_action_request",
+            json!({ "request": "Q?", "idempotencyKey": key }),
+        )
+        .await
+        .unwrap();
+        ids.push(raised["userActionRequestId"].as_str().unwrap().to_owned());
+    }
+    let err = tool(
+        &rig,
+        a.token(),
+        "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": ids[1], "idempotencyKey": "r-out" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("work-outline/unauthorized"), "{err}");
+    assert!(!request_is_resolved(&snapshot(&rig), &ids[1]));
+    tool(
+        &rig,
+        a.token(),
+        "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": ids[0], "idempotencyKey": "r-in" }),
+    )
+    .await
+    .unwrap();
+    assert!(request_is_resolved(&snapshot(&rig), &ids[0]));
+}
+
 // ---- admin chats ---------------------------------------------------------------
 
 const OTHER_SPACE: &str = "space-2";

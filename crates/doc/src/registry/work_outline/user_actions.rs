@@ -669,7 +669,7 @@ impl RegistryDoc {
                     r.id == p.user_action_request_id
                         || agent_chat
                             .as_ref()
-                            .is_none_or(|chat| self.agent_may_resolve_request(chat, r, false))
+                            .is_none_or(|chat| self.agent_may_resolve_request(chat, r))
                 })
                 .collect(),
         };
@@ -1125,13 +1125,11 @@ impl RegistryDoc {
 
     /// Whether an agent acting for Chat `agent_chat` may resolve or answer
     /// `request`: [`Self::agent_may_resolve_origin`], or the request sits on
-    /// an item inside the Chat's project scope, or (`own_subtree`, set only for
-    /// the target of an answer) inside its own item's subtree (contract amendment "relay user answer").
+    /// an item inside the Chat's own item's subtree or project scope.
     pub(crate) fn agent_may_resolve_request(
         &self,
         agent_chat: &str,
         request: &UserActionRequestView,
-        own_subtree: bool,
     ) -> bool {
         if self.agent_may_resolve_origin(agent_chat, &request.chat_id) {
             return true;
@@ -1154,15 +1152,15 @@ impl RegistryDoc {
             && self
                 .chat_assigned_work_item(agent_chat, &space)
                 .is_some_and(|root| {
-                    self.item_in_agent_reach(&space, &root, &request.work_item_id, own_subtree)
+                    self.item_in_agent_reach(&space, &root, &request.work_item_id)
                 })
     }
 
-    /// `item` is inside `root`'s nearest project (the item itself counts as a
-    /// project), or, with `own_subtree`, `root` or below it.
-    fn item_in_agent_reach(&self, space: &str, root: &str, item: &str, own_subtree: bool) -> bool {
+    /// `item` is `root` or below it, or inside `root`'s nearest project (the
+    /// item itself counts as a project).
+    fn item_in_agent_reach(&self, space: &str, root: &str, item: &str) -> bool {
         let tree = self.outline_tree(space);
-        if own_subtree && (item == root || tree.descendants(root).iter().any(|id| id == item)) {
+        if (item == root || tree.descendants(root).iter().any(|id| id == item)) {
             return true;
         }
         let mut cursor = Some(root.to_owned());
@@ -1538,10 +1536,10 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::ResolveUserActionRequest(p) => {
                 match self.user_action_request(&p.user_action_request_id) {
-                    Some(request) if self.agent_may_resolve_request(chat_id, &request, p.answer.is_some()) => Ok(()),
+                    Some(request) if self.agent_may_resolve_request(chat_id, &request) => Ok(()),
                     Some(_) => Err(unauthorized(
-                        "Agents may only resolve requests their own Chat or a Chat it created \
-                         raised, or requests on items in their own item's subtree or project",
+                        "Agents may only resolve requests raised by their own Chat or a Chat it \
+                         created, or requests on items in their own item's subtree or project",
                     )),
                     None => Err(not_found("Request not found")),
                 }
