@@ -131,6 +131,7 @@ impl Shell {
                 account: facts.as_ref().and_then(|facts| facts.account.clone()),
                 model: facts.as_ref().and_then(|facts| facts.model.label.clone()),
                 background,
+                admin: state.admin.is_admin(&chat.id, crate::admin::now_ms()),
             });
         }
         inputs
@@ -1016,6 +1017,27 @@ impl Shell {
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .child(SharedString::from(row.title.clone())),
                             )
+                            .when(row.admin, |el| {
+                                el.child(
+                                    div()
+                                        .debug_selector({
+                                            let selector = format!("running-admin-{}", row.chat_id);
+                                            move || selector.clone()
+                                        })
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.warning)
+                                        .child(
+                                            icon(icons::SHIELD)
+                                                .size(px(11.0))
+                                                .text_color(theme.warning),
+                                        )
+                                        .child("Admin"),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_none()
@@ -1276,6 +1298,40 @@ mod tests {
             assert!(!shell.running.open, "opening closes the popover");
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("c1"));
         });
+    }
+
+    #[gpui::test]
+    fn an_admin_chat_row_shows_the_admin_marker_and_others_do_not(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, 3);
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        state.update(cx, |state, _| {
+            state.admin.set_grants(vec![mast_proto::AdminGrant {
+                chat_id: "c1".into(),
+                space_id: "s1".into(),
+                granted_at_ms: 0,
+                expires_at_ms: None,
+                skip_bulk_confirmation: false,
+            }]);
+        });
+        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        redraw(cx);
+        shell.read_with(cx, |shell, cx| {
+            let snapshot = shell.running_snapshot(cx);
+            let admin: Vec<(String, bool)> = snapshot
+                .entries()
+                .filter_map(|entry| match entry {
+                    Entry::Row(row) => Some((row.chat_id.clone(), row.admin)),
+                    _ => None,
+                })
+                .collect();
+            assert!(admin.contains(&("c1".to_owned(), true)), "{admin:?}");
+            assert!(admin.contains(&("c0".to_owned(), false)), "{admin:?}");
+        });
+        assert!(cx.debug_bounds("running-admin-c1").is_some());
+        assert!(cx.debug_bounds("running-admin-c0").is_none());
+        assert!(cx.debug_bounds("running-admin-c2").is_none());
     }
 
     #[gpui::test]

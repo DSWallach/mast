@@ -3,6 +3,7 @@
 //! Ported from zeron's `packages/control/src/wire.ts` + `packages/harness/src/types.ts`.
 //! Context occupancy is replicated per chat; billing `Usage` remains a harness passthrough.
 
+pub mod admin;
 pub mod agent;
 pub mod artifacts;
 pub mod chat_diff_target;
@@ -28,6 +29,7 @@ pub mod work_outline_templates;
 pub mod work_outline_user_actions;
 pub mod workspace;
 
+pub use admin::*;
 pub use agent::*;
 pub use artifacts::{
     ArtifactAddCommentParams, ArtifactAddCommentReply, ArtifactAnswerQuestionParams,

@@ -1587,6 +1587,27 @@ impl OutlineView {
         cx.notify();
     }
 
+    /// The app state this view reads (tests script the engine through it).
+    #[cfg(test)]
+    pub(crate) fn app_state_for_test(&self) -> Entity<AppState> {
+        self.state.clone()
+    }
+
+    /// The open picker's rows as (label, depth).
+    #[cfg(test)]
+    pub(crate) fn picker_rows_for_test(&self) -> Vec<(String, u32)> {
+        self.picker
+            .as_ref()
+            .map(|picker| {
+                picker
+                    .entries
+                    .iter()
+                    .map(|e| (e.label.clone(), e.depth))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker.take().is_some() {
             window.focus(&self.focus, cx);

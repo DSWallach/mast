@@ -776,6 +776,11 @@ pub mod agent_tools {
         /// Make an item (or every direct child of a container) follow its
         /// container template: adopts existing items by title, creates the rest.
         pub const APPLY_CONTAINER_TEMPLATE: &str = "work_outline_apply_container_template";
+        /// Admin chats only: a batch of outline changes anywhere in the
+        /// Space (rename, move, group, status, archive, instructions,
+        /// resolve), with a dry-run preview and a user-approved token for
+        /// bulk changes. Refused unless the user granted this chat admin.
+        pub const ADMIN: &str = "work_outline_admin";
         /// Engine-internal (not an MCP tool): queue the first Turn of a child
         /// Chat the MCP `create_chat` tool created, with ids derived from the
         /// calling Chat and its idempotency key so retries never duplicate it.
@@ -817,7 +822,7 @@ pub mod agent_tools {
             [ARTIFACT_PUBLISH, ARTIFACT_GET_PLAN, ARTIFACT_RENDER_CHECK];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 10] = [
+        pub const WORK_OUTLINE: [&str; 11] = [
             READ_CURRENT,
             READ_SUBTREE,
             CREATE_CHILD,
@@ -828,6 +833,7 @@ pub mod agent_tools {
             ANSWER_USER_ACTION_REQUEST,
             APPLY_CONTAINER_TEMPLATE,
             PROPOSE_INSTRUCTION,
+            ADMIN,
         ];
     }
 
@@ -846,6 +852,10 @@ pub mod agent_tools {
         pub run_id: String,
         pub space_id: String,
         pub device_id: String,
+        /// The Space this chat currently administers (a live user grant,
+        /// checked at every authenticate), else absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub admin_space_id: Option<String>,
     }
 
     /// Params of [`TOOL_CALL_METHOD`].

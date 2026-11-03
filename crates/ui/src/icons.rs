@@ -96,6 +96,7 @@ icon_assets![
     (SIDEBAR_MINIMALISTIC_LEFT, "sidebar-minimalistic-left"),
     (KEY_MINIMALISTIC, "key-minimalistic"),
     (KEYBOARD, "keyboard"),
+    (SHIELD, "shield"),
     (ARROW_LEFT, "arrow-left"),
     (ARROW_RIGHT, "arrow-right"),
     (ARROW_UP, "arrow-up"),

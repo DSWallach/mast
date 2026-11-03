@@ -58,6 +58,21 @@ completed and raise a Required Action "Ready to merge: <name>" saying
 what changed, which tests you ran and what to try. Do not merge.
 ```
 
+## Admin chats
+
+An admin chat can do what you can do in the app, across one Space, so it can reorganise a workspace or change project process without you clicking through it.
+
+**Granting.** Only you can grant it: right-click a chat (or open its Item tab) and choose **Grant admin for this Space…**. Pick a length (1, 4, 8 or 24 hours, or until revoked; 4 hours is the default) and, if you trust a cleanup run, **Skip bulk confirmations** (off by default). The chat shows a shield badge, "Admin · <Space> · 3h left", in its header and Item tab with a **Revoke** button. Revoking or expiry stops the chat at its next call, even mid-sweep. No agent tool can grant admin, and an admin can't grant it to another chat.
+
+**What it can do, inside the granted Space only:** read, list and message any chat; archive chats; start chats on any item; rename, create, move, group, archive and restore items; set status, project flag, worker destination and "Convert to project"; add, edit and remove instructions directly; accept or dismiss instruction proposals; move chats between items; resolve Required Actions. These go through `work_outline_admin`.
+
+**What it can't do:** touch another Space; write to Linear or GitHub; delete anything for good (it archives); change another chat's sandbox; read `~/.claude` or `~/.codex`. Admin doesn't widen the chat's own sandbox either.
+
+**Safety rails.**
+- Everything is attributed "by admin chat <title> (granted by <you>)", never as you. When an admin resolves a request, the note says so, so a worker whose rule is "only my answer counts" can tell the difference.
+- One admin turn is one entry in Recent Changes (⌘Z undoes the latest), with each action listed.
+- A call that touches more than 10 items runs nothing. It returns a preview and raises a Required Action, **Approve bulk change: …**. Resolve it yourself (an agent's resolve doesn't count); the admin then repeats the same steps with the confirm token (30 minutes, one use).
+
 ## Try it
 
 1. Make an item "Coordinator" with the instructions above.

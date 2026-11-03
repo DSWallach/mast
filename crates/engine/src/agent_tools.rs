@@ -160,6 +160,7 @@ impl AgentGrant {
             run_id: self.run_id.clone(),
             space_id: self.space_id.clone(),
             device_id: self.device_id.clone(),
+            admin_space_id: None,
         }
     }
 }
@@ -178,11 +179,18 @@ pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Default)]
 pub struct AgentTokens {
     grants: Mutex<HashMap<TokenKey, AgentGrant>>,
+    /// User-granted admin chats (device-local; RPC-written only).
+    admin: crate::admin::AdminGrants,
 }
 
 impl AgentTokens {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// The admin grant store (shared by every RPC surface of this engine).
+    pub fn admin(&self) -> &crate::admin::AdminGrants {
+        &self.admin
     }
 
     /// Mint a token for one Run. Valid until the returned lease drops or
@@ -589,6 +597,11 @@ fn parse_args<T: serde::de::DeserializeOwned>(arguments: &Value) -> Result<T, Ag
 struct CallContext<'a> {
     grant: AgentGrant,
     workspace: &'a WorkspaceHost,
+    /// The Space this chat administers right now (a live user grant on this
+    /// call), else `None`.
+    admin_space: Option<String>,
+    /// The chat's title, for attribution.
+    chat_title: String,
 }
 
 impl CallContext<'_> {
@@ -641,6 +654,21 @@ impl CallContext<'_> {
             .unwrap_or_default()
     }
 }
+
+/// An admin chat's resolution note carries "by admin chat <title> (granted
+/// by Mikey)" so the origin chat can tell it from the user's own answer.
+fn attributed_note(context: &CallContext, note: Option<String>) -> Option<String> {
+    if context.admin_space.is_none() {
+        return note;
+    }
+    let who = crate::admin::attribution(&context.chat_title);
+    Some(match note {
+        Some(note) => format!("{note} ({who})"),
+        None => format!("Resolved {who}"),
+    })
+}
+
+mod admin_tool;
 
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -829,7 +857,10 @@ impl AgentToolsService {
     /// `AgentAuthenticate`: who the token speaks for (token lookup and the
     /// Chat row only; no outline is materialized).
     pub fn authenticate(&self, token: &str) -> Result<AgentOrigin, AgentToolError> {
-        Ok(self.context(token)?.grant.origin())
+        let context = self.context(token)?;
+        let mut origin = context.grant.origin();
+        origin.admin_space_id = context.admin_space.clone();
+        Ok(origin)
     }
 
     fn context(&self, token: &str) -> Result<CallContext<'_>, AgentToolError> {
@@ -845,9 +876,17 @@ impl AgentToolsService {
         if chat.space_id.as_deref() != Some(grant.space_id.as_str()) {
             return Err(AgentToolError::unauthenticated());
         }
+        let admin_space = self
+            .tokens
+            .admin()
+            .live(&grant.chat_id)
+            .filter(|g| g.space_id == grant.space_id)
+            .map(|g| g.space_id);
         Ok(CallContext {
             grant,
             workspace: &self.workspace,
+            admin_space,
+            chat_title: chat.title.clone().unwrap_or_default(),
         })
     }
 
@@ -892,6 +931,7 @@ impl AgentToolsService {
             }
             tools::APPLY_CONTAINER_TEMPLATE => self.apply_container_template(context, arguments),
             tools::PROPOSE_INSTRUCTION => self.propose_instruction(context, arguments),
+            tools::ADMIN => self.admin(context, arguments),
             tools::QUEUE_CHILD_CHAT_TURN => self.queue_child_chat_turn(context, arguments),
             tools::CLAIM_CHILD_CHAT => self.claim_child_chat(context, arguments),
             tools::PROJECT_SCOPE_CHATS => Ok(self.project_scope_chats(context)),
@@ -924,7 +964,9 @@ impl AgentToolsService {
         mutation: &WorkOutlineMutation,
     ) -> Result<WorkOutlineMutateReply, AgentToolError> {
         let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
-        Ok(self.work_outline.mutate_as(mutation, &actor)?)
+        Ok(self
+            .work_outline
+            .mutate_as_admin(mutation, &actor, context.admin_space.as_deref())?)
     }
 
     // ---- tools ---------------------------------------------------------------
@@ -1300,7 +1342,7 @@ impl AgentToolsService {
         let mutation =
             WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
                 user_action_request_id: args.user_action_request_id.clone(),
-                note: non_empty(args.resolution),
+                note: attributed_note(context, non_empty(args.resolution)),
                 answer: None,
                 operation_id,
             });
@@ -1406,8 +1448,14 @@ impl AgentToolsService {
         let origin_chat = (!request.chat_id.is_empty())
             .then(|| self.workspace.chat(&request.chat_id).ok().flatten())
             .flatten();
-        let own_item = context.require_item("answering a request")?;
-        let reaches = request.chat_id == *caller
+        let admin = context.admin_space.as_deref() == Some(request.space_id.as_str());
+        let own_item = match context.current_item_id() {
+            Some(item) => item,
+            None if admin => request.work_item_id.clone(),
+            None => context.require_item("answering a request")?,
+        };
+        let reaches = admin
+            || request.chat_id == *caller
             || origin_chat
                 .as_ref()
                 .is_some_and(|c| c.parent_chat_id.as_deref() == Some(caller.as_str()))
@@ -1743,14 +1791,23 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: ReadSubtreeArgs = parse_args(arguments)?;
-        let root = context.require_item("reading its subtree")?;
-        let target = non_empty(args.work_item_id).unwrap_or_else(|| root.clone());
+        let target_arg = non_empty(args.work_item_id);
+        let root = match (context.admin_space.is_some(), context.current_item_id()) {
+            (_, Some(item)) => item,
+            (true, None) => target_arg.clone().ok_or_else(|| {
+                AgentToolError::invalid("pass workItemId: this chat has no item of its own")
+            })?,
+            (false, None) => context.require_item("reading its subtree")?,
+        };
+        let target = target_arg.unwrap_or_else(|| root.clone());
         let max_depth = args
             .max_depth
             .unwrap_or(DEFAULT_SUBTREE_DEPTH)
             .min(MAX_SUBTREE_DEPTH);
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-        if snapshot.item(&target).is_none() || !in_agent_scope(&snapshot, &root, &target) {
+        if snapshot.item(&target).is_none()
+            || (context.admin_space.is_none() && !in_agent_scope(&snapshot, &root, &target))
+        {
             return Err(WorkOutlineError::unauthorized(
                 "Agents may only read their own work item, its descendants, and their project",
             )
@@ -1814,10 +1871,14 @@ impl AgentToolsService {
                 "a prompt is required to start a chat for a work item",
             ));
         }
-        let root = context.require_item("starting a chat for a work item")?;
+        let root = match context.current_item_id() {
+            Some(item) => item,
+            None if context.admin_space.is_some() => args.work_item_id.clone(),
+            None => context.require_item("starting a chat for a work item")?,
+        };
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         if snapshot.item(&args.work_item_id).is_none()
-            || !in_agent_scope(&snapshot, &root, &args.work_item_id)
+            || (context.admin_space.is_none() && !in_agent_scope(&snapshot, &root, &args.work_item_id))
         {
             return Err(WorkOutlineError::unauthorized(
                 "Agents may only start chats for their own work item, its descendants, and \

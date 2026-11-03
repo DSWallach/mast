@@ -481,6 +481,10 @@ fn chat_item(row: &Row) -> Item {
     };
     text.push("\u{25cf} ", Some(dot));
     text.push(&truncate_title(&row.title), None);
+    if row.admin {
+        // This chat can reshape its Space (a text tag: menu items are text).
+        text.push(" \u{b7} Admin", Some(Tone::Bromine));
+    }
     let detail = if row.state.needs_you() {
         format!("{} {}", row.state.label(), row.elapsed)
     } else {

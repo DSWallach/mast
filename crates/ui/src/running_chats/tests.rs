@@ -18,6 +18,7 @@ fn input(id: &str, space: &str, state: RunState, mins_ago: i64) -> Input {
         account: None,
         model: None,
         background: 0,
+        admin: false,
     }
 }
 

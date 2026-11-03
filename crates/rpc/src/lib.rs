@@ -64,6 +64,22 @@ pub mod methods {
     /// One-click Resume/Resend: re-dispatch the last user message on the saved
     /// harness session. Params `{chatId}`; replies `{resumed}`. IPC-only.
     pub const RESUME_INTERRUPTED_RUN: &str = "ResumeInterruptedRun";
+    /// Grant a chat admin for its Space, with an expiry. Params
+    /// `GrantAdminParams`; replies the `AdminGrant`. IPC-only, user action:
+    /// no agent tool reaches it.
+    pub const GRANT_ADMIN: &str = "GrantAdmin";
+    /// Revoke a chat's admin grant now (in-flight calls fail their next
+    /// check). Params `{chatId}`; replies `{}`. IPC-only.
+    pub const REVOKE_ADMIN: &str = "RevokeAdmin";
+    /// Live admin grants on this device. No params; replies `AdminGrant[]`.
+    /// IPC-only.
+    pub const LIST_ADMIN_GRANTS: &str = "ListAdminGrants";
+    /// Admin audit turns, newest last. Params `AdminAuditListParams`; replies
+    /// `AdminAuditTurn[]`. IPC-only.
+    pub const ADMIN_AUDIT_LIST: &str = "AdminAuditList";
+    /// Undo one admin turn (every change in the sweep). Params
+    /// `AdminUndoTurnParams`; replies `AdminUndoTurnReply`. IPC-only.
+    pub const ADMIN_UNDO_TURN: &str = "AdminUndoTurn";
     /// Worker-event wake status of one chat (settings, held and recent
     /// events). Params `{chatId}`; replies `WakeStatus`. IPC-only.
     pub const GET_WAKE_STATUS: &str = "GetWakeStatus";

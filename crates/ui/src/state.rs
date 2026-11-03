@@ -765,6 +765,8 @@ pub struct AppState {
     pub(crate) action_log: crate::work_outline::action_log::ActionLog,
     /// One `WatchWorkOutline` task per watched Space (single-flight per key).
     work_outline_tasks: HashMap<String, Task<()>>,
+    /// Live admin grants and the admin audit cache (`crate::admin`).
+    pub(crate) admin: crate::admin::AdminState,
     /// Spaces the Outline presentation declared visible; the reconciler
     /// watches exactly these (intersected with live Spaces).
     work_outline_visible: Vec<String>,
@@ -886,6 +888,7 @@ impl AppState {
             work_outlines: crate::work_outline::WorkOutlineStore::new(),
             action_log: Default::default(),
             work_outline_tasks: HashMap::new(),
+            admin: Default::default(),
             work_outline_visible: Vec::new(),
             work_outline_runtime: None,
             artifacts: crate::artifacts::ArtifactStore::new(),
@@ -2754,6 +2757,11 @@ impl AppState {
 
     /// Spaces that should have a live watch: the union of the declared
     /// visible set and the selected Chat's Space, restricted to live Spaces.
+    /// Is the Outline presentation on screen (any Space declared visible)?
+    pub(crate) fn work_outline_is_visible(&self) -> bool {
+        !self.work_outline_visible.is_empty()
+    }
+
     fn desired_work_outline_spaces(&self) -> HashSet<String> {
         self.work_outline_visible
             .iter()
