@@ -858,7 +858,7 @@ fn launch_args(key: &str, item: &str, sandbox: &str) -> Value {
     json!({
         "idempotencyKey": key, "workItemId": item, "prompt": "go",
         "config": { "harness": "mock", "model": null, "reasoning": null,
-                    "modelOptions": {}, "sandbox": sandbox, "autoApprove": true },
+                    "modelOptions": {}, "sandbox": sandbox, "autoApprove": false },
     })
 }
 
@@ -922,7 +922,7 @@ async fn a_child_started_for_a_descendant_item_gets_that_items_instructions() {
     assert_eq!(assignment.work_item_id.as_deref(), Some(a_grand.as_str()));
     let row = rig.core.workspace.chat(&child).unwrap().unwrap();
     assert_eq!(row.parent_chat_id.as_deref(), Some(CHAT));
-    // Approval is never automatic for an agent-started child.
+    // An agent-started child is Ask unless an Auto caller asks for Auto.
     assert!(!row.config.unwrap().auto_approve);
     let pin = rig
         .core
