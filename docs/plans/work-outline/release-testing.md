@@ -63,6 +63,24 @@ the 3 minute limit and three `managed_accounts` tests failed. They are in the
 `terminal-heavy` test group (max 2 at a time); with that, both binaries pass (38 tests,
 69 s).
 
+## Measurements (2026-11-03, mast-engine, 1072 tests, 18-core Mac with other chats building)
+
+| Runner | Result |
+| --- | --- |
+| `cargo test -p mast-engine --no-fail-fast` (today) | stopped after about 110 min with 37 of 79 test binaries done; extrapolates to 3.5 h or more |
+| `cargo nextest run --profile release -p mast-engine` | 1072 run, 1072 passed, 56 quarantined skipped, **1184 s (about 20 min)** |
+
+The first nextest run (before the `terminal-heavy` group) finished 956 tests with 11
+failures/timeouts in `managed_accounts` and `m5_repos_diffs_terminals`; with the group
+they pass. Timings include contention from other chats' builds, so treat them as an upper
+bound.
+
+**The Mac sleeps during long runs.** Maintenance sleep (about 16 min) pauses test
+processes and nextest's timers, so a run looks hung and its wall clock is inflated (one
+nextest run showed 6439 s wall for 1184 s of test time). Wrap long runs in
+`caffeinate -i` (idle-sleep only, ends with the command), e.g.
+`caffeinate -i scripts/run_release_tests.sh --build`.
+
 ## Process rules
 
 - Only kill processes inside your own worktree. Never `pkill -f target/debug/deps`.
