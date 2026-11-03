@@ -576,6 +576,33 @@ impl Shell {
                 ticket.url.clone(),
             ));
         }
+        for review in &facts.reviews {
+            let id = review.artifact_id.clone();
+            let selector = format!("chat-header-review-{id}");
+            row = row.child(
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .h(px(20.0))
+                    .px(px(7.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .rounded(px(5.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.element_hover.opacity(0.55))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.element_hover))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.accent)
+                    .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(11.0)))
+                    .child(SharedString::from(review.title.clone()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_artifact(id.clone(), window, cx);
+                    })),
+            );
+        }
         row.into_any_element()
     }
 
@@ -757,7 +784,10 @@ impl Shell {
                     id: chat.id.clone(),
                     space_id: chat.space_id.clone(),
                     parent_chat_id: chat.parent_chat_id.clone(),
-                    title: chat.title.clone().unwrap_or_else(|| "New session".to_owned()),
+                    title: chat
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "New session".to_owned()),
                     status: state.display_status_for(chat, now),
                     archived: chat.archived,
                     stale: false,
@@ -773,7 +803,9 @@ impl Shell {
                 .collect();
             (spaces, chats)
         };
-        list.update(cx, |list, _| list.set_data(spaces, std::sync::Arc::new(chats)));
+        list.update(cx, |list, _| {
+            list.set_data(spaces, std::sync::Arc::new(chats))
+        });
         list
     }
 
@@ -818,14 +850,23 @@ impl Shell {
                         .size(px(10.0))
                         .text_color(theme.text_muted),
                     )
-                    .child(section_label(theme, section_icon(name), label, icon_selector))
+                    .child(section_label(
+                        theme,
+                        section_icon(name),
+                        label,
+                        icon_selector,
+                    ))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(if warn { theme.warning } else { theme.text_muted })
+                            .text_color(if warn {
+                                theme.warning
+                            } else {
+                                theme.text_muted
+                            })
                             .child(SharedString::from(summary)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -925,7 +966,11 @@ impl Shell {
                     .p(px(8.0))
                     .rounded(px(6.0))
                     .border_1()
-                    .border_color(if open > 0 { theme.warning.opacity(0.6) } else { theme.border })
+                    .border_color(if open > 0 {
+                        theme.warning.opacity(0.6)
+                    } else {
+                        theme.border
+                    })
                     .child(
                         div()
                             .flex()
@@ -1037,13 +1082,25 @@ impl Shell {
             }
             block.into_any_element()
         });
-        col = col.child(self.item_accordion("runs-in", "Runs in", runs_summary, false, body, theme, cx));
+        col = col.child(self.item_accordion(
+            "runs-in",
+            "Runs in",
+            runs_summary,
+            false,
+            body,
+            theme,
+            cx,
+        ));
 
         // Model.
         let model_differs = facts.model.ran && facts.model.configured.is_some();
         let model_summary = format!(
             "{} \u{b7} {}",
-            facts.model.label.clone().unwrap_or_else(|| "default".into()),
+            facts
+                .model
+                .label
+                .clone()
+                .unwrap_or_else(|| "default".into()),
             facts.model.detail()
         );
         let body = self.item_tab_open.contains("model").then(|| {
@@ -1051,12 +1108,25 @@ impl Shell {
                 .when(model_differs, |el| el.text_color(theme.warning))
                 .into_any_element()
         });
-        col = col.child(self.item_accordion("model", "Model", model_summary.clone(), model_differs, body, theme, cx));
+        col = col.child(self.item_accordion(
+            "model",
+            "Model",
+            model_summary.clone(),
+            model_differs,
+            body,
+            theme,
+            cx,
+        ));
 
         // Account.
-        let account_summary = facts.account.clone().unwrap_or_else(|| "Default login".into());
-        let body = self.item_tab_open.contains("account").then(|| {
-            match &facts.account {
+        let account_summary = facts
+            .account
+            .clone()
+            .unwrap_or_else(|| "Default login".into());
+        let body = self
+            .item_tab_open
+            .contains("account")
+            .then(|| match &facts.account {
                 Some(account) => div()
                     .debug_selector(|| "chat-item-account-badge".into())
                     .flex_none()
@@ -1079,9 +1149,16 @@ impl Shell {
                     .child(SharedString::from(account.clone()))
                     .into_any_element(),
                 None => muted("Default login".into()).into_any_element(),
-            }
-        });
-        col = col.child(self.item_accordion("account", "Account", account_summary, false, body, theme, cx));
+            });
+        col = col.child(self.item_accordion(
+            "account",
+            "Account",
+            account_summary,
+            false,
+            body,
+            theme,
+            cx,
+        ));
 
         // Links.
         if facts.item.is_some() && (!facts.prs.is_empty() || facts.ticket.is_some()) {
@@ -1104,28 +1181,38 @@ impl Shell {
                 for (ix, pr) in facts.prs.iter().enumerate() {
                     let url = pr.url.clone();
                     block = block.child(
-                        pr_link_row(format!("chat-item-pr-{ix}"), pr, theme)
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        pr_link_row(format!("chat-item-pr-{ix}"), pr, theme).on_click(cx.listener(
+                            move |this, _, window, cx| {
                                 let external = window.modifiers().secondary();
                                 this.open_web_reference(&url, external, window, cx)
-                            })),
+                            },
+                        )),
                     );
                 }
                 if let Some(ticket) = &facts.ticket {
                     let url = ticket.url.clone();
                     block = block.child(
-                        ticket_link_row("chat-item-ticket".into(), ticket, theme)
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        ticket_link_row("chat-item-ticket".into(), ticket, theme).on_click(
+                            cx.listener(move |this, _, window, cx| {
                                 if let Some(url) = &url {
                                     let external = window.modifiers().secondary();
                                     this.open_web_reference(url, external, window, cx)
                                 }
-                            })),
+                            }),
+                        ),
                     );
                 }
                 block.into_any_element()
             });
-            col = col.child(self.item_accordion("links", "Links", parts.join(" \u{b7} "), false, body, theme, cx));
+            col = col.child(self.item_accordion(
+                "links",
+                "Links",
+                parts.join(" \u{b7} "),
+                false,
+                body,
+                theme,
+                cx,
+            ));
         }
 
         // Plan.
@@ -1156,7 +1243,15 @@ impl Shell {
                     }))
                     .into_any_element()
             });
-            col = col.child(self.item_accordion("plan", "Plan", summary.clone(), false, body, theme, cx));
+            col = col.child(self.item_accordion(
+                "plan",
+                "Plan",
+                summary.clone(),
+                false,
+                body,
+                theme,
+                cx,
+            ));
         }
 
         // Children.
@@ -1208,11 +1303,14 @@ impl Shell {
                     );
                 }
                 if item.children.len() > CHILD_ROWS {
-                    block = block.child(muted(format!("+{} more", item.children.len() - CHILD_ROWS)));
+                    block =
+                        block.child(muted(format!("+{} more", item.children.len() - CHILD_ROWS)));
                 }
                 block.into_any_element()
             });
-            col = col.child(self.item_accordion("children", "Children", summary, false, body, theme, cx));
+            col = col.child(
+                self.item_accordion("children", "Children", summary, false, body, theme, cx),
+            );
         }
 
         // No item: the way in.
@@ -1241,15 +1339,20 @@ impl Shell {
             );
         }
 
-        let id_summary = format!(
-            "Chat {}",
-            facts.chat_id.chars().take(8).collect::<String>()
-        );
+        let id_summary = format!("Chat {}", facts.chat_id.chars().take(8).collect::<String>());
         let body = self
             .item_tab_open
             .contains("identifiers")
             .then(|| self.render_identifiers(facts, theme, cx));
-        col = col.child(self.item_accordion("identifiers", "Identifiers", id_summary, false, body, theme, cx));
+        col = col.child(self.item_accordion(
+            "identifiers",
+            "Identifiers",
+            id_summary,
+            false,
+            body,
+            theme,
+            cx,
+        ));
         col.into_any_element()
     }
 
@@ -1435,23 +1538,25 @@ impl Shell {
             for (ix, pr) in facts.prs.iter().enumerate() {
                 let url = pr.url.clone();
                 block = block.child(
-                    pr_link_row(format!("{prefix}-pr-{ix}"), pr, theme)
-                        .on_click(cx.listener(move |this, _, window, cx| {
+                    pr_link_row(format!("{prefix}-pr-{ix}"), pr, theme).on_click(cx.listener(
+                        move |this, _, window, cx| {
                             let external = window.modifiers().secondary();
                             this.open_web_reference(&url, external, window, cx)
-                        })),
+                        },
+                    )),
                 );
             }
             if let Some(ticket) = &facts.ticket {
                 let url = ticket.url.clone();
                 block = block.child(
-                    ticket_link_row(format!("{prefix}-ticket"), ticket, theme)
-                        .on_click(cx.listener(move |this, _, window, cx| {
+                    ticket_link_row(format!("{prefix}-ticket"), ticket, theme).on_click(
+                        cx.listener(move |this, _, window, cx| {
                             if let Some(url) = &url {
                                 let external = window.modifiers().secondary();
                                 this.open_web_reference(url, external, window, cx)
                             }
-                        })),
+                        }),
+                    ),
                 );
             }
             col = col.child(block);
@@ -1803,9 +1908,9 @@ pub(super) fn pr_link_row(
         "Pull request".to_owned()
     };
     let title = pr.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
-    let icon_color = pr
-        .status
-        .map_or(theme.text_faint, |status| chip::state_color(status.state, theme));
+    let icon_color = pr.status.map_or(theme.text_faint, |status| {
+        chip::state_color(status.state, theme)
+    });
     let mut tip = vec![title.map_or_else(|| fallback.clone(), str::to_owned)];
     if !repo_ref.is_empty() && title.is_some() {
         tip.push(repo_ref.clone());

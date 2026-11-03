@@ -332,6 +332,7 @@ type StateSlice = (
     Option<String>,
     Option<usize>,
     Option<String>,
+    Vec<mast_proto::ChatRefTargetView>,
 );
 
 /// What the tab reads from `AppState` while rendering.
@@ -343,11 +344,18 @@ fn state_slice(state: &crate::state::AppState, artifact_id: &str) -> StateSlice 
             .snapshot()
             .map(|snapshot| std::sync::Arc::as_ptr(snapshot) as usize)
     });
+    let refs = artifact
+        .as_ref()
+        .filter(|artifact| artifact.kind == ArtifactKind::Review)
+        .and_then(|artifact| artifact.chat_id.as_deref())
+        .map(|chat_id| state.chat_ref_targets(chat_id).to_vec())
+        .unwrap_or_default();
     (
         artifact,
         state.local_device_id.clone(),
         outline,
         state.artifacts().space_ids().next().map(str::to_owned),
+        refs,
     )
 }
 
@@ -622,7 +630,10 @@ impl ArtifactTab {
                     bytes,
                 )));
             }
-            ArtifactBody::Options(_) | ArtifactBody::Review(_) | ArtifactBody::Text(_) | ArtifactBody::Invalid(_) => {}
+            ArtifactBody::Options(_)
+            | ArtifactBody::Review(_)
+            | ArtifactBody::Text(_)
+            | ArtifactBody::Invalid(_) => {}
         }
         self.document_changed(cx);
         cx.notify();
@@ -1412,28 +1423,96 @@ impl ArtifactTab {
                 let Some(ArtifactBody::Review(review)) = &self.body else {
                     return message("Loading…".into());
                 };
-                let highlights = review.highlights.iter().enumerate().map(|(index, highlight)| {
-                    let selector = format!("review-highlight-{index}");
-                    div().id(SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .p(px(10.0)).rounded(px(6.0)).border_1().border_color(theme.border)
-                        .flex().flex_col().gap(px(4.0))
-                        .child(div().text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!("{} · {}", highlight.kind, highlight.severity))))
-                        .child(div().text_size(crate::typography::ui_rems(12.5))
-                            .text_color(theme.text).child(SharedString::from(highlight.text.clone())))
-                });
-                div().id("artifact-review").debug_selector(|| "artifact-review".into())
-                    .size_full().overflow_y_scroll().p(px(12.0)).flex().flex_col().gap(px(8.0))
-                    .child(div().text_size(crate::typography::ui_rems(13.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD).child("Summary"))
-                    .child(div().text_size(crate::typography::ui_rems(12.5))
-                        .text_color(theme.text).child(SharedString::from(review.summary.clone())))
-                    .when(!review.highlights.is_empty(), |el| el.child(
-                        div().pt(px(4.0)).text_size(crate::typography::ui_rems(13.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD).child("Highlights")))
-                    .children(highlights).into_any_element()
+                let stale_head = self
+                    .artifact(cx)
+                    .and_then(|artifact| artifact.chat_id)
+                    .and_then(|chat_id| {
+                        model::review_head_drift(
+                            review,
+                            self.state.read(cx).chat_ref_targets(&chat_id),
+                        )
+                        .map(str::to_owned)
+                    });
+                let highlights = review
+                    .highlights
+                    .iter()
+                    .enumerate()
+                    .map(|(index, highlight)| {
+                        let selector = format!("review-highlight-{index}");
+                        div()
+                            .id(SharedString::from(selector.clone()))
+                            .debug_selector(move || selector.clone())
+                            .p(px(10.0))
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(format!(
+                                        "{} · {}",
+                                        highlight.kind, highlight.severity
+                                    ))),
+                            )
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(12.5))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(highlight.text.clone())),
+                            )
+                    });
+                div()
+                    .id("artifact-review")
+                    .debug_selector(|| "artifact-review".into())
+                    .size_full()
+                    .overflow_y_scroll()
+                    .p(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .when_some(stale_head, |el, head| {
+                        el.child(
+                            div()
+                                .debug_selector(|| "review-stale".into())
+                                .p(px(8.0))
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(theme.warning)
+                                .text_color(theme.warning)
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .child(SharedString::from(format!(
+                                    "Stale · head moved {} → {}",
+                                    review.pr.head_sha, head
+                                ))),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Summary"),
+                    )
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(review.summary.clone())),
+                    )
+                    .when(!review.highlights.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .pt(px(4.0))
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Highlights"),
+                        )
+                    })
+                    .children(highlights)
+                    .into_any_element()
             }
             Presenter::Text => match &self.body {
                 Some(ArtifactBody::Text(text)) => {

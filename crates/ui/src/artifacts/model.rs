@@ -216,6 +216,7 @@ pub(crate) enum ArtifactBody {
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub(crate) struct ReviewCard {
+    pub(crate) pr: mast_proto::review_sidecar::ReviewPullRequest,
     pub(crate) summary: String,
     pub(crate) highlights: Vec<ReviewHighlight>,
 }
@@ -225,6 +226,23 @@ pub(crate) struct ReviewHighlight {
     pub(crate) kind: String,
     pub(crate) severity: String,
     pub(crate) text: String,
+}
+
+/// A matching live PR ref can establish that this review is stale.
+pub(crate) fn review_head_drift<'a>(
+    review: &ReviewCard,
+    targets: &'a [mast_proto::ChatRefTargetView],
+) -> Option<&'a str> {
+    targets.iter().find_map(|target| {
+        let pr = crate::chat_work_context::parse_pr_url(target.pr_url.as_deref()?)?;
+        if pr.number != review.pr.number
+            || !format!("{}/{}", pr.owner, pr.repo).eq_ignore_ascii_case(&review.pr.repo)
+        {
+            return None;
+        }
+        let head = target.head_sha.as_deref()?;
+        (!head.eq_ignore_ascii_case(&review.pr.head_sha)).then_some(head)
+    })
 }
 
 /// Which wrapper a web body uses.
@@ -285,7 +303,9 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                 },
                 ArtifactKind::Review => match serde_json::from_str::<ReviewCard>(&text) {
                     Ok(review) => ArtifactBody::Review(review),
-                    Err(error) => ArtifactBody::Invalid(format!("Could not read the review ({error}).")),
+                    Err(error) => {
+                        ArtifactBody::Invalid(format!("Could not read the review ({error})."))
+                    }
                 },
                 ArtifactKind::Options => match OptionsManifest::parse(&text) {
                     Ok(manifest) => ArtifactBody::Options(manifest),
