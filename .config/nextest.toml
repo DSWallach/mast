@@ -1,0 +1,96 @@
+# cargo-nextest configuration for the Mast workspace.
+#
+# Scope: engine, mcp, harness, proto and the other non-UI crates. The UI crate
+# (mast-ui) is NOT run under nextest: its gpui tests share process-global state and
+# need one thread in one process, which `cargo test -p mast-ui --lib -- --test-threads=1`
+# provides and nextest (one process per test) does not. See
+# docs/plans/work-outline/release-testing.md.
+#
+# Profiles
+#   default     local development; quarantined tests run and may fail.
+#   release     excludes the quarantined tests; any failure is a new failure.
+#   quarantine  runs only the quarantined tests; failures are expected.
+#
+# The quarantine list is duplicated in `profile.release.default-filter` and
+# `profile.quarantine.default-filter` because nextest has no named filter sets.
+# Edit both together. Each entry is a `test(~name)` substring match, optionally
+# scoped by `binary(...)`.
+
+[profile.default]
+test-threads = 8
+slow-timeout = { period = "60s", terminate-after = 3 }
+fail-fast = false
+
+[profile.release]
+test-threads = 8
+# A test running 3 minutes is hung: terminate it and report a failure.
+slow-timeout = { period = "60s", terminate-after = 3 }
+fail-fast = false
+failure-output = "immediate-final"
+status-level = "retry"
+default-filter = '''
+not (
+    test(~capture_source_context_reads_the_dispatch_checkout)
+  | test(~local_opening_tail_arrives_before_full_mirror_and_keeps_all_history)
+  | test(~holder_probe_reports_pid_without_disturbing_the_lock)
+  | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
+  | test(~restart_restores_the_queue_frozen_until_an_explicit_send)
+  | test(~mutations_stay_fast_on_a_large_local_registry)
+  | test(~stalled_prompt_post_has_a_bounded_timeout)
+  | test(~workspace_file_surface_proxies_over_the_relay)
+  | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
+  | test(~cursor_login_flow_spawns_shim_and_auto_activates)
+  | test(~codex_login_resolves_override_and_adds_its_directory_to_child_path)
+  | (binary(instruction_delivery) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
+  | (binary(external_import_links_repair) & test(~repair_))
+  | test(~workspace_file_rpcs_list_search_read_write_and_watch)
+  | test(~version_probe_bounds_hangs_and_rejects_nonzero)
+  | test(~codex_login_honors_override_only_installation)
+  | test(~login_child)
+  | binary(pr_ticket_cache_login_shell)
+  | (binary(managed_accounts) & (test(~sign_in)))
+  | test(~setting_the_destination_syncs_the_space)
+  | test(~git_status_stream)
+  | test(~models_discovers_visible_catalog_with_pagination)
+  | test(~falls_back_when_interactive_attempt_hangs)
+  | test(~generated_image_is_materialized_before_publication_and_survives_reopen)
+  | test(~sync_picks_up_a_closed_message_but_defers_the_new_open_reply)
+  | test(~online_runtime_shutdown_stops_edge_workers_and_retires_the_graph)
+  | test(~titling_e2e_names_chat_and_renames_worktree_branch)
+)
+'''
+
+[profile.quarantine]
+test-threads = 2
+slow-timeout = { period = "60s", terminate-after = 3 }
+fail-fast = false
+status-level = "retry"
+default-filter = '''
+    test(~capture_source_context_reads_the_dispatch_checkout)
+  | test(~local_opening_tail_arrives_before_full_mirror_and_keeps_all_history)
+  | test(~holder_probe_reports_pid_without_disturbing_the_lock)
+  | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
+  | test(~restart_restores_the_queue_frozen_until_an_explicit_send)
+  | test(~mutations_stay_fast_on_a_large_local_registry)
+  | test(~stalled_prompt_post_has_a_bounded_timeout)
+  | test(~workspace_file_surface_proxies_over_the_relay)
+  | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
+  | test(~cursor_login_flow_spawns_shim_and_auto_activates)
+  | test(~codex_login_resolves_override_and_adds_its_directory_to_child_path)
+  | (binary(instruction_delivery) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
+  | (binary(external_import_links_repair) & test(~repair_))
+  | test(~workspace_file_rpcs_list_search_read_write_and_watch)
+  | test(~version_probe_bounds_hangs_and_rejects_nonzero)
+  | test(~codex_login_honors_override_only_installation)
+  | test(~login_child)
+  | binary(pr_ticket_cache_login_shell)
+  | (binary(managed_accounts) & (test(~sign_in)))
+  | test(~setting_the_destination_syncs_the_space)
+  | test(~git_status_stream)
+  | test(~models_discovers_visible_catalog_with_pagination)
+  | test(~falls_back_when_interactive_attempt_hangs)
+  | test(~generated_image_is_materialized_before_publication_and_survives_reopen)
+  | test(~sync_picks_up_a_closed_message_but_defers_the_new_open_reply)
+  | test(~online_runtime_shutdown_stops_edge_workers_and_retires_the_graph)
+  | test(~titling_e2e_names_chat_and_renames_worktree_branch)
+'''
