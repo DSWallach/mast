@@ -1711,6 +1711,9 @@ impl Inner {
                     let _ = self.worker_signals.send(WorkerSignal::ToolFailures { chat_id: chat_id.to_owned(), failures });
                 }
             }
+            if matches!(status, SessionStatus::Idle | SessionStatus::Errored) {
+                lock(&self.awaiting_inputs).remove(chat_id);
+            }
             entry.awaiting_input = if status == SessionStatus::AwaitingInput {
                 lock(&self.awaiting_inputs).get(chat_id).cloned()
             } else { None };

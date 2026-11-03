@@ -475,7 +475,7 @@ pub fn truncate_title(title: &str) -> String {
 fn chat_item(row: &Row) -> Item {
     let mut text = Styled::default();
     let dot = match row.state {
-        RunState::Errored => Tone::Cadmium,
+        RunState::Errored | RunState::ToolFailed => Tone::Cadmium,
         RunState::Awaiting => Tone::Bromine,
         RunState::Working | RunState::IdleBackground => Tone::Clover,
     };

@@ -2101,6 +2101,26 @@ async fn project_rig(rig: &Rig) -> ProjectRig {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn project_destination_worker_prompt_wakes_without_watcher_delay() {
+    let rig = rig().await;
+    let project = project_rig(&rig).await;
+    assign_chat(&rig, "wake-orchestrator", CHAT, &project.planning).await;
+    assign_chat(&rig, "wake-worker", OTHER_CHAT, &project.ticket).await;
+    let wakes = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(), None, Arc::new(|| 1_000_000),
+    );
+    wakes.ingest_worker_signal(mast_engine::sessions::WorkerSignal::Input {
+        chat_id: OTHER_CHAT.into(), input: mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion {
+            id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false,
+        }] },
+    }).await;
+    let held = wakes.status(CHAT).held;
+    assert_eq!(held.len(), 1);
+    assert!(held[0].summary.contains("waiting for approval: Run build?"));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_project_records_its_worker_destination_and_validates_it() {
     let rig = rig().await;
     let p = project_rig(&rig).await;

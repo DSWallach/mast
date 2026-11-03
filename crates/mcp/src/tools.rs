@@ -2688,6 +2688,14 @@ mod tests {
         assert!(props.get("viewport").is_some() && props.get("theme").is_some());
     }
 
+    #[test]
+    fn create_chat_describes_worker_support_and_approvals() {
+        let tool = catalog().into_iter().find(|tool| tool.name == "create_chat").unwrap();
+        for phrase in ["claude-code", "codex", "worker reports", "Required Actions", "worker approvals", "wake the orchestrator"] {
+            assert!(tool.description.contains(phrase), "missing {phrase}");
+        }
+    }
+
     #[tokio::test]
     async fn chat_summaries_include_worker_blockers() {
         let world = Arc::new(World { working: true, ..World::default() });

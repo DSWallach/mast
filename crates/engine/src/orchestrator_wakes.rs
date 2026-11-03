@@ -383,9 +383,24 @@ impl OrchestratorWakes {
     /// coalescing session watch to observe every prompt or completed turn.
     pub async fn ingest_worker_signal(&self, signal: crate::sessions::WorkerSignal) {
         use crate::sessions::WorkerSignal;
-        // The worker can ask before the asynchronous chat watcher catches up.
+        // A newly assigned worker can ask before either workspace watcher
+        // catches up. Refresh its Space so project-destination orchestrators
+        // receive the event as well as its direct parent.
+        let worker = match &signal {
+            WorkerSignal::Input { chat_id, .. } | WorkerSignal::ToolFailures { chat_id, .. } => chat_id,
+        };
         if let Ok(chats) = self.inner.workspace.read_chats() {
+            let space_id = chats.iter().find(|chat| &chat.id == worker).and_then(|chat| chat.space_id.clone());
             self.ingest_chats(&chats).await;
+            if let Some(space_id) = space_id {
+                let workspace = self.inner.workspace.clone();
+                if let Ok(snapshot) = tokio::task::spawn_blocking(move || {
+                    let inputs = workspace.work_outline_inputs(&space_id);
+                    mast_doc::materialize_work_outline(&space_id, &inputs)
+                }).await {
+                    self.ingest_snapshot(&snapshot).await;
+                }
+            }
         }
         let now = self.now();
         let (worker, kind, detail, key) = match signal {
