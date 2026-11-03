@@ -223,6 +223,47 @@ async fn review_publish_and_get_validate_identity_and_scope() {
             .len(),
         64
     );
+    git(
+        &rig.worktree,
+        &["update-ref", "refs/remotes/origin/review", &head],
+    );
+    rig.core
+        .workspace
+        .update_chat_diff_targets(CHAT, |row| {
+            row.ref_targets.push(mast_proto::StoredRefDiffTarget {
+                id: "pr-42".into(),
+                kind: mast_proto::RefDiffKind::Pr,
+                path: rig.worktree.to_string_lossy().into_owned(),
+                repo_id: "repo-test".into(),
+                head_branch: "review".into(),
+                head_ref: "refs/remotes/origin/review".into(),
+                base_branch: "main".into(),
+                base_ref: "refs/heads/main".into(),
+                pr_number: Some(42),
+                pr_url: Some(url.into()),
+                bound_at: 0,
+            });
+        })
+        .unwrap();
+    let fresh = tool(&rig, &rig.token, "review_get", json!({"prUrl": url}))
+        .await
+        .unwrap();
+    assert_eq!(fresh["stale"], false);
+    assert_eq!(fresh["currentHeadSha"], head);
+    std::fs::write(rig.worktree.join("README.md"), "changed again\n").unwrap();
+    git(&rig.worktree, &["commit", "-qam", "advance head"]);
+    let advanced = git(&rig.worktree, &["rev-parse", "HEAD"]);
+    git(
+        &rig.worktree,
+        &["update-ref", "refs/remotes/origin/review", &advanced],
+    );
+    let stale = tool(&rig, &rig.token, "review_get", json!({"prUrl": url}))
+        .await
+        .unwrap();
+    assert_eq!(stale["artifactId"], id);
+    assert_eq!(stale["stale"], true);
+    assert_eq!(stale["currentHeadSha"], advanced);
+    assert_eq!(stale["review"]["pr"]["headSha"], head);
     let other = tool(&rig, &rig.other_token, "review_get", json!({"prUrl": url}))
         .await
         .unwrap();
