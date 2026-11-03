@@ -1157,7 +1157,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::REVIEW_GET,
             required: &[],
-            optional: &[],
+            optional: &[p("prUrl", "select a pull request; defaults to latest")],
             example: "{}",
         },
         ToolUsage {

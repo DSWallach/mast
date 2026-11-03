@@ -481,8 +481,8 @@ fn artifact_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::REVIEW_GET,
-            description: "Read the calling chat's published review artifact and content, or null when none exists.",
-            input_schema: json!({ "type": "object", "properties": {} }),
+            description: "Read the calling chat's published review artifact and content, or null when none exists. Pass prUrl to select a pull request; otherwise the latest review is returned.",
+            input_schema: json!({ "type": "object", "properties": { "prUrl": { "type": "string" } } }),
         },
     ]
 }
