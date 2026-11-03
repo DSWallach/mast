@@ -1890,9 +1890,13 @@ fn handle_server_request(
     // Permission-profile grants only exist off the yolo path (policy "never"
     // never asks); keep the yolo branch's behavior exactly as it was.
     if !is_approval || (auto_approve && method == "item/permissions/requestApproval") {
+        let server_name = params
+            .get("serverName")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         tracing::info!(
             target: "mast_harness::codex",
-            server_name = params.get("serverName").and_then(Value::as_str).unwrap_or("unknown"),
+            server_name,
             method,
             "rejecting unsupported Codex server request"
         );
