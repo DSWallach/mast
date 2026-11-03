@@ -1184,7 +1184,7 @@ fn agent_of_an_execution_bound_chat_cannot_reassociate() {
 }
 
 #[test]
-fn agent_resolve_closes_only_its_own_members_of_a_dedupe_group() {
+fn agent_resolve_closes_the_in_reach_members_of_a_dedupe_group() {
     let mut f = fixture();
     let own = f.own.clone();
     assign(&mut f.doc, "as-c2", "c2", &own);
@@ -1208,18 +1208,10 @@ fn agent_resolve_closes_only_its_own_members_of_a_dedupe_group() {
     let s = snap(&f.doc);
     assert!(!s.user_action_request(&mine).unwrap().is_unresolved());
     assert!(!s.user_action_request(&mine_again).unwrap().is_unresolved());
-    let other = s.user_action_request(&theirs).unwrap();
-    assert!(other.is_unresolved(), "another Chat's request stays open");
-    assert!(!other.deduped, "it becomes the canonical request");
-    assert_eq!(s.item(&own).unwrap().rollup.unresolved_user_action_count, 1);
-    // The user's resolve still closes the whole (remaining) group.
-    apply(&mut f.doc, resolve_params("gu", &theirs, None)).unwrap();
-    assert!(
-        !snap(&f.doc)
-            .user_action_request(&theirs)
-            .unwrap()
-            .is_unresolved()
-    );
+    // Another Chat's duplicate on the agent's own item is in its subtree, so
+    // it closes with the group.
+    assert!(!s.user_action_request(&theirs).unwrap().is_unresolved());
+    assert_eq!(s.item(&own).unwrap().rollup.unresolved_user_action_count, 0);
 }
 
 /// `answer` is the user's chat message carried by an agent: only an agent
@@ -1289,13 +1281,16 @@ fn coordinator_resolve_closes_its_childs_dedupe_group_and_nothing_else() {
     c4.parent_chat_id = Some("c3".into());
     f.doc.upsert_chat(&c4).unwrap();
     assign(&mut f.doc, "as-c3", "c3", &child);
-    assign(&mut f.doc, "as-c4", "c4", &child);
+    let sibling = f.sibling.clone();
+    // c4 sits outside c1's subtree.
+    assign(&mut f.doc, "as-c4", "c4", &sibling);
     assign(&mut f.doc, "as-c2", "c2", &child);
     let raise = |f: &mut Fixture, op: &str, chat: &str, key: Option<&str>| {
+        let item = if chat == "c4" { &sibling } else { &child };
         apply_as(
             &mut f.doc,
             &agent(chat),
-            request_params(op, &child, chat, key),
+            request_params(op, item, chat, key),
         )
         .unwrap()
         .user_action_request_id
@@ -1307,14 +1302,14 @@ fn coordinator_resolve_closes_its_childs_dedupe_group_and_nothing_else() {
     let grandchild = raise(&mut f, "k4", "c4", None);
     let plain = raise(&mut f, "k5", "c3", None);
 
-    // The coordinator resolves one deduped request: both of the child's group
-    // members close, the unrelated chat's duplicate stays open.
+    // The coordinator resolves one deduped request: every group member on the
+    // item (its subtree) closes, including another chat's duplicate.
     as_agent(&mut f, resolve_params("cx", &first, Some("Merged"))).unwrap();
     let s = snap(&f.doc);
     for id in [&first, &again] {
         assert!(!s.user_action_request(id).unwrap().is_unresolved(), "{id}");
     }
-    assert!(s.user_action_request(&other_chat).unwrap().is_unresolved());
+    assert!(!s.user_action_request(&other_chat).unwrap().is_unresolved());
     // An undeduped child request resolves too.
     as_agent(&mut f, resolve_params("cy", &plain, None)).unwrap();
     assert!(
@@ -1323,7 +1318,7 @@ fn coordinator_resolve_closes_its_childs_dedupe_group_and_nothing_else() {
             .unwrap()
             .is_unresolved()
     );
-    // Grandchildren stay out of reach, loudly.
+    // Requests outside the coordinator's subtree stay out of reach, loudly.
     denied(&mut f, resolve_params("cz", &grandchild, None));
     assert!(
         snap(&f.doc)
@@ -1332,7 +1327,7 @@ fn coordinator_resolve_closes_its_childs_dedupe_group_and_nothing_else() {
             .is_unresolved()
     );
     // An unrelated Chat cannot resolve the child's request either.
-    let again_open = raise(&mut f, "k6", "c3", Some("later"));
+    let again_open = raise(&mut f, "k6", "c4", Some("later"));
     let err = apply_as(
         &mut f.doc,
         &agent("c2"),
