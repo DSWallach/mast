@@ -632,6 +632,7 @@ pub(crate) struct RefRange {
     pub head_ref: String,
     /// The head's commit: a moved head re-captures the diff.
     pub head_sha: Option<String>,
+    pub pr_url: Option<String>,
     pub base_branch: String,
     pub base_ref: String,
 }
@@ -727,6 +728,7 @@ impl ExecutionMember {
                 head_branch: target.head_branch.clone(),
                 head_ref: target.head_ref.clone(),
                 head_sha: target.head_sha.clone(),
+                pr_url: target.pr_url.clone(),
                 base_branch: target.base_branch.clone(),
                 base_ref: target.base_ref.clone(),
             }),

@@ -14,7 +14,7 @@
 //! repository and of each submodule. A path must canonicalize to exactly one
 //! member; nothing outside the family is probed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -225,6 +225,7 @@ impl DiffTargets {
                     path,
                     kind: checkout.kind,
                     repo_name: checkout.repo_name.clone(),
+                    repo_slug: checkout.repo_slug.clone(),
                     branch: checkout.branch.clone(),
                     head_sha: checkout.head_sha.clone(),
                     bound,
@@ -508,6 +509,7 @@ struct Checkout {
     path: PathBuf,
     kind: DiffCheckoutKind,
     repo_name: String,
+    repo_slug: Option<String>,
     branch: Option<String>,
     head_sha: Option<String>,
 }
@@ -558,6 +560,10 @@ impl Family {
         }
         let root_main = main_checkout_of(&facts.common_dir).unwrap_or_else(|| own.clone());
         let root_name = base_name(&root_main);
+        let mut slugs: HashMap<PathBuf, Option<String>> = HashMap::new();
+        if heads {
+            slugs.insert(facts.common_dir.clone(), git_text(&own, &["config", "--get", "remote.origin.url"]).and_then(|url| crate::pr_review_launch::github_slug(&url)));
+        }
 
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut checkouts: Vec<Checkout> = Vec::new();
@@ -567,13 +573,17 @@ impl Family {
             path: own.clone(),
             kind: DiffCheckoutKind::Own,
             repo_name: root_name.clone(),
+            repo_slug: slugs.get(&facts.common_dir).cloned().flatten(),
             branch,
             head_sha,
         });
 
         let mut submodules: Vec<(PathBuf, Facts)> = Vec::new();
         discover_submodules(&own, 0, &mut submodules);
-        for (path, _) in &submodules {
+        for (path, sub_facts) in &submodules {
+            if heads {
+                slugs.entry(sub_facts.common_dir.clone()).or_insert_with(|| git_text(path, &["config", "--get", "remote.origin.url"]).and_then(|url| crate::pr_review_launch::github_slug(&url)));
+            }
             if !seen.insert(path.clone()) {
                 continue;
             }
@@ -582,6 +592,7 @@ impl Family {
                 path: path.clone(),
                 kind: DiffCheckoutKind::Submodule,
                 repo_name: base_name(path),
+                repo_slug: slugs.get(&sub_facts.common_dir).cloned().flatten(),
                 branch,
                 head_sha,
             });
@@ -623,6 +634,7 @@ impl Family {
                     path,
                     kind: DiffCheckoutKind::Worktree,
                     repo_name: repo_name.clone(),
+                    repo_slug: slugs.get(&common_dir).cloned().flatten(),
                     branch,
                     head_sha,
                 });

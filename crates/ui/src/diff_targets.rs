@@ -205,6 +205,7 @@ mod tests {
             path: path.into(),
             kind,
             repo_name: "flagship".into(),
+            repo_slug: Some("cofactr/flagship".into()),
             branch: branch.map(Into::into),
             head_sha: Some("0123456789abcdef".into()),
             bound: false,

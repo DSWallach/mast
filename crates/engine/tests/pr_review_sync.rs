@@ -1252,3 +1252,64 @@ async fn a_ticket_item_linking_a_requested_pr_is_not_adopted() {
     assert!(item.parent_work_item_id.is_none());
     assert_eq!(snapshot.unresolved_user_action_requests(&ticket).count(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_review_rpc_clears_closed_pr_and_rejects_stale_marks() {
+    let rig = rig().await;
+    rig.view(
+        "acme/ui",
+        9,
+        "Fix",
+        View {
+            state: "OPEN",
+            reviews: vec![],
+            requested: vec![],
+        },
+    );
+    let target = "pr:acme/ui#9";
+    let before = json!({"target": target, "headSha": null, "viewedHunks": [], "viewedFiles": []});
+    let after =
+        json!({"target": target, "headSha": "abc", "viewedHunks": ["hunk-1"], "viewedFiles": []});
+    rig.call(
+        methods::SET_DIFF_REVIEW_STATE,
+        json!({"before": before, "after": after}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rig.call(methods::GET_DIFF_REVIEW_STATE, json!({"target": target}))
+            .await
+            .unwrap()["state"]["viewedHunks"],
+        json!(["hunk-1"])
+    );
+    rig.view(
+        "acme/ui",
+        9,
+        "Fix",
+        View {
+            state: "CLOSED",
+            reviews: vec![],
+            requested: vec![],
+        },
+    );
+    rig.call(
+        methods::PR_STATUS,
+        json!({"owner": "acme", "repo": "ui", "number": 9, "forceRefresh": true}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        rig.call(methods::GET_DIFF_REVIEW_STATE, json!({"target": target}))
+            .await
+            .unwrap()["state"]
+            .is_null()
+    );
+    assert!(
+        rig.call(
+            methods::SET_DIFF_REVIEW_STATE,
+            json!({"before": after, "after": after})
+        )
+        .await
+        .is_err()
+    );
+}

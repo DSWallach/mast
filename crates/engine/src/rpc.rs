@@ -3952,6 +3952,23 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
             }
+            methods::GET_DIFF_REVIEW_STATE => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                let state = self.workspace.diff_review_state(target).map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&mast_proto::DiffReviewStateReply { state })
+            }
+            methods::SET_DIFF_REVIEW_STATE => {
+                let update: mast_proto::DiffReviewUpdate = parse_params(params)?;
+                if let Some(pr) = update.after.target.strip_prefix("pr:").and_then(mast_proto::PullRequestRef::parse_external_id) {
+                    let params = mast_proto::PrStatusParams { owner: pr.owner, repo: pr.repo, number: pr.number, force_refresh: false };
+                    if self.pr_review_sync.status(&params).await.is_ok_and(|status| status.state.is_finished()) {
+                        return Err(RpcError::Failed("This PR is closed; its review state was cleared.".into()));
+                    }
+                }
+                RpcReply::value(&self.workspace.update_diff_review_state(&update).map_err(|error| RpcError::Failed(error.to_string()))?)
+            }
             methods::SET_CHAT_DIFF_TARGET => {
                 let p: mast_proto::SetChatDiffTargetParams = parse_params(params)?;
                 let targets = self.diff_targets.clone();

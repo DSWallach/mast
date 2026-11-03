@@ -60,7 +60,12 @@ use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use mast_syntax::LanguageId as Lang;
 
+mod file_list;
 mod ref_picker;
+mod review_state;
+
+use file_list::*;
+use review_state::*;
 
 /// The chat/worktree identity a Changes surface was created for.
 ///
@@ -1179,29 +1184,6 @@ fn watch_checkout_params(
     serde_json::Value::Object(params)
 }
 
-fn comment_state_key(
-    comments: &[ReviewComment],
-    draft: Option<&(String, CommentSide, u32)>,
-) -> u64 {
-    let mut parts: Vec<String> = comments
-        .iter()
-        .flat_map(|comment| [comment.id.clone(), comment.body.clone()])
-        .collect();
-    if let Some((path, side, line)) = draft {
-        parts.push(format!("draft:{path}:{}:{line}", side.tag()));
-    }
-    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-    hash64(&refs)
-}
-
-fn hash64(parts: &[&str]) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
-    for p in parts {
-        p.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
 const MAX_EXCERPT_SOURCE_LINES: usize = 200_000;
 
 fn excerpt_side(
@@ -1451,286 +1433,11 @@ struct ParsedDiff {
     file_count: usize,
     /// Indexed like `files`; survives row virtualization and folding.
     horizontal: Vec<FileHorizontalState>,
+    hunk_identities: Arc<Vec<Vec<String>>>,
     files: Arc<Vec<FileDiff>>,
     origins: Arc<Vec<FileOrigin>>,
     submodules: Arc<Vec<SubmoduleGroup>>,
     layout: Arc<Vec<DiffTreeNode>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileOrigin {
-    repository_relative_path: String,
-    repository_path: Option<String>,
-    nesting_depth: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SubmoduleGroup {
-    repository_path: String,
-    parent_repository_path: Option<String>,
-    old_revision: Option<String>,
-    new_revision: Option<String>,
-    additions: u32,
-    deletions: u32,
-    file_count: usize,
-    truncated: bool,
-    /// The parent gitlink's post-change SHA carried Git's `-dirty` suffix.
-    /// Expanded children replace that SHA row, so the group must retain it.
-    dirty: bool,
-    nesting_depth: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DiffTreeNode {
-    File(u32),
-    Submodule {
-        group: u32,
-        children: Vec<DiffTreeNode>,
-    },
-}
-
-fn nested_display_path(repository_path: &str, path: &str) -> String {
-    if path.is_empty() {
-        repository_path.to_string()
-    } else {
-        format!(
-            "{}/{}",
-            repository_path.trim_end_matches('/'),
-            path.trim_start_matches('/')
-        )
-    }
-}
-
-fn submodule_local_path<'a>(
-    repository_path: &'a str,
-    parent_repository_path: Option<&str>,
-) -> Option<&'a str> {
-    match parent_repository_path {
-        None => Some(repository_path),
-        Some(parent) => repository_path.strip_prefix(parent)?.strip_prefix('/'),
-    }
-}
-
-fn gitlink_has_dirty_marker(file: &FileDiff) -> bool {
-    file.hunks
-        .iter()
-        .flat_map(|hunk| &hunk.lines)
-        .any(|line| line.kind == LineKind::Add && line.text.trim_end().ends_with("-dirty"))
-}
-
-/// Parse root and nested patches into one file arena plus an ordered tree.
-/// Expanded group nodes replace their owning gitlink file; unavailable
-/// sections are deliberately ignored so the root SHA-only file remains.
-fn parse_diff_tree(
-    root_patch: &str,
-    submodules: &[SubmoduleDiffSummary],
-) -> (
-    Vec<FileDiff>,
-    Vec<FileOrigin>,
-    Vec<SubmoduleGroup>,
-    Vec<DiffTreeNode>,
-) {
-    let mut files = parse_patch(root_patch);
-    let mut origins = files
-        .iter()
-        .map(|file| FileOrigin {
-            repository_relative_path: file.path.clone(),
-            repository_path: None,
-            nesting_depth: 0,
-        })
-        .collect::<Vec<_>>();
-    let root_files = (0..files.len() as u32).collect::<Vec<_>>();
-    let mut repository_files: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut groups = Vec::new();
-
-    for section in submodules.iter().filter(|section| section.expanded) {
-        let section_files = parse_patch(&section.patch);
-        // An expanded section without renderable children must not replace
-        // the root/parent gitlink. This occurs when a combined payload is
-        // truncated before the nested patch arrives; the SHA transition is
-        // still the only useful fallback in that case.
-        if section_files.is_empty() {
-            continue;
-        }
-        let depth = {
-            let mut depth = 0usize;
-            let mut parent = section.parent_repository_path.as_deref();
-            let mut seen = std::collections::HashSet::new();
-            while let Some(path) = parent {
-                if !seen.insert(path) || depth >= 16 {
-                    break;
-                }
-                depth += 1;
-                parent = submodules
-                    .iter()
-                    .find(|candidate| candidate.repository_path == path)
-                    .and_then(|candidate| candidate.parent_repository_path.as_deref());
-            }
-            depth
-        };
-        let group_ix = groups.len() as u32;
-        groups.push(SubmoduleGroup {
-            repository_path: section.repository_path.clone(),
-            parent_repository_path: section.parent_repository_path.clone(),
-            old_revision: section.old_revision.clone(),
-            new_revision: section.new_revision.clone(),
-            additions: section.additions,
-            deletions: section.deletions,
-            file_count: section.files.len(),
-            truncated: section.truncated,
-            dirty: false,
-            nesting_depth: depth,
-        });
-
-        let mut indices = Vec::with_capacity(section_files.len());
-        for mut file in section_files {
-            let repository_relative_path = file.path.clone();
-            file.path = nested_display_path(&section.repository_path, &file.path);
-            file.old_path = file
-                .old_path
-                .take()
-                .map(|path| nested_display_path(&section.repository_path, &path));
-            indices.push(files.len() as u32);
-            files.push(file);
-            origins.push(FileOrigin {
-                repository_relative_path,
-                repository_path: Some(section.repository_path.clone()),
-                nesting_depth: depth + 1,
-            });
-        }
-        repository_files.insert(section.repository_path.clone(), indices);
-        debug_assert_eq!(group_ix as usize + 1, groups.len());
-    }
-
-    // Expanded groups replace their parent gitlink rows. Preserve the one
-    // extra state encoded only in those rows: Git's post-change `-dirty`
-    // suffix. This works recursively because nested section files share the
-    // same arena and carry their owning repository in `origins`.
-    for group in &mut groups {
-        let local_path = submodule_local_path(
-            &group.repository_path,
-            group.parent_repository_path.as_deref(),
-        );
-        let owner_files = match group.parent_repository_path.as_deref() {
-            None => Some(root_files.as_slice()),
-            Some(parent) => repository_files.get(parent).map(Vec::as_slice),
-        };
-        group.dirty = local_path
-            .zip(owner_files)
-            .and_then(|(local_path, owner_files)| {
-                owner_files.iter().find_map(|file_ix| {
-                    let ix = *file_ix as usize;
-                    (origins.get(ix)?.repository_relative_path == local_path)
-                        .then(|| files.get(ix))
-                        .flatten()
-                })
-            })
-            .is_some_and(gitlink_has_dirty_marker);
-    }
-
-    fn build_repository(
-        parent: Option<&str>,
-        file_indices: &[u32],
-        origins: &[FileOrigin],
-        groups: &[SubmoduleGroup],
-        repository_files: &HashMap<String, Vec<u32>>,
-        ancestors: &mut Vec<String>,
-    ) -> Vec<DiffTreeNode> {
-        let candidate_groups = groups
-            .iter()
-            .enumerate()
-            .filter(|(_, group)| group.parent_repository_path.as_deref() == parent)
-            .filter_map(|(ix, group)| {
-                submodule_local_path(&group.repository_path, parent)
-                    .map(|local| (local.to_string(), ix))
-            })
-            .collect::<Vec<_>>();
-        let mut used = std::collections::HashSet::new();
-        let mut nodes = Vec::new();
-        for &file_ix in file_indices {
-            let Some(origin) = origins.get(file_ix as usize) else {
-                continue;
-            };
-            let Some(group_ix) = candidate_groups.iter().find_map(|(path, group_ix)| {
-                (path == &origin.repository_relative_path).then_some(*group_ix)
-            }) else {
-                nodes.push(DiffTreeNode::File(file_ix));
-                continue;
-            };
-            let group = &groups[group_ix];
-            if ancestors.contains(&group.repository_path) {
-                nodes.push(DiffTreeNode::File(file_ix));
-                continue;
-            }
-            used.insert(group_ix);
-            ancestors.push(group.repository_path.clone());
-            let children = build_repository(
-                Some(&group.repository_path),
-                repository_files
-                    .get(&group.repository_path)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-                origins,
-                groups,
-                repository_files,
-                ancestors,
-            );
-            ancestors.pop();
-            nodes.push(DiffTreeNode::Submodule {
-                group: group_ix as u32,
-                children,
-            });
-        }
-        // A truncated parent patch can omit the gitlink header while the
-        // structured section still arrived. Keep that section reachable.
-        for (_, group_ix) in candidate_groups {
-            if used.contains(&group_ix) {
-                continue;
-            }
-            let group = &groups[group_ix];
-            if ancestors.contains(&group.repository_path) {
-                continue;
-            }
-            ancestors.push(group.repository_path.clone());
-            let children = build_repository(
-                Some(&group.repository_path),
-                repository_files
-                    .get(&group.repository_path)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-                origins,
-                groups,
-                repository_files,
-                ancestors,
-            );
-            ancestors.pop();
-            nodes.push(DiffTreeNode::Submodule {
-                group: group_ix as u32,
-                children,
-            });
-        }
-        nodes
-    }
-
-    let layout = build_repository(
-        None,
-        &root_files,
-        &origins,
-        &groups,
-        &repository_files,
-        &mut Vec::new(),
-    );
-    (files, origins, groups, layout)
-}
-
-fn logical_file_count(layout: &[DiffTreeNode]) -> usize {
-    layout
-        .iter()
-        .map(|node| match node {
-            DiffTreeNode::File(_) => 1,
-            DiffTreeNode::Submodule { children, .. } => logical_file_count(children),
-        })
-        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -2265,6 +1972,33 @@ pub struct Changes {
     /// The flattened row model the list virtualizes over (line granularity;
     /// collapsed bodies excluded) + each file's row span within it.
     rows: Vec<DiffRow>,
+    file_filter: Entity<ComposerInput>,
+    diff_focus: FocusHandle,
+    review_target: Option<String>,
+    review_link_chat: Option<String>,
+    review_link_status: Option<mast_engine::pr_ticket_cache::ChatLinkStatus>,
+    review_pr: Option<String>,
+    review_link_task: Option<Task<()>>,
+    review_head_task: Option<Task<()>>,
+    review_head_for: Option<String>,
+    review_head: Option<(String, String)>,
+    review_checkout_matches: Option<bool>,
+    review_status_task: Option<Task<()>>,
+    review_status_checked: Option<std::time::Instant>,
+    review_status_base: Option<String>,
+    review_closed: bool,
+    review_state: Option<mast_proto::DiffReviewState>,
+    review_task: Option<Task<()>>,
+    review_save_task: Option<Task<()>>,
+    review_pending: HashMap<String, mast_proto::DiffReviewState>,
+    review_acknowledged: HashMap<String, mast_proto::DiffReviewState>,
+    review_error: Option<String>,
+    seen_candidates: HashMap<String, review_state::SeenCandidate>,
+    seen_hunks: std::collections::HashSet<String>,
+    seen_task: Option<Task<()>>,
+    seen_last_render: std::time::Instant,
+    seen_scroll_epoch: u64,
+    _file_filter_events: Subscription,
     row_ranges: Vec<Option<std::ops::Range<usize>>>,
     /// Ordered file and submodule headers; sticky file headers stop at either.
     section_headers: Vec<usize>,
@@ -2396,6 +2130,17 @@ impl Changes {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         let settings = crate::settings::current(cx);
         let mode = DiffMode::from_split(settings.diff_split);
+        let list = ListState::new(0, ListAlignment::Top, px(1024.0));
+        let weak = cx.weak_entity();
+        list.set_scroll_handler(move |_, window, cx| {
+            weak.update(cx, |this: &mut Changes, cx| {
+                this.note_seen_scroll(window, cx);
+            }).ok();
+        });
+        let file_filter = cx.new(|cx| ComposerInput::with_context("Filter files…", "PaletteSearch", cx));
+        let file_filter_events = cx.subscribe(&file_filter, |_: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) { cx.notify(); }
+        });
         Self {
             state,
             owner,
@@ -2413,12 +2158,39 @@ impl Changes {
             submodule_folds: HashMap::new(),
             highlights: HashMap::new(),
             rows: Vec::new(),
+            file_filter,
+            diff_focus: cx.focus_handle(),
+            review_target: None,
+            review_link_chat: None,
+            review_link_status: None,
+            review_pr: None,
+            review_link_task: None,
+            review_head_task: None,
+            review_head_for: None,
+            review_head: None,
+            review_checkout_matches: None,
+            review_status_task: None,
+            review_status_checked: None,
+            review_status_base: None,
+            review_closed: false,
+            review_state: None,
+            review_task: None,
+            review_save_task: None,
+            review_pending: HashMap::new(),
+            review_acknowledged: HashMap::new(),
+            review_error: None,
+            seen_candidates: HashMap::new(),
+            seen_hunks: std::collections::HashSet::new(),
+            seen_task: None,
+            seen_last_render: std::time::Instant::now(),
+            seen_scroll_epoch: 0,
+            _file_filter_events: file_filter_events,
             row_ranges: Vec::new(),
             section_headers: Vec::new(),
             fold_settle: None,
             // Rows are single lines now — a deep overdraw is cheap and keeps
             // fast wheel flicks from outrunning measurement.
-            list: ListState::new(0, ListAlignment::Top, px(1024.0)),
+            list,
             scope: DiffScope::default(),
             base_ref: None,
             branches: Vec::new(),
@@ -3179,6 +2951,7 @@ impl Changes {
             }
             return;
         };
+        self.ensure_review_state(cx);
         let key = self.parse_key(&diff);
         if self.parsed.as_ref().is_some_and(|p| p.key == key) {
             self.sync_comment_rows(cx);
@@ -3192,9 +2965,13 @@ impl Changes {
         let file_count = diff.files.len();
         let submodules = diff.submodules.clone();
         self.parse_task = Some(cx.spawn(async move |this, cx| {
-            let (files, origins, submodules, layout) = cx
+            let (files, origins, submodules, layout, identities) = cx
                 .background_executor()
-                .spawn(async move { parse_diff_tree(&patch, &submodules) })
+                .spawn(async move {
+                    let (files, origins, submodules, layout) = parse_diff_tree(&patch, &submodules);
+                    let identities = hunk_identities(&files);
+                    (files, origins, submodules, layout, identities)
+                })
                 .await;
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
@@ -3212,6 +2989,18 @@ impl Changes {
                 };
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
+                changes.seen_candidates.clear();
+                for file in &files {
+                    if is_generated_file(&file.path) || is_large_file(file) {
+                        changes.folds.insert(
+                            file.path.clone(),
+                            FileFold {
+                                collapsed: true,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
                 changes.submodule_folds.clear();
                 changes.highlights.clear();
                 let staged = changes.staged_comments(cx);
@@ -3225,7 +3014,12 @@ impl Changes {
                         .as_ref()
                         .map(|(path, side, line)| (path.as_str(), *side, *line)),
                     changes.mode,
-                    |_| false,
+                    |index| {
+                        changes
+                            .folds
+                            .get(&files[index].path)
+                            .is_some_and(|fold| fold.collapsed)
+                    },
                     |_| false,
                 );
                 changes.comment_key = comment_state_key(&staged, draft.as_ref());
@@ -3246,11 +3040,13 @@ impl Changes {
                     deletions,
                     file_count,
                     horizontal,
+                    hunk_identities: Arc::new(identities),
                     files: Arc::new(files),
                     origins: Arc::new(origins),
                     submodules: Arc::new(submodules),
                     layout: Arc::new(layout),
                 });
+                changes.ensure_review_state(cx);
                 cx.notify();
             })
             .ok();
@@ -3262,6 +3058,7 @@ impl Changes {
     /// `splice` shifts the logical scroll anchor by the count delta, so
     /// content below the fold stays put.
     fn replace_file_body(&mut self, file_ix: usize, new_body: Vec<DiffRow>) {
+        self.seen_candidates.clear();
         let Some(range) = self.row_ranges.get(file_ix).and_then(Clone::clone) else {
             return;
         };
@@ -3605,6 +3402,7 @@ impl Changes {
     }
 
     fn reflatten(&mut self, cx: &mut Context<Self>) {
+        self.seen_candidates.clear();
         let Some(parsed) = &self.parsed else {
             cx.notify();
             return;
@@ -4458,11 +4256,21 @@ impl Changes {
                 .and_then(|f| file_notices(f).into_iter().nth(notice as usize))
                 .map(|text| notice_row(text, &theme))
                 .unwrap_or_else(|| gpui::Empty.into_any_element()),
-            DiffRow::HunkHeader { file, hunk } => files
-                .get(file as usize)
-                .and_then(|f| f.hunks.get(hunk as usize))
-                .map(|h| hunk_header_row(&h.header, &theme))
-                .unwrap_or_else(|| gpui::Empty.into_any_element()),
+            DiffRow::HunkHeader { file, hunk } => {
+                let Some(file_diff) = files.get(file as usize) else { return gpui::Empty.into_any_element(); };
+                let Some(hunk_diff) = file_diff.hunks.get(hunk as usize) else { return gpui::Empty.into_any_element(); };
+                let Some(identity) = self.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.get(file as usize)).and_then(|items| items.get(hunk as usize)) else { return gpui::Empty.into_any_element(); };
+                let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
+                let seen = self.seen_hunks.contains(identity);
+                let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
+                div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
+                    .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
+                        .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
+                        .text_size(px(10.0)).text_color(theme.text_muted)
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
+                        .child(label))
+                    .into_any_element()
+            },
             DiffRow::Line {
                 file,
                 hunk,
@@ -4910,8 +4718,9 @@ impl Changes {
             .bg(rest_bg)
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_fold(ix, cx);
+                window.focus(&this.diff_focus, cx);
                 cx.notify();
             }))
             .child(chevron)
@@ -4933,6 +4742,9 @@ impl Changes {
                     .text_color(theme.text_dim)
                     .child(SharedString::from(file.path.clone())),
             )
+            .when(collapsed && is_large_file(file), |el| {
+                el.child(div().flex_none().text_size(px(10.0)).text_color(theme.text_muted).child("Load diff"))
+            })
             .when(file.binary, |el| {
                 el.child(
                     div()
@@ -5960,6 +5772,15 @@ impl Changes {
                         .text_color(del_color(theme))
                         .child(SharedString::from(format!("−{}", parsed.deletions))),
                 )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!(
+                            "{} hunks",
+                            logical_hunk_count(&parsed.layout, &parsed.files)
+                        ))),
+                )
                 .child(div().flex_1())
                 .when(parsed.truncated, |el| {
                     el.child(
@@ -6819,7 +6640,7 @@ fn render_file_body_upto(
 }
 
 impl Render for Changes {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.scope == DiffScope::History {
             let history = self.history_pane(cx);
             history.update(cx, |history, cx| history.ensure_loaded(cx));
@@ -6950,6 +6771,7 @@ impl Render for Changes {
                     .into_any_element(),
                 DiffPhase::List => {
                     if self.parsed.is_some() {
+                        self.ensure_seen_monitor(window, cx);
                         let sticky_header = self.render_sticky_file_header(&theme, cx);
                         div()
                             .flex_1()
@@ -6959,16 +6781,29 @@ impl Render for Changes {
                             .children(self.render_header_strip(&theme))
                             .child(
                                 div()
-                                    .relative()
+                                    .flex()
+                                    .flex_row()
                                     .flex_1()
                                     .min_h_0()
-                                    .overflow_hidden()
+                                    .child(self.render_file_list(&theme, cx))
                                     .child(
-                                        list(self.list.clone(), cx.processor(Self::render_row))
-                                            .size_full()
-                                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
-                                    )
-                                    .when_some(sticky_header, |el, header| el.child(header)),
+                                        div()
+                                            .track_focus(&self.diff_focus)
+                                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                                                this.diff_key_down(event, window, cx);
+                                            }))
+                                            .relative()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .min_h_0()
+                                            .overflow_hidden()
+                                            .child(
+                                                list(self.list.clone(), cx.processor(Self::render_row))
+                                                    .size_full()
+                                                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                                            )
+                                            .when_some(sticky_header, |el, header| el.child(header)),
+                                    ),
                             )
                             .into_any_element()
                     } else {
@@ -7001,6 +6836,13 @@ impl Render for Changes {
             .children(self.render_context_chrome(&theme, cx))
             .children(self.render_execution_selector(&theme, cx))
             .children(self.render_diff_target_error(&theme, cx))
+            .when_some(self.review_error.clone(), |el, message| {
+                el.child(div().flex().items_center().gap(px(8.0))
+                    .child(crate::error_notice::ErrorNotice::from_text("changes-review-state-error", &theme, &message))
+                    .child(div().id("changes-review-state-retry").cursor_pointer().text_color(theme.text_muted)
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_review_state(cx)))
+                        .child("Retry")))
+            })
             .when_some(error, |el, message| {
                 el.child(
                     div()
@@ -8912,6 +8754,7 @@ index 1111111..2222222 160000
             path: path.into(),
             kind,
             repo_name: "flagship".into(),
+            repo_slug: Some("cofactr/flagship".into()),
             branch: branch.map(Into::into),
             head_sha: Some("0123456789abcdef".into()),
             bound: false,

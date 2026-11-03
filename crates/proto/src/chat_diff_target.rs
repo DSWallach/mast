@@ -132,6 +132,9 @@ pub struct DiffCheckoutCandidate {
     pub kind: DiffCheckoutKind,
     /// Repository display name.
     pub repo_name: String,
+    /// Lowercase GitHub owner/repository from this checkout's origin, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_slug: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

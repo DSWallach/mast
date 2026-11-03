@@ -702,7 +702,14 @@ impl PrReviewSyncService {
             return Err(invalid("Not a pull request (owner, repo, number)"));
         }
         let pr = PullRequestRef::new(params.owner.trim(), params.repo.trim(), params.number);
-        Ok(self.detail(&pr, params.force_refresh).await?.summary)
+        let summary = self.detail(&pr, params.force_refresh).await?.summary;
+        if summary.state.is_finished() {
+            let target = format!("pr:{}", pr.external_id().to_lowercase());
+            if let Err(error) = self.inner.workspace.delete_diff_review_state(&target) {
+                tracing::warn!(%error, "could not clear closed PR review state");
+            }
+        }
+        Ok(summary)
     }
 
     /// `PrMyOpen`.
@@ -1394,6 +1401,12 @@ impl PrReviewSyncService {
                         tracing::warn!(code = error.code.as_str(), "pr review sync: update failed");
                         continue;
                     }
+                }
+            }
+            if matches!(request_state, PrReviewRequestState::Merged | PrReviewRequestState::Closed) {
+                let target = format!("pr:{}", pr.external_id().to_lowercase());
+                if let Err(error) = self.inner.workspace.delete_diff_review_state(&target) {
+                    tracing::warn!(%error, "pr review sync: could not clear diff review state");
                 }
             }
             if matches!(

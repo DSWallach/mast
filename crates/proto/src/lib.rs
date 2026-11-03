@@ -7,6 +7,7 @@ pub mod admin;
 pub mod agent;
 pub mod artifacts;
 pub mod chat_diff_target;
+pub mod diff_review;
 pub mod entities;
 pub mod env;
 pub mod linear;
@@ -47,6 +48,7 @@ pub use artifacts::{
     pick_message,
 };
 pub use chat_diff_target::*;
+pub use diff_review::*;
 pub use entities::*;
 pub use linear::*;
 pub use orchestrator_wakes::*;

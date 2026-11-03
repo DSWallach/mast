@@ -624,3 +624,34 @@ async fn the_seventeenth_target_is_refused_until_a_stale_one_is_gone() {
             .any(|t| t.path == text(last) && t.selected)
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_candidates_report_their_repository_origin() {
+    let fixture = fixture();
+    for (path, origin) in [
+        (
+            fixture.ws.clone(),
+            "https://github.com/Cofactr/workspace.git",
+        ),
+        (
+            fixture.ws.join("flagship"),
+            "git@github.com:Cofactr/Flagship.git",
+        ),
+    ] {
+        let status = mast_harness::git_command()
+            .args(["config", "remote.origin.url", origin])
+            .current_dir(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let candidates = fixture.targets.list_checkouts("chat-1").unwrap().candidates;
+    for candidate in candidates {
+        let expected = if candidate.repo_name == "flagship" {
+            "cofactr/flagship"
+        } else {
+            "cofactr/workspace"
+        };
+        assert_eq!(candidate.repo_slug.as_deref(), Some(expected));
+    }
+}

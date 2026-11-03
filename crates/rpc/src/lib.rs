@@ -198,6 +198,8 @@ pub mod methods {
     /// ChatDiffTargetsReply`. Validates the path like the `bind_chat_worktree`
     /// agent tool and writes the same `chatDiffTargets` row. Local device.
     pub const SET_CHAT_DIFF_TARGET: &str = "SetChatDiffTarget";
+    pub const GET_DIFF_REVIEW_STATE: &str = "GetDiffReviewState";
+    pub const SET_DIFF_REVIEW_STATE: &str = "SetDiffReviewState";
     /// Stream of every chat's resolved diff targets on this device:
     /// `Vec<mast_proto::ChatDiffTargetsView>`, current value first, then each
     /// change (a bind, a selection, a worktree appearing or vanishing, a

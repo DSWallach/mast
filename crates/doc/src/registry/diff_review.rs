@@ -1,0 +1,226 @@
+//! Mutable reading state, keyed by a PR or diff-target identity.
+use super::*;
+use mast_proto::{DiffReviewState, derive_id};
+
+fn row_id(target: &str) -> String {
+    derive_id(target, "diff-review")
+}
+
+impl RegistryDoc {
+    pub fn diff_review_state(&self, target: &str) -> Option<DiffReviewState> {
+        let row = self.overlay_row(KIND_DIFF_REVIEW_STATE, &row_id(target))?;
+        if row.fields.get("target").and_then(Value::as_str) != Some(target) {
+            return None;
+        }
+        let mut state = DiffReviewState {
+            target: target.to_owned(),
+            head_sha: row
+                .fields
+                .get("headSha")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            ..Default::default()
+        };
+        for (field, value) in &row.fields {
+            if let Some(hash) = field.strip_prefix("h:") {
+                if value.as_bool() == Some(true) {
+                    state.viewed_hunks.insert(hash.to_owned());
+                }
+            } else if field.starts_with("f:") {
+                if let Some(path) = value.as_str() {
+                    state.viewed_files.insert(path.to_owned());
+                }
+            }
+        }
+        Some(state)
+    }
+
+    /// Write only changed fields so large reviews remain below the per-op cap.
+    pub fn put_diff_review_state(&mut self, state: &DiffReviewState) -> Result<bool, DocError> {
+        let before = self
+            .diff_review_state(&state.target)
+            .unwrap_or_else(|| DiffReviewState {
+                target: state.target.clone(),
+                ..Default::default()
+            });
+        self.update_diff_review_state(&before, state)
+    }
+
+    /// Apply the caller's changes relative to its snapshot, preserving
+    /// concurrent edits to other fields.
+    pub fn update_diff_review_state(
+        &mut self,
+        before: &DiffReviewState,
+        state: &DiffReviewState,
+    ) -> Result<bool, DocError> {
+        if state.target.trim().is_empty() || before.target != state.target {
+            return Err(DocError::Schema(
+                "diff review state needs matching targets".into(),
+            ));
+        }
+        if self.diff_review_state(&state.target).is_none()
+            && (before.head_sha.is_some()
+                || !before.viewed_hunks.is_empty()
+                || !before.viewed_files.is_empty())
+        {
+            return Err(DocError::Schema(
+                "diff review state was cleared; reload before editing".into(),
+            ));
+        }
+        if let Some(current) = self.diff_review_state(&state.target) {
+            if current.head_sha != before.head_sha && current.head_sha != state.head_sha {
+                return Err(DocError::Schema(
+                    "review head changed; reload and mark it again".into(),
+                ));
+            }
+        }
+        let id = row_id(&state.target);
+        self.observe_row(KIND_DIFF_REVIEW_STATE, &id);
+        let mut updates = Vec::new();
+        if self.diff_review_state(&state.target).is_none() || before.head_sha != state.head_sha {
+            updates.push(fields([
+                ("target", json!(state.target)),
+                ("headSha", opt_str(state.head_sha.as_deref())),
+            ]));
+        }
+        for hash in before
+            .viewed_hunks
+            .symmetric_difference(&state.viewed_hunks)
+        {
+            let mut set = BTreeMap::new();
+            set.insert(
+                format!("h:{hash}"),
+                json!(state.viewed_hunks.contains(hash)),
+            );
+            updates.push(set);
+        }
+        for path in before
+            .viewed_files
+            .symmetric_difference(&state.viewed_files)
+        {
+            let mut set = BTreeMap::new();
+            set.insert(
+                format!("f:{}", derive_id(path, "diff-review-file")),
+                if state.viewed_files.contains(path) {
+                    json!(path)
+                } else {
+                    Value::Null
+                },
+            );
+            updates.push(set);
+        }
+        if updates.is_empty() {
+            return Ok(false);
+        }
+        let hlc = self.mint_hlc();
+        let ops = updates
+            .into_iter()
+            .map(|set| RowOp {
+                kind: KIND_DIFF_REVIEW_STATE.into(),
+                id: id.clone(),
+                op: OpKind::Upsert,
+                set: Some(set),
+                hlc: hlc.clone(),
+                clocks: None,
+            })
+            .collect();
+        self.write_ops(ops)?;
+        Ok(true)
+    }
+
+    pub fn delete_diff_review_state(&mut self, target: &str) -> bool {
+        let id = row_id(target);
+        if !self.row_exists(KIND_DIFF_REVIEW_STATE, &id) {
+            return false;
+        }
+        self.delete_row_ops(&[(KIND_DIFF_REVIEW_STATE, &id)]);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn diff_review_state_roundtrip() {
+        let mut registry = RegistryDoc::new("device");
+        let mut state = DiffReviewState {
+            target: "pr:owner/repo#42".into(),
+            head_sha: Some("abc".into()),
+            ..Default::default()
+        };
+        state.viewed_hunks.insert("a".repeat(64));
+        state.viewed_files.insert("src/a.rs".into());
+        assert!(registry.put_diff_review_state(&state).unwrap());
+        assert_eq!(
+            registry.diff_review_state(&state.target),
+            Some(state.clone())
+        );
+        assert!(!registry.put_diff_review_state(&state).unwrap());
+        state.head_sha = Some("def".into());
+        state.viewed_files.clear();
+        assert!(registry.put_diff_review_state(&state).unwrap());
+        assert_eq!(
+            registry.diff_review_state(&state.target),
+            Some(state.clone())
+        );
+        assert!(registry.delete_diff_review_state(&state.target));
+        assert_eq!(registry.diff_review_state(&state.target), None);
+    }
+    #[test]
+    fn large_review_splits_registry_operations() {
+        let mut registry = RegistryDoc::new("device");
+        let mut state = DiffReviewState {
+            target: "pr:owner/repo#42".into(),
+            ..Default::default()
+        };
+        for index in 0..500 {
+            state.viewed_hunks.insert(format!("{index:064x}"));
+        }
+        assert!(registry.put_diff_review_state(&state).unwrap());
+        assert_eq!(registry.diff_review_state(&state.target), Some(state));
+    }
+    #[test]
+    fn stale_head_cannot_restore_changed_marks() {
+        let mut registry = RegistryDoc::new("device");
+        let base = DiffReviewState {
+            target: "pr:o/r#1".into(),
+            head_sha: Some("old".into()),
+            ..Default::default()
+        };
+        assert!(registry.put_diff_review_state(&base).unwrap());
+        let mut moved = base.clone();
+        moved.head_sha = Some("new".into());
+        assert!(registry.update_diff_review_state(&base, &moved).unwrap());
+        let mut stale = base.clone();
+        stale.viewed_hunks.insert("old-change".into());
+        assert!(registry.update_diff_review_state(&base, &stale).is_err());
+        assert!(
+            registry
+                .diff_review_state(&base.target)
+                .unwrap()
+                .viewed_hunks
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn concurrent_review_marks_preserve_each_other_and_clear_rejects_stale_updates() {
+        let mut registry = RegistryDoc::new("device");
+        let base = DiffReviewState {
+            target: "pr:owner/repo#42".into(),
+            ..Default::default()
+        };
+        let mut a = base.clone();
+        a.viewed_hunks.insert("a".repeat(64));
+        let mut b = base.clone();
+        b.viewed_hunks.insert("b".repeat(64));
+        assert!(registry.update_diff_review_state(&base, &a).unwrap());
+        assert!(registry.update_diff_review_state(&base, &b).unwrap());
+        let combined = registry.diff_review_state(&base.target).unwrap();
+        assert!(combined.viewed_hunks.contains(&"a".repeat(64)));
+        assert!(combined.viewed_hunks.contains(&"b".repeat(64)));
+        assert!(registry.delete_diff_review_state(&base.target));
+        assert!(registry.update_diff_review_state(&combined, &a).is_err());
+    }
+}

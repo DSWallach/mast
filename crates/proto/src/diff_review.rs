@@ -1,0 +1,31 @@
+//! Persisted reading state for a PR or an individual diff target.
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffReviewState {
+    pub target: String,
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    #[serde(default)]
+    pub viewed_hunks: BTreeSet<String>,
+    #[serde(default)]
+    pub viewed_files: BTreeSet<String>,
+}
+
+/// Changes relative to the snapshot the viewer read. Concurrent writers
+/// touching different marks do not erase one another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffReviewUpdate {
+    pub before: DiffReviewState,
+    pub after: DiffReviewState,
+}
+
+/// A nullable state must be wrapped: the RPC transport cannot carry a bare null.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffReviewStateReply {
+    pub state: Option<DiffReviewState>,
+}
