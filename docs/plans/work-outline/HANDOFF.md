@@ -724,6 +724,22 @@ session restarts kill background shells, so re-arm watchers and resend children 
 
 ## Next, agreed but not started
 
+- **Faster, more reliable releases** (offered 2026-11-02, Mikey agreed to queue it for a fresh
+  session; do it when nothing is mid-release). In order of payoff:
+  1. Run engine/MCP tests with cargo-nextest: test binaries in parallel (today `cargo test` runs ~85
+     engine test files one after another, 30–90 min) plus a per-test timeout (e.g. 3 min) so a hang
+     like `device_routing` fails fast instead of eating an hour. Expected: engine runs ~8–15 min.
+  2. Quarantine the known flaky/environmental failures (see "Known test failures") in release runs;
+     track them separately so new failures stand out.
+  3. Selective testing: only run the suites a branch touched (UI-only → UI suite); trust a child's
+     green full run when its branch is already rebased onto the release head and nothing changed
+     underneath.
+  4. Shared compile cache across worktrees (sccache) so each child doesn't recompile the same crates.
+  5. Overlap the installed build with the test run (different target dirs).
+  6. Process rules for children: only kill processes inside your own worktree (a child's
+     `pkill -f target/debug/deps` killed the coordinator's release run); stagger children so at most
+     two run full suites at once; don't start long runs under `nice` (can't be raised without root).
+
 - **Artifacts phase 4:** G (comments on HTML anchors).
 - **Artifacts phase 5:** F (side-by-side options + pick) and H (canonical plan with the linked
   Linear project shown next to it; no mirroring into Linear).
