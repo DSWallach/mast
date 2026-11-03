@@ -1565,11 +1565,22 @@ impl Tools {
                 short(&chat.id)
             );
         }
+        let caller_parent = match origin {
+            Some(origin) => self
+                .zeron
+                .chats()
+                .await?
+                .into_iter()
+                .find(|c| c.id == origin.chat_id)
+                .and_then(|c| c.parent_chat_id),
+            None => None,
+        };
         if let Some(origin) = origin
             && chat.parent_chat_id.as_deref() != Some(origin.chat_id.as_str())
+            && caller_parent.as_deref() == Some(chat.id.as_str())
         {
             // Not one of its children, so reach_chat let it through as the
-            // caller's parent.
+            // caller's parent (an admin chat's other reach is an ordinary send).
             if args.wait {
                 anyhow::bail!(
                     "wait is not supported when messaging your parent chat; the report is queued"
@@ -2307,7 +2318,7 @@ mod tests {
                     RpcReply::Value(origin)
                 }
                 agent_tools::TOOL_CALL_METHOD => {
-                    if params["token"] != BETA_TOKEN {
+                    if params["token"] != BETA_TOKEN && params["token"] != ADMIN_TOKEN {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -2885,7 +2896,10 @@ mod tests {
                 .call(name, json!({ "chat": "chat-nova-3", "text": "hi" }))
                 .await
                 .unwrap_err();
-            assert!(err.contains("agents can only"), "{name}: {err}");
+            assert!(
+                err.contains("agents can only") || err.contains("no chat matches"),
+                "{name}: {err}"
+            );
         }
         let listed = admin
             .call("list_chats", json!({ "include_archived": true }))
