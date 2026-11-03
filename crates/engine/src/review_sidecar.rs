@@ -84,7 +84,7 @@ fn parse_hunks(patch: &str) -> Vec<Hunk> {
                 ));
             }
         } else if let Some((_, lines)) = current.as_mut() {
-            if line.starts_with([' ', '+', '-']) {
+            if line.starts_with([' ', '+', '-', '\\']) {
                 lines.push_str(line);
             }
         }
