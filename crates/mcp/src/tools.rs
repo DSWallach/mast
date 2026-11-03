@@ -2603,6 +2603,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_publish_forwards_review_to_engine() {
+        let def = artifact_catalog().into_iter()
+            .find(|def| def.name == agent_tool_names::REVIEW_PUBLISH).unwrap();
+        assert_eq!(def.input_schema["required"], json!(["prUrl", "headSha", "review"]));
+        let world = Arc::new(World::default());
+        let agent = tools(world.clone(), Some(BETA_TOKEN));
+        let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1"}});
+        agent.call(agent_tool_names::REVIEW_PUBLISH, arguments.clone()).await.unwrap();
+        let calls = world.agent_calls(agent_tool_names::REVIEW_PUBLISH);
+        assert_eq!(calls[0]["token"], BETA_TOKEN);
+        assert_eq!(calls[0]["arguments"], arguments);
+    }
+
+    #[tokio::test]
     async fn artifact_tools_need_a_token_and_return_the_screenshot_as_an_image() {
         let world = Arc::new(World::default());
         let anonymous = tools(world.clone(), None);
