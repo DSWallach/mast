@@ -372,6 +372,35 @@ fn review_head_drift_requires_a_matching_pr_and_changed_head() {
     assert_eq!(super::model::review_head_drift(&review, &[target]), None);
 }
 
+#[test]
+fn review_head_reads_only_the_matching_cached_pr() {
+    let review: mast_proto::ReviewPullRequest = serde_json::from_value(serde_json::json!({
+        "repo":"o/r", "number":1, "headSha":"abc", "baseSha":"def"
+    }))
+    .unwrap();
+    let detail = |url: &str, head: &str| {
+        serde_json::json!({
+            "number":1,"url":url,"state":"OPEN","isDraft":false,
+            "reviewDecision":null,"reviewers":[],"checks":null,"title":null,"branch":null,
+            "headSha":head,"mergeable":"UNKNOWN","hasReviewerRequested":false
+        })
+    };
+    let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+        "pr":null,"ticket":null,"isWorktree":false,"diffStat":null,"prSource":null,"ticketSource":null,
+        "prLinks":[
+            {"url":"https://github.com/o/other/pull/1","source":null,"detail":detail("https://github.com/o/other/pull/1", "wrong")},
+            {"url":"https://github.com/o/r/pull/1","source":null,"detail":detail("https://github.com/o/r/pull/1", "moved")}
+        ]
+    })).unwrap();
+    assert_eq!(
+        super::model::cached_review_head(&status, &review),
+        Some("moved")
+    );
+    let mut unknown = status.clone();
+    unknown.pr_links[1].detail.as_mut().unwrap().head_sha = None;
+    assert_eq!(super::model::cached_review_head(&unknown, &review), None);
+}
+
 #[gpui::test]
 fn options_open_their_fragment_through_the_companion_read(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);

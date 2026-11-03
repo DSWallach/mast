@@ -401,6 +401,29 @@ impl ArtifactTab {
                 }
             }
         });
+        // The chat header already polls linked PR metadata. Observe its cache
+        // without making a request from the artifact pane.
+        let shell_observe = shell
+            .as_ref()
+            .and_then(|shell| shell.upgrade())
+            .map(|shell| {
+                let mut seen: Option<String> = None;
+                cx.observe(&shell, move |this, shell, cx| {
+                    let head = match &this.body {
+                        Some(ArtifactBody::Review(review)) => this
+                            .artifact(cx)
+                            .and_then(|artifact| artifact.chat_id)
+                            .and_then(|chat_id| {
+                                shell.read(cx).cached_review_head(&chat_id, &review.pr)
+                            }),
+                        _ => None,
+                    };
+                    if seen != head {
+                        seen = head;
+                        cx.notify();
+                    }
+                })
+            });
         let remembered_zoom = super::zoom::ZoomMemory::recall(cx, &artifact_id);
         let mut tab = Self {
             state,
@@ -441,6 +464,7 @@ impl ArtifactTab {
             _side: None,
             _subscriptions: vec![theme, observe],
         };
+        tab._subscriptions.extend(shell_observe);
         tab.load(None, window, cx);
         tab
     }
@@ -1423,16 +1447,29 @@ impl ArtifactTab {
                 let Some(ArtifactBody::Review(review)) = &self.body else {
                     return message("Loading…".into());
                 };
-                let stale_head = self
+                let cached_head = self
                     .artifact(cx)
                     .and_then(|artifact| artifact.chat_id)
                     .and_then(|chat_id| {
-                        model::review_head_drift(
-                            review,
-                            self.state.read(cx).chat_ref_targets(&chat_id),
-                        )
-                        .map(str::to_owned)
+                        self.shell
+                            .as_ref()?
+                            .upgrade()?
+                            .read(cx)
+                            .cached_review_head(&chat_id, &review.pr)
                     });
+                let stale_head = if let Some(head) = cached_head {
+                    (!head.eq_ignore_ascii_case(&review.pr.head_sha)).then_some(head)
+                } else {
+                    self.artifact(cx)
+                        .and_then(|artifact| artifact.chat_id)
+                        .and_then(|chat_id| {
+                            model::review_head_drift(
+                                review,
+                                self.state.read(cx).chat_ref_targets(&chat_id),
+                            )
+                            .map(str::to_owned)
+                        })
+                };
                 let highlights = review
                     .highlights
                     .iter()

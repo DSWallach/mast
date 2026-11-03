@@ -4562,6 +4562,12 @@ impl Shell {
         .detach();
     }
 
+    /// Read an already cached PR head; never starts a request.
+    pub(crate) fn cached_review_head(&self, chat_id: &str, pr: &mast_proto::ReviewPullRequest) -> Option<String> {
+        let status = self.chat_header_links.get(chat_id)?.status.as_ref()?;
+        crate::artifacts::model::cached_review_head(status, pr).map(str::to_owned)
+    }
+
     pub(crate) fn invalidate_chat_header_links(&mut self, chat_id: &str) {
         self.chat_header_links.remove(chat_id);
     }

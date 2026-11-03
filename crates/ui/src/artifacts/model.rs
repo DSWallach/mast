@@ -228,6 +228,37 @@ pub(crate) struct ReviewHighlight {
     pub(crate) text: String,
 }
 
+/// Find a PR's head in the existing chat-link cache, matching the full identity.
+pub(crate) fn cached_review_head<'a>(
+    status: &'a mast_engine::pr_ticket_cache::ChatLinkStatus,
+    review: &mast_proto::ReviewPullRequest,
+) -> Option<&'a str> {
+    let matches = |url: &str| {
+        crate::chat_work_context::parse_pr_url(url).is_some_and(|pr| {
+            pr.number == review.number
+                && format!("{}/{}", pr.owner, pr.repo).eq_ignore_ascii_case(&review.repo)
+        })
+    };
+    status
+        .pr_links
+        .iter()
+        .find_map(|link| {
+            if matches(&link.url) {
+                link.detail.as_ref()?.head_sha.as_deref()
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            let pr = status.pr.as_ref()?;
+            if matches(pr.url.as_deref()?) {
+                pr.head_sha.as_deref()
+            } else {
+                None
+            }
+        })
+}
+
 /// A matching live PR ref can establish that this review is stale.
 pub(crate) fn review_head_drift<'a>(
     review: &ReviewCard,
