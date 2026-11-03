@@ -2098,8 +2098,38 @@ impl ArtifactsService {
                     continue;
                 }
             }
+            let current_head = self
+                .workspace()
+                .chat_diff_targets(&caller.chat_id)
+                .ok()
+                .flatten()
+                .and_then(|row| {
+                    row.ref_targets.into_iter().find(|target| {
+                        target.pr_number == Some(review.pr.number)
+                            && target
+                                .pr_url
+                                .as_deref()
+                                .and_then(crate::work_outline_pr_links::pull_request_from_url)
+                                .is_some_and(|pr| {
+                                    review
+                                        .pr
+                                        .repo
+                                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
+                                })
+                    })
+                })
+                .and_then(|target| {
+                    git(
+                        Path::new(&target.path),
+                        &["rev-parse", "--verify", &target.head_ref],
+                    )
+                });
+            let stale = current_head
+                .as_ref()
+                .map(|head| !head.eq_ignore_ascii_case(&review.pr.head_sha));
             return Ok(json!({"artifactId": artifact.id, "title": artifact.title,
-                "revision": artifact.revisions.last().map(|r| r.id), "review": review}));
+                "revision": artifact.current_revision, "review": review,
+                "currentHeadSha": current_head, "stale": stale}));
         }
         Ok(json!({"artifactId": null}))
     }
