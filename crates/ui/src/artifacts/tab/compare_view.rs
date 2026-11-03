@@ -168,7 +168,7 @@ fn web_kind(kind: ArtifactKind) -> Option<WebKind> {
         ArtifactKind::HtmlPage => Some(WebKind::Page),
         ArtifactKind::Mermaid => Some(WebKind::Mermaid),
         ArtifactKind::Image => Some(WebKind::Image),
-        ArtifactKind::Markdown | ArtifactKind::Unknown => None,
+        ArtifactKind::Markdown | ArtifactKind::Review | ArtifactKind::Unknown => None,
     }
 }
 

@@ -39,7 +39,7 @@ pub(crate) fn flavor(kind: ArtifactKind) -> Flavor {
         | ArtifactKind::Image => Flavor::Visual,
         ArtifactKind::Markdown => Flavor::Markdown,
         ArtifactKind::Options => Flavor::Options,
-        ArtifactKind::Unknown => Flavor::Text,
+        ArtifactKind::Review | ArtifactKind::Unknown => Flavor::Text,
     }
 }
 
