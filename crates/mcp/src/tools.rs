@@ -137,7 +137,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. When a worker you started is finished (`archivable: true` in list_chats / get_chat), archive it with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours.",
+            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. When a worker you started is finished (`archivable: true` in list_chats / get_chat), archive it with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -150,6 +150,7 @@ fn catalog() -> Vec<ToolDef> {
                     "model": { "type": "string", "description": "Model id from list_models. Omit for Mast's default for the harness (Claude Code: claude-opus-5-5)." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
+                    "autoApprove": { "type": "boolean", "default": false, "description": "Start the child on Auto (full access, never asks). Allowed only when your own chat is on Auto; otherwise refused." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
@@ -589,6 +590,8 @@ struct CreateChatArgs {
     model: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
+    #[serde(default, alias = "autoApprove")]
+    auto_approve: bool,
     title: Option<String>,
     branch: Option<String>,
     cwd: Option<String>,
@@ -1129,6 +1132,18 @@ impl Tools {
             }
             None => requested_sandbox.unwrap_or(SandboxLevel::WorkspaceWrite),
         };
+        // Auto (full access, never asks) is never wider than the parent: only
+        // a chat that is itself on Auto may start an Auto child.
+        if args.auto_approve
+            && let Some(caller) = &caller
+            && !caller.config.as_ref().is_some_and(|c| c.auto_approve)
+        {
+            anyhow::bail!(
+                "autoApprove refused: a child chat can only be Auto when the calling chat is \
+                 on Auto (never wider than its parent); set this chat's approval to Auto, or \
+                 omit autoApprove to start the child on Ask"
+            );
+        }
         // Never leave the model empty: the harness CLI would fall back to its
         // own default (e.g. `~/.claude/settings.json`), not the composer's.
         let model = mast_proto::resolve_model(harness, args.model.as_deref());
@@ -1141,8 +1156,9 @@ impl Tools {
             reasoning,
             model_options: Default::default(),
             sandbox,
-            // Always Ask: never more permissive than any parent.
-            auto_approve: false,
+            // Ask unless requested, and then only under an Auto parent
+            // (checked above; the engine re-checks it).
+            auto_approve: args.auto_approve,
         };
 
         let (space, device_id) = match (origin, args.project.as_deref()) {

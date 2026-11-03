@@ -551,6 +551,44 @@ fn sandbox_rank(level: SandboxLevel) -> u8 {
     }
 }
 
+/// A sandbox's reach once approval is counted: Auto runs full access unless
+/// the chat is read-only.
+fn effective_rank(level: SandboxLevel, auto_approve: bool) -> u8 {
+    if auto_approve && level != SandboxLevel::ReadOnly {
+        sandbox_rank(SandboxLevel::DangerFullAccess)
+    } else {
+        sandbox_rank(level)
+    }
+}
+
+/// A child chat's config may never be wider than its parent's. Auto (full
+/// access, never asks) needs an Auto parent; it forces full access in the
+/// Codex harness (read-only is never widened), so an Auto child counts as
+/// full access in the sandbox cap.
+fn check_child_config(
+    parent: Option<&mast_proto::ChatConfig>,
+    child: &mast_proto::ChatConfig,
+) -> Result<(), AgentToolError> {
+    let parent_auto = parent.is_some_and(|c| c.auto_approve);
+    let cap = parent
+        .map(|c| c.sandbox)
+        .unwrap_or(SandboxLevel::WorkspaceWrite);
+    if child.auto_approve && !parent_auto {
+        return Err(AgentToolError::refused(
+            AgentToolErrorCode::Forbidden,
+            "autoApprove refused: a child chat can only be Auto when the calling chat is on \
+             Auto (never wider than its parent)",
+        ));
+    }
+    if effective_rank(child.sandbox, child.auto_approve) > effective_rank(cap, parent_auto) {
+        return Err(AgentToolError::refused(
+            AgentToolErrorCode::Forbidden,
+            "a child chat can never have a wider sandbox than its parent",
+        ));
+    }
+    Ok(())
+}
+
 /// Whether `target` is `root` or one of its effective descendants.
 fn in_subtree(snapshot: &mast_proto::WorkOutlineSnapshot, root: &str, target: &str) -> bool {
     let mut cursor = Some(target.to_owned());
@@ -1867,7 +1905,7 @@ impl AgentToolsService {
     ///
     /// The target must be the caller's item or a descendant (else
     /// `work-outline/unauthorized`), the child's sandbox may not exceed the
-    /// caller's, approval is never automatic, and the new Chat records the
+    /// caller's, an Auto child needs an Auto caller, and the new Chat records the
     /// caller as its parent. Ids derive from `(token Chat, idempotencyKey)`.
     pub fn prepare_child_launch(
         &self,
@@ -1911,22 +1949,16 @@ impl AgentToolsService {
             .ok()
             .flatten()
             .ok_or_else(AgentToolError::unauthenticated)?;
-        let cap = caller
-            .config
-            .as_ref()
-            .map(|c| c.sandbox)
-            .unwrap_or(SandboxLevel::WorkspaceWrite);
-        let config = args.config.map(|mut config| {
-            config.auto_approve = false;
-            config
-        });
-        if let Some(config) = &config
-            && sandbox_rank(config.sandbox) > sandbox_rank(cap)
-        {
-            return Err(AgentToolError::refused(
-                AgentToolErrorCode::Forbidden,
-                "a child chat can never have a wider sandbox than its parent",
-            ));
+        let config = args.config;
+        if let Some(config) = &config {
+            check_child_config(caller.config.as_ref(), config)?;
+            if config.auto_approve {
+                tracing::info!(
+                    parent_chat_id = %context.grant.chat_id,
+                    work_item_id = %args.work_item_id,
+                    "agent started an Auto child chat"
+                );
+            }
         }
         Ok(mast_proto::CreateChatForWorkItemParams {
             work_item_id: args.work_item_id,
@@ -2230,6 +2262,37 @@ mod tests {
         assert!(tokens.authenticate(short.token()).is_err());
         short.renew();
         assert!(tokens.authenticate(short.token()).is_err(), "never revived");
+    }
+
+    fn cfg(sandbox: SandboxLevel, auto: bool) -> mast_proto::ChatConfig {
+        serde_json::from_value(json!({
+            "harness": "codex", "model": "m", "sandbox": sandbox, "autoApprove": auto,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn auto_children_need_an_auto_parent() {
+        use SandboxLevel::*;
+        let auto_parent = cfg(WorkspaceWrite, true);
+        assert!(check_child_config(Some(&auto_parent), &cfg(WorkspaceWrite, true)).is_ok());
+        assert!(check_child_config(Some(&auto_parent), &cfg(DangerFullAccess, true)).is_ok());
+        // An Ask parent is refused, even with a full-access sandbox.
+        for parent in [cfg(WorkspaceWrite, false), cfg(DangerFullAccess, false)] {
+            let err = check_child_config(Some(&parent), &cfg(WorkspaceWrite, true)).unwrap_err();
+            assert!(format!("{err:?}").contains("autoApprove refused"), "{err:?}");
+        }
+        assert!(check_child_config(None, &cfg(WorkspaceWrite, true)).is_err());
+        // Omitted (Ask) stays allowed under either parent.
+        assert!(check_child_config(Some(&auto_parent), &cfg(WorkspaceWrite, false)).is_ok());
+        let ask = cfg(WorkspaceWrite, false);
+        assert!(check_child_config(Some(&ask), &cfg(WorkspaceWrite, false)).is_ok());
+        assert!(check_child_config(Some(&ask), &cfg(DangerFullAccess, false)).is_err());
+        // Read-only children stay read-only and never count as full access.
+        assert_eq!(effective_rank(ReadOnly, true), sandbox_rank(ReadOnly));
+        let ro_auto = cfg(ReadOnly, true);
+        assert!(check_child_config(Some(&ro_auto), &cfg(ReadOnly, true)).is_ok());
+        assert!(check_child_config(Some(&ro_auto), &cfg(WorkspaceWrite, true)).is_err());
     }
 
     #[test]

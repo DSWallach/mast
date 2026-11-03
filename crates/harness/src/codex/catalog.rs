@@ -57,13 +57,57 @@ pub(crate) fn sandbox_policy_type(sandbox: SandboxLevel) -> &'static str {
 /// access: zeron agents fetch deps and hit APIs unattended, and with the
 /// approval policy pinned to "never" a network-less sandbox would fail those
 /// commands with no escalation path.
-pub(crate) fn sandbox_policy_value(sandbox: SandboxLevel) -> serde_json::Value {
+///
+/// `writable_roots` are extra absolute roots (see [`git_writable_roots`]):
+/// codex keeps `.git` read-only inside every writable root, and a linked
+/// worktree's or submodule's git data lives outside the cwd, so without them
+/// every commit stalls on an approval prompt.
+pub(crate) fn sandbox_policy_value(
+    sandbox: SandboxLevel,
+    writable_roots: &[String],
+) -> serde_json::Value {
     let mut policy = serde_json::Map::new();
     policy.insert("type".into(), sandbox_policy_type(sandbox).into());
     if matches!(sandbox, SandboxLevel::WorkspaceWrite) {
         policy.insert("networkAccess".into(), true.into());
+        if !writable_roots.is_empty() {
+            policy.insert("writableRoots".into(), writable_roots.into());
+        }
     }
     serde_json::Value::Object(policy)
+}
+
+/// The git directories a workspace-write sandbox must be able to write for
+/// `cwd`: the git dir (a linked worktree's `<common>/worktrees/<name>`) and
+/// the common dir (refs, objects, config). Verified against the real codex
+/// seatbelt sandbox: the common dir alone still denies the worktree's
+/// `index.lock`; both together let `git commit` and `git worktree add` run
+/// with no prompt. Empty when `cwd` is not in a git repository.
+pub(crate) fn git_writable_roots(cwd: &str) -> Vec<String> {
+    if cwd.is_empty() {
+        return Vec::new();
+    }
+    let out = crate::git_command()
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .current_dir(cwd)
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut roots: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim();
+        if line.starts_with('/') && !roots.iter().any(|r| r == line) {
+            roots.push(line.to_string());
+        }
+    }
+    roots
 }
 
 const ULTRA_LADDER: &[ReasoningLevel] = &[
@@ -202,6 +246,110 @@ pub(crate) fn static_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_write_policy_carries_writable_roots() {
+        let roots = vec!["/r/.git".to_string(), "/r/.git/worktrees/w".to_string()];
+        let v = sandbox_policy_value(SandboxLevel::WorkspaceWrite, &roots);
+        assert_eq!(v["type"], "workspaceWrite");
+        assert_eq!(v["networkAccess"], true);
+        assert_eq!(v["writableRoots"], serde_json::json!(roots));
+        let none = sandbox_policy_value(SandboxLevel::WorkspaceWrite, &[]);
+        assert!(none.get("writableRoots").is_none());
+        for level in [SandboxLevel::ReadOnly, SandboxLevel::DangerFullAccess] {
+            let v = sandbox_policy_value(level, &roots);
+            assert!(v.get("writableRoots").is_none());
+        }
+    }
+
+    #[test]
+    fn git_roots_for_main_and_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let st = crate::git_command()
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        let main = base.join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "i"]);
+        let main_git = main.join(".git").to_string_lossy().to_string();
+        assert_eq!(
+            git_writable_roots(main.to_str().unwrap()),
+            vec![main_git.clone()]
+        );
+        let wt = base.join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "f"],
+        );
+        let roots = git_writable_roots(wt.to_str().unwrap());
+        assert_eq!(roots.len(), 2);
+        assert!(roots[0].ends_with("/.git/worktrees/wt"), "{roots:?}");
+        assert_eq!(roots[1], main_git);
+        assert!(git_writable_roots(tmp.path().join("nope").to_str().unwrap()).is_empty());
+    }
+
+    /// Runs the real codex seatbelt sandbox: a commit in a linked worktree is
+    /// denied with no roots and succeeds with `git_writable_roots`. Skipped
+    /// when `codex` is not installed or the sandbox cannot nest.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codex_sandbox_commits_in_linked_worktree_with_git_roots() {
+        let probe = std::process::Command::new("codex")
+            .arg("--version")
+            .output();
+        if probe.map(|o| !o.status.success()).unwrap_or(true) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let st = crate::git_command()
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        let main = base.join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "i"]);
+        let wt = base.join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "f"],
+        );
+        let commit = |roots: &[String]| -> bool {
+            let out = std::process::Command::new("codex")
+                .args(["sandbox", "-c", "sandbox_mode=workspace-write"])
+                .args([
+                    "-c".to_string(),
+                    format!(
+                        "sandbox_workspace_write.writable_roots={}",
+                        serde_json::json!(roots)
+                    ),
+                ])
+                .args(["--", "git", "-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["commit", "-q", "--allow-empty", "-m", "x"])
+                .current_dir(&wt)
+                .output()
+                .unwrap();
+            out.status.success()
+        };
+        if commit(&[]) {
+            return; // sandbox not enforcing here (nested/unsupported): nothing to prove
+        }
+        assert!(commit(&git_writable_roots(wt.to_str().unwrap())));
+    }
 
     #[test]
     fn effort_clamps_like_codex_ts() {

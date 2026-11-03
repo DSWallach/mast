@@ -92,7 +92,10 @@ use mast_proto::{
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
 use crate::{CancellationToken, Harness, HarnessError, RunControls};
-use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
+use catalog::{
+    REASONING_LEVELS, git_writable_roots, sandbox_mode, sandbox_policy_value, static_models,
+    to_effort,
+};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
     route_child_notification, turn_error_message, turn_id, usage_event,
@@ -1175,6 +1178,14 @@ async fn run_session(session: Session) {
         }
     };
 
+    let writable_roots = if request.sandbox == mast_proto::SandboxLevel::WorkspaceWrite {
+        let cwd = request.cwd.clone();
+        tokio::task::spawn_blocking(move || git_writable_roots(&cwd))
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let turn_params = |text: &str| -> Value {
         let mut p = serde_json::Map::new();
         p.insert("threadId".into(), Value::String(thread_id.clone()));
@@ -1182,7 +1193,7 @@ async fn run_session(session: Session) {
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert(
             "sandboxPolicy".into(),
-            sandbox_policy_value(request.sandbox),
+            sandbox_policy_value(request.sandbox, &writable_roots),
         );
         // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
         // when asked for — without this codex "thinks" in silence for minutes:
