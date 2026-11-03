@@ -175,9 +175,9 @@ impl RegistryDoc {
         now_ms: i64,
     ) -> Outcome<()> {
         check_operation_id(&p.operation_id)?;
-        if actor.kind == WorkOutlineActorKind::Agent {
+        if actor.kind == WorkOutlineActorKind::Agent && !self.admin_in_force() {
             return Err(WorkOutlineError::unauthorized(
-                "Only you can change a container's template",
+                "Only you or an admin chat can change a container's template",
             ));
         }
         self.require_space(&p.space_id)?;

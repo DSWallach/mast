@@ -511,10 +511,8 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
             let template = match step.get("template") {
                 None | Some(Value::Null) => None,
                 Some(v) => {
-                    let mut t: ContainerTemplate = serde_json::from_value(v.clone())
+                    let t: ContainerTemplate = serde_json::from_value(v.clone())
                         .map_err(|e| invalid(format!("template is not a valid ContainerTemplate: {e}")))?;
-                    t.assign_ids(op);
-                    t.check().map_err(|e| invalid(format!("template: {e}")))?;
                     Some(t)
                 }
             };
@@ -531,7 +529,7 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
                 Some(t) => format!(
                     "Set the container template of {} ({} rule nodes)",
                     ctx.title(&item),
-                    t.node_count()
+                    t.root.node_count()
                 ),
                 None => format!("Clear the container template of {}", ctx.title(&item)),
             };
