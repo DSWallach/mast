@@ -3954,7 +3954,8 @@ impl RpcService for EngineRpc {
                 let target = params.get("target").and_then(serde_json::Value::as_str)
                     .filter(|target| !target.trim().is_empty())
                     .ok_or_else(|| RpcError::Failed("target is required".into()))?;
-                RpcReply::value(&self.workspace.diff_review_state(target).map_err(|error| RpcError::Failed(error.to_string()))?)
+                let state = self.workspace.diff_review_state(target).map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&mast_proto::DiffReviewStateReply { state })
             }
             methods::SET_DIFF_REVIEW_STATE => {
                 let update: mast_proto::DiffReviewUpdate = parse_params(params)?;

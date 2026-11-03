@@ -22,3 +22,10 @@ pub struct DiffReviewUpdate {
     pub before: DiffReviewState,
     pub after: DiffReviewState,
 }
+
+/// A nullable state must be wrapped: the RPC transport cannot carry a bare null.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffReviewStateReply {
+    pub state: Option<DiffReviewState>,
+}

@@ -276,6 +276,20 @@ pub(super) fn logical_file_count(layout: &[DiffTreeNode]) -> usize {
         .sum()
 }
 
+/// Count only files present in the display tree; expanded submodules replace
+/// their parent gitlink in that tree but leave it in the file arena.
+pub(super) fn logical_hunk_count(layout: &[DiffTreeNode], files: &[FileDiff]) -> usize {
+    layout
+        .iter()
+        .map(|node| match node {
+            DiffTreeNode::File(index) => files
+                .get(*index as usize)
+                .map_or(0, |file| file.hunks.len()),
+            DiffTreeNode::Submodule { children, .. } => logical_hunk_count(children, files),
+        })
+        .sum()
+}
+
 /// Generated dependency snapshots are usually reviewed through their source manifests.
 pub(super) fn is_generated_file(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -300,9 +314,62 @@ pub(super) fn is_generated_file(path: &str) -> bool {
         || name.ends_with(".min.css")
 }
 
+/// Keep very large file bodies out of the virtual list until requested.
+pub(super) fn is_large_file(file: &FileDiff) -> bool {
+    const MAX_EXPANDED_LINES: usize = 2_000;
+    file.hunks
+        .iter()
+        .map(|hunk| hunk.lines.len())
+        .sum::<usize>()
+        > MAX_EXPANDED_LINES
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_generated_file;
+    use super::{DiffLine, FileDiff, Hunk, LineKind, is_generated_file, is_large_file};
+
+    #[test]
+    fn hunk_count_excludes_replaced_gitlinks() {
+        let mut gitlink = FileDiff::new("sub".into(), None);
+        gitlink.hunks.push(Hunk {
+            header: "@@".into(),
+            lines: Vec::new(),
+        });
+        let mut nested = FileDiff::new("sub/a".into(), None);
+        nested.hunks.extend([
+            Hunk {
+                header: "@@".into(),
+                lines: Vec::new(),
+            },
+            Hunk {
+                header: "@@".into(),
+                lines: Vec::new(),
+            },
+        ]);
+        let layout = vec![super::DiffTreeNode::Submodule {
+            group: 0,
+            children: vec![super::DiffTreeNode::File(1)],
+        }];
+        assert_eq!(super::logical_hunk_count(&layout, &[gitlink, nested]), 2);
+    }
+
+    #[test]
+    fn large_file_collapses_only_above_the_limit() {
+        let line = DiffLine {
+            kind: LineKind::Add,
+            old_no: None,
+            new_no: Some(1),
+            text: "x".into(),
+        };
+        let mut file = FileDiff::new("src/a.rs".into(), None);
+        file.hunks.push(Hunk {
+            header: "@@".into(),
+            lines: vec![line.clone(); 2_000],
+        });
+        assert!(!is_large_file(&file));
+        file.hunks[0].lines.push(line);
+        assert!(is_large_file(&file));
+    }
 
     #[test]
     fn generated_file_detection_uses_file_names() {
@@ -395,6 +462,7 @@ impl Changes {
                 };
                 div()
                     .id(("changes-file-list-entry", index))
+                    .debug_selector(move || format!("changes-file-list-entry-{index}"))
                     .flex()
                     .items_center()
                     .gap(px(5.0))
@@ -415,7 +483,13 @@ impl Changes {
                                 cx.stop_propagation();
                                 this.toggle_review_file(index, cx);
                             }))
-                            .child(if viewed { "☑" } else { "□" }),
+                            .child(if review_state.is_none() {
+                                "–"
+                            } else if viewed {
+                                "☑"
+                            } else {
+                                "□"
+                            }),
                     )
                     .child(
                         div()
@@ -618,6 +692,45 @@ impl Changes {
 #[cfg(test)]
 mod navigation_tests {
     use super::*;
+
+    #[gpui::test]
+    fn file_list_filters_rename_paths_and_jumps(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/other.rs b/other.rs\n--- a/other.rs\n+++ b/other.rs\n@@ -1 +1 @@\n-a\n+b\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.reflatten(cx);
+        }));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
+        assert!(vcx.debug_bounds("changes-file-list-entry-1").is_some());
+        let filter = changes.read_with(vcx, |changes, _| changes.file_filter.clone());
+        filter.update(vcx, |input, cx| input.set_text("old.rs", cx));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
+        assert!(vcx.debug_bounds("changes-file-list-entry-1").is_none());
+        let row = vcx
+            .debug_bounds("changes-file-list-entry-0")
+            .unwrap()
+            .center();
+        vcx.simulate_click(row, gpui::Modifiers::default());
+        changes.read_with(vcx, |changes, _| {
+            assert!(matches!(
+                changes.rows[changes.list.logical_scroll_top().item_ix],
+                DiffRow::FileHeader { file: 0 }
+            ))
+        });
+    }
 
     #[gpui::test]
     fn navigation_moves_between_hunks_and_files(cx: &mut gpui::TestAppContext) {

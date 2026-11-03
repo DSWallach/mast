@@ -67,6 +67,13 @@ impl RegistryDoc {
                 "diff review state was cleared; reload before editing".into(),
             ));
         }
+        if let Some(current) = self.diff_review_state(&state.target) {
+            if current.head_sha != before.head_sha && current.head_sha != state.head_sha {
+                return Err(DocError::Schema(
+                    "review head changed; reload and mark it again".into(),
+                ));
+            }
+        }
         let id = row_id(&state.target);
         self.observe_row(KIND_DIFF_REVIEW_STATE, &id);
         let mut updates = Vec::new();
@@ -173,6 +180,30 @@ mod tests {
         assert!(registry.put_diff_review_state(&state).unwrap());
         assert_eq!(registry.diff_review_state(&state.target), Some(state));
     }
+    #[test]
+    fn stale_head_cannot_restore_changed_marks() {
+        let mut registry = RegistryDoc::new("device");
+        let base = DiffReviewState {
+            target: "pr:o/r#1".into(),
+            head_sha: Some("old".into()),
+            ..Default::default()
+        };
+        assert!(registry.put_diff_review_state(&base).unwrap());
+        let mut moved = base.clone();
+        moved.head_sha = Some("new".into());
+        assert!(registry.update_diff_review_state(&base, &moved).unwrap());
+        let mut stale = base.clone();
+        stale.viewed_hunks.insert("old-change".into());
+        assert!(registry.update_diff_review_state(&base, &stale).is_err());
+        assert!(
+            registry
+                .diff_review_state(&base.target)
+                .unwrap()
+                .viewed_hunks
+                .is_empty()
+        );
+    }
+
     #[test]
     fn concurrent_review_marks_preserve_each_other_and_clear_rejects_stale_updates() {
         let mut registry = RegistryDoc::new("device");

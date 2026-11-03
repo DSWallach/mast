@@ -1976,13 +1976,16 @@ pub struct Changes {
     diff_focus: FocusHandle,
     review_target: Option<String>,
     review_link_chat: Option<String>,
+    review_link_status: Option<mast_engine::pr_ticket_cache::ChatLinkStatus>,
     review_pr: Option<String>,
     review_link_task: Option<Task<()>>,
     review_head_task: Option<Task<()>>,
     review_head_for: Option<String>,
     review_head: Option<(String, String)>,
+    review_checkout_matches: Option<bool>,
     review_status_task: Option<Task<()>>,
     review_status_checked: Option<std::time::Instant>,
+    review_status_base: Option<String>,
     review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
     review_task: Option<Task<()>>,
@@ -2159,13 +2162,16 @@ impl Changes {
             diff_focus: cx.focus_handle(),
             review_target: None,
             review_link_chat: None,
+            review_link_status: None,
             review_pr: None,
             review_link_task: None,
             review_head_task: None,
             review_head_for: None,
             review_head: None,
+            review_checkout_matches: None,
             review_status_task: None,
             review_status_checked: None,
+            review_status_base: None,
             review_closed: false,
             review_state: None,
             review_task: None,
@@ -2985,7 +2991,7 @@ impl Changes {
                 changes.folds.clear();
                 changes.seen_candidates.clear();
                 for file in &files {
-                    if is_generated_file(&file.path) {
+                    if is_generated_file(&file.path) || is_large_file(file) {
                         changes.folds.insert(
                             file.path.clone(),
                             FileFold {
@@ -3040,6 +3046,7 @@ impl Changes {
                     submodules: Arc::new(submodules),
                     layout: Arc::new(layout),
                 });
+                changes.ensure_review_state(cx);
                 cx.notify();
             })
             .ok();
@@ -4255,12 +4262,13 @@ impl Changes {
                 let Some(identity) = self.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.get(file as usize)).and_then(|items| items.get(hunk as usize)) else { return gpui::Empty.into_any_element(); };
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
+                let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
                         .text_size(px(10.0)).text_color(theme.text_muted)
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
-                        .child(if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" }))
+                        .child(label))
                     .into_any_element()
             },
             DiffRow::Line {
@@ -4734,6 +4742,9 @@ impl Changes {
                     .text_color(theme.text_dim)
                     .child(SharedString::from(file.path.clone())),
             )
+            .when(collapsed && is_large_file(file), |el| {
+                el.child(div().flex_none().text_size(px(10.0)).text_color(theme.text_muted).child("Load diff"))
+            })
             .when(file.binary, |el| {
                 el.child(
                     div()
@@ -5767,7 +5778,7 @@ impl Changes {
                         .text_color(theme.text_faint)
                         .child(SharedString::from(format!(
                             "{} hunks",
-                            parsed.files.iter().map(|file| file.hunks.len()).sum::<usize>()
+                            logical_hunk_count(&parsed.layout, &parsed.files)
                         ))),
                 )
                 .child(div().flex_1())
@@ -8743,6 +8754,7 @@ index 1111111..2222222 160000
             path: path.into(),
             kind,
             repo_name: "flagship".into(),
+            repo_slug: Some("cofactr/flagship".into()),
             branch: branch.map(Into::into),
             head_sha: Some("0123456789abcdef".into()),
             bound: false,

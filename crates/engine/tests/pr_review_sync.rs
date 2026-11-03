@@ -1279,7 +1279,7 @@ async fn diff_review_rpc_clears_closed_pr_and_rejects_stale_marks() {
     assert_eq!(
         rig.call(methods::GET_DIFF_REVIEW_STATE, json!({"target": target}))
             .await
-            .unwrap()["viewedHunks"],
+            .unwrap()["state"]["viewedHunks"],
         json!(["hunk-1"])
     );
     rig.view(
@@ -1301,7 +1301,7 @@ async fn diff_review_rpc_clears_closed_pr_and_rejects_stale_marks() {
     assert!(
         rig.call(methods::GET_DIFF_REVIEW_STATE, json!({"target": target}))
             .await
-            .unwrap()
+            .unwrap()["state"]
             .is_null()
     );
     assert!(

@@ -61,6 +61,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pr_checkout_requires_matching_repository_branch_and_base() {
+        let status = mast_proto::PullRequestStatusSummary {
+            pr_ref: mast_proto::PullRequestRef::new("Cofactr", "ui", 7),
+            head_ref_name: Some("feature".into()),
+            base_ref_name: Some("main".into()),
+            ..Default::default()
+        };
+        let mut checkout = mast_proto::DiffCheckoutCandidate {
+            path: "/worktree".into(),
+            kind: mast_proto::DiffCheckoutKind::Worktree,
+            repo_name: "ui".into(),
+            repo_slug: Some("cofactr/ui".into()),
+            branch: Some("feature".into()),
+            head_sha: Some("abc".into()),
+            bound: true,
+            selected: true,
+        };
+        assert!(checkout_matches_pr(&checkout, &status, Some("main")));
+        checkout.repo_slug = Some("cofactr/other".into());
+        assert!(!checkout_matches_pr(&checkout, &status, Some("main")));
+        checkout.repo_slug = Some("cofactr/ui".into());
+        checkout.branch = Some("other".into());
+        assert!(!checkout_matches_pr(&checkout, &status, Some("main")));
+        checkout.branch = Some("feature".into());
+        assert!(!checkout_matches_pr(&checkout, &status, Some("other")));
+    }
+
+    #[test]
     fn seen_requires_dwell_scroll_and_hunk_end() {
         assert!(!seen_after_traversal(
             Duration::from_millis(1999),
@@ -90,7 +118,11 @@ mod tests {
             .viewed_hunks
             .insert(hunk_identity("a", &first[0].hunks[0]));
         state.viewed_files.insert("a".into());
-        assert!(reconcile_review_head(&mut state, Some("new".into())));
+        assert!(reconcile_review_head(
+            &mut state,
+            Some("new".into()),
+            &hunk_identities(&moved)
+        ));
         assert!(
             state
                 .viewed_hunks
@@ -102,6 +134,32 @@ mod tests {
                 .contains(&hunk_identity("a", &changed[0].hunks[0]))
         );
         assert!(state.viewed_files.is_empty());
+    }
+
+    #[test]
+    fn changed_hunks_do_not_reappear_viewed_if_they_return() {
+        let first = parse_patch("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n");
+        let changed =
+            parse_patch("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+changed\n");
+        let identity = hunk_identity("a", &first[0].hunks[0]);
+        let mut state = mast_proto::DiffReviewState {
+            target: "pr:o/r#1".into(),
+            head_sha: Some("one".into()),
+            ..Default::default()
+        };
+        state.viewed_hunks.insert(identity.clone());
+        assert!(reconcile_review_head(
+            &mut state,
+            Some("two".into()),
+            &hunk_identities(&changed)
+        ));
+        assert!(!state.viewed_hunks.contains(&identity));
+        assert!(reconcile_review_head(
+            &mut state,
+            Some("three".into()),
+            &hunk_identities(&first)
+        ));
+        assert!(!state.viewed_hunks.contains(&identity));
     }
 
     #[test]
@@ -121,13 +179,39 @@ mod tests {
     }
 }
 
-fn reconcile_review_head(state: &mut mast_proto::DiffReviewState, head: Option<String>) -> bool {
+fn reconcile_review_head(
+    state: &mut mast_proto::DiffReviewState,
+    head: Option<String>,
+    identities: &[Vec<String>],
+) -> bool {
     if head.is_none() || state.head_sha == head {
         return false;
     }
+    let present: std::collections::HashSet<&str> =
+        identities.iter().flatten().map(String::as_str).collect();
+    state
+        .viewed_hunks
+        .retain(|identity| present.contains(identity.as_str()));
     state.head_sha = head;
     state.viewed_files.clear();
     true
+}
+
+fn checkout_matches_pr(
+    checkout: &mast_proto::DiffCheckoutCandidate,
+    status: &mast_proto::PullRequestStatusSummary,
+    base: Option<&str>,
+) -> bool {
+    let slug = format!("{}/{}", status.pr_ref.owner, status.pr_ref.repo).to_lowercase();
+    checkout.repo_slug.as_deref() == Some(slug.as_str())
+        && checkout
+            .branch
+            .as_deref()
+            .zip(status.head_ref_name.as_deref())
+            .is_some_and(|(actual, head)| actual == head)
+        && base
+            .zip(status.base_ref_name.as_deref())
+            .is_some_and(|(actual, expected)| actual == expected)
 }
 
 impl Changes {
@@ -147,6 +231,8 @@ impl Changes {
             }
             if let Some(pr) = &self.review_pr
                 && owner.range.is_none()
+                && self.scope == DiffScope::Branch
+                && self.review_checkout_matches == Some(true)
             {
                 let head = self
                     .review_head
@@ -173,11 +259,54 @@ impl Changes {
             .map(|path| (format!("diff:local:{path}"), None))
     }
 
+    /// Resolve launcher reviews and chats attached to a PR review item.
+    fn linked_review_pr(&self, cx: &App) -> Option<String> {
+        let owner = self.owner.as_ref()?;
+        let status = self.review_link_status.as_ref()?;
+        let state = self.state.read(cx);
+        let space_id = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == owner.chat_id)
+            .and_then(|chat| chat.space_id.as_deref());
+        let load = space_id.map(|space_id| state.work_outline(space_id));
+        let snapshot = load
+            .as_ref()
+            .and_then(|load| load.snapshot())
+            .map(|snapshot| snapshot.as_ref());
+        let prs = crate::chat_work_context::chat_prs(status);
+        let context = crate::chat_work_context::resolve(&crate::chat_work_context::ResolveInput {
+            chat_id: &owner.chat_id,
+            snapshot,
+            chat_prs: &prs,
+            artifacts: None,
+        })?;
+        match context.variant {
+            crate::chat_work_context::Variant::PrReview(review) => review
+                .prs
+                .first()
+                .map(|pr| format!("pr:{}", pr.external_id().to_lowercase())),
+            _ => None,
+        }
+    }
+
     pub(super) fn ensure_review_state(&mut self, cx: &mut Context<Self>) {
-        if let Some(chat_id) = self.owner.as_ref().map(|owner| owner.chat_id.clone()) {
+        // A selected ref has its own identity; chat linkage must not delay it.
+        if let Some(chat_id) = self
+            .owner
+            .as_ref()
+            .filter(|owner| owner.range.is_none() && self.scope == DiffScope::Branch)
+            .map(|owner| owner.chat_id.clone())
+        {
             if self.review_link_chat.as_deref() != Some(&chat_id) {
+                if self.review_error.is_some() {
+                    return;
+                }
                 self.review_link_chat = Some(chat_id.clone());
+                self.review_target = None;
+                self.review_state = None;
                 self.review_pr = None;
+                self.review_link_status = None;
                 let task = self.state.update(cx, |state, cx| {
                     state.chat_diff_rpc(
                         methods::CHAT_LINK_STATUS,
@@ -186,26 +315,28 @@ impl Changes {
                     )
                 });
                 self.review_link_task = Some(cx.spawn(async move |this, cx| {
-                    let status = task.await.ok().and_then(|value| {
+                    let result = task.await.and_then(|value| {
                         serde_json::from_value::<mast_engine::pr_ticket_cache::ChatLinkStatus>(
                             value,
                         )
-                        .ok()
+                        .map_err(|error| format!("Malformed chat PR links: {error}"))
                     });
                     this.update(cx, |this, cx| {
                         if this.review_link_chat.as_deref() != Some(&chat_id) {
                             return;
                         }
                         this.review_link_task = None;
-                        this.review_pr = status
-                            .and_then(|status| {
-                                status.pr_links.into_iter().find(|link| {
-                                    link.source == Some(mast_proto::ChatLinkSource::ReviewLauncher)
-                                })
-                            })
-                            .and_then(|link| crate::chat_work_context::parse_pr_url(&link.url))
-                            .map(|pr| format!("pr:{}", pr.external_id().to_lowercase()));
-                        this.ensure_review_state(cx);
+                        match result {
+                            Ok(status) => {
+                                this.review_link_status = Some(status);
+                                this.ensure_review_state(cx);
+                            }
+                            Err(error) => {
+                                this.review_link_chat = None;
+                                this.review_error =
+                                    Some(format!("Could not identify the review target: {error}"));
+                            }
+                        }
                         cx.notify();
                     })
                     .ok();
@@ -216,47 +347,117 @@ impl Changes {
                 return;
             }
         }
-        if self.review_pr.is_some()
+        if self.review_link_status.is_some()
+            && self.scope == DiffScope::Branch
             && self
                 .owner
                 .as_ref()
                 .is_some_and(|owner| owner.range.is_none())
         {
-            if let Some((chat_id, path, revision)) = self.owner.as_ref().and_then(|owner| {
+            let pr = self.linked_review_pr(cx);
+            if self.review_pr != pr {
+                self.review_pr = pr;
+                self.review_head_for = None;
+                self.review_head = None;
+                self.review_checkout_matches = None;
+            }
+        }
+        if let Some(pr) = self
+            .review_pr
+            .as_deref()
+            .and_then(|key| key.strip_prefix("pr:"))
+            .and_then(mast_proto::PullRequestRef::parse_external_id)
+            && self.scope == DiffScope::Branch
+            && self
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.range.is_none())
+        {
+            let Some((chat_id, path, revision)) = self.owner.as_ref().and_then(|owner| {
                 Some((
                     owner.chat_id.clone(),
                     owner.cwd.clone()?,
                     self.active_diff(cx).map(|diff| self.parse_key(&diff))?,
                 ))
-            }) {
-                let lookup_key = format!("{path}\0{revision}");
-                if self.review_head_for.as_deref() != Some(&lookup_key) {
-                    self.review_head_for = Some(lookup_key.clone());
-                    let task = self
-                        .state
-                        .update(cx, |state, cx| state.list_chat_diff_checkouts(&chat_id, cx));
-                    self.review_head_task = Some(cx.spawn(async move |this, cx| {
-                        let head = task
-                            .await
-                            .ok()
-                            .and_then(|candidates| {
-                                candidates
-                                    .into_iter()
-                                    .find(|candidate| candidate.path == path)
-                            })
-                            .and_then(|candidate| candidate.head_sha);
-                        this.update(cx, |this, cx| {
-                            if this.review_head_for.as_deref() != Some(&lookup_key) {
-                                return;
-                            }
-                            this.review_head_task = None;
-                            this.review_head = head.map(|sha| (path, sha));
-                            this.ensure_review_state(cx);
-                            cx.notify();
-                        })
-                        .ok();
-                    }));
+            }) else {
+                return;
+            };
+            let lookup_key = format!("{}\0{path}\0{revision}", pr.external_id().to_lowercase());
+            if self.review_head_for.as_deref() != Some(&lookup_key) {
+                if self.review_error.is_some() {
+                    return;
                 }
+                self.review_head_for = Some(lookup_key.clone());
+                self.review_checkout_matches = None;
+                self.review_target = None;
+                self.review_state = None;
+                let base = self.base_ref.clone();
+                let expected_slug = format!("{}/{}", pr.owner, pr.repo).to_lowercase();
+                let expected_pr = pr.external_id().to_lowercase();
+                let (checkout_task, status_task) = self.state.update(cx, |state, cx| {
+                    let checkout = state.list_chat_diff_checkouts(&chat_id, cx);
+                    let status = state.chat_diff_rpc(methods::PR_STATUS, serde_json::json!({"owner": pr.owner, "repo": pr.repo, "number": pr.number}), cx);
+                    (checkout, status)
+                });
+                self.review_head_task = Some(cx.spawn(async move |this, cx| {
+                    let result = async {
+                        let checkouts = checkout_task.await?;
+                        let checkout = checkouts
+                            .into_iter()
+                            .find(|checkout| checkout.path == path)
+                            .ok_or_else(|| "Selected checkout is unavailable".to_string())?;
+                        let Some(slug) = checkout.repo_slug.as_deref() else {
+                            return Err(
+                                "Selected checkout has no confirmed GitHub origin".to_string()
+                            );
+                        };
+                        if slug != expected_slug {
+                            return Ok((checkout.head_sha, false));
+                        }
+                        if checkout.head_sha.is_none() {
+                            return Err("Selected checkout has no confirmed head".to_string());
+                        }
+                        let status: mast_proto::PullRequestStatusSummary =
+                            serde_json::from_value(status_task.await?)
+                                .map_err(|error| error.to_string())?;
+                        if status.pr_ref.external_id().to_lowercase() != expected_pr {
+                            return Err("PR status did not match the requested review".to_string());
+                        }
+                        if status.head_ref_name.is_none()
+                            || status.base_ref_name.is_none()
+                            || base.is_none()
+                        {
+                            return Err("PR head or base branch is unavailable".to_string());
+                        }
+                        let matches = checkout_matches_pr(&checkout, &status, base.as_deref());
+                        Ok::<_, String>((checkout.head_sha, matches))
+                    }
+                    .await;
+                    this.update(cx, |this, cx| {
+                        if this.review_head_for.as_deref() != Some(&lookup_key) {
+                            return;
+                        }
+                        this.review_head_task = None;
+                        match result {
+                            Ok((head, matches)) => {
+                                this.review_checkout_matches = Some(matches);
+                                this.review_head = head.map(|sha| (path, sha));
+                                this.ensure_review_state(cx);
+                            }
+                            Err(error) => {
+                                this.review_head_for = None;
+                                this.review_error =
+                                    Some(format!("Could not confirm the PR checkout: {error}"));
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+                return;
+            }
+            if self.review_head_task.is_some() {
+                return;
             }
         }
         let Some((target, head_sha)) = self.review_identity(cx) else {
@@ -267,27 +468,21 @@ impl Changes {
             if self.review_closed {
                 return;
             }
-            if let Some(state) = &mut self.review_state {
-                if reconcile_review_head(state, head_sha) {
-                    self.review_pending.insert(target, state.clone());
-                    self.save_review_state(cx);
-                }
-            }
+            self.reconcile_current_review_head(head_sha, cx);
             return;
         }
         self.review_target = Some(target.clone());
         self.review_status_task = None;
         self.review_status_checked = None;
+        self.review_status_base = None;
         self.review_closed = false;
         self.refresh_review_status(cx);
         self.seen_candidates.clear();
         self.seen_hunks.clear();
         self.review_error = None;
-        if let Some(mut state) = self.review_pending.get(&target).cloned() {
-            if reconcile_review_head(&mut state, head_sha.clone()) {
-                self.review_pending.insert(target, state.clone());
-            }
+        if let Some(state) = self.review_pending.get(&target).cloned() {
             self.review_state = Some(state);
+            self.reconcile_current_review_head(head_sha, cx);
             self.save_review_state(cx);
             return;
         }
@@ -301,7 +496,8 @@ impl Changes {
         });
         self.review_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await.and_then(|value| {
-                serde_json::from_value::<Option<mast_proto::DiffReviewState>>(value)
+                serde_json::from_value::<mast_proto::DiffReviewStateReply>(value)
+                    .map(|reply| reply.state)
                     .map_err(|error| error.to_string())
             });
             this.update(cx, |this, cx| {
@@ -311,16 +507,16 @@ impl Changes {
                 this.review_task = None;
                 match result {
                     Ok(state) => {
-                        let mut state = state.unwrap_or_else(|| mast_proto::DiffReviewState {
+                        let state = state.unwrap_or_else(|| mast_proto::DiffReviewState {
                             target: target.clone(),
                             ..Default::default()
                         });
                         this.review_acknowledged
                             .insert(target.clone(), state.clone());
-                        if reconcile_review_head(&mut state, head_sha) {
-                            this.review_pending.insert(target.clone(), state.clone());
-                        }
                         this.review_state = Some(state);
+                        // Re-read the current head: it may have moved while the row loaded.
+                        let head = this.review_identity(cx).and_then(|(_, head)| head);
+                        this.reconcile_current_review_head(head, cx);
                         this.save_review_state(cx);
                     }
                     Err(error) => this.review_error = Some(error),
@@ -329,6 +525,55 @@ impl Changes {
             })
             .ok();
         }));
+    }
+
+    /// Prune only after the complete patch for the current head has parsed.
+    /// Otherwise a slow parse (or a truncated patch) would erase valid marks.
+    fn reconcile_current_review_head(&mut self, head: Option<String>, cx: &mut Context<Self>) {
+        if head.is_none()
+            || self
+                .review_state
+                .as_ref()
+                .is_none_or(|state| state.head_sha.as_deref() == head.as_deref())
+            || !matches!(self.scope, DiffScope::Branch | DiffScope::Range)
+            || self.scoped_inflight.is_some()
+            || !self
+                .review_target
+                .as_deref()
+                .is_some_and(|target| target.starts_with("pr:"))
+        {
+            return;
+        }
+        let Some(parsed) = self.parsed.as_ref() else {
+            return;
+        };
+        let diff_base = match self.scope {
+            DiffScope::Branch => self.base_ref.as_deref(),
+            DiffScope::Range => self
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.range.as_ref())
+                .map(|range| range.base_branch.as_str()),
+            _ => None,
+        };
+        if diff_base.is_none() || diff_base != self.review_status_base.as_deref() {
+            return;
+        }
+        if parsed.truncated
+            || self
+                .active_diff(cx)
+                .is_none_or(|diff| self.parse_key(&diff) != parsed.key)
+        {
+            return;
+        }
+        let Some(state) = self.review_state.as_mut() else {
+            return;
+        };
+        if reconcile_review_head(state, head, &parsed.hunk_identities) {
+            self.review_pending
+                .insert(state.target.clone(), state.clone());
+            self.save_review_state(cx);
+        }
     }
 
     fn refresh_review_status(&mut self, cx: &mut Context<Self>) {
@@ -366,6 +611,7 @@ impl Changes {
                 }
                 this.review_status_task = None;
                 if let Some(status) = status {
+                    this.review_status_base = status.base_ref_name.clone();
                     let closed = status.state.is_finished();
                     if closed {
                         this.review_closed = true;
@@ -379,6 +625,8 @@ impl Changes {
                         this.review_closed = false;
                         this.review_target = None;
                         this.ensure_review_state(cx);
+                    } else {
+                        this.ensure_review_state(cx);
                     }
                 }
                 cx.notify();
@@ -388,7 +636,17 @@ impl Changes {
     }
 
     pub(super) fn retry_review_state(&mut self, cx: &mut Context<Self>) {
+        let stale = self.review_error.as_deref().is_some_and(|error| {
+            error.contains("review head changed") || error.contains("review state was cleared")
+        });
         self.review_error = None;
+        if stale {
+            if let Some(target) = &self.review_target {
+                self.review_pending.remove(target);
+                self.review_acknowledged.remove(target);
+            }
+            self.review_state = None;
+        }
         if self.review_state.is_none() {
             self.review_target = None;
             self.ensure_review_state(cx);
@@ -514,6 +772,124 @@ impl Changes {
 #[cfg(test)]
 mod mark_tests {
     use super::*;
+
+    #[gpui::test]
+    fn worktree_and_pr_branch_have_distinct_review_targets(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            let changes = cx.new(|cx| {
+                let owner = ChangesTarget {
+                    chat_id: "chat".into(),
+                    device_id: "device".into(),
+                    cwd: Some("/repo".into()),
+                    checkout_id: None,
+                    branch: None,
+                    unconfirmed: None,
+                    exact_checkout: false,
+                    range: None,
+                };
+                let mut changes = Changes::with_owner(state, Some(owner), cx);
+                changes.review_link_status = Some(mast_engine::pr_ticket_cache::ChatLinkStatus {
+                    pr_links: vec![mast_engine::pr_ticket_cache::PrLinkStatus {
+                        url: "https://github.com/o/r/pull/1".into(),
+                        source: Some(mast_proto::ChatLinkSource::ReviewLauncher),
+                        detail: None,
+                    }],
+                    ..Default::default()
+                });
+                changes
+            });
+            changes.update(cx, |changes, cx| {
+                changes.review_pr = changes.linked_review_pr(cx);
+                changes.review_checkout_matches = Some(true);
+                assert_eq!(changes.review_identity(cx).unwrap().0, "diff:device:/repo");
+                changes.scope = DiffScope::Branch;
+                assert_eq!(changes.review_identity(cx).unwrap().0, "pr:o/r#1");
+                changes.review_checkout_matches = Some(false);
+                assert_eq!(changes.review_identity(cx).unwrap().0, "diff:device:/repo");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn head_reconciliation_waits_for_the_current_complete_diff(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        vcx.update(|_, cx| {
+            changes.update(cx, |changes, cx| {
+                let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+                let files = parse_patch(patch);
+                let identity = hunk_identity("a", &files[0].hunks[0]);
+                let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+                let horizontal = files.iter().map(FileHorizontalState::new).collect();
+                changes.scope = DiffScope::Branch;
+                changes.base_ref = Some("main".into());
+                changes.scoped = Some(CheckoutDiff {
+                    checkout_id: "checkout".into(),
+                    device_id: "device".into(),
+                    cwd: "/repo".into(),
+                    patch: patch.into(),
+                    files: Vec::new(),
+                    submodules: Vec::new(),
+                    additions: 1,
+                    deletions: 1,
+                    truncated: false,
+                    checksum: "current".into(),
+                    updated_at: chrono::Utc::now(),
+                });
+                changes.review_target = Some("pr:o/r#1".into());
+                changes.review_status_base = Some("main".into());
+                let mut state = mast_proto::DiffReviewState {
+                    target: "pr:o/r#1".into(),
+                    head_sha: Some("old".into()),
+                    ..Default::default()
+                };
+                state.viewed_hunks.insert(identity.clone());
+                state.viewed_hunks.insert("removed".into());
+                changes.review_state = Some(state);
+                changes.parsed = Some(ParsedDiff {
+                    key: "stale".into(),
+                    truncated: false,
+                    additions: 1,
+                    deletions: 1,
+                    file_count: 1,
+                    horizontal,
+                    hunk_identities: Arc::new(hunk_identities(&files)),
+                    files: Arc::new(files),
+                    origins: Arc::new(origins),
+                    submodules: Arc::new(submodules),
+                    layout: Arc::new(layout),
+                });
+                changes.reconcile_current_review_head(Some("new".into()), cx);
+                assert_eq!(
+                    changes.review_state.as_ref().unwrap().head_sha.as_deref(),
+                    Some("old")
+                );
+                let key = changes.parse_key(changes.scoped.as_ref().unwrap());
+                changes.parsed.as_mut().unwrap().key = key;
+                changes.parsed.as_mut().unwrap().truncated = true;
+                changes.reconcile_current_review_head(Some("new".into()), cx);
+                assert_eq!(
+                    changes.review_state.as_ref().unwrap().head_sha.as_deref(),
+                    Some("old")
+                );
+                changes.parsed.as_mut().unwrap().truncated = false;
+                changes.reconcile_current_review_head(Some("new".into()), cx);
+                let state = changes.review_state.as_ref().unwrap();
+                assert_eq!(state.head_sha.as_deref(), Some("new"));
+                assert!(state.viewed_hunks.contains(&identity));
+                assert!(!state.viewed_hunks.contains("removed"));
+            })
+        });
+    }
 
     #[gpui::test]
     fn file_and_hunk_marks_are_manual_and_shared(cx: &mut gpui::TestAppContext) {
