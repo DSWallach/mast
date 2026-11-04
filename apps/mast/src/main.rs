@@ -77,7 +77,7 @@ enum DaemonCommand {
     Status,
 }
 
-/// Production edge (Cloudflare Worker + Durable Objects on the zeron.sh zone).
+/// Legacy sync endpoint; sync is disabled by default.
 /// `MAST_EDGE_URL` overrides (local dev / self-hosting).
 const DEFAULT_EDGE_URL: &str = "https://edge.zeron.sh";
 
