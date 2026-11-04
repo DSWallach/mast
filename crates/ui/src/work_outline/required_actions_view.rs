@@ -536,6 +536,9 @@ impl RequiredActionsList {
             .read(cx)
             .work_outline_actions()
             .resolve_user_action_request(ResolveUserActionRequestParams {
+                outcome: None,
+                values: None,
+                via: None,
                 user_action_request_id: request_id.clone(),
                 note,
                 answer: None,

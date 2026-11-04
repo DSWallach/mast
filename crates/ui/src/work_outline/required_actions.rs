@@ -754,6 +754,9 @@ pub(crate) mod fixture {
     pub(crate) fn resolve(request: &mut UserActionRequestView, at: i64, note: Option<&str>) {
         request.state = UserActionRequestState::Resolved;
         request.resolution = Some(UserActionResolution {
+            outcome: None,
+            values: None,
+            via: None,
             by: WorkOutlineActor {
                 kind: WorkOutlineActorKind::User,
                 device_id: "device-fixture".into(),
@@ -777,6 +780,9 @@ pub(crate) mod fixture {
     ) {
         request.state = UserActionRequestState::Resolved;
         request.resolution = Some(UserActionResolution {
+            outcome: None,
+            values: None,
+            via: None,
             by: agent(source_chat),
             at,
             note: Some(text.into()),

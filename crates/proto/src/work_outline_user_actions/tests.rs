@@ -60,6 +60,9 @@ fn user_action_request_view_field_names_are_pinned() {
         created_at: 10,
         state: UserActionRequestState::Resolved,
         resolution: Some(UserActionResolution {
+            outcome: None,
+            values: None,
+            via: None,
             by: agent(),
             at: 20,
             note: Some("done".into()),
@@ -189,6 +192,9 @@ fn mutation_field_names_are_pinned() {
     );
     round_trip(
         &WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+            outcome: None,
+            values: None,
+            via: None,
             user_action_request_id: "r-1".into(),
             note: Some("answered".into()),
             answer: None,

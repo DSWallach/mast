@@ -569,6 +569,9 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
                 "resolve request",
                 format!("Resolve Required Action {about}"),
                 WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+                    outcome: None,
+                    values: None,
+                    via: None,
                     user_action_request_id: id,
                     note: Some(match opt_text(step, "note") {
                         Some(n) => format!("{n} ({})", ctx.who),

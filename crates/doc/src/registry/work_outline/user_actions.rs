@@ -420,6 +420,9 @@ impl RegistryDoc {
         now_ms: i64,
         note: Option<&str>,
         answer: Option<&UserActionAnswer>,
+        outcome: Option<&str>,
+        values: Option<&serde_json::Value>,
+        via: Option<&str>,
     ) -> Vec<Planned> {
         let mut resolution = json!({ "by": actor_row_value(actor), "at": now_ms });
         if let Some(note) = note {
@@ -432,6 +435,9 @@ impl RegistryDoc {
                 "text": answer.text,
             });
         }
+        if let Some(outcome) = outcome { resolution["outcome"] = json!(outcome); }
+        if let Some(values) = values { resolution["values"] = values.clone(); }
+        if let Some(via) = via { resolution["via"] = json!(via); }
         requests
             .into_iter()
             .filter(|request| request.is_open())
@@ -478,7 +484,7 @@ impl RegistryDoc {
             actor,
             now_ms,
             Some(COMPLETION_RESOLUTION_NOTE),
-            None,
+            None, None, None, None,
         ))
     }
 
@@ -633,6 +639,23 @@ impl RegistryDoc {
     ) -> Outcome<()> {
         check_id("request", &p.user_action_request_id)?;
         check_note("The resolution note", p.note.as_deref())?;
+        if let Some(outcome) = p.outcome.as_deref() {
+            if !["approved", "declined", "changesRequested", "chosen", "answered", "done", "dismissed", "merged", "superseded"].contains(&outcome) {
+                return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Invalid resolution outcome"));
+            }
+            if actor.kind == WorkOutlineActorKind::Agent && !["done", "superseded", "declined", "answered"].contains(&outcome) {
+                return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Agents cannot record this outcome"));
+            }
+        }
+        if let Some(via) = p.via.as_deref() {
+            if !["card", "chat", "agent"].contains(&via) || (via == "card" && actor.kind != WorkOutlineActorKind::User) {
+                return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Invalid resolution provenance"));
+            }
+        }
+        if p.values.as_ref().is_some_and(|v| v.to_string().len() > 4000) {
+            return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Resolution values are too large"));
+        }
+
         if let Some(answer) = &p.answer {
             // Only the engine's `answer_user_action_request` writes this, as
             // an agent actor; it verified the message before calling.
@@ -685,7 +708,7 @@ impl RegistryDoc {
                 .collect(),
         };
         let plan =
-            Self::plan_resolutions(&group, actor, now_ms, p.note.as_deref(), p.answer.as_ref());
+            Self::plan_resolutions(&group, actor, now_ms, p.note.as_deref(), p.answer.as_ref(), p.outcome.as_deref(), p.values.as_ref(), p.via.as_deref());
         self.commit(plan, &[])
     }
 

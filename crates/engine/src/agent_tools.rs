@@ -1436,6 +1436,9 @@ impl AgentToolsService {
         })?;
         let mutation =
             WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+                outcome: None,
+                values: None,
+                via: None,
                 user_action_request_id: args.user_action_request_id.clone(),
                 note: attributed_note(context, non_empty(args.resolution)),
                 answer: None,
@@ -1635,6 +1638,9 @@ impl AgentToolsService {
         self.workspace.ledger_mark(&ledger_key).map_err(ledger)?;
         let mutation =
             WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+                outcome: None,
+                values: None,
+                via: None,
                 user_action_request_id: request_id.clone(),
                 note: Some(text.clone()),
                 answer: Some(mast_proto::UserActionAnswer {

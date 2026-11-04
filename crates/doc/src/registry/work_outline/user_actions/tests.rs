@@ -144,6 +144,9 @@ fn request(doc: &mut RegistryDoc, op: &str, work_item: &str, dedupe: Option<&str
 
 fn resolve_params(op: &str, id: &str, note: Option<&str>) -> WorkOutlineMutation {
     WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+        outcome: None,
+        values: None,
+        via: None,
         user_action_request_id: id.into(),
         note: note.map(str::to_owned),
         answer: None,
@@ -1252,6 +1255,9 @@ fn an_answer_is_agent_only_and_recorded_with_its_source() {
         .unwrap();
     let with_answer = |op: &str, request: &str| {
         WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+            outcome: None,
+            values: None,
+            via: None,
             user_action_request_id: request.into(),
             note: Some("go ahead".into()),
             answer: Some(mast_proto::UserActionAnswer {

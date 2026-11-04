@@ -1372,6 +1372,9 @@ impl PrReviewSyncService {
                     let resolved = self
                         .mutate(WorkOutlineMutation::ResolveUserActionRequest(
                             ResolveUserActionRequestParams {
+                                outcome: None,
+                                values: None,
+                                via: None,
                                 user_action_request_id: request,
                                 note: Some(note.into()),
                                 answer: None,
