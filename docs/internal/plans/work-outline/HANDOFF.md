@@ -616,6 +616,15 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Friction reporting + compact agent messages** (2026-11-04, `friction-reporting`, `compact-agent-messages`):
+  `report_friction` / `list_friction` agent tools (Mast fills chat, harness, actual model, Space, item, branch;
+  dedupe by fingerprint with occurrence counts), auto-capture (refused Mast tool calls, approval prompts + the
+  answer, harness-rejected requests, turn errors) through the shared `mast_harness::redact` redactor, a
+  Friction section in Space-root details (filters, expand, Create bug, Propose instruction, Dismiss, Export
+  Markdown in the old agent-friction-log format) and an auto-capture toggle (default on). Transcript: messages
+  from other chats, admin chats and Mast wakes render compact and muted with a source header (prefix-detected;
+  structured sender metadata is a follow-up; relayed "Re:" answers are the user's own and render as human).
+  Release run: nextest 2294/2294, UI 2442/0. Not yet: importing the old Cofactr friction log.
 - **Neutral defaults 1B** (2026-11-04, `neutral-defaults-settings`, 3 Terra slices): one-time UI settings migration
   marker (existing vs fresh profile); fresh profiles get neutral defaults, existing ones keep their effective
   values: admin grant duration remembered (4 h), Team tab hide/auto/always (auto for both, matches today),
@@ -773,28 +782,43 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-03 ~23:00; overnight run, a fresh coordinator starts here)
+## In flight (snapshot 2026-11-04 ~16:30; this coordinator chat 74bc70e5 is being /compact-ed, not replaced)
 
-**Overnight plan (Mikey, 2026-11-03: "I trust your judgment", keep usage reasonable, caffeinate):**
-1. Finish the in-flight features first: `pr-review-search` (PR review phase 3, Codex chat f69159ac,
-   item 7125da84) and `needs-outcomes` (Needs-you phase 2, Codex chat 915056bd, item cfb3bf7c; includes the
-   admin bulk "no still approves" fix, item b05c3e04). Then Needs-you phase 3 (`needs-links-facts`) on Terra.
-   Plan: mast-artifact:e0a05a3d0248e2e8d8d0fda6bb6214c4 (section 7). Q-1..Q-5 open: use its recommendations.
-2. Merge everything ready into `work-outline-implementation` (this is "main" for Mikey; never touch the
-   literal `main` branch), release with `caffeinate -i scripts/run_release_tests.sh`, install, push. Never
-   restart Mast; resend children after Mikey restarts.
-3. Then the coworker cleanup on a NEW branch `coworker-cleanup` that stays UNMERGED for Mikey's review:
-   repo cleanup proposal defaults (mast-artifact:bacfa5c96fe27d73a2821e8f4e2aa446: internal docs →
-   `docs/internal/`, iOS → `archive/ios` branch then delete, delete landing/www-redirect/edge worker, drop
-   upstream workflows, unlinked media after listing, dev scripts → `scripts/dev/`, .gitignore gaps, gitleaks
-   history scan), visible zeron/creel copy (names audit branch 1), `zeron.sh` install/update links removed
-   (local-only), and `mast doctor` on its own branch. Not tonight: internal identifier rename, binary/data
-   migration, bundle id (tabled; coworkers build from source), repo location (fork vs Cofactr org, open).
-- Model routing per the Space-root instruction: Terra implements and researches; Sonnet for write-ups; Opus
-  only for short decisions and coordinating. Terra tends to end turns early with "not complete": resend
-  "continue until Ready to merge".
-- Known: wake echoes ("resolved: …" after the coordinator's own resolve) cost a coordinator turn each; file
-  as a small bug if not done.
+**Coordinator:** chat 74bc70e5 on Mast Dev (Opus). Workers report to it (parentChatId), so keep using it;
+a fresh chat wouldn't hear them until "Hand off to new chat" (item 6161edf6) exists. Release runs go
+DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`) because restarts kill session background shells;
+they don't wake the coordinator, so check logs when asked for status.
+
+**Running (Codex Terra, children of 74bc70e5):**
+- `wake-echo-redelivery` (chat dc4d8ad2, item afd7c0ab; also covers 68b601a8): no wakes for the orchestrator's own
+  resolves; each worker report delivered exactly once, persisted across restarts.
+- `archivable-pr-rule` (chat ae7078db, item 5291292e): a chat is PR-finished only when every PR it owns is
+  merged/closed; mentioned PRs don't count.
+Release both together when their Ready to merge (kind handoff) arrive.
+
+**Queued (agreed with Mikey):**
+1. Auto-continue (item 33fd6aa5; after wake-echo merges, same files): nudge a worker whose item is still open
+   after its turn ends (≤3 times, then wake the orchestrator); per-orchestrator setting, off by default, on for
+   Mast Dev.
+2. Hand off to new chat (item 6161edf6): reparent children, move held wakes/reports, post a summary.
+3. Quick wins from the feature audit: diff-target Remove button + prune missing paths; visual-compare
+   "compared first N px" banner; PR-merged wake (also enables handoff auto-resolve on landing).
+4. Coworker readiness: first-run smoke test on a throwaway profile; import the Cofactr friction log.
+5. Later: Needs-you phases 4–6, PR review phase 4 (walkthrough), rebindable outline shortcuts (3b6f9919),
+   the data/binary rename migration, `mast-doctor` branch (pushed, unmerged, awaiting Mikey's review).
+
+**Terra working style:** it ends turns early ("can't complete in this turn") on anything that looks big.
+Give one or two concrete items per chat, say "partial progress is fine: commit and keep going", start a
+fresh chat per slice on the same branch, and archive the finished one. Build with
+`CARGO_TARGET_DIR=<worktree>/target-clean`; never seed the cache. Approve its unsandboxed test reruns
+(watcher/home-dir tests only pass outside Codex's sandbox).
+
+**Disk:** prune `zeron/target/debug` when idle (`find deps -maxdepth 1 -type f -mmin +360 -delete`, same for
+build/ and .fingerprint/); delete merged worktrees' target-clean right after merging. Repo auto-gc is off.
+
+**Cofactr admin-chat follow-ups Mikey is sending:** resolve stock lot Q-7, archive the old Project Template copy,
+Tickets rules rev 3 (`kind: review` until the PR is approved, then `handoff`). Cofactr Space-root proposal
+8838b1f4 (kinds/facts/links) awaits Mikey's accept.
 
 **What Mikey is doing next:** using an admin chat in the Cofactr Space to set up the Projects container
 template (matching his current copy template), move existing projects under it with a preview, and
