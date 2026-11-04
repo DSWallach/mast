@@ -844,12 +844,12 @@ pub mod agent_tools {
         /// The Work Outline tools, in catalog order.
         pub const WORK_OUTLINE: [&str; 12] = [
             READ_CURRENT,
-            GET_USER_ACTION_REQUEST,
             READ_SUBTREE,
             CREATE_CHILD,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
+            GET_USER_ACTION_REQUEST,
             RESOLVE_USER_ACTION_REQUEST,
             ANSWER_USER_ACTION_REQUEST,
             APPLY_CONTAINER_TEMPLATE,
