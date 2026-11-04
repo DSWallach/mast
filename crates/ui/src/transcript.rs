@@ -5629,6 +5629,7 @@ impl Transcript {
         let label = if expanded { "Show less" } else { "Show more" };
         let button = div()
             .id(SharedString::from(format!("{row_id}-expander")))
+            .debug_selector({ let selector = format!("{row_id}-expander"); move || selector.clone() })
             .group("user-message-toggle")
             .role(gpui::Role::Button)
             .aria_label(if expanded {
@@ -6299,7 +6300,7 @@ impl Transcript {
                     let label = if let Some(at) = row.timestamp.and_then(chrono::DateTime::from_timestamp_millis) {
                         format!("{label} · {}", crate::state::format_time_ago(at, chrono::Utc::now()))
                     } else { label };
-                    let mut header = div().id(SharedString::from(format!("{}-source", row.id))).flex().items_center().gap(px(5.0)).text_size(crate::typography::ui_rems(12.0)).text_color(theme.text_muted)
+                    let mut header = div().id(SharedString::from(format!("{}-source", row.id))).debug_selector({ let selector = format!("{}-source", row.id); move || selector.clone() }).flex().items_center().gap(px(5.0)).text_size(crate::typography::ui_rems(12.0)).text_color(theme.text_muted)
                         .child(crate::icons::icon(crate::icons::CHAT_ROUND_LINE).size(px(12.0)))
                         .child(SharedString::from(label));
                     if let Some(chat_id) = resolved {
@@ -13193,6 +13194,58 @@ mod tests {
             assert_eq!(text.as_ref(), expected);
             assert_eq!(matches!(source, crate::message_source::MessageSource::Human), input == "Human text");
         }
+    }
+
+    #[gpui::test]
+    fn relayed_row_renders_source_and_expands(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats.push(serde_json::from_value(serde_json::json!({
+                "id": "abcdef", "deviceId": "device", "title": "Worker", "archived": false,
+                "cwd": null, "branch": null, "checkoutId": null, "config": null,
+                "lastMessagePreview": null, "lastMessageAt": null,
+                "createdAt": chrono::Utc::now(), "spaceId": "space"
+            })).unwrap());
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let opened = Rc::new(std::cell::RefCell::new(None));
+        let captured = opened.clone();
+        let _subscription = cx.update(|cx| cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+            if let TranscriptEvent::OpenChat(id) = event { *captured.borrow_mut() = Some(id.clone()); }
+        }));
+        let mut entry = assistant("relay", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        entry.parts = vec![text_part("text", "[Message from Mast chat Worker (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\none\ntwo\nthree\nfour")];
+        transcript.update(cx, |this, _| {
+            this.rows = rows_for_entry(&entry, false, &mut parse);
+            this.content_width = 600.0;
+        });
+        struct RowFixture(Entity<Transcript>);
+        impl Render for RowFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |this, cx| this.render_row(0, window, cx))
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| RowFixture(transcript.clone()));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("relay-source").is_some());
+        let source = vcx.debug_bounds("relay-source").unwrap().center();
+        vcx.simulate_click(source, gpui::Modifiers::default());
+        assert_eq!(opened.borrow().as_deref(), Some("abcdef"));
+        let expand = vcx.debug_bounds("relay-expander").expect("long relay is collapsible").center();
+        vcx.simulate_click(expand, gpui::Modifiers::default());
+        transcript.read_with(vcx, |this, _| assert_eq!(this.user_folds["relay"].open, Some(true)));
+        vcx.run_until_parked();
+        let collapse = vcx.debug_bounds("relay-expander").unwrap().center();
+        vcx.simulate_click(collapse, gpui::Modifiers::default());
+        transcript.read_with(vcx, |this, _| assert_eq!(this.user_folds["relay"].open, Some(false)));
     }
 
     #[test]
