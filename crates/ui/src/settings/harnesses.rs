@@ -99,6 +99,8 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
 }
 
 pub struct HarnessesPage {
+    friction_settings: Option<mast_proto::FrictionSettings>,
+    friction_saving: bool,
     title_settings: Loadable<TitleSettings>,
     title_models: Loadable<Vec<Model>>,
     title_menu: Option<bool>, // false = harness, true = model
@@ -169,6 +171,8 @@ impl SignInPhase {
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
+            friction_settings: None,
+            friction_saving: false,
             title_settings: Loadable::Idle,
             title_models: Loadable::Idle,
             title_menu: None,
@@ -190,7 +194,50 @@ impl HarnessesPage {
             sign_in_task: None,
         };
         page.load(cx);
+        page.load_friction_settings(cx);
         page
+    }
+
+    fn load_friction_settings(&mut self, cx: &mut Context<Self>) {
+        let task = self
+            .state
+            .read(cx)
+            .work_outline_actions()
+            .get_friction_settings();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(settings) => this.friction_settings = Some(settings),
+                    Err(error) => this.error = Some(error.message),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_friction_capture(&mut self, auto_capture: bool, cx: &mut Context<Self>) {
+        self.friction_saving = true;
+        let task = self
+            .state
+            .read(cx)
+            .work_outline_actions()
+            .set_friction_settings(mast_proto::FrictionSettings { auto_capture });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.friction_saving = false;
+                match result {
+                    Ok(settings) => this.friction_settings = Some(settings),
+                    Err(error) => this.error = Some(error.message),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Params with the `targetDeviceId` passthrough merged in.
@@ -1115,6 +1162,27 @@ impl Render for HarnessesPage {
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
+        let friction = self.friction_settings.as_ref().map(|settings| {
+            let enabled = settings.auto_capture;
+            let saving = self.friction_saving;
+            widgets::section_card(&theme).child(
+                div()
+                    .id("friction-auto-capture")
+                    .debug_selector(|| "friction-auto-capture".into())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .p(px(12.0))
+                    .child("Auto-capture friction")
+                    .child(widgets::toggle_switch(&theme, enabled))
+                    .when(!saving, |row| {
+                        row.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_friction_capture(!enabled, cx)
+                            }))
+                    }),
+            )
+        });
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
         div()
@@ -1151,6 +1219,7 @@ impl Render for HarnessesPage {
                             )
                             .children(error)
                             .child(body)
+                            .children(friction)
                             .child(titles),
                     ),
             )
