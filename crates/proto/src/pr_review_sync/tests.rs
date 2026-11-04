@@ -273,6 +273,7 @@ fn sync_state_and_work_outline_additions_are_pinned() {
 
     let settings = serde_json::to_value(WorkOutlineSnapshot {
         space_settings: WorkOutlineSpaceSettings {
+            pr_review_prompts: None,
             linear_enabled: false,
             pr_review_sync_work_item_id: Some("w".into()),
             linear_assigned_work_item_id: None,

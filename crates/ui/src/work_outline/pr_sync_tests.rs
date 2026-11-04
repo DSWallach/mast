@@ -194,6 +194,26 @@ fn destination_picker_sets_and_clears_the_setting(cx: &mut gpui::TestAppContext)
     assert!(set[1]["workItemId"].is_null());
 }
 
+#[gpui::test]
+fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    snapshot.space_settings.pr_review_prompts = Some(mast_proto::PrReviewPrompts::legacy());
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    let details = open_details(&overview, vcx, "");
+    details.update(vcx, |d, cx| {
+        d.edit_pr_prompts(cx);
+        d.set_pr_review_prompt_for_test("Review {url} carefully", cx);
+        d.save_pr_prompts(cx);
+    });
+    vcx.run_until_parked();
+    let saved = mutations(&calls, "setPrReviewPrompts");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["spaceId"], "s1");
+    assert_eq!(saved[0]["prompts"]["review"], "Review {url} carefully");
+    assert_eq!(saved[0]["prompts"]["fixCi"], mast_proto::PrReviewPrompts::legacy().fix_ci);
+}
+
 /// Sync now runs PrReviewSyncNow for the Space and shows the result.
 #[gpui::test]
 fn sync_now_runs_and_reports_the_result(cx: &mut gpui::TestAppContext) {

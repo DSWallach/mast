@@ -225,7 +225,7 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true },
                 "force": { "type": "boolean", "default": false, "description": "For a non-child project worker without admin access, archive although archivable is false; needs reason." },
-                "reason": { "type": "string", "description": "Short why, for the action log (required with force)." }
+                "reason": { "type": "string", "description": "Short reason for the action log; required when forcing a non-archivable non-child project worker without admin access." }
             })),
         },
     ]
@@ -3637,13 +3637,16 @@ mod tests {
     fn tool_descriptions_match_scope_and_archive_rules() {
         let defs = catalog();
         let create = defs.iter().find(|d| d.name == "create_chat").unwrap();
+        assert!(create.description.contains("anything inside your project"));
         assert!(create.input_schema["properties"]["workItemId"]["description"].as_str().unwrap().contains("any item inside your project"));
         let archive = defs.iter().find(|d| d.name == "archive_chat").unwrap();
         for phrase in ["Direct children and admin targets do not require force", "Other project workers", "force=true"] {
             assert!(archive.description.contains(phrase), "{phrase}");
         }
+        assert!(archive.input_schema["properties"]["reason"]["description"].as_str().unwrap().contains("non-child project worker"));
         let outline = work_outline_catalog();
         let child = outline.iter().find(|d| d.name == agent_tool_names::CREATE_CHILD).unwrap();
+        assert!(child.description.contains("item inside your project"));
         let parent = child.input_schema["properties"]["parentWorkItemId"]["description"].as_str().unwrap();
         assert!(parent.contains("any item inside your project"));
         assert!(parent.contains("worker destination"));

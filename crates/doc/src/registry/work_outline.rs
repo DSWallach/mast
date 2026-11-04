@@ -901,6 +901,9 @@ impl RegistryDoc {
                     ..Default::default()
                 })
             }
+            WorkOutlineMutation::SetPrReviewPrompts(p) => {
+                self.set_pr_review_prompts(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::SetPrReviewSyncDestination(p) => self
                 .set_pr_review_sync_destination(p, now_ms)
                 .map(|_| empty),

@@ -461,6 +461,41 @@ pub struct WorkOutlineSpaceSettings {
     /// (`None` = off for this Space).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_assigned_work_item_id: Option<String>,
+    /// Editable prompt templates for PR launches; absent on an unmigrated Space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_review_prompts: Option<PrReviewPrompts>,
+}
+
+/// Space-scoped PR launch templates. Placeholders: {url}, {branch}, {location}.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrReviewPrompts {
+    pub review: String,
+    pub self_review: String,
+    pub fix_ci: String,
+}
+
+impl PrReviewPrompts {
+    pub fn legacy() -> Self {
+        Self {
+            review: "/code-review {url} — someone else's PR; review it as a reviewer. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Don't post anything to GitHub unless I ask.".into(),
+            self_review: "/code-review {url} — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub.".into(),
+            fix_ci: "/fix-ci {url} — my PR. Its branch `{branch}` is checked out at {location}; do all the work there.".into(),
+        }
+    }
+
+    pub fn neutral() -> Self {
+        let review = "Review {url} for bugs, risks, and missing tests. The branch `{branch}` is checked out at {location}. Review the PR against its base and publish the review with review_publish.".to_owned();
+        Self { self_review: review.clone(), review, fix_ci: "Investigate and fix failing CI for {url}. The branch `{branch}` is checked out at {location}.".into() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPrReviewPromptsParams {
+    pub space_id: String,
+    pub prompts: PrReviewPrompts,
+    pub operation_id: String,
 }
 
 /// How a Chat relates to the outline. Lenient: unknown reads as `unassociated`.
@@ -1395,6 +1430,7 @@ pub enum WorkOutlineMutation {
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
     SetPrReviewSyncDestination(SetPrReviewSyncDestinationParams),
+    SetPrReviewPrompts(SetPrReviewPromptsParams),
     SetLinearAssignedDestination(SetLinearAssignedDestinationParams),
     // ── Project templates ──
     SaveWorkItemTemplate(crate::work_outline_templates::SaveWorkItemTemplateParams),
@@ -1435,6 +1471,7 @@ impl WorkOutlineMutation {
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
+            Self::SetPrReviewPrompts(p) => &p.operation_id,
             Self::SetLinearAssignedDestination(p) => &p.operation_id,
             Self::SaveWorkItemTemplate(p) => &p.operation_id,
             Self::DeleteWorkItemTemplate(p) => &p.operation_id,
@@ -1473,6 +1510,7 @@ impl WorkOutlineMutation {
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",
+            Self::SetPrReviewPrompts(_) => "setPrReviewPrompts",
             Self::SetLinearAssignedDestination(_) => "setLinearAssignedDestination",
             Self::SaveWorkItemTemplate(_) => "saveWorkItemTemplate",
             Self::DeleteWorkItemTemplate(_) => "deleteWorkItemTemplate",

@@ -913,6 +913,93 @@ impl WorkItemDetails {
     }
 
     /// The Space-root variant: Space-root instructions only.
+    pub(crate) fn edit_pr_prompts(&mut self, cx: &mut Context<Self>) {
+        let prompts = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.space_settings.pr_review_prompts.clone())
+            .unwrap_or_else(mast_proto::PrReviewPrompts::legacy);
+        self.pr_review_input
+            .update(cx, |input, cx| input.set_text(prompts.review, cx));
+        self.pr_self_review_input
+            .update(cx, |input, cx| input.set_text(prompts.self_review, cx));
+        self.pr_fix_ci_input
+            .update(cx, |input, cx| input.set_text(prompts.fix_ci, cx));
+        self.pr_prompts_editing = true;
+        cx.notify();
+    }
+
+    pub(crate) fn save_pr_prompts(&mut self, cx: &mut Context<Self>) {
+        let prompts = mast_proto::PrReviewPrompts {
+            review: self.pr_review_input.read(cx).text().to_owned(),
+            self_review: self.pr_self_review_input.read(cx).text().to_owned(),
+            fix_ci: self.pr_fix_ci_input.read(cx).text().to_owned(),
+        };
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetPrReviewPrompts(
+                mast_proto::SetPrReviewPromptsParams {
+                    space_id: self.space_id.clone(),
+                    prompts,
+                    operation_id: super::super::actions::new_operation_id(),
+                },
+            ),
+        );
+        self.run_instruction("pr-prompts:save", task, cx, |this| {
+            this.pr_prompts_editing = false
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pr_review_prompt_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.pr_review_input
+            .update(cx, |input, cx| input.set_text(text.to_owned(), cx));
+    }
+
+    fn render_pr_prompts(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let mut section = div()
+            .debug_selector(|| "space-pr-prompts".into())
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(div().text_color(theme.text).child("PR review prompts"));
+        if self.pr_prompts_editing {
+            section = section.child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child("Use {url}, {branch}, and {location} for launch details."),
+            );
+            for (label, input) in [
+                ("PR review prompt", &self.pr_review_input),
+                ("Self-review prompt", &self.pr_self_review_input),
+                ("Fix CI prompt", &self.pr_fix_ci_input),
+            ] {
+                section = section
+                    .child(div().text_color(theme.text).child(label))
+                    .child(Self::input_frame(input, theme));
+            }
+            section
+                .child(
+                    Self::small_button("pr-prompts-save", "Save", theme)
+                        .debug_selector(|| "pr-prompts-save".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.save_pr_prompts(cx))),
+                )
+                .child(
+                    Self::small_button("pr-prompts-cancel", "Cancel", theme).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.pr_prompts_editing = false;
+                            cx.notify();
+                        },
+                    )),
+                )
+        } else {
+            section.child(
+                Self::small_button("pr-prompts-edit", "Edit prompts", theme)
+                    .debug_selector(|| "pr-prompts-edit".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.edit_pr_prompts(cx))),
+            )
+        }
+    }
+
     pub(super) fn render_space_root(
         &mut self,
         frame: gpui::Stateful<gpui::Div>,
@@ -958,6 +1045,7 @@ impl WorkItemDetails {
         let execution = self.render_execution_section(&snapshot, theme, cx);
         let linear = self.render_space_linear(&snapshot, theme, cx);
         let pr_sync = self.render_space_pr_sync(&snapshot, theme, cx);
+        let pr_prompts = self.render_pr_prompts(theme, cx);
         let templates = self.render_templates_section(&snapshot, theme, cx);
         frame.child(header).child(
             div()
@@ -984,7 +1072,8 @@ impl WorkItemDetails {
                 .child(execution)
                 .child(templates)
                 .child(linear)
-                .child(pr_sync),
+                .child(pr_sync)
+                .child(pr_prompts),
         )
     }
 }

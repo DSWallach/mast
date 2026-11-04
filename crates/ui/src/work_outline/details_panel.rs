@@ -204,6 +204,10 @@ pub(crate) struct WorkItemDetails {
     /// The one instruction being written or edited (explicit Save/Cancel).
     pub(crate) instruction_draft: Option<InstructionDraft>,
     instruction_input: Entity<ComposerInput>,
+    pr_review_input: Entity<ComposerInput>,
+    pr_self_review_input: Entity<ComposerInput>,
+    pr_fix_ci_input: Entity<ComposerInput>,
+    pr_prompts_editing: bool,
     /// `/` skill autocomplete on the instruction editor (plain
     /// "`name` skill" text, listed for this item's execution root).
     instruction_skills: Entity<SkillCompletion>,
@@ -300,6 +304,21 @@ impl WorkItemDetails {
         // the description editor), Shift+Enter breaks a line. Blur never saves.
         let instruction_input = cx.new(|cx| {
             ComposerInput::new("Instruction", cx)
+                .with_text_metrics(12.5, 18.0)
+                .with_auto_grow()
+        });
+        let pr_review_input = cx.new(|cx| {
+            ComposerInput::new("PR review prompt", cx)
+                .with_text_metrics(12.5, 18.0)
+                .with_auto_grow()
+        });
+        let pr_self_review_input = cx.new(|cx| {
+            ComposerInput::new("Self-review prompt", cx)
+                .with_text_metrics(12.5, 18.0)
+                .with_auto_grow()
+        });
+        let pr_fix_ci_input = cx.new(|cx| {
+            ComposerInput::new("Fix CI prompt", cx)
                 .with_text_metrics(12.5, 18.0)
                 .with_auto_grow()
         });
@@ -419,6 +438,10 @@ impl WorkItemDetails {
             instructions_open: is_space_root,
             instruction_draft: None,
             instruction_input,
+            pr_review_input,
+            pr_self_review_input,
+            pr_fix_ci_input,
+            pr_prompts_editing: false,
             instruction_skills,
             excerpts_open: HashSet::new(),
             instructions_expanded: HashSet::new(),
