@@ -77,6 +77,9 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
             .unwrap_or(false),
         pr_review_sync_work_item_id: super::pr_review_sync::decode_destination(row),
         linear_assigned_work_item_id: super::pr_review_sync::decode_linear_assigned(row),
+        pr_review_prompts: row
+            .and_then(|r| r.fields.get("prReviewPrompts"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
     }
 }
 

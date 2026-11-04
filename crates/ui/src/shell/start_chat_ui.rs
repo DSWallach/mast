@@ -1575,7 +1575,7 @@ fn pr_start_chat_card(
                 .child(
                     note(
                         "start-chat-pr-prompt-note",
-                        "The review instructions are added when the Chat starts.",
+                        "The selected Space's prompt is added when the Chat starts.",
                         theme.text_faint,
                     )
                     .mt(px(2.0)),
@@ -2804,7 +2804,7 @@ mod tests {
             );
             assert_eq!(
                 crate::pr_review_launch::prompt_preview(pr.action, &pr.reference.url()),
-                "/code-review https://github.com/acme/flagship/pull/7"
+                "Space PR review prompt: https://github.com/acme/flagship/pull/7"
             );
             assert_eq!(pr.item, Some(("s1".to_string(), HOUSEKEEPING.to_string())));
         });

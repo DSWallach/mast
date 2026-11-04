@@ -1125,6 +1125,53 @@ impl RegistryDoc {
         Ok(())
     }
 
+    /// Create a Space and its initial PR prompts in the same registry batch.
+    pub fn create_space_with_pr_prompts(
+        &mut self,
+        space: &Space,
+        prompts: &mast_proto::PrReviewPrompts,
+    ) -> Result<(), DocError> {
+        let space_set = fields([
+            ("id", json!(space.id)),
+            ("deviceId", json!(space.device_id)),
+            ("path", json!(space.path)),
+            ("name", opt_str(space.name.as_deref())),
+            ("gitDetected", json!(space.git_detected)),
+            ("gitCheckedAt", opt_ms(space.git_checked_at)),
+            ("checkoutId", opt_str(space.checkout_id.as_deref())),
+            ("createdAt", json!(space.created_at.timestamp_millis())),
+        ]);
+        let settings_set = fields([
+            ("spaceId", json!(space.id)),
+            ("prReviewPrompts", json!(prompts)),
+            ("updatedAt", json!(space.created_at.timestamp_millis())),
+            ("v", json!(work_outline::WORK_OUTLINE_ROW_VERSION)),
+        ]);
+        self.observe_row(KIND_SPACES, &space.id);
+        self.observe_row(work_outline::KIND_WORK_OUTLINE_SPACE_SETTINGS, &space.id);
+        let space_hlc = self.next_hlc();
+        let settings_hlc = self.next_hlc();
+        self.enqueue_ops(vec![
+            RowOp {
+                kind: KIND_SPACES.into(),
+                id: space.id.clone(),
+                op: OpKind::Upsert,
+                set: Some(space_set),
+                hlc: space_hlc,
+                clocks: None,
+            },
+            RowOp {
+                kind: work_outline::KIND_WORK_OUTLINE_SPACE_SETTINGS.into(),
+                id: space.id.clone(),
+                op: OpKind::Upsert,
+                set: Some(settings_set),
+                hlc: settings_hlc,
+                clocks: None,
+            },
+        ]);
+        Ok(())
+    }
+
     pub fn space(&self, space_id: &str) -> Result<Option<Space>, DocError> {
         Ok(self
             .overlay_row(KIND_SPACES, space_id)

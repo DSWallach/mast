@@ -483,9 +483,7 @@ fn behind_by(path: &Path, branch: &str) -> u64 {
     .unwrap_or(0)
 }
 
-/// launch.sh's `location` text. The devcontainer mount note is added only
-/// when the workspace has a `.devcontainer` (Cofactr), where launch.sh's
-/// wording applies verbatim.
+/// Describe a checkout without assuming a devcontainer mount from its configuration.
 pub fn describe_location(ws: &Path, root: &Path, path: &Path, branch: &str, behind: u64) -> String {
     let shown = path.display();
     let mut location = if path == ws {
@@ -495,7 +493,14 @@ pub fn describe_location(ws: &Path, root: &Path, path: &Path, branch: &str, behi
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if ws.join(".devcontainer").is_dir() {
+        let container_path = Path::new("/workspace/.worktrees").join(&base);
+        if Path::new("/.dockerenv").is_file()
+            && path
+                .canonicalize()
+                .ok()
+                .zip(container_path.canonicalize().ok())
+                .is_some_and(|(actual, mounted)| actual == mounted)
+        {
             format!("the worktree `{shown}` (`/workspace/.worktrees/{base}` in the devcontainer)")
         } else {
             format!("the worktree `{shown}`")
@@ -522,17 +527,51 @@ pub fn seeded_prompt(
     location: &str,
     self_review: bool,
 ) -> String {
-    match action {
-        PrReviewAction::CodeReview if self_review => format!(
-            "/code-review {url} — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub."
-        ),
-        PrReviewAction::FixCi => format!(
-            "/fix-ci {url} — my PR. Its branch `{branch}` is checked out at {location}; do all the work there."
-        ),
-        PrReviewAction::CodeReview => format!(
-            "/code-review {url} — someone else's PR; review it as a reviewer. Its branch `{branch}` is checked out at {location}; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Don't post anything to GitHub unless I ask."
-        ),
+    render_prompt(
+        &mast_proto::PrReviewPrompts::legacy(),
+        action,
+        url,
+        branch,
+        location,
+        self_review,
+    )
+}
+
+pub fn render_prompt(
+    prompts: &mast_proto::PrReviewPrompts,
+    action: PrReviewAction,
+    url: &str,
+    branch: &str,
+    location: &str,
+    self_review: bool,
+) -> String {
+    let template = match action {
+        PrReviewAction::CodeReview if self_review => &prompts.self_review,
+        PrReviewAction::CodeReview => &prompts.review,
+        PrReviewAction::FixCi => &prompts.fix_ci,
+    };
+    let mut result = String::new();
+    let mut remaining = template.as_str();
+    while let Some(index) = remaining.find('{') {
+        result.push_str(&remaining[..index]);
+        remaining = &remaining[index..];
+        let replacement = [
+            ("{url}", url),
+            ("{branch}", branch),
+            ("{location}", location),
+        ]
+        .into_iter()
+        .find(|(key, _)| remaining.starts_with(key));
+        if let Some((key, value)) = replacement {
+            result.push_str(value);
+            remaining = &remaining[key.len()..];
+        } else {
+            result.push('{');
+            remaining = &remaining[1..];
+        }
     }
+    result.push_str(remaining);
+    result
 }
 
 pub fn chat_title(action: PrReviewAction, repo_name: &str, number: u64, pr_title: &str) -> String {
@@ -918,7 +957,19 @@ impl PrReviewLauncher {
         let (head, chosen, behind, url, location) = checkout;
         let self_review =
             matches!(p.action, PrReviewAction::CodeReview) && self.is_own_pr(&head).await;
-        let prompt = seeded_prompt(p.action, &url, &head.head_ref_name, &location, self_review);
+        let inputs = self.workspace.work_outline_inputs(&found.space.id);
+        let settings = mast_doc::materialize_work_outline(&found.space.id, &inputs).space_settings;
+        let prompts = settings
+            .pr_review_prompts
+            .unwrap_or_else(mast_proto::PrReviewPrompts::legacy);
+        let prompt = render_prompt(
+            &prompts,
+            p.action,
+            &url,
+            &head.head_ref_name,
+            &location,
+            self_review,
+        );
         let branch = head.head_ref_name.clone();
         let mut notes = chosen.notes.clone();
         if behind > 0 {
@@ -1181,7 +1232,7 @@ mod tests {
         assert_eq!(
             describe_location(&ws, &root, &wt, "b", 2),
             format!(
-                "the worktree `{}` (`/workspace/.worktrees/flagship-pr-7` in the devcontainer), 2 commit(s) behind origin/b — pull before you start",
+                "the worktree `{}`, 2 commit(s) behind origin/b — pull before you start",
                 wt.display()
             )
         );
@@ -1189,6 +1240,72 @@ mod tests {
         assert_eq!(
             describe_location(&ws, &root, &elsewhere, "b", 0),
             format!("`{}`", elsewhere.display())
+        );
+    }
+
+    #[test]
+    fn review_prompt_templates_preserve_legacy_and_use_custom_values() {
+        let legacy = mast_proto::PrReviewPrompts::legacy();
+        assert_eq!(
+            render_prompt(
+                &legacy,
+                PrReviewAction::FixCi,
+                "url",
+                "branch",
+                "location",
+                false
+            ),
+            "/fix-ci url — my PR. Its branch `branch` is checked out at location; do all the work there."
+        );
+        assert_eq!(
+            render_prompt(
+                &legacy,
+                PrReviewAction::CodeReview,
+                "url",
+                "branch",
+                "location",
+                false
+            ),
+            "/code-review url — someone else's PR; review it as a reviewer. Its branch `branch` is checked out at location; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Don't post anything to GitHub unless I ask."
+        );
+        assert_eq!(
+            render_prompt(&legacy, PrReviewAction::CodeReview, "url", "branch", "location", true),
+            "/code-review url — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `branch` is checked out at location; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub."
+        );
+        assert!(
+            render_prompt(
+                &legacy,
+                PrReviewAction::FixCi,
+                "url",
+                "feature-{location}",
+                "checkout",
+                false
+            )
+            .contains("`feature-{location}`")
+        );
+        let mut neutral = mast_proto::PrReviewPrompts::neutral();
+        assert!(
+            render_prompt(
+                &neutral,
+                PrReviewAction::CodeReview,
+                "url",
+                "branch",
+                "location",
+                false
+            )
+            .contains("review_publish")
+        );
+        neutral.review = "Custom {url} {branch} {location}".into();
+        assert_eq!(
+            render_prompt(
+                &neutral,
+                PrReviewAction::CodeReview,
+                "url",
+                "branch",
+                "location",
+                false
+            ),
+            "Custom url branch location"
         );
     }
 

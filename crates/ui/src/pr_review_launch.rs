@@ -106,15 +106,13 @@ pub(crate) async fn start(
 pub(crate) const REFERENCE_HINT: &str =
     "Enter a PR URL (https://github.com/owner/repo/pull/123) or owner/repo#123";
 
-/// The prompt's opening in the Start Chat dialog: the slash command and the
-/// PR link. The host appends the rest (reviewer or author wording, the
-/// branch and where it is checked out) once it has checked the PR out.
+/// The Space and checkout are resolved by the engine at launch.
 pub(crate) fn prompt_preview(action: PrReviewAction, url: &str) -> String {
-    let command = match action {
-        PrReviewAction::CodeReview => "/code-review",
-        PrReviewAction::FixCi => "/fix-ci",
+    let label = match action {
+        PrReviewAction::CodeReview => "Space PR review prompt",
+        PrReviewAction::FixCi => "Space fix CI prompt",
     };
-    format!("{command} {url}")
+    format!("{label}: {url}")
 }
 
 /// Where the host runs a PR chat, as the Start Chat dialog describes it.

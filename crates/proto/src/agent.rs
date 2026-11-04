@@ -1203,7 +1203,7 @@ pub mod agent_tools {
                 p("model", "see list_models"),
                 p("autoApprove", "true only if your chat is on Auto"),
             ],
-            example: r#"{"workItemId": "<item id>", "prompt": "Do X, then finish with Ready to merge.", "idempotencyKey": "start-x", "wait": false}"#,
+            example: r#"{"workItemId": "<item id>", "prompt": "Implement the requested change and report the result.", "idempotencyKey": "start-x", "wait": false}"#,
         },
     ];
 

@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 
 use mast_proto::pr_review_sync::WorkItemExternalSyncState;
 use mast_proto::work_outline::{
-    SetLinearAssignedDestinationParams, SetPrReviewSyncDestinationParams, WorkOutlineErrorCode,
+    PrReviewPrompts, SetLinearAssignedDestinationParams, SetPrReviewPromptsParams,
+    SetPrReviewSyncDestinationParams, WorkOutlineErrorCode,
 };
 use serde_json::{Value, json};
 
@@ -60,6 +61,76 @@ fn decode_settings_item(row: Option<&RegistryRow>, field: &str) -> Option<String
 }
 
 impl RegistryDoc {
+    /// Initialize only missing prompt settings; safe to retry after an interrupted migration.
+    pub fn initialize_pr_review_prompts(
+        &mut self,
+        space_id: &str,
+        prompts: &PrReviewPrompts,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        if self
+            .overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id)
+            .as_ref()
+            .and_then(|row| row.fields.get("prReviewPrompts"))
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.set_pr_review_prompts(
+            &SetPrReviewPromptsParams {
+                space_id: space_id.to_owned(),
+                prompts: prompts.clone(),
+                operation_id: "initialize-pr-review-prompts".into(),
+            },
+            now_ms,
+        )
+    }
+
+    pub fn set_pr_review_prompts(
+        &mut self,
+        p: &SetPrReviewPromptsParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        for prompt in [&p.prompts.review, &p.prompts.self_review, &p.prompts.fix_ci] {
+            if prompt.len() > 8192 {
+                return Err(invalid("PR review prompt exceeds 8192 bytes"));
+            }
+        }
+        let value = json!(p.prompts);
+        if self
+            .overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id)
+            .as_ref()
+            .and_then(|row| row.fields.get("prReviewPrompts"))
+            == Some(&value)
+        {
+            return Ok(());
+        }
+        let plan = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("prReviewPrompts".into(), value),
+                    ("updatedAt".into(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => Planned::upsert(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("spaceId".into(), json!(p.space_id)),
+                    ("prReviewPrompts".into(), value),
+                    ("updatedAt".into(), json!(now_ms)),
+                    ("v".into(), json!(WORK_OUTLINE_ROW_VERSION)),
+                ]),
+            ),
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![plan], &[(KIND_SPACES, p.space_id.as_str())])
+    }
+
     /// The Space's PR review sync destination, when set.
     pub fn pr_review_sync_destination(&self, space_id: &str) -> Option<String> {
         decode_space_settings(

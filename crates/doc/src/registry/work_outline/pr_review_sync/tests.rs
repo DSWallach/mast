@@ -388,3 +388,37 @@ fn agents_cannot_set_the_linked_linear_item() {
         .unwrap_err();
     assert_eq!(error.code, WorkOutlineErrorCode::Unauthorized);
 }
+
+#[test]
+fn prompt_migration_preserves_existing_and_explicit_values() {
+    let mut doc = doc();
+    doc.initialize_pr_review_prompts(SPACE, &PrReviewPrompts::legacy(), NOW)
+        .unwrap();
+    assert_eq!(
+        snapshot(&doc, SPACE).space_settings.pr_review_prompts,
+        Some(PrReviewPrompts::legacy())
+    );
+    let mut custom = PrReviewPrompts::neutral();
+    custom.review = "Custom {url}".into();
+    doc.set_pr_review_prompts(
+        &SetPrReviewPromptsParams {
+            space_id: SPACE.into(),
+            prompts: custom.clone(),
+            operation_id: "custom".into(),
+        },
+        NOW + 1,
+    )
+    .unwrap();
+    doc.initialize_pr_review_prompts(SPACE, &PrReviewPrompts::legacy(), NOW + 2)
+        .unwrap();
+    assert_eq!(
+        snapshot(&doc, SPACE).space_settings.pr_review_prompts,
+        Some(custom)
+    );
+    doc.initialize_pr_review_prompts(OTHER, &PrReviewPrompts::neutral(), NOW)
+        .unwrap();
+    assert_eq!(
+        snapshot(&doc, OTHER).space_settings.pr_review_prompts,
+        Some(PrReviewPrompts::neutral())
+    );
+}

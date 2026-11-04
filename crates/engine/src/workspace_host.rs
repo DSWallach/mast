@@ -168,6 +168,7 @@ struct PublishedGenerations {
     chats: Option<u64>,
     sessions: Option<u64>,
     spaces: Option<u64>,
+    pr_prompt_migration: Option<(u64, u64)>,
 }
 
 struct WorkspaceHostInner {
@@ -312,6 +313,14 @@ impl WorkspaceHost {
             cursor_sdk_version: Some(mast_harness::CursorHarness::sdk_version().into()),
             capabilities,
         })?;
+
+        // Materialize the previous implicit prompts for existing Spaces. Each
+        // row is initialized only when absent, so retries preserve user edits.
+        if config.edge.is_none()
+            && let Err(error) = migrate_space_pr_prompts(&mut doc, now.timestamp_millis())
+        {
+            tracing::warn!(%error, "PR prompt migration failed");
+        }
 
         let local_authority = config.edge.is_none();
         if local_authority && doc.settle_pending_locally() {
@@ -1370,7 +1379,9 @@ impl WorkspaceHost {
             checkout_id: None,
             created_at: Utc::now(),
         };
-        self.mutate(|doc| doc.upsert_space(&space))?;
+        self.mutate(|doc| {
+            doc.create_space_with_pr_prompts(&space, &mast_proto::PrReviewPrompts::neutral())
+        })?;
         Ok(space.id)
     }
 
@@ -1553,17 +1564,21 @@ impl WorkspaceHost {
         {
             return Ok(());
         }
-        self.mutate(|doc| {
-            doc.upsert_space(&Space {
-                id: space_id.to_string(),
-                device_id: device_id.to_string(),
-                path: path.to_string(),
-                name,
-                git_detected,
-                git_checked_at: None,
-                checkout_id: None,
-                created_at: Utc::now(),
-            })
+        self.mutate(|doc| -> Result<(), EngineError> {
+            doc.create_space_with_pr_prompts(
+                &Space {
+                    id: space_id.to_string(),
+                    device_id: device_id.to_string(),
+                    path: path.to_string(),
+                    name,
+                    git_detected,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    created_at: Utc::now(),
+                },
+                &mast_proto::PrReviewPrompts::neutral(),
+            )?;
+            Ok(())
         })?;
         Ok(())
     }
@@ -2034,6 +2049,34 @@ impl WorkspaceHostInner {
             // the last publish: a session heartbeat must not re-materialize
             // every chat, under the registry lock.
             let mut published = lock(&self.published_generations);
+            let settings_kind = mast_doc::registry::work_outline::KIND_WORK_OUTLINE_SPACE_SETTINGS;
+            let migration_key = (
+                doc.kinds_generation(&[mast_doc::KIND_SPACES]),
+                doc.kinds_generation(&[settings_kind]),
+            );
+            if (registry_synced
+                || self
+                    .local_authority
+                    .load(std::sync::atomic::Ordering::Relaxed))
+                && published.pr_prompt_migration != Some(migration_key)
+            {
+                match migrate_space_pr_prompts(&mut doc, Utc::now().timestamp_millis()) {
+                    Ok(changed) => {
+                        if changed {
+                            self.settle_if_local(&mut doc);
+                            self.bump_changed();
+                            if let Some(room) = lock(&self.room).as_ref() {
+                                room.nudge();
+                            }
+                        }
+                        published.pr_prompt_migration = Some((
+                            doc.kinds_generation(&[mast_doc::KIND_SPACES]),
+                            doc.kinds_generation(&[settings_kind]),
+                        ));
+                    }
+                    Err(error) => tracing::warn!(%error, "PR prompt migration failed"),
+                }
+            }
             let chats_gen = doc.kinds_generation(&[mast_doc::KIND_CHATS]);
             let sessions_gen = doc.kinds_generation(&[mast_doc::KIND_SESSIONS]);
             let spaces_gen = doc.kinds_generation(&[mast_doc::KIND_SPACES]);
@@ -2440,6 +2483,21 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
     }
 }
 
+/// Materialize legacy defaults only for Spaces that do not already have prompts.
+fn migrate_space_pr_prompts(doc: &mut RegistryDoc, now_ms: i64) -> Result<bool, EngineError> {
+    let generation = doc.generation();
+    for space in doc.read_spaces()? {
+        if let Err(error) = doc.initialize_pr_review_prompts(
+            &space.id,
+            &mast_proto::PrReviewPrompts::legacy(),
+            now_ms,
+        ) {
+            tracing::warn!(space_id = %space.id, ?error, "PR prompt migration failed");
+        }
+    }
+    Ok(doc.generation() != generation)
+}
+
 fn publish_if_changed<T: PartialEq>(sender: &watch::Sender<T>, value: T) {
     sender.send_if_modified(|current| {
         if *current == value {
@@ -2584,6 +2642,76 @@ impl mast_sync::RegistryTransport for WsDerivedRegistryTransport {
 #[cfg(test)]
 mod tests {
     use super::{ChatLinkKind, WorkspaceHost, device_name_on_boot, linked_worktree_root};
+
+    #[tokio::test]
+    async fn space_prompt_migration_preserves_existing_and_initializes_new_spaces() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let mut doc = RegistryDoc::new("test-device");
+        doc.upsert_space(&Space {
+            id: "existing".into(),
+            device_id: "test-device".into(),
+            path: "/existing".into(),
+            name: None,
+            git_detected: false,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        store
+            .save_snapshot(REGISTRY_DOC_ID, &doc.to_bytes().unwrap())
+            .unwrap();
+        let host = WorkspaceHost::open(
+            store,
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test".into(),
+                platform: "macos".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let settings = |space: &str| {
+            mast_doc::materialize_work_outline(space, &host.work_outline_inputs(space))
+                .space_settings
+                .pr_review_prompts
+        };
+        assert_eq!(
+            settings("existing"),
+            Some(mast_proto::PrReviewPrompts::legacy())
+        );
+        host.create_space("created", "test-device", "/created", None, false)
+            .unwrap();
+        assert_eq!(
+            settings("created"),
+            Some(mast_proto::PrReviewPrompts::neutral())
+        );
+        let automatic = host.space_for_path("/automatic").unwrap();
+        assert_eq!(
+            settings(&automatic),
+            Some(mast_proto::PrReviewPrompts::neutral())
+        );
+        host.import_space_row(&Space {
+            id: "imported".into(),
+            device_id: "test-device".into(),
+            path: "/imported".into(),
+            name: None,
+            git_detected: false,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        host.inner.publish();
+        assert_eq!(
+            settings("imported"),
+            Some(mast_proto::PrReviewPrompts::legacy())
+        );
+    }
 
     #[tokio::test]
     async fn registry_http_sync_retains_dns_cause() {

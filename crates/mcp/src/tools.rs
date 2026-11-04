@@ -137,12 +137,12 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on a descendant of your work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tickets\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. When a worker you started is finished (`archivable: true` in list_chats / get_chat), archive it with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (poll `work_outline_read_subtree` for open requests such as \"Ready to merge\"). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
+            description: "Create a chat in a project (or project-less on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "idempotency_key": { "type": "string", "description": "Stable key for this request (required inside a Mast chat). The same key returns the same chat; a new chat needs a new key." },
-                    "workItemId": { "type": "string", "description": "Start the child for this work item: your chat's item or one of its descendants. Requires prompt; incompatible with cwd and branch." },
+                    "workItemId": { "type": "string", "description": "Start the child for your chat's item, a descendant, or any item inside your project. Requires prompt; incompatible with cwd and branch." },
                     "project": { "type": "string", "description": "Project id, path, or name. Required unless device is given." },
                     "device": { "type": "string", "description": "Host device (id or name) for a project-less chat; defaults to this device." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
@@ -221,11 +221,11 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "archive_chat",
-            description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches chats you created and, from a project's orchestrator, its workers (list_chats workers=true). When a worker you started is finished (archivable: true), archive it. A chat that isn't archivable is refused unless force=true with a short reason (logged). Mikey can undo.",
+            description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches direct children, project workers, and for an admin chat, other chats in its Space. Direct children and admin targets do not require force. Other project workers that are not archivable require force=true and a short reason (logged). The user can undo.",
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true },
-                "force": { "type": "boolean", "default": false, "description": "Archive although archivable is false; needs reason." },
-                "reason": { "type": "string", "description": "Short why, for the action log (required with force)." }
+                "force": { "type": "boolean", "default": false, "description": "For a non-child project worker without admin access, archive although archivable is false; needs reason." },
+                "reason": { "type": "string", "description": "Short reason for the action log; required when forcing a non-archivable non-child project worker without admin access." }
             })),
         },
     ]
@@ -258,7 +258,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::READ_SUBTREE,
-            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). Use it as a coordinator to see what your children are doing and to poll for requests such as \"Ready to merge\". Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tickets); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
+            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). Use it to see children and their requests. Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tasks); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -270,13 +270,13 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::CREATE_CHILD,
-            description: "Create a work item under your chat's item (default) or one of its descendants. The item records your chat as its creator. Required: title and idempotencyKey. Optional: description, parentWorkItemId, status. Without parentWorkItemId, a chat inside a project creates the item in the project's worker destination (e.g. its \"Tickets\" container) when it has one, otherwise under your own item; the reply says which (resolvedToWorkerDestination). Inside a project you may also name any item of that project (e.g. a sibling Tickets container) as parentWorkItemId.",
+            description: "Create a work item under your chat's item, a descendant, or an item inside your project. The item records your chat as its creator. Required: title and idempotencyKey. Optional: description, parentWorkItemId, status. Without parentWorkItemId, a chat inside a project creates the item in the project's worker destination (e.g. its \"Tasks\" container) when it has one, otherwise under your own item; the reply says which (resolvedToWorkerDestination). Inside a project you may also name any item of that project (e.g. a sibling Tasks container) as parentWorkItemId.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string" },
                     "description": { "type": "string" },
-                    "parentWorkItemId": { "type": "string", "description": "Your chat's item or a descendant. Defaults to your chat's item." },
+                    "parentWorkItemId": { "type": "string", "description": "Your chat's item, a descendant, or any item inside your project. Defaults to the project worker destination if configured, otherwise your chat's item." },
                     "status": { "type": "string", "enum": ["pending", "active"], "default": "pending" },
                     "idempotencyKey": idempotency_key_schema()
                 },
@@ -442,7 +442,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::ARTIFACT_GET_PLAN,
-            description: "The pinned plan of your chat's work item: {artifactId, title, revision, storedPath, content, openQuestions, unverifiedClaims, answeredQuestions: [{id, answer, at, revision}], comments: [{id, text, quote, anchor, revision, at, anchorStatus}], pickedOptions: [{artifactId, title, optionId, label, note, at, revision}]}, or null. answeredQuestions are answers the user gave in Mast (the plan's question card or Required Actions) that the document may not reflect yet: fold each into the plan (`status: resolved` + `decision:`) in your next revision. comments are the open comments on an HTML or Mermaid plan, each with its anchor and quoted text (anchorStatus found|outdated|unknown): address them in the next revision and pass their ids as addressedComments to artifact_publish. pickedOptions are the options Mikey picked on your options artifacts (also in the plan-less reply): continue with that option. Call it at the start of every chat under a work item; if a plan exists, work from it and publish new revisions of it instead of writing a new one.",
+            description: "The pinned plan of your chat's work item: {artifactId, title, revision, storedPath, content, openQuestions, unverifiedClaims, answeredQuestions: [{id, answer, at, revision}], comments: [{id, text, quote, anchor, revision, at, anchorStatus}], pickedOptions: [{artifactId, title, optionId, label, note, at, revision}]}, or null. answeredQuestions are answers the user gave in Mast (the plan's question card or Required Actions) that the document may not reflect yet: fold each into the plan (`status: resolved` + `decision:`) in your next revision. comments are the open comments on an HTML or Mermaid plan, each with its anchor and quoted text (anchorStatus found|outdated|unknown): address them in the next revision and pass their ids as addressedComments to artifact_publish. pickedOptions are the options the user picked on your options artifacts (also in the plan-less reply): continue with that option. Call it at the start of every chat under a work item; if a plan exists, work from it and publish new revisions of it instead of writing a new one.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -3634,12 +3634,22 @@ mod tests {
     }
 
     #[test]
-    fn the_tool_descriptions_carry_the_archive_directive() {
+    fn tool_descriptions_match_scope_and_archive_rules() {
         let defs = catalog();
-        for name in ["archive_chat", "create_chat"] {
-            let def = defs.iter().find(|d| d.name == name).unwrap();
-            assert!(def.description.contains("archivable: true"), "{name}");
+        let create = defs.iter().find(|d| d.name == "create_chat").unwrap();
+        assert!(create.description.contains("anything inside your project"));
+        assert!(create.input_schema["properties"]["workItemId"]["description"].as_str().unwrap().contains("any item inside your project"));
+        let archive = defs.iter().find(|d| d.name == "archive_chat").unwrap();
+        for phrase in ["Direct children and admin targets do not require force", "Other project workers", "force=true"] {
+            assert!(archive.description.contains(phrase), "{phrase}");
         }
+        assert!(archive.input_schema["properties"]["reason"]["description"].as_str().unwrap().contains("non-child project worker"));
+        let outline = work_outline_catalog();
+        let child = outline.iter().find(|d| d.name == agent_tool_names::CREATE_CHILD).unwrap();
+        assert!(child.description.contains("item inside your project"));
+        let parent = child.input_schema["properties"]["parentWorkItemId"]["description"].as_str().unwrap();
+        assert!(parent.contains("any item inside your project"));
+        assert!(parent.contains("worker destination"));
     }
 
     #[test]

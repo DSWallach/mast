@@ -363,6 +363,7 @@ fn snapshot_settings_and_modified_fields_are_additive() {
     assert!(edited.follows_external_sync("description"));
     let settings = serde_json::to_value(WorkOutlineSnapshot {
         space_settings: WorkOutlineSpaceSettings {
+            pr_review_prompts: None,
             linear_enabled: true,
             ..Default::default()
         },

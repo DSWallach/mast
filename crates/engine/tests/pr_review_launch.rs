@@ -189,6 +189,16 @@ esac
         )
         .await
         .unwrap();
+    client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({
+                "op": "setPrReviewPrompts", "spaceId": SPACE,
+                "prompts": mast_proto::PrReviewPrompts::legacy(), "operationId": "legacy-prompts"
+            }),
+        )
+        .await
+        .unwrap();
     Rig {
         _tmp: tmp,
         core,
@@ -456,13 +466,7 @@ async fn dirty_main_gets_a_worktree_under_the_workspace() {
     );
     assert_eq!(
         reply.prompt,
-        review_prompt(
-            BRANCH,
-            &format!(
-                "the worktree `{}` (`/workspace/.worktrees/flagship-pr-7` in the devcontainer)",
-                path.display()
-            )
-        )
+        review_prompt(BRANCH, &format!("the worktree `{}`", path.display()))
     );
     assert!(
         !gh_calls(&rig)
@@ -517,12 +521,11 @@ async fn worktrees_root_file_overrides_the_environment() {
         .expect("start");
     let path = file_root.join("flagship-pr-7");
     assert_eq!(Path::new(&reply.checkout_path), path);
-    // Under the overridden root: still the devcontainer worktree wording.
+    // A configured root alone does not establish a container mount.
     assert!(
-        reply.prompt.contains(&format!(
-            "the worktree `{}` (`/workspace/.worktrees/flagship-pr-7` in the devcontainer)",
-            path.display()
-        )),
+        reply
+            .prompt
+            .contains(&format!("the worktree `{}`", path.display())),
         "{}",
         reply.prompt
     );
@@ -634,7 +637,7 @@ async fn the_outermost_space_wins_over_a_space_on_the_submodule() {
     assert_eq!(
         reply.prompt,
         format!(
-            "/fix-ci https://github.com/acme/flagship/pull/7 — my PR. Its branch `{BRANCH}` is checked out at the canonical workspace checkout; do all the work there."
+            "Investigate and fix failing CI for https://github.com/acme/flagship/pull/7. The branch `{BRANCH}` is checked out at the canonical workspace checkout."
         )
     );
 }
@@ -801,4 +804,47 @@ async fn an_unknown_viewer_keeps_the_reviewer_prompt() {
         .await
         .expect("start");
     assert_eq!(reply.prompt, review_prompt(BRANCH, &location));
+}
+
+#[tokio::test]
+async fn launcher_uses_space_prompt_settings() {
+    let rig = rig().await;
+    let mut prompts = mast_proto::PrReviewPrompts::neutral();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({
+                "op": "setPrReviewPrompts", "spaceId": SPACE,
+                "prompts": prompts, "operationId": "neutral-prompts"
+            }),
+        )
+        .await
+        .unwrap();
+    let neutral = start(
+        &rig,
+        &params("neutral-review", 7, PrReviewAction::CodeReview),
+    )
+    .await
+    .unwrap();
+    assert!(neutral.prompt.contains("review_publish"));
+    assert!(!neutral.prompt.contains("/code-review"));
+    prompts.review = "Custom review of {url} at {location}".into();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({
+                "op": "setPrReviewPrompts", "spaceId": SPACE,
+                "prompts": prompts, "operationId": "custom-prompts"
+            }),
+        )
+        .await
+        .unwrap();
+    let mut request = params("custom-review", 7, PrReviewAction::CodeReview);
+    request.fresh = true;
+    let custom = start(&rig, &request).await.unwrap();
+    assert!(
+        custom
+            .prompt
+            .starts_with("Custom review of https://github.com/acme/flagship/pull/7 at ")
+    );
 }
