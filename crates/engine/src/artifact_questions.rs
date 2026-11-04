@@ -468,6 +468,8 @@ impl ArtifactQuestionSync {
         );
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            links: Vec::new(),
+            facts: Vec::new(),
             kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask),
             priority: None,
                 work_item_id: item.to_owned(),

@@ -44,6 +44,8 @@ fn proposal_role_is_pinned() {
 #[test]
 fn user_action_request_view_field_names_are_pinned() {
     let view = UserActionRequestView {
+            links: Vec::new(),
+            facts: Vec::new(),
             kind: None,
             priority: None,
         id: "r-1".into(),
@@ -166,6 +168,8 @@ fn proposal_view_field_names_are_pinned() {
 fn mutation_field_names_are_pinned() {
     round_trip(
         &WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            links: Vec::new(),
+            facts: Vec::new(),
             kind: None,
             priority: None,
             work_item_id: "w-1".into(),

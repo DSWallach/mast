@@ -1399,6 +1399,8 @@ impl AgentToolsService {
         };
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+                links: Vec::new(),
+                facts: Vec::new(),
                 kind: args.kind.or_else(|| {
                     args.dedupe_key
                         .as_deref()
