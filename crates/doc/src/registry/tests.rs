@@ -285,6 +285,24 @@ pub(super) fn chat(id: &str, device_id: &str) -> Chat {
     }
 }
 
+#[test]
+fn hand_off_chat_children_records_provenance_and_replays() {
+    let mut doc = RegistryDoc::new("dev-a");
+    for id in ["source", "destination", "worker", "archived"] {
+        let mut row = chat(id, "dev-a");
+        row.space_id = Some("space".into());
+        row.parent_chat_id = (id == "worker" || id == "archived").then(|| "source".into());
+        row.archived = id == "archived";
+        doc.upsert_chat(&row).unwrap();
+    }
+    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 123).unwrap(), vec!["worker"]);
+    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 999).unwrap(), vec!["worker"]);
+    assert_eq!(doc.chat("worker").unwrap().unwrap().parent_chat_id.as_deref(), Some("destination"));
+    assert_eq!(doc.chat("archived").unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+    let provenance = doc.overlay_row(KIND_CHATS, "destination").unwrap().fields["orchestratorHandOff"].clone();
+    assert_eq!(provenance["at"], 123);
+}
+
 pub(super) fn space(id: &str, device_id: &str, path: &str) -> Space {
     Space {
         id: id.into(),
