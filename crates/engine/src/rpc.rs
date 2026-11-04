@@ -3334,11 +3334,11 @@ impl RpcService for EngineRpc {
                             Err(e) => Err(RpcError::Failed(e.to_string())),
                         }
                     };
-                if result.is_err()
+                if let Err(error) = &result
                     && let Some(grant) = grant
                 {
                     self.sessions
-                        .note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool);
+                        .note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool, &error.to_string());
                 }
                 RpcReply::value(&result?)
             }

@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use futures::StreamExt;
@@ -164,6 +165,7 @@ struct Inner {
     worker_signals: broadcast::Sender<WorkerSignal>,
     awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
     turn_failures: Mutex<HashMap<String, mast_proto::ToolFailures>>,
+    auto_capture_friction: AtomicBool,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -286,6 +288,7 @@ impl SessionsEngine {
                 worker_signals,
                 awaiting_inputs: Mutex::new(HashMap::new()),
                 turn_failures: Mutex::new(HashMap::new()),
+                auto_capture_friction: AtomicBool::new(true),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -503,7 +506,7 @@ impl SessionsEngine {
     }
 
     /// Record a failed agent-tool dispatch only while its token's run is live.
-    pub fn note_agent_tool_failure(&self, chat_id: &str, run_id: &str, tool: &str) {
+    pub fn note_agent_tool_failure(&self, chat_id: &str, run_id: &str, tool: &str, error: &str) {
         let runs = lock(&self.inner.runs);
         if !runs.get(chat_id).is_some_and(|run| run.run_id == run_id) { return; }
         let mut failures = lock(&self.inner.turn_failures);
@@ -512,6 +515,15 @@ impl SessionsEngine {
         if failure.tools.len() < 10 && !failure.tools.iter().any(|name| name == tool) {
             failure.tools.push(tool.to_owned());
         }
+        drop(failures);
+        drop(runs);
+        let code = error.split_once(": ").map(|(code, _)| code.rsplit('/').next().unwrap_or(code)).unwrap_or("failed");
+        self.inner.capture_friction(chat_id, mast_proto::FrictionKind::ToolFailure, &format!("{tool} refused: {code}"), error, None);
+    }
+
+    /// Enable or disable automatic friction capture for this engine.
+    pub fn set_auto_capture_friction(&self, enabled: bool) {
+        self.inner.auto_capture_friction.store(enabled, Ordering::Relaxed);
     }
 
     /// Harness for the authenticated live run, when it is still active.
@@ -1746,6 +1758,24 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
+    }
+
+    fn capture_friction(&self, chat_id: &str, kind: mast_proto::FrictionKind, summary: &str, detail: &str, approval: Option<mast_proto::FrictionApproval>) -> Option<String> {
+        if !self.auto_capture_friction.load(Ordering::Relaxed) { return None; }
+        let ws = self.workspace()?;
+        let chat = ws.chat(chat_id).ok()??;
+        let space_id = chat.space_id.clone().filter(|s| !s.is_empty())?;
+        let clean = |text: &str, limit: usize| mast_harness::redact::redact_secrets(text).chars().take(limit).collect::<String>();
+        let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id).or_else(|| chat.config.as_ref().map(|c| c.harness));
+        let harness = harness.and_then(|h| serde_json::to_value(h).ok()).and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into());
+        let now = now_ms();
+        let report = mast_proto::FrictionReport {
+            id: String::new(), kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
+            workaround: None, suggestion: None, approval: approval.map(|a| mast_proto::FrictionApproval { command: clean(&a.command, 1024), why: clean(&a.why, 2048) }), severity: None, links: vec![],
+            provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto },
+            fingerprint: String::new(), occurrences: 0, last_seen: now, status: mast_proto::FrictionStatus::Open,
+        };
+        match ws.record_friction(report) { Ok(row) => Some(row.id), Err(err) => { tracing::warn!(error = %err, "automatic friction capture failed"); None } }
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.

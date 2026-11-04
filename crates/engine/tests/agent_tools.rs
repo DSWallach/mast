@@ -3745,3 +3745,29 @@ async fn friction_captures_live_run_harness() {
     assert_eq!(row["report"]["provenance"]["harness"], "mock");
     rig.harness.release.notify_one();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_tool_failures_and_can_be_disabled() {
+    let rig = rig().await;
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "run").await;
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[0].clone() else { panic!("missing tools") };
+    let token = &tools.env["MAST_AGENT_TOKEN"];
+    for _ in 0..2 {
+        assert!(tool(&rig, token, "missing_tool", json!({})).await.is_err());
+    }
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].occurrences, 2);
+    assert_eq!(rows[0].provenance.source, mast_proto::FrictionSource::Auto);
+    assert!(tool(&rig, token, "token=fake-credential", json!({})).await.is_err());
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    let serialized = serde_json::to_string(&rows).unwrap();
+    assert!(!serialized.contains("fake-credential"));
+    assert!(serialized.contains("[REDACTED]"));
+    rig.core.sessions.set_auto_capture_friction(false);
+    assert!(tool(&rig, token, "another_missing_tool", json!({})).await.is_err());
+    assert_eq!(rig.core.workspace.friction_reports(SPACE).len(), 2);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
