@@ -58,7 +58,7 @@ impl Shell {
             return;
         }
         let chat_id = self.active_chat.clone();
-        if self.team_facts(&chat_id, cx).is_empty() {
+        if !self.settings.team_tab_visibility.visible(!self.team_facts(&chat_id, cx).is_empty()) {
             return;
         }
         self.leave_overview_for_chat(cx);
@@ -88,7 +88,7 @@ impl Shell {
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
-        if team.is_empty() {
+        if !self.settings.team_tab_visibility.visible(!team.is_empty()) {
             return None;
         }
         let theme = Theme::of(cx).clone();

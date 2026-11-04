@@ -614,6 +614,25 @@ enum ProfileAtMigration {
     Fresh,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamTabVisibility {
+    Hide,
+    #[default]
+    Auto,
+    Always,
+}
+
+impl TeamTabVisibility {
+    pub(crate) fn visible(self, has_workers: bool) -> bool {
+        match self {
+            Self::Hide => false,
+            Self::Auto => has_workers,
+            Self::Always => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -636,6 +655,7 @@ pub struct UiSettings {
     /// session title.
     pub sidebar_show_project_label: bool,
     pub sidebar_compact: bool,
+    pub team_tab_visibility: TeamTabVisibility,
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
@@ -798,6 +818,7 @@ impl Default for UiSettings {
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
             sidebar_compact: true,
+            team_tab_visibility: TeamTabVisibility::Auto,
             sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
@@ -1862,6 +1883,29 @@ pub use mast_proto::SidebarSection;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn team_tab_visibility_defaults_for_fresh_and_existing_profiles() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing { std::fs::create_dir(&dir).unwrap(); }
+            let mut settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.team_tab_visibility, TeamTabVisibility::Auto);
+            settings.team_tab_visibility = TeamTabVisibility::Always;
+            settings.save(&dir).unwrap();
+            assert_eq!(UiSettings::load_for_startup(&dir).team_tab_visibility, TeamTabVisibility::Always);
+        }
+    }
+
+    #[test]
+    fn team_tab_visibility_modes() {
+        for has_workers in [false, true] {
+            assert!(!TeamTabVisibility::Hide.visible(has_workers));
+            assert_eq!(TeamTabVisibility::Auto.visible(has_workers), has_workers);
+            assert!(TeamTabVisibility::Always.visible(has_workers));
+        }
+    }
+
+    #[test]
     fn admin_grant_duration_defaults_and_persists_for_fresh_and_existing_profiles() {
         use super::UiSettings;
         use crate::admin::DurationChoice;
@@ -1877,7 +1921,10 @@ mod tests {
             assert_eq!(settings.admin_grant_duration, DurationChoice::FourHours);
             settings.admin_grant_duration = DurationChoice::UntilRevoked;
             settings.save(&dir).unwrap();
-            assert_eq!(UiSettings::load_for_startup(&dir).admin_grant_duration, DurationChoice::UntilRevoked);
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).admin_grant_duration,
+                DurationChoice::UntilRevoked
+            );
         }
     }
     use super::*;
@@ -2410,6 +2457,7 @@ mod tests {
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
             sidebar_compact: true,
+            team_tab_visibility: TeamTabVisibility::Auto,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_show_harness: false,

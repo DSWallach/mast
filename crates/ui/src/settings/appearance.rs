@@ -51,6 +51,7 @@ pub enum FontKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
+    TeamTabVisibilityChanged(crate::settings::TeamTabVisibility),
 }
 
 impl FontKind {
@@ -3052,7 +3053,52 @@ impl Render for AppearancePage {
                 ))
             })
             .collect::<Vec<_>>();
+        let team_choices = [
+            (crate::settings::TeamTabVisibility::Hide, "Hide"),
+            (crate::settings::TeamTabVisibility::Auto, "Auto"),
+            (crate::settings::TeamTabVisibility::Always, "Always"),
+        ]
+        .into_iter()
+        .map(|(value, label)| {
+            let active = ui_settings.team_tab_visibility == value;
+            div()
+                .id(SharedString::from(format!("team-visibility-{label}")))
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(px(6.0))
+                .bg(if active {
+                    theme.accent.opacity(0.15)
+                } else {
+                    crate::theme::wash(0.025)
+                })
+                .cursor_pointer()
+                .child(label)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(AppearanceSettingsEvent::TeamTabVisibilityChanged(value));
+                    cx.notify();
+                }))
+        })
+        .collect::<Vec<_>>();
         let mut settings_rows = theme_rows;
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::LIST))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(widgets::row_title(&theme, "Team tab"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child("Choose when the Team tab appears.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(div().flex().gap(px(6.0)).children(team_choices))
+                .into_any_element(),
+        );
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::TUNING))
