@@ -520,6 +520,24 @@ async fn auto_continue_defaults_and_orchestrator_overrides_persist() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_continue_loads_legacy_wake_settings() {
+    let rig = Rig::new().await;
+    std::fs::write(&rig.store, r#"{"orch":{"errors":false,"prs":true}}"#).unwrap();
+    let wakes = OrchestratorWakes::new(
+        rig.core.sessions.clone(),
+        rig.core.doc_host.clone(),
+        rig.core.workspace.clone(),
+        Some(rig.store.clone()),
+        Arc::new(|| 0),
+    );
+    let settings = wakes.settings(ORCH);
+    assert!(!settings.auto_continue);
+    assert!(!settings.errors);
+    assert!(settings.prs);
+    rig.core.shutdown().await;
+}
+
 fn snapshot(requests: serde_json::Value) -> WorkOutlineSnapshot {
     serde_json::from_value(serde_json::json!({
         "spaceId": "s1", "available": true, "synced": true,
