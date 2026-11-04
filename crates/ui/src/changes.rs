@@ -2079,11 +2079,11 @@ impl Render for DiffHeaderTooltip {
 }
 
 impl Changes {
-    pub(crate) fn diff_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.diff_focus.contains_focused(window, cx)
+    pub(crate) fn diff_is_focused(&self, window: &Window, _cx: &App) -> bool {
+        self.diff_focus.is_focused(window)
     }
-    pub(crate) fn changed_paths(&self) -> Vec<String> {
-        self.parsed.as_ref().map(|parsed| parsed.files.iter().map(|file| file.path.clone()).collect()).unwrap_or_default()
+    pub(crate) fn changed_paths(&self) -> Option<Vec<String>> {
+        self.parsed.as_ref().map(|parsed| parsed.files.iter().filter(|file| file.status != FileStatus::Deleted).map(|file| file.path.clone()).collect())
     }
     pub(crate) fn go_to_line(&mut self, target: u32, cx: &mut Context<Self>) {
         let Some(parsed) = &self.parsed else { return };
@@ -2098,8 +2098,8 @@ impl Changes {
         }
         let Some(parsed) = &self.parsed else { return };
         if let Some(index) = self.rows.iter().position(|row| match *row {
-            DiffRow::Line { file, hunk, line, .. } if file as usize == file_index => parsed.files[file as usize].hunks[hunk as usize].lines[line as usize].new_no == Some(target),
-            DiffRow::SplitLine { file, hunk, right: Some(line), .. } if file as usize == file_index => parsed.files[file as usize].hunks[hunk as usize].lines[line as usize].new_no == Some(target),
+            DiffRow::Line { file, hunk, line, .. } if file as usize == file_index => { let line = &parsed.files[file as usize].hunks[hunk as usize].lines[line as usize]; line.new_no.or(line.old_no) == Some(target) },
+            DiffRow::SplitLine { file, hunk, left, right } if file as usize == file_index => right.or(left).is_some_and(|line| { let line = &parsed.files[file as usize].hunks[hunk as usize].lines[line as usize]; line.new_no.or(line.old_no) == Some(target) }),
             _ => false,
         }) { self.list.scroll_to_reveal_item(index); cx.notify(); }
     }
@@ -7935,6 +7935,27 @@ index 1111111..2222222 160000
             body_height(added),
             NOTICE_HEIGHT + HUNK_HEADER_HEIGHT + 3.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
+    }
+
+    #[gpui::test]
+    fn go_to_line_scrolls_to_the_requested_diff_line(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window.update(cx, |changes, _, cx| {
+            let files = parse_patch(PATCH);
+            let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |_| false);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            let target = rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 1, line: 2, .. })).unwrap();
+            changes.list.reset_with_uniform_height(rows.len(), px(20.0));
+            changes.rows = rows;
+            changes.row_ranges = ranges.into_iter().map(Some).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 0, deletions: 0, file_count: files.len(), horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes.go_to_line(12, cx);
+            assert!(changes.list.logical_scroll_top().item_ix >= target);
+        }).unwrap();
     }
 
     fn diff(checkout: &str, device: &str, cwd: &str, patch: &str) -> CheckoutDiff {

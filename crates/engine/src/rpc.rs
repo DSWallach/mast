@@ -4722,6 +4722,7 @@ impl RpcService for EngineRpc {
                         Ok(summary) => Frame::Complete {
                             matches: summary.matches,
                             files: summary.files,
+                            skipped_files: summary.skipped_files,
                             truncated: summary.truncated,
                         },
                         Err(message) => Frame::Error { message },

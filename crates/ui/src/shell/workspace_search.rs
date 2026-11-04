@@ -20,6 +20,8 @@ struct ResultRow {
     changed: bool,
 }
 pub(super) struct WorkspaceSearch {
+    chat_id: String,
+    context: Option<FilesRequestContext>,
     mode: SearchMode,
     input: Entity<ComposerInput>,
     include: Entity<ComposerInput>,
@@ -27,9 +29,10 @@ pub(super) struct WorkspaceSearch {
     previous_focus: Option<FocusHandle>,
     focus_pending: bool,
     active: usize,
-    scroll: gpui::ScrollHandle,
+    list: gpui::ListState,
     rows: Vec<ResultRow>,
     changed: Vec<String>,
+    has_diff: bool,
     case_sensitive: bool,
     whole_word: bool,
     regex: bool,
@@ -41,6 +44,16 @@ pub(super) struct WorkspaceSearch {
 }
 
 impl Shell {
+    pub(super) fn workspace_recent_key(&self, cx: &App) -> String {
+        let state = self.state.read(cx);
+        let checkout = state
+            .chat_diff_targets(&self.active_chat)
+            .iter()
+            .find(|target| target.selected)
+            .map(|target| target.path.as_str())
+            .unwrap_or("");
+        format!("{}\0{checkout}", self.active_chat)
+    }
     pub(super) fn open_workspace_search(
         &mut self,
         mode: SearchMode,
@@ -91,18 +104,37 @@ impl Shell {
                 }
             }));
         }
-        let changed = self
-            .right_tabs
-            .get(&self.panel_key(cx))
-            .and_then(|tabs| {
-                tabs.iter().find_map(|tab| match tab {
-                    RightSurface::Diff(id) => self.diffs.get(id),
-                    _ => None,
+        let diff = self.active_changes(cx).or_else(|| {
+            self.right_tabs
+                .get(&self.panel_key(cx))
+                .and_then(|tabs| {
+                    tabs.iter().find_map(|tab| match tab {
+                        RightSurface::Diff(id) => self.diffs.get(id),
+                        _ => None,
+                    })
                 })
-            })
-            .map(|diff| diff.read(cx).changed_paths())
-            .unwrap_or_default();
+                .cloned()
+        });
+        if let Some(diff) = &diff {
+            subscriptions.push(cx.observe(diff, |this, diff, cx| {
+                let Some(paths) = diff.read(cx).changed_paths() else {
+                    return;
+                };
+                if let Some(search) = this.workspace_search.as_mut() {
+                    if !search.has_diff || search.changed != paths {
+                        search.has_diff = true;
+                        search.changed = paths;
+                        this.update_workspace_search(cx);
+                    }
+                }
+            }));
+        }
+        let changed = diff.and_then(|diff| diff.read(cx).changed_paths());
+        let has_diff = changed.is_some();
+        let changed = changed.unwrap_or_default();
         self.workspace_search = Some(WorkspaceSearch {
+            chat_id: self.active_chat.clone(),
+            context: FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat),
             mode,
             input,
             include,
@@ -110,9 +142,10 @@ impl Shell {
             previous_focus: window.focused(cx),
             focus_pending: true,
             active: 0,
-            scroll: gpui::ScrollHandle::new(),
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(300.0)),
             rows: Vec::new(),
             changed,
+            has_diff,
             case_sensitive: false,
             whole_word: false,
             regex: false,
@@ -136,14 +169,29 @@ impl Shell {
     }
 
     fn update_workspace_search(&mut self, cx: &mut Context<Self>) {
+        let recent_key = self.workspace_recent_key(cx);
         let Some(search) = self.workspace_search.as_mut() else {
             return;
         };
+        if search.chat_id != self.active_chat {
+            search.task = None;
+            search.rows.clear();
+            search.status = "The active chat changed; reopen search.".into();
+            cx.notify();
+            return;
+        }
+        if search.context != FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat) {
+            search.task = None;
+            search.rows.clear();
+            search.status = "The workspace changed; reopen search.".into();
+            cx.notify();
+            return;
+        }
         search.task = None;
         search.generation = search.generation.wrapping_add(1);
         let generation = search.generation;
         search.active = 0;
-        search.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        search.list.reset(0);
         search.rows.clear();
         search.status.clear();
         let mode = search.mode;
@@ -159,7 +207,7 @@ impl Shell {
         };
         let recents = self
             .workspace_file_recents
-            .get(&self.active_chat)
+            .get(&recent_key)
             .cloned()
             .unwrap_or_default();
         if query.is_empty() {
@@ -181,6 +229,9 @@ impl Shell {
                     })
                     .collect();
             }
+            search
+                .list
+                .reset_with_uniform_height(search.rows.len(), px(42.0));
             cx.notify();
             return;
         }
@@ -252,7 +303,8 @@ impl Shell {
                                         .unwrap_or(usize::MAX),
                                 )
                             });
-                            search.status.clear();
+                            search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
+                            search.status = if search.rows.is_empty() { "No files found".into() } else { String::new() };
                         }
                         Err(error) => search.status = error.to_string(),
                     }
@@ -290,6 +342,7 @@ impl Shell {
                                     Ok(WorkspaceContentSearchFrame::Complete {
                                         matches,
                                         files,
+                                        skipped_files,
                                         truncated,
                                     }) => {
                                         search.status = if truncated {
@@ -298,13 +351,19 @@ impl Shell {
                                             )
                                         } else {
                                             format!("{matches} matches in {files} files")
-                                        }
+                                        };
+                                        if skipped_files > 0 { search.status.push_str(&format!("; {skipped_files} files could not be searched")); }
                                     }
                                     Ok(WorkspaceContentSearchFrame::Error { message }) => {
                                         search.status = message
                                     }
                                     Err(error) => search.status = error.to_string(),
                                 }}
+                                let count = search.list.item_count();
+                                if search.rows.len() > count {
+                                    search.list.splice(count..count, search.rows.len() - count);
+                                    search.list.clone().with_uniform_item_height(px(42.0));
+                                }
                                 cx.notify();
                                 true
                             });
@@ -340,6 +399,14 @@ impl Shell {
         let Some(search) = self.workspace_search.as_ref() else {
             return;
         };
+        if search.chat_id != self.active_chat {
+            self.close_workspace_search(window, cx);
+            return;
+        }
+        if search.context != FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat) {
+            self.close_workspace_search(window, cx);
+            return;
+        }
         if search.mode == SearchMode::Line {
             let Ok(line) = search.input.read(cx).text().trim().parse::<u32>() else {
                 return;
@@ -382,9 +449,7 @@ impl Shell {
             window.focus(&search.input.focus_handle(cx), cx);
         }
         let mode = search.mode;
-        let rows = search.rows.clone();
-        let active = search.active;
-        let scroll = search.scroll.clone();
+        let list = search.list.clone();
         let theme = Theme::of(cx).for_popup();
         let mut card = div()
             .id("workspace-search")
@@ -413,7 +478,7 @@ impl Shell {
                                 } else {
                                     (search.active + n - 1) % n
                                 };
-                                search.scroll.scroll_to_item(search.active);
+                                search.list.scroll_to_reveal_item(search.active);
                                 cx.notify();
                             }
                         }
@@ -435,12 +500,14 @@ impl Shell {
             ];
             let mut buttons = div().flex().gap(px(8.0));
             for (label, selected, id) in toggles {
-                if id == 3 && search.changed.is_empty() {
+                if id == 3 && !search.has_diff {
                     continue;
                 }
                 buttons = buttons.child(
                     div()
                         .id(("search-option", id))
+                        .role(gpui::Role::Button)
+                        .aria_label(label)
                         .cursor_pointer()
                         .px(px(6.0))
                         .rounded(px(4.0))
@@ -464,85 +531,102 @@ impl Shell {
                 .child(search.include.clone())
                 .child(search.exclude.clone());
         }
-        let mut results = div()
-            .id("workspace-search-results")
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&scroll)
-            .flex()
-            .flex_col();
-        let mut previous = String::new();
-        let mut changed_header = false;
-        let mut files_header = false;
-        for (index, row) in rows.iter().enumerate() {
-            if mode == SearchMode::Files && row.changed && !changed_header {
-                changed_header = true;
-                results = results.child(
-                    div()
-                        .pt(px(8.0))
-                        .text_color(theme.text_muted)
-                        .child("Changed in this diff"),
-                );
-            }
-            if mode == SearchMode::Files && !row.changed && !files_header {
-                files_header = true;
-                results = results.child(
-                    div()
-                        .pt(px(8.0))
-                        .text_color(theme.text_muted)
-                        .child("Files"),
-                );
-            }
-            if mode == SearchMode::Content && previous != row.path {
-                previous = row.path.clone();
-                results = results.child(
-                    div()
-                        .pt(px(8.0))
-                        .text_color(theme.text_muted)
-                        .child(row.path.clone()),
-                );
-            }
-            let label = if let Some(line) = row.line {
-                let prefix = format!("{line}: ");
-                let offset = prefix.len();
-                gpui::StyledText::new(format!("{prefix}{}", row.preview))
-                    .with_highlights(row.ranges.iter().map(|&(start, end)| {
-                        (
-                            offset + start..offset + end,
-                            gpui::HighlightStyle {
-                                color: Some(theme.code_text),
-                                background_color: Some(theme.code_wash),
-                                ..Default::default()
-                            },
-                        )
-                    }))
-                    .into_any_element()
-            } else {
-                row.path.clone().into_any_element()
-            };
-            results = results.child(
+        let results = gpui::list(list, cx.processor(Self::render_workspace_search_row))
+            .h(px(
+                320.0_f32.min((f32::from(viewport.height) - 200.0).max(80.0))
+            ))
+            .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
+        card = card
+            .when(mode != SearchMode::Line, |card| card.child(results))
+            .child(
                 div()
-                    .id(("workspace-search-result", index))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .cursor_pointer()
-                    .when(index == active, |el| el.bg(theme.surface_raised))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_workspace_result(index, window, cx)
-                    })),
+                    .text_color(theme.text_muted)
+                    .child(search.status.clone()),
             );
-        }
-        card = card.child(results).child(
-            div()
-                .text_color(theme.text_muted)
-                .child(search.status.clone()),
-        );
         Some(popover::modal(
             "workspace-search-overlay",
             viewport,
             card.into_any_element(),
         ))
+    }
+    fn render_workspace_search_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(search) = self.workspace_search.as_ref() else {
+            return gpui::Empty.into_any_element();
+        };
+        let Some(row) = search.rows.get(index).cloned() else {
+            return gpui::Empty.into_any_element();
+        };
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| search.rows.get(index));
+        let header = match search.mode {
+            SearchMode::Content if previous.is_none_or(|previous| previous.path != row.path) => {
+                Some(row.path.clone())
+            }
+            SearchMode::Files
+                if previous.is_none_or(|previous| previous.changed != row.changed) =>
+            {
+                Some(
+                    if row.changed {
+                        "Changed in this diff"
+                    } else {
+                        "Files"
+                    }
+                    .to_owned(),
+                )
+            }
+            _ => None,
+        };
+        let theme = Theme::of(cx).for_popup();
+        let label = if let Some(line) = row.line {
+            let prefix = format!("{line}: ");
+            let offset = prefix.len();
+            gpui::StyledText::new(format!("{prefix}{}", row.preview))
+                .with_highlights(row.ranges.iter().map(|&(start, end)| {
+                    (
+                        offset + start..offset + end,
+                        gpui::HighlightStyle {
+                            color: Some(theme.code_text),
+                            background_color: Some(theme.code_wash),
+                            ..Default::default()
+                        },
+                    )
+                }))
+                .into_any_element()
+        } else {
+            row.path.clone().into_any_element()
+        };
+        div()
+            .id(("workspace-search-result", index))
+            .role(gpui::Role::Button)
+            .aria_label(row.path.clone())
+            .h(px(42.0))
+            .w_full()
+            .px(px(8.0))
+            .flex()
+            .flex_col()
+            .justify_end()
+            .cursor_pointer()
+            .when(index == search.active, |el| el.bg(theme.surface_raised))
+            .when_some(header, |el, header| {
+                el.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme.text_muted)
+                        .truncate()
+                        .child(header),
+                )
+            })
+            .child(div().truncate().child(label))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_workspace_result(index, window, cx)
+            }))
+            .into_any_element()
     }
 }
 fn parse_line_suffix(query: &str) -> (&str, Option<u32>) {
@@ -575,6 +659,105 @@ mod tests {
         );
         assert_eq!(parse_line_suffix("src/main.rs:0"), ("src/main.rs:0", None));
         assert_eq!(split_globs("*.rs, src/** , "), vec!["*.rs", "src/**"]);
+    }
+
+    #[gpui::test]
+    fn configured_shortcuts_open_the_search_overlays(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let host = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: mast_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        host.update(cx, |shell, _, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![serde_json::from_value(serde_json::json!({"id":"chat", "deviceId":"local", "cwd":"/tmp", "archived":false, "createdAt":Utc::now()})).unwrap()];
+                state.select_chat(Some("chat".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+        }).unwrap();
+        cx.run_until_parked();
+        cx.update_window(host.into(), |_, window, cx| {
+            window.draw(cx).clear();
+            let context = gpui::KeyContext::parse("Input").unwrap();
+            let replace =
+                window.bindings_for_action_in_context(&gpui_base::input::Replace, context);
+            let new_key = gpui::Keystroke::parse(&platform_combo("mod-alt-f")).unwrap();
+            let old_key = gpui::Keystroke::parse(&platform_combo("mod-shift-f")).unwrap();
+            assert!(replace.iter().any(|binding| {
+                binding.match_keystrokes(std::slice::from_ref(&new_key)) == Some(false)
+            }));
+            assert!(!replace.iter().any(|binding| {
+                binding.match_keystrokes(std::slice::from_ref(&old_key)) == Some(false)
+            }));
+        })
+        .unwrap();
+        cx.simulate_keystrokes(host.into(), &platform_combo("mod-o"));
+        host.update(cx, |shell, window, cx| {
+            assert!(
+                shell
+                    .workspace_search
+                    .as_ref()
+                    .is_some_and(|search| search.mode == SearchMode::Files)
+            );
+            shell.close_workspace_search(window, cx);
+        })
+        .unwrap();
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        cx.simulate_keystrokes(host.into(), &platform_combo("mod-shift-f"));
+        host.update(cx, |shell, _, _| {
+            assert!(
+                shell
+                    .workspace_search
+                    .as_ref()
+                    .is_some_and(|search| search.mode == SearchMode::Content)
+            )
+        })
+        .unwrap();
+        host.update(cx, |shell, window, cx| {
+            shell.close_workspace_search(window, cx);
+            let mut map = KeymapConfig::default();
+            map.quick_open = "mod-alt-o".into();
+            apply_keymap(cx, &map, ComposerSendBehavior::default());
+        })
+        .unwrap();
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        cx.simulate_keystrokes(host.into(), &platform_combo("mod-alt-o"));
+        host.update(cx, |shell, _, _| {
+            assert!(
+                shell
+                    .workspace_search
+                    .as_ref()
+                    .is_some_and(|search| search.mode == SearchMode::Files)
+            )
+        })
+        .unwrap();
     }
 
     #[gpui::test]

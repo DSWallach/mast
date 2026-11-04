@@ -548,8 +548,10 @@ impl Render for FileEditorTooltip {
 impl FilesSurface {
     pub(crate) fn editor_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.preview.active.as_deref().and_then(|path| self.preview.documents.get(path))
-            .and_then(|document| document.editor.as_ref())
-            .is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx))
+            .is_some_and(|document| {
+                document.editor.as_ref().is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx))
+                    || document.markdown.as_ref().is_some_and(|view| view.read(cx).focus.contains_focused(window, cx))
+            })
     }
     #[cfg(test)]
     pub(crate) fn test_images_visible(&self) -> bool {

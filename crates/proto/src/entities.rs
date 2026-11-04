@@ -732,6 +732,8 @@ pub enum WorkspaceContentSearchFrame {
     Complete {
         matches: usize,
         files: usize,
+        #[serde(default)]
+        skipped_files: usize,
         truncated: bool,
     },
     Error {

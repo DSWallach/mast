@@ -36,6 +36,7 @@ pub struct ContentSearchMatch {
 pub struct ContentSearchSummary {
     pub matches: usize,
     pub files: usize,
+    pub skipped_files: usize,
     pub truncated: bool,
     pub cancelled: bool,
 }
@@ -108,7 +109,7 @@ pub fn search_workspace_content(
             continue;
         }
         let mut file_has_matches = false;
-        let _ = searcher.search_path(
+        let result = searcher.search_path(
             &matcher,
             entry.path(),
             UTF8(|line_number, line| {
@@ -179,6 +180,9 @@ pub fn search_workspace_content(
                 Ok(true)
             }),
         );
+        if result.is_err() {
+            summary.skipped_files += 1;
+        }
     }
     summary.cancelled = cancelled.load(Ordering::Relaxed);
     Ok(summary)
@@ -292,15 +296,55 @@ mod tests {
     #[test]
     fn content_search_rejects_invalid_regex_and_respects_ignore() {
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join(".ignore"), "ignored.txt\n").unwrap();
+        assert!(
+            mast_harness::git_command()
+                .arg("init")
+                .arg("-q")
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(root.path().join(".gitignore"), "ignored.txt\n").unwrap();
         fs::write(root.path().join("ignored.txt"), "needle\n").unwrap();
         fs::write(root.path().join(".visible"), "needle\n").unwrap();
-        let mut query = ContentSearchQuery { text: "needle".into(), ..Default::default() };
+        let mut query = ContentSearchQuery {
+            text: "needle".into(),
+            ..Default::default()
+        };
         let (matches, _) = collect(root.path(), &query);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].path, Path::new(".visible"));
         query.regex = true;
         query.text = "(".into();
-        assert!(search_workspace_content(root.path(), &query, &AtomicBool::new(false), |_| true).is_err());
+        assert!(
+            search_workspace_content(root.path(), &query, &AtomicBool::new(false), |_| true)
+                .is_err()
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn content_search_excludes_symlinks_and_git_metadata() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "needle").unwrap();
+        fs::create_dir(root.path().join(".git")).unwrap();
+        fs::write(root.path().join(".git/config"), "needle").unwrap();
+        symlink(outside.path().join("secret"), root.path().join("link")).unwrap();
+        let query = ContentSearchQuery {
+            text: "needle".into(),
+            ..Default::default()
+        };
+        assert!(collect(root.path(), &query).0.is_empty());
+    }
+
+    #[test]
+    fn content_search_reports_files_exceeding_buffer_limit() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("long"), "x".repeat(1024 * 1024 + 1)).unwrap();
+        let query = ContentSearchQuery { text: "needle".into(), ..Default::default() };
+        let (_, summary) = collect(root.path(), &query);
+        assert_eq!(summary.skipped_files, 1);
     }
 }

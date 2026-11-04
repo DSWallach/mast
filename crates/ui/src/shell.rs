@@ -3614,7 +3614,8 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
-        let recent = self.workspace_file_recents.entry(self.active_chat.clone()).or_default();
+        let recent_key = self.workspace_recent_key(cx);
+        let recent = self.workspace_file_recents.entry(recent_key).or_default();
         recent.retain(|item| item != &path);
         recent.insert(0, path.clone());
         recent.truncate(100);
