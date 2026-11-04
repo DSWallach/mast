@@ -30,10 +30,12 @@ pub enum WakeEventKind {
     AwaitingInput,
     /// A completed worker turn had failed Mast tool calls.
     ToolCallsFailed,
+    /// A worker exhausted its automatic continuation attempts.
+    AutoContinueStopped,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 9] = [
+    pub const ALL: [WakeEventKind; 10] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -43,6 +45,7 @@ impl WakeEventKind {
         Self::WorkerReport,
         Self::AwaitingInput,
         Self::ToolCallsFailed,
+        Self::AutoContinueStopped,
     ];
 }
 
@@ -102,6 +105,7 @@ impl WakeSettings {
                 WakeEventKind::WorkerReport => self.worker_reports,
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
+                WakeEventKind::AutoContinueStopped => self.auto_continue,
             }
     }
 }

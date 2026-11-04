@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AutoContinue {
     workers: HashMap<String, WorkerState>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WorkerState {
     item_id: String,
     last_message_id: Option<String>,
