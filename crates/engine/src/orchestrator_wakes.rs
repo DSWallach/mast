@@ -403,6 +403,23 @@ impl OrchestratorWakes {
         self.status(chat_id)
     }
 
+    /// Reclaim a queued wake and transfer its events and effective settings.
+    /// Call under the wake state lock, serialized with wake delivery.
+    fn transfer_wakes(&self, state: &mut State, from: &str, to: &str) {
+        self.inner.doc_host.pull_pending_event_message(from);
+        let cancelled = self.inner.event_turns.take_cancelled(from);
+        state.core.restore(from, cancelled, self.now());
+        let settings = state.settings_overrides.get(from).copied().unwrap_or_else(|| WakeSettings {
+            auto_continue: state.auto_continue_default,
+            ..WakeSettings::default()
+        });
+        state.core.set_settings_preserving_held(to, settings);
+        state.settings_overrides.insert(to.to_owned(), settings);
+        state.core.transfer_held(from, to);
+        state.timers.remove(from);
+        self.persist(state);
+    }
+
     fn persist(&self, state: &State) {
         let Some(path) = &self.inner.store else {
             return;
@@ -1017,11 +1034,11 @@ impl OrchestratorWakes {
     /// keep holding until the next event (turn end, draft cleared).
     pub async fn evaluate(&self, orch: &str, force: bool) {
         let now = self.now();
-        let cancelled = self.inner.event_turns.take_cancelled(orch);
         let ctx = self.ctx(orch);
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        let cancelled = self.inner.event_turns.take_cancelled(orch);
         if !cancelled.is_empty() {
             state.core.restore(orch, cancelled, now);
         }

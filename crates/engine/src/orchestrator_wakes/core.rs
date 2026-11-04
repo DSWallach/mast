@@ -134,6 +134,11 @@ impl WakeCore {
         }
     }
 
+    /// Copy settings during a hand-off without discarding already held events.
+    pub fn set_settings_preserving_held(&mut self, orch: &str, settings: WakeSettings) {
+        self.orchs.entry(orch.to_owned()).or_default().settings = settings;
+    }
+
     pub fn all_settings(&self) -> HashMap<String, WakeSettings> {
         self.orchs
             .iter()
