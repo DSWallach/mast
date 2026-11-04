@@ -219,4 +219,24 @@ mod tests {
         .unwrap();
         assert!(summary.cancelled);
     }
+
+    #[test]
+    fn content_search_file_limit_and_changed_files() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_FILES {
+            fs::write(root.path().join(format!("{index}.txt")), "match\n").unwrap();
+        }
+        let mut query = ContentSearchQuery {
+            text: "match".into(),
+            ..Default::default()
+        };
+        let (_, summary) = collect(root.path(), &query);
+        assert_eq!(summary.files, MAX_FILES);
+        assert!(summary.truncated);
+        query.changed_files = Some([PathBuf::from("12.txt")].into_iter().collect());
+        let (matches, summary) = collect(root.path(), &query);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].path, Path::new("12.txt"));
+        assert!(!summary.truncated);
+    }
 }

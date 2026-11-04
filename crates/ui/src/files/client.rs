@@ -169,6 +169,17 @@ impl WorkspaceFilesClient {
         self.call(methods::SEARCH_WORKSPACE_FILES, &request).await
     }
 
+    pub async fn search_content(
+        &self,
+        request: mast_proto::SearchWorkspaceContentRequest,
+    ) -> Result<mpsc::Receiver<Value>, FilesClientError> {
+        let params = request_params(&request, self.context.target_device_id.as_deref())?;
+        self.transport
+            .subscribe(methods::SEARCH_WORKSPACE_CONTENT, params)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn read_file(
         &self,
         request: ReadWorkspaceFileRequest,
