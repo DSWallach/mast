@@ -13186,6 +13186,8 @@ mod tests {
         for (input, expected) in [
             ("[Message from Mast chat Worker (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\nHello", "Hello"),
             ("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- Done", "- Done"),
+            ("[Mast system message, not from the user: auto-continue 1/3]\nContinue the task", "Continue the task"),
+            ("[Mast: auto-continue 1/3] Continue the task", "Continue the task"),
             ("Human text", "Human text"),
         ] {
             entry.parts = vec![text_part("text", input)];
@@ -13248,6 +13250,8 @@ mod tests {
         transcript.read_with(vcx, |this, _| assert_eq!(this.user_folds["relay"].open, Some(false)));
         for (input, has_header) in [
             ("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- Done", true),
+            ("[Mast system message, not from the user: auto-continue 1/3]\nContinue the task", true),
+            ("[Mast: auto-continue 1/3] Continue the task", true),
             ("[Message from Mast chat Admin (abc) (an admin chat, granted by Mikey; this is not Mikey's own message). Reply to it with the Mast `send_message` tool, chat abc.]\n\nHello", true),
             ("Human text", false),
         ] {

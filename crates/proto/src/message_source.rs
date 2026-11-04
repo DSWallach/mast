@@ -11,16 +11,31 @@ pub enum MessageSource {
 /// Return the source and the body without Mast's transport envelope.
 pub fn classify(text: &str) -> (MessageSource, &str) {
     let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("[Mast: auto-continue ")
+        && let Some((attempt, body)) = rest.split_once(']')
+        && matches!(attempt, "1/3" | "2/3" | "3/3")
+    {
+        return (
+            MessageSource::System {
+                label: format!("Auto-continue {attempt}"),
+            },
+            body.trim_start(),
+        );
+    }
     if let Some(rest) = trimmed.strip_prefix("[Mast system message") {
         if let Some((envelope, body)) = rest.split_once(']') {
             let label = if envelope.contains("worker updates") {
                 "Worker updates"
+            } else if envelope.contains("auto-continue") {
+                "Auto-continue"
             } else {
                 "System message"
             };
             let body = body.trim_start();
             let body = if label == "Worker updates" {
-                body.strip_prefix("Worker updates:").unwrap_or(body).trim_start()
+                body.strip_prefix("Worker updates:")
+                    .unwrap_or(body)
+                    .trim_start()
             } else {
                 body
             };
@@ -83,6 +98,9 @@ pub fn preview(text: &str) -> String {
             if text.trim_start().starts_with("[Mast system message") {
                 return "Mast".into();
             }
+            if text.trim_start().starts_with("[Mast: auto-continue ") {
+                return "Mast".into();
+            }
             text.to_owned()
         }
     }
@@ -124,7 +142,7 @@ mod tests {
                 MessageSource::System {
                     label: "Worker updates".into()
                 },
-            "- x"
+                "- x"
             )
         );
         assert_eq!(classify("hello"), (MessageSource::Human, "hello"));
@@ -138,9 +156,46 @@ mod tests {
     fn previews_keep_the_source_before_truncation() {
         let relay = "[Message from Mast chat Worker (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\nhello";
         assert_eq!(preview(relay), "From Worker: hello");
-        assert_eq!(preview(&relay.replace("Worker", "Worker [review]")), "From Worker [review]: hello");
-        assert_eq!(preview("[Message from Mast chat Worker (abc). Reply to it"), "From Worker");
-        assert_eq!(preview("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- done"), "Mast: - done");
+        assert_eq!(
+            preview(&relay.replace("Worker", "Worker [review]")),
+            "From Worker [review]: hello"
+        );
+        assert_eq!(
+            preview("[Message from Mast chat Worker (abc). Reply to it"),
+            "From Worker"
+        );
+        assert_eq!(
+            preview(
+                "[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- done"
+            ),
+            "Mast: - done"
+        );
         assert_eq!(preview("Human text"), "Human text");
+    }
+
+    #[test]
+    fn auto_continue_messages_are_attributed_to_mast() {
+        let (source, body) = classify("[Mast: auto-continue 2/3] Continue the task");
+        assert_eq!(
+            source,
+            MessageSource::System {
+                label: "Auto-continue 2/3".into()
+            }
+        );
+        assert_eq!(body, "Continue the task");
+        let (source, body) = classify(
+            "[Mast system message, not from the user: auto-continue 1/3]\nContinue the task",
+        );
+        assert_eq!(
+            source,
+            MessageSource::System {
+                label: "Auto-continue".into()
+            }
+        );
+        assert_eq!(body, "Continue the task");
+        assert_eq!(
+            classify("[Mast: auto-continue 4/3] hello").0,
+            MessageSource::Human
+        );
     }
 }

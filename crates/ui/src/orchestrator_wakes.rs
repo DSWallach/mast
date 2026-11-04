@@ -25,15 +25,17 @@ pub(crate) enum WakeToggle {
     WorkerReports,
     AwaitingInput,
     ToolCallsFailed,
+    AutoContinue,
 }
 
 impl WakeToggle {
-    pub(crate) const KINDS: [WakeToggle; 7] = [
+    pub(crate) const KINDS: [WakeToggle; 8] = [
         Self::RequiredActions,
         Self::Errors,
         Self::WorkerReports,
         Self::AwaitingInput,
         Self::ToolCallsFailed,
+        Self::AutoContinue,
         Self::TurnFinished,
         Self::Prs,
     ];
@@ -48,6 +50,7 @@ impl WakeToggle {
             Self::WorkerReports => "Worker reports",
             Self::AwaitingInput => "Awaiting input",
             Self::ToolCallsFailed => "Tool calls failed",
+            Self::AutoContinue => "Auto-continue workers",
         }
     }
 
@@ -61,6 +64,7 @@ impl WakeToggle {
             Self::WorkerReports => "worker-reports",
             Self::AwaitingInput => "awaiting-input",
             Self::ToolCallsFailed => "tool-calls-failed",
+            Self::AutoContinue => "auto-continue",
         }
     }
 
@@ -74,6 +78,7 @@ impl WakeToggle {
             Self::WorkerReports => settings.worker_reports,
             Self::AwaitingInput => settings.awaiting_input,
             Self::ToolCallsFailed => settings.tool_calls_failed,
+            Self::AutoContinue => settings.auto_continue,
         }
     }
 
@@ -88,6 +93,7 @@ impl WakeToggle {
             Self::WorkerReports => &mut settings.worker_reports,
             Self::AwaitingInput => &mut settings.awaiting_input,
             Self::ToolCallsFailed => &mut settings.tool_calls_failed,
+            Self::AutoContinue => &mut settings.auto_continue,
         };
         *slot = !*slot;
         settings
@@ -168,6 +174,11 @@ impl WakeControl {
     /// One line for the Item tab's accordion row.
     pub(crate) fn summary(&self) -> String {
         let mut text = if self.settings.enabled { "On" } else { "Off" }.to_owned();
+        text.push_str(if self.settings.auto_continue {
+            " · Auto-continue on"
+        } else {
+            " · Auto-continue off"
+        });
         if let Some(chip) = &self.held {
             text.push_str(" \u{b7} ");
             text.push_str(&chip.text);
@@ -183,9 +194,24 @@ pub(crate) fn unseen_by_worker(status: &WakeStatus) -> HashMap<String, Vec<Strin
     for event in status.recent.iter().rev().filter(|event| event.unseen) {
         out.entry(event.worker_chat_id.clone())
             .or_default()
-            .push(event.summary.clone());
+            .push(wake_event_summary(event));
     }
     out
+}
+
+/// Use a stable, concise label for the automatic continuation limit.
+fn wake_event_summary(event: &mast_proto::WakeEventView) -> String {
+    if event.kind == mast_proto::WakeEventKind::AutoContinueStopped {
+        let worker = event
+            .summary
+            .split_once(" — ")
+            .map(|(name, _)| name)
+            .or(event.worker_title.as_deref())
+            .unwrap_or(&event.worker_chat_id);
+        format!("{worker} — stopped after 3 auto-continues with its item open")
+    } else {
+        event.summary.clone()
+    }
 }
 
 /// Worker chat id -> its latest report to the orchestrator (full text),
@@ -346,6 +372,22 @@ mod tests {
         let p = WakeToggle::Errors.params("c", base);
         assert!(!p.settings.errors);
         assert!(WakeToggle::Prs.get(&WakeToggle::Prs.flipped(base)));
+        let p = WakeToggle::AutoContinue.params("orchestrator", base);
+        assert!(p.settings.auto_continue);
+        assert_eq!(
+            p.settings,
+            WakeSettings {
+                auto_continue: true,
+                ..base
+            }
+        );
+        assert!(!WakeToggle::AutoContinue.flipped(p.settings).auto_continue);
+        assert_eq!(WakeControl::of(None).summary(), "On · Auto-continue off");
+        let control = WakeControl::of(Some(&WakeStatus {
+            settings: p.settings,
+            ..Default::default()
+        }));
+        assert_eq!(control.summary(), "On · Auto-continue on");
     }
 
     #[test]
@@ -361,6 +403,22 @@ mod tests {
         let map = unseen_by_worker(&status);
         assert_eq!(map["w1"], ["summary 1", "summary 3"]);
         assert!(!map.contains_key("w2"));
+    }
+
+    #[test]
+    fn stopped_worker_has_a_clear_unseen_label() {
+        let mut stopped = event("stopped", "worker", true);
+        stopped.kind = WakeEventKind::AutoContinueStopped;
+        stopped.summary =
+            "ENG-42 — worker stopped with its item open after 3 auto-continues".into();
+        let status = WakeStatus {
+            recent: vec![stopped],
+            ..Default::default()
+        };
+        assert_eq!(
+            unseen_by_worker(&status)["worker"],
+            ["ENG-42 — stopped after 3 auto-continues with its item open"]
+        );
     }
 
     #[test]
