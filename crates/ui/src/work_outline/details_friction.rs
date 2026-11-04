@@ -1,4 +1,4 @@
-//! Read-only Space friction reports.
+//! Space friction reports.
 use super::{DetailsEvent, WorkItemDetails};
 use crate::theme::Theme;
 use gpui::{Context, SharedString, div, prelude::*, px};
@@ -6,6 +6,43 @@ use mast_proto::{
     FrictionKind, FrictionReport, FrictionSource, FrictionStatus, ListFrictionReportsParams,
 };
 use std::collections::HashSet;
+
+fn friction_markdown(reports: &[FrictionReport]) -> String {
+    fn value(value: Option<&str>) -> &str {
+        value
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("n/a")
+    }
+    reports.iter().map(|report| {
+        let date = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(report.provenance.created_at)
+            .map(|date| date.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "n/a".to_owned());
+        format!("## {date} {}\n- Friction: {}\n- Approval requested: {}\n- Why approval was needed: {}\n- Workaround used: {}\n- Suggested rule/tooling improvement: {}",
+            report.summary, value(Some(&report.what_happened)),
+            value(report.approval.as_ref().map(|approval| approval.command.as_str())),
+            value(report.approval.as_ref().map(|approval| approval.why.as_str())),
+            value(report.workaround.as_deref()), value(report.suggestion.as_deref()))
+    }).collect::<Vec<_>>().join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn friction_export_markdown_snapshot() {
+        let report: FrictionReport = serde_json::from_value(serde_json::json!({
+            "id": "one", "kind": "bug", "summary": "Build failed", "whatHappened": "Compiler failed",
+            "workaround": "Retry", "suggestion": null, "approval": {"command": "cargo build", "why": "Network access"},
+            "provenance": {"chatId": "chat", "harness": "codex", "model": null, "spaceId": "space", "createdAt": 0, "source": "agent"},
+            "fingerprint": "one", "occurrences": 1, "lastSeen": 0, "status": "open"
+        })).unwrap();
+        assert_eq!(
+            friction_markdown(&[report]),
+            "## 1970-01-01 Build failed\n- Friction: Compiler failed\n- Approval requested: cargo build\n- Why approval was needed: Network access\n- Workaround used: Retry\n- Suggested rule/tooling improvement: n/a"
+        );
+    }
+}
 
 #[derive(Default)]
 pub(super) struct FrictionDetailsState {
@@ -98,6 +135,16 @@ impl WorkItemDetails {
                             this.fetch_friction(cx);
                             cx.notify();
                         }
+                    })),
+            );
+        }
+        if let Some(reports) = &self.friction.reports {
+            let markdown = friction_markdown(reports);
+            filters = filters.child(
+                Self::small_button("friction-export", "Export Markdown", theme)
+                    .debug_selector(|| "friction-export".into())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown.clone()));
                     })),
             );
         }
