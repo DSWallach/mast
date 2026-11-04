@@ -2611,6 +2611,7 @@ mod tests {
                 "space-1".into(),
                 "dev".into(),
             )]),
+            friction_destination_by_space_id: HashMap::from([("space-1".into(), "bugs".into())]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),

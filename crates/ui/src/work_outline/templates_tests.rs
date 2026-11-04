@@ -770,3 +770,32 @@ fn friction_actions_call_engine(cx: &mut gpui::TestAppContext) {
             && params["status"] == "dismissed"
     ));
 }
+
+#[gpui::test]
+fn friction_auto_capture_toggle_calls_engine(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, state, vcx) = outline_overview(cx, dir.path());
+    let calls: TemplateCalls = Default::default();
+    let sink = calls.clone();
+    state.update(vcx, |state, _| {
+        state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(
+            std::sync::Arc::new(move |method, params| {
+                sink.lock().unwrap().push((method.to_owned(), params.clone()));
+                match method {
+                    mast_rpc::methods::GET_FRICTION_SETTINGS => Ok(serde_json::json!({"autoCapture": true})),
+                    mast_rpc::methods::SET_FRICTION_SETTINGS => Ok(params),
+                    _ => Ok(serde_json::Value::Null),
+                }
+            }),
+        ));
+    });
+    vcx.update(|window, cx| {
+        window.replace_root(cx, |_, cx| crate::settings::harnesses::HarnessesPage::new(state, cx));
+    });
+    vcx.run_until_parked();
+    draw(vcx);
+    click(vcx, "friction-auto-capture");
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(|(method, _)| method == mast_rpc::methods::GET_FRICTION_SETTINGS));
+    assert!(calls.iter().any(|(method, params)| method == mast_rpc::methods::SET_FRICTION_SETTINGS && params["autoCapture"] == false));
+}
