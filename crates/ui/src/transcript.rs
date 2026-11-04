@@ -1077,6 +1077,7 @@ pub enum RowKind {
         artifact: Option<VisualizationArtifact>,
     },
     User {
+        source: crate::message_source::MessageSource,
         /// Visible prompt (attachment-ref trailer already stripped). When the
         /// prompt carries file mentions this is the *projected* display text —
         /// chip labels in place of the raw Markdown links.
@@ -1444,7 +1445,8 @@ pub fn rows_for_entry(
             .join("\n\n");
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
-        let parsed = crate::attachments::parse_user_message_images(&raw);
+        let (source, body) = crate::message_source::classify(&raw);
+        let parsed = crate::attachments::parse_user_message_images(body);
         // File mentions render as chips here too, not just in the composer.
         // The projection is pure over the text, so the raw-length row version
         // below stays a valid cache/diff key.
@@ -1461,6 +1463,7 @@ pub fn rows_for_entry(
             version: (raw.len() as u64) << 1 | pending as u64,
             turn_start: true,
             kind: RowKind::User {
+                source,
                 text: text.into(),
                 mentions: Arc::new(mentions),
                 attachments: Arc::new(parsed.attachments),
@@ -3269,6 +3272,7 @@ impl Render for BlobFetchErrorTooltip {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    OpenChat(String),
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -5473,6 +5477,7 @@ impl Transcript {
         row_ix: usize,
         text: SharedString,
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        compact: bool,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
@@ -5481,7 +5486,8 @@ impl Transcript {
         let expanded = fold.open.unwrap_or(false);
         let line_height =
             f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
-        let collapsed_text_h = USER_COLLAPSED_LINES as f32 * line_height;
+        let collapsed_lines = if compact { 3 } else { USER_COLLAPSED_LINES };
+        let collapsed_text_h = collapsed_lines as f32 * line_height;
         // Include the continuation line in the resize endpoints so removing
         // it on expansion does not make the bubble jump by a line.
         let collapsed_h = collapsed_text_h + line_height;
@@ -5491,7 +5497,7 @@ impl Transcript {
             .or_insert_with(|| Rc::new(Cell::new(0.0)))
             .clone();
         let measured = measured_h.get();
-        let collapsible = text.lines().count() > USER_COLLAPSED_LINES
+        let collapsible = text.lines().count() > collapsed_lines
             || (measured > 0.0 && measured > collapsed_text_h + 0.5)
             || (measured == 0.0 && user_message_needs_collapse(&text));
         let full_h = measured_h.get().max(collapsed_h);
@@ -5546,6 +5552,7 @@ impl Transcript {
                 text,
                 mentions,
                 theme,
+                compact,
                 measured_h.clone(),
                 cx.entity_id(),
             ));
@@ -6233,6 +6240,7 @@ impl Transcript {
 
         let inner: AnyElement = match &row.kind {
             RowKind::User {
+                source,
                 text,
                 mentions,
                 attachments,
@@ -6244,6 +6252,7 @@ impl Transcript {
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
+                let compact = !matches!(source, crate::message_source::MessageSource::Human);
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
                 // HStack); image-only sends show no bubble at all.
@@ -6276,7 +6285,30 @@ impl Transcript {
                             })),
                     );
                 }
-                if !text.is_empty() {
+                if compact {
+                    let (label, chat_id) = match source {
+                        crate::message_source::MessageSource::OtherChat { chat_id, title } => (format!("From {title}"), Some(chat_id.clone())),
+                        crate::message_source::MessageSource::Admin { chat_id, title } => (format!("Admin chat · {title}"), Some(chat_id.clone())),
+                        crate::message_source::MessageSource::System { label } => (format!("{label} · Mast"), None),
+                        crate::message_source::MessageSource::Human => unreachable!(),
+                    };
+                    let resolved = chat_id.and_then(|prefix| {
+                        let matches: Vec<_> = self.state.read(cx).chats.iter().filter(|chat| chat.id.starts_with(&prefix)).map(|chat| chat.id.clone()).collect();
+                        (matches.len() == 1).then(|| matches[0].clone())
+                    });
+                    let label = if let Some(at) = row.timestamp.and_then(chrono::DateTime::from_timestamp_millis) {
+                        format!("{label} · {}", crate::state::format_time_ago(at, chrono::Utc::now()))
+                    } else { label };
+                    let mut header = div().id(SharedString::from(format!("{}-source", row.id))).flex().items_center().gap(px(5.0)).text_size(crate::typography::ui_rems(12.0)).text_color(theme.text_muted)
+                        .child(crate::icons::icon(crate::icons::CHAT_ROUND_LINE).size(px(12.0)))
+                        .child(SharedString::from(label));
+                    if let Some(chat_id) = resolved {
+                        header = header.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| cx.emit(TranscriptEvent::OpenChat(chat_id.clone()))));
+                    }
+                    column = column.child(div().w_full().border_l_1().border_color(theme.accent).pl(px(10.0)).text_size(crate::typography::ui_rems(13.0)).line_height(crate::typography::ui_rems(USER_LINE_HEIGHT)).text_color(theme.text_muted)
+                        .child(header)
+                        .child(self.render_user_body(&row.id, ix, text, mentions, true, &theme, window, cx)));
+                } else if !text.is_empty() {
                     // `min_w_0` is load-bearing: gpui text answers min/max-content
                     // probes with its UNWRAPPED width, so without it the bubble's
                     // automatic min-size is the full single-line width — the flex
@@ -6297,7 +6329,7 @@ impl Transcript {
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
                                 .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, &theme, window, cx,
+                                    &row.id, ix, text, mentions, false, &theme, window, cx,
                                 )),
                         ),
                     );
@@ -7397,6 +7429,7 @@ fn user_bubble_text(
     text: SharedString,
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
     theme: &Theme,
+    compact: bool,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
 ) -> AnyElement {
@@ -7406,7 +7439,7 @@ fn user_bubble_text(
     let body_run = |len: usize| TextRun {
         len,
         font: gpui::font(theme.font_sans.clone()),
-        color: theme.text,
+        color: if compact { theme.text_muted } else { theme.text },
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -13142,6 +13175,24 @@ mod tests {
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].id, after[0].id);
         assert_eq!(before[0].version, after[0].version);
+    }
+
+    #[test]
+    fn user_rows_strip_mast_envelopes_but_keep_human_text() {
+        let mut entry = assistant("source", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        for (input, expected) in [
+            ("[Message from Mast chat Worker (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\nHello", "Hello"),
+            ("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- Done", "- Done"),
+            ("Human text", "Human text"),
+        ] {
+            entry.parts = vec![text_part("text", input)];
+            let rows = rows_for_entry(&entry, false, &mut parse);
+            let RowKind::User { text, source, .. } = &rows[0].kind else { panic!("expected user row") };
+            assert_eq!(text.as_ref(), expected);
+            assert_eq!(matches!(source, crate::message_source::MessageSource::Human), input == "Human text");
+        }
     }
 
     #[test]

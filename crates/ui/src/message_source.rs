@@ -18,11 +18,17 @@ pub fn classify(text: &str) -> (MessageSource, &str) {
             } else {
                 "System message"
             };
+            let body = body.trim_start();
+            let body = if label == "Worker updates" {
+                body.strip_prefix("Worker updates:").unwrap_or(body).trim_start()
+            } else {
+                body
+            };
             return (
                 MessageSource::System {
                     label: label.into(),
                 },
-                body.trim_start(),
+                body,
             );
         }
     }
@@ -95,7 +101,7 @@ mod tests {
                 MessageSource::System {
                     label: "Worker updates".into()
                 },
-                "Worker updates:\n- x"
+            "- x"
             )
         );
         assert_eq!(classify("hello"), (MessageSource::Human, "hello"));
