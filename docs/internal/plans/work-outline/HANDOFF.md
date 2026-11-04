@@ -616,6 +616,13 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Wake echoes + archivable PR rule** (2026-11-04, `wake-echo-redelivery`, `archivable-pr-rule`, Terra): a
+  resolved-action wake is suppressed when the receiving orchestrator resolved the request itself (user and
+  other-chat resolutions still wake); wake batch selection and queueing are serialized, so concurrent
+  evaluations can't deliver the same batch twice. A chat is PR-finished only when every PR it owns is merged
+  or closed; a PR with no cached status blocks archiving; mention, ticket and review-launcher links don't count.
+  Not yet: restart-durable reports/wakes with stable report ids (item aa155e46; 68b601a8 left open for it).
+  Release run: nextest 1174/1174 (engine + mcp), UI 2442/0.
 - **Friction reporting + compact agent messages** (2026-11-04, `friction-reporting`, `compact-agent-messages`):
   `report_friction` / `list_friction` agent tools (Mast fills chat, harness, actual model, Space, item, branch;
   dedupe by fingerprint with occurrence counts), auto-capture (refused Mast tool calls, approval prompts + the
@@ -782,7 +789,7 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-04 ~16:30; this coordinator chat 74bc70e5 is being /compact-ed, not replaced)
+## In flight (snapshot 2026-11-04 evening; coordinator chat 74bc70e5, compacted, not replaced)
 
 **Coordinator:** chat 74bc70e5 on Mast Dev (Opus). Workers report to it (parentChatId), so keep using it;
 a fresh chat wouldn't hear them until "Hand off to new chat" (item 6161edf6) exists. Release runs go
@@ -790,14 +797,10 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`) because restarts kill 
 they don't wake the coordinator, so check logs when asked for status.
 
 **Running (Codex Terra, children of 74bc70e5):**
-- `wake-echo-redelivery` (chat dc4d8ad2, item afd7c0ab; also covers 68b601a8): no wakes for the orchestrator's own
-  resolves; each worker report delivered exactly once, persisted across restarts.
-- `archivable-pr-rule` (chat ae7078db, item 5291292e): a chat is PR-finished only when every PR it owns is
-  merged/closed; mentioned PRs don't count.
-Release both together when their Ready to merge (kind handoff) arrive.
+- `auto-continue` (item 33fd6aa5), first slice; see Queued 1 for scope.
 
 **Queued (agreed with Mikey):**
-1. Auto-continue (item 33fd6aa5; after wake-echo merges, same files): nudge a worker whose item is still open
+1. Auto-continue (item 33fd6aa5; started after wake-echo merged, same files): nudge a worker whose item is still open
    after its turn ends (≤3 times, then wake the orchestrator); per-orchestrator setting, off by default, on for
    Mast Dev.
 2. Hand off to new chat (item 6161edf6): reparent children, move held wakes/reports, post a summary.
