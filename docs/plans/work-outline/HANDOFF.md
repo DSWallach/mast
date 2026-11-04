@@ -616,6 +616,14 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Typed Needs-you, phase 1** (2026-11-03 night, `needs-kind-field`; design option C hybrid, plan
+  mast-artifact:e0a05a3d0248e2e8d8d0fda6bb6214c4): Required Actions have `kind` (ask, review, approve, choose,
+  handoff, notice) and `priority`; legacy text-only rows are classified on read; "Ready to merge" text
+  matchers replaced by `kind == handoff` (status light, Team, archivable); producers set kinds (admin bulk →
+  approve, PR review → review, plan questions → ask, option picks → choose); kind icons and groups;
+  `notice` stays out of the badge/light; plan question cards show a link chip. MCP create takes kind/priority.
+  Release run: nextest 2248/2249 (the 1 was a stale usage-text assertion, fixed), UI 2412/0. Phase 2
+  (`needs-outcomes`, incl. the admin bulk "no still approves" fix) is in progress.
 - **PR review phases 1 + 2** (2026-11-03 evening, `pr-review-read-diff`, `pr-review-sidecar`; Codex
   gpt-6.1-terra; brief mast-artifact:3e12f5d0be4cb1de57ed6b0f8be58992). Phase 1, Changes pane: filterable
   file sidebar (renames old → new, +/- counts), J/K next/prev hunk, ⇧J/⇧K next/prev file, hunk count,
