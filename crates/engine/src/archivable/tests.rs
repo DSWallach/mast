@@ -20,8 +20,6 @@ fn item(status: &str, archived_at: Option<i64>) -> WorkItemView {
 }
 
 fn request(text: &str, state: &str) -> UserActionRequestView {
-    links: Vec::new(),
-    facts: Vec::new(),
     serde_json::from_value(json!({
         "id": "r", "chatId": "w1", "workItemId": "i1", "text": text, "state": state,
     }))
