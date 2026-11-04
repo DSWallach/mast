@@ -1,22 +1,5 @@
 # Packaging
 
-## Linux (implemented)
-
-```sh
-scripts/package-linux.sh            # release build (thin LTO, stripped)
-PROFILE=debug scripts/package-linux.sh   # fast smoke package
-```
-
-Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
-
-- `zeron` — the binary (headed by default; `zeron headless` runs the engine alone)
-- `zeron.desktop` — XDG desktop entry
-- `zeron.png` — 1024×1024 Mast app icon
-- `install.sh` — installs into `~/.local/{bin,share/applications,share/icons}`
-
-The release profile in the root `Cargo.toml` sets `lto = "thin"` and
-`strip = "symbols"` for distribution builds.
-
 ## macOS
 
 ```sh
@@ -28,8 +11,7 @@ signs it (set `CODESIGN_IDENTITY` for a real Developer ID), and wraps it in a
 dmg. The auto-update tarball retains an internal `Zeron.app` path so older
 installed builds can update into Mast. Release asset file names keep the
 `zeron-` prefix (the update manifest, release workflow and download links key
-on them); the dmg volume and the app inside it are named Mast. CI runs this on tags
-(`.github/workflows/release.yml`). The manual steps it automates, for reference
+on them); the dmg volume and the app inside it are named Mast. The manual steps it automates, for reference
 (run on a macOS host — gpui needs Metal; no cross-build from Linux):
 
 1. Build the universal (or per-arch) binary:
