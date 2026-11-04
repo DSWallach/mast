@@ -492,6 +492,34 @@ async fn settings_persist_across_service_restarts() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_continue_defaults_and_orchestrator_overrides_persist() {
+    let rig = Rig::new().await;
+    assert!(!rig.wakes.settings(ORCH).auto_continue);
+    std::fs::write(
+        &rig.store,
+        r#"{"autoContinue":true,"orchestrators":{"orch":{"autoContinue":false}}}"#,
+    )
+    .unwrap();
+    let reload = || {
+        OrchestratorWakes::new(
+            rig.core.sessions.clone(),
+            rig.core.doc_host.clone(),
+            rig.core.workspace.clone(),
+            Some(rig.store.clone()),
+            Arc::new(|| 0),
+        )
+    };
+    let wakes = reload();
+    assert!(!wakes.settings(ORCH).auto_continue);
+    assert!(wakes.settings("another").auto_continue);
+    wakes.set_settings(ORCH, wakes.settings(ORCH)).await;
+    let again = reload();
+    assert!(!again.status(ORCH).settings.auto_continue);
+    assert!(again.status("another").settings.auto_continue);
+    rig.core.shutdown().await;
+}
+
 fn snapshot(requests: serde_json::Value) -> WorkOutlineSnapshot {
     serde_json::from_value(serde_json::json!({
         "spaceId": "s1", "available": true, "synced": true,
@@ -663,7 +691,8 @@ async fn concurrent_evaluations_queue_one_report() {
     for task in tasks {
         task.await.unwrap();
     }
-    rig.wait_for(|| !rig.wake_prompts().is_empty(), "report delivery").await;
+    rig.wait_for(|| !rig.wake_prompts().is_empty(), "report delivery")
+        .await;
     rig.settle().await;
     assert_eq!(rig.wake_prompts().len(), 1);
     let _ = rig.finish.send(());

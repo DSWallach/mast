@@ -46,6 +46,36 @@ pub fn system_clock() -> Clock {
     Arc::new(|| chrono::Utc::now().timestamp_millis())
 }
 
+// The original file was a flat map of chat ids to settings. Preserve it on
+// read; missing autoContinue fields inherit the global default.
+fn read_settings(bytes: &[u8]) -> (bool, HashMap<String, WakeSettings>) {
+    let Ok(serde_json::Value::Object(mut root)) = serde_json::from_slice(bytes) else {
+        return (false, HashMap::new());
+    };
+    let default = root
+        .remove("autoContinue")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let entries = match root.remove("orchestrators") {
+        Some(serde_json::Value::Object(entries)) => entries,
+        _ => root,
+    };
+    let overrides = entries
+        .into_iter()
+        .filter_map(|(chat, mut value)| {
+            if let Some(object) = value.as_object_mut() {
+                object
+                    .entry("autoContinue")
+                    .or_insert(serde_json::Value::Bool(default));
+            }
+            serde_json::from_value(value)
+                .ok()
+                .map(|settings| (chat, settings))
+        })
+        .collect();
+    (default, overrides)
+}
+
 #[derive(Debug)]
 struct EventTurn {
     message_id: String,
@@ -149,6 +179,8 @@ struct ChatInfo {
 #[derive(Default)]
 struct State {
     core: WakeCore,
+    auto_continue_default: bool,
+    settings_overrides: HashMap<String, WakeSettings>,
     chats: HashMap<String, ChatInfo>,
     chats_seeded: bool,
     /// Per Space: worker chat → orchestrators by project worker destination.
@@ -192,10 +224,12 @@ impl OrchestratorWakes {
         let mut state = State::default();
         if let Some(path) = &store
             && let Ok(bytes) = std::fs::read(path)
-            && let Ok(saved) = serde_json::from_slice::<HashMap<String, WakeSettings>>(&bytes)
         {
+            let (auto_continue_default, saved) = read_settings(&bytes);
+            state.auto_continue_default = auto_continue_default;
             for (chat, settings) in saved {
                 state.core.set_settings(&chat, settings);
+                state.settings_overrides.insert(chat, settings);
             }
         }
         Self {
@@ -330,13 +364,24 @@ impl OrchestratorWakes {
     // ── settings / status / user activity ─────────────────────────────────
 
     pub fn settings(&self, chat_id: &str) -> WakeSettings {
-        lock(&self.inner.state).core.settings(chat_id)
+        let state = lock(&self.inner.state);
+        state
+            .settings_overrides
+            .get(chat_id)
+            .copied()
+            .unwrap_or_else(|| WakeSettings {
+                auto_continue: state.auto_continue_default,
+                ..WakeSettings::default()
+            })
     }
 
     pub async fn set_settings(&self, chat_id: &str, settings: WakeSettings) -> WakeStatus {
         {
             let mut state = lock(&self.inner.state);
             state.core.set_settings(chat_id, settings);
+            state
+                .settings_overrides
+                .insert(chat_id.to_owned(), settings);
             self.persist(&state);
         }
         self.evaluate(chat_id, false).await;
@@ -347,8 +392,11 @@ impl OrchestratorWakes {
         let Some(path) = &self.inner.store else {
             return;
         };
-        let map = state.core.all_settings();
-        if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
+        let settings = serde_json::json!({
+            "autoContinue": state.auto_continue_default,
+            "orchestrators": state.settings_overrides,
+        });
+        if let Ok(bytes) = serde_json::to_vec_pretty(&settings) {
             let _ = std::fs::write(path, bytes);
         }
     }
@@ -358,6 +406,14 @@ impl OrchestratorWakes {
         let now = self.now();
         let mut state = lock(&self.inner.state);
         let mut status = state.core.status(chat_id, now, ctx);
+        status.settings = state
+            .settings_overrides
+            .get(chat_id)
+            .copied()
+            .unwrap_or_else(|| WakeSettings {
+                auto_continue: state.auto_continue_default,
+                ..WakeSettings::default()
+            });
         status.is_orchestrator = is_orchestrator(&state, chat_id);
         status
     }
@@ -798,7 +854,9 @@ impl OrchestratorWakes {
                 let text = batch.render();
                 match self.inner.doc_host.queue_event_message(orch, &text) {
                     Ok(message_id) => {
-                        self.inner.event_turns.register(orch, message_id, batch.events.clone());
+                        self.inner
+                            .event_turns
+                            .register(orch, message_id, batch.events.clone());
                         state.core.delivered(orch, &batch, now);
                     }
                     Err(err) => {

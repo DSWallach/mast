@@ -246,7 +246,8 @@ mod tests {
 
     #[test]
     fn old_settings_enable_worker_blocker_wakes_and_allow_disabling_each() {
-        let mut settings: WakeSettings = serde_json::from_str(r#"{"enabled":true,"errors":false}"#).unwrap();
+        let mut settings: WakeSettings =
+            serde_json::from_str(r#"{"enabled":true,"errors":false}"#).unwrap();
         assert!(!settings.auto_continue);
         assert!(settings.wakes_for(WakeEventKind::AwaitingInput));
         assert!(settings.wakes_for(WakeEventKind::ToolCallsFailed));
