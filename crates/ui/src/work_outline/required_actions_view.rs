@@ -959,6 +959,10 @@ impl RequiredActionsList {
                             true,
                             theme,
                         )
+                        .debug_selector({
+                            let selector = format!("required-actions-info-toggle-{id}");
+                            move || selector.clone()
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.info_open.remove(&toggle) {
                                 this.info_open.insert(toggle.clone());

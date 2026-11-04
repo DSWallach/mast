@@ -1696,7 +1696,6 @@ fn required_action_structured_references_render_on_the_item_tab(cx: &mut TestApp
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         let mut action = request("structured", "s1", API, CHAT_API, "Review the change");
         action.kind = Some(UserActionKind::Handoff);
-        action.info = Some("**Details** https://github.com/acme/repo/pull/2".into());
         action.facts = vec![
             RequestFact {
                 label: "Branch".into(),
@@ -1768,8 +1767,6 @@ fn required_action_structured_references_render_on_the_item_tab(cx: &mut TestApp
     ] {
         assert!(has(vcx, selector), "{selector}");
     }
-    click_selector(vcx, "required-actions-info-toggle-structured");
-    assert!(has(vcx, "required-actions-info-structured"));
     click_selector(vcx, "required-actions-link-structured-0");
     shell.read_with(vcx, |shell, _| {
         assert_eq!(shell.artifact_tabs.tabs.len(), 1)
@@ -1826,4 +1823,16 @@ fn review_open_uses_the_first_artifact_reference(cx: &mut TestAppContext) {
     shell.read_with(vcx, |shell, _| {
         assert_eq!(shell.artifact_tabs.tabs.len(), 1)
     });
+}
+
+#[gpui::test]
+fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
+    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let mut action = request("markdown-detail", "s1", API, CHAT_API, "Review details");
+        action.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff);
+        action.info = Some("**Details** https://github.com/acme/repo/pull/2".into());
+        snapshot.user_action_requests.push(action);
+    });
+    click_selector(vcx, "required-actions-info-toggle-markdown-detail");
+    assert!(has(vcx, "required-actions-info-markdown-detail"));
 }
