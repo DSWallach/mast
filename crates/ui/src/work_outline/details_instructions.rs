@@ -1047,6 +1047,7 @@ impl WorkItemDetails {
         let pr_sync = self.render_space_pr_sync(&snapshot, theme, cx);
         let pr_prompts = self.render_pr_prompts(theme, cx);
         let templates = self.render_templates_section(&snapshot, theme, cx);
+        let friction = self.render_friction_section(theme, cx);
         frame.child(header).child(
             div()
                 .id("work-item-details-body")
@@ -1067,6 +1068,7 @@ impl WorkItemDetails {
                         .child("Space root"),
                 )
                 .child(required_actions)
+                .child(friction)
                 .child(section)
                 .when_some(proposals, |el, proposals| el.child(proposals))
                 .child(execution)

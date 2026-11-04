@@ -630,3 +630,35 @@ fn template_preview_lists_nodes_instructions_and_badges() {
         (1, "Tickets  [worker destination]".to_owned(), false)
     );
 }
+
+#[gpui::test]
+fn friction_reports_expand_and_filter_to_empty(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, _outline, calls, vcx) = template_overview(cx, dir.path(), template_fixture(), |method, params| {
+        if method == mast_rpc::methods::LIST_FRICTION_REPORTS {
+            if params["status"] == "dismissed" { return Ok(serde_json::json!([])); }
+            let report = |id: &str, occurrences| serde_json::json!({
+                "id": id, "kind": "bug", "summary": "A problem", "whatHappened": "It failed",
+                "workaround": "Retry", "suggestion": "Repair it", "approval": {"command": "build", "why": "needed", "answer": true},
+                "provenance": {"chatId": "chat-1", "harness": "codex", "model": "model", "spaceId": "s1", "createdAt": 1, "source": "agent"},
+                "fingerprint": id, "occurrences": occurrences, "lastSeen": 1, "status": "open"
+            });
+            return Ok(serde_json::json!([report("one", 3), report("two", 5)]));
+        }
+        template_reply(method, params)
+    });
+    open_details(&overview, vcx, "");
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(row_bounds(vcx, "friction-count-one-3".into()).is_some());
+    assert!(row_bounds(vcx, "friction-count-two-5".into()).is_some());
+    click(vcx, "friction-row-one");
+    assert!(row_bounds(vcx, "friction-details-one".into()).is_some());
+    assert!(row_bounds(vcx, "friction-detail-one-What happened".into()).is_some());
+    assert!(row_bounds(vcx, "friction-detail-one-Workaround".into()).is_some());
+    assert!(row_bounds(vcx, "friction-detail-one-Suggestion".into()).is_some());
+    assert!(row_bounds(vcx, "friction-approval-one".into()).is_some());
+    click(vcx, "friction-filter-Dismissed");
+    assert!(row_bounds(vcx, "friction-empty".into()).is_some());
+    assert!(calls.lock().unwrap().iter().any(|(method, params)| method == mast_rpc::methods::LIST_FRICTION_REPORTS && params["status"] == "open"));
+}
