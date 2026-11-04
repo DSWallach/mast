@@ -52,6 +52,7 @@ struct GatedHarness {
     /// Every Run request as the harness received it.
     requests: Arc<Mutex<Vec<RunRequest>>>,
     release: Arc<Notify>,
+    questions: Arc<Mutex<Vec<mast_proto::UserInputQuestion>>>,
 }
 
 impl GatedHarness {
@@ -123,9 +124,14 @@ impl Harness for GatedHarness {
     async fn run_with_agent_tools(
         &self,
         request: RunRequest,
-        _controls: RunControls,
+        controls: RunControls,
         tools: AgentToolsInjection,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let questions = self.questions.lock().unwrap().clone();
+        if !questions.is_empty() {
+            let answer = (controls.request_input)(questions);
+            tokio::spawn(async move { let _ = answer.await; });
+        }
         self.spawns.lock().unwrap().push(Spawn::WithTools {
             prompt: request.prompt.clone(),
             tools,
@@ -3768,6 +3774,29 @@ async fn friction_captures_tool_failures_and_can_be_disabled() {
     rig.core.sessions.set_auto_capture_friction(false);
     assert!(tool(&rig, token, "another_missing_tool", json!({})).await.is_err());
     assert_eq!(rig.core.workspace.friction_reports(SPACE).len(), 2);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_approval_and_answer() {
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+    };
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows.len(), 1);
+    let approval = rows[0].approval.as_ref().unwrap();
+    assert_eq!(approval.command, "echo token=[REDACTED]");
+    assert_eq!(approval.why, "sandbox");
+    assert_eq!(approval.answer, None);
+    assert!(rig.core.sessions.respond_input(CHAT, &input.request_id, vec![mast_proto::UserInputAnswer { question_id: "approval".into(), labels: vec!["No".into()] }]).unwrap());
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(false));
+    assert_eq!(rows[0].occurrences, 1);
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
 }

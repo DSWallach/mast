@@ -42,6 +42,8 @@ pub enum FrictionSource {
 pub struct FrictionApproval {
     pub command: String,
     pub why: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

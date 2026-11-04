@@ -57,6 +57,21 @@ impl RegistryDoc {
             .collect()
     }
 
+    /// Update the answer without recording another occurrence.
+    pub fn answer_friction_approval(&mut self, id: &str, answer: bool) -> Result<(), DocError> {
+        let row = self.overlay_row(KIND_FRICTION_REPORTS, id).ok_or_else(|| DocError::Schema("friction report not found".into()))?;
+        let mut report = decode(&row).ok_or_else(|| DocError::Schema("invalid friction report".into()))?;
+        let approval = report.approval.as_mut().ok_or_else(|| DocError::Schema("friction report has no approval".into()))?;
+        approval.answer = Some(answer);
+        let mut fields = BTreeMap::new();
+        fields.insert("approval".into(), serde_json::to_value(approval)?);
+        self.observe_row(KIND_FRICTION_REPORTS, id);
+        let op = RowOp { kind: KIND_FRICTION_REPORTS.into(), id: id.into(), op: OpKind::Update, set: Some(fields), hlc: self.next_hlc(), clocks: None };
+        check_op_size(&op)?;
+        self.write_ops(vec![op])?;
+        Ok(())
+    }
+
     /// Record an occurrence with a per-device counter, so concurrent devices merge.
     pub fn record_friction(
         &mut self,
@@ -215,6 +230,7 @@ mod tests {
         changed.approval = Some(mast_proto::FrictionApproval {
             command: "cargo test".into(),
             why: "permission".into(),
+            answer: None,
         });
         assert_ne!(friction_fingerprint(&base), friction_fingerprint(&changed));
     }
