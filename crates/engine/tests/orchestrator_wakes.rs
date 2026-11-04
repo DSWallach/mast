@@ -645,6 +645,32 @@ async fn worker_reports_batch_with_other_events_and_say_what_the_worker_said() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_evaluations_queue_one_report() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "finished").await.unwrap();
+    rig.advance(WAKE_WINDOW_MS);
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let wakes = rig.wakes.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            wakes.evaluate(ORCH, false).await;
+        }));
+    }
+    barrier.wait().await;
+    for task in tasks {
+        task.await.unwrap();
+    }
+    rig.wait_for(|| !rig.wake_prompts().is_empty(), "report delivery").await;
+    rig.settle().await;
+    assert_eq!(rig.wake_prompts().len(), 1);
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_reports_follow_the_user_first_holds() {
     let rig = Rig::new().await;
     rig.wakes.note_user_activity(ORCH, Some(true)).await;

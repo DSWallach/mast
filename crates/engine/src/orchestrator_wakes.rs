@@ -779,16 +779,18 @@ impl OrchestratorWakes {
         let now = self.now();
         let cancelled = self.inner.event_turns.take_cancelled(orch);
         let ctx = self.ctx(orch);
-        let decision = {
-            let mut state = lock(&self.inner.state);
-            if !cancelled.is_empty() {
-                state.core.restore(orch, cancelled, now);
-            }
-            state.core.decide(orch, now, ctx, force)
-        };
-        match decision {
+        // Keep selection and queueing under the same lock: several watchers can
+        // evaluate the same orchestrator concurrently.
+        let mut state = lock(&self.inner.state);
+        if !cancelled.is_empty() {
+            state.core.restore(orch, cancelled, now);
+        }
+        match state.core.decide(orch, now, ctx, force) {
             Decision::Nothing | Decision::Hold(_) => {}
-            Decision::WaitUntil { at_ms, .. } => self.arm_timer(orch, at_ms),
+            Decision::WaitUntil { at_ms, .. } => {
+                drop(state);
+                self.arm_timer(orch, at_ms);
+            }
             Decision::Deliver(batch) => {
                 if !self.hosted_here(orch) {
                     return;
@@ -796,10 +798,8 @@ impl OrchestratorWakes {
                 let text = batch.render();
                 match self.inner.doc_host.queue_event_message(orch, &text) {
                     Ok(message_id) => {
-                        self.inner
-                            .event_turns
-                            .register(orch, message_id, batch.events.clone());
-                        lock(&self.inner.state).core.delivered(orch, &batch, now);
+                        self.inner.event_turns.register(orch, message_id, batch.events.clone());
+                        state.core.delivered(orch, &batch, now);
                     }
                     Err(err) => {
                         tracing::warn!(chat = %orch, error = %err, "orchestrator wake delivery failed");
