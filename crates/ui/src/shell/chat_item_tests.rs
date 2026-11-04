@@ -1687,3 +1687,152 @@ fn unarchive_sends_set_chat_archived_false(cx: &mut TestAppContext) {
     assert_eq!(requests[0]["chatId"], "w-1");
     assert_eq!(requests[0]["archived"], false);
 }
+
+#[gpui::test]
+fn required_action_structured_references_render_on_the_item_tab(cx: &mut TestAppContext) {
+    use mast_proto::work_outline_user_actions::{
+        RequestFact, RequestLink, RequestLinkTarget, UserActionKind,
+    };
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let mut action = request("structured", "s1", API, CHAT_API, "Review the change");
+        action.kind = Some(UserActionKind::Handoff);
+        action.facts = vec![
+            RequestFact {
+                label: "Branch".into(),
+                value: "feature/test".into(),
+            },
+            RequestFact {
+                label: "Tests".into(),
+                value: "Passed".into(),
+            },
+        ];
+        action.links = vec![
+            RequestLink {
+                label: "Artifact".into(),
+                target: RequestLinkTarget::Artifact {
+                    id: "0123456789abcdef0123456789abcdef".into(),
+                },
+            },
+            RequestLink {
+                label: "File".into(),
+                target: RequestLinkTarget::File {
+                    path: "src/lib.rs".into(),
+                    line: Some(4),
+                },
+            },
+            RequestLink {
+                label: "Diff".into(),
+                target: RequestLinkTarget::Diff { branch: None },
+            },
+            RequestLink {
+                label: "PR".into(),
+                target: RequestLinkTarget::Pr {
+                    url: "https://github.com/acme/repo/pull/1".into(),
+                },
+            },
+            RequestLink {
+                label: "Chat".into(),
+                target: RequestLinkTarget::Chat { id: CHAT_UI.into() },
+            },
+            RequestLink {
+                label: "URL".into(),
+                target: RequestLinkTarget::Url {
+                    url: "https://example.com".into(),
+                },
+            },
+        ];
+        snapshot.user_action_requests.push(action);
+    });
+    let state = shell.read_with(vcx, |shell, _| shell.state.clone());
+    state.update(vcx, |state, _| {
+        state.set_test_artifacts(crate::artifacts::tests::snapshot(vec![
+            crate::artifacts::tests::artifact(
+                "0123456789abcdef0123456789abcdef",
+                "Plan",
+                mast_proto::ArtifactKind::Markdown,
+            ),
+        ]))
+    });
+    shell.update(vcx, |shell, _| shell.route = Route::Chat);
+    draw(vcx);
+    assert!(has(vcx, "required-actions-fact-structured-Branch"));
+    assert!(has(vcx, "required-actions-fact-structured-Tests"));
+    for selector in [
+        "required-actions-link-structured-0",
+        "required-actions-link-structured-1",
+        "required-actions-link-structured-2",
+        "required-actions-link-structured-3",
+        "required-actions-link-structured-4",
+        "required-actions-link-structured-5",
+    ] {
+        assert!(has(vcx, selector), "{selector}");
+    }
+    click_selector(vcx, "required-actions-link-structured-0");
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.artifact_tabs.tabs.len(), 1)
+    });
+    click_selector(vcx, "required-actions-link-structured-1");
+    vcx.run_until_parked();
+    shell.read_with(vcx, |shell, _| {
+        assert!(
+            shell
+                .file_surface_paths
+                .values()
+                .any(|path| path == "src/lib.rs")
+        )
+    });
+    click_selector(vcx, "required-actions-link-structured-2");
+    vcx.run_until_parked();
+    shell.read_with(vcx, |shell, _| assert!(!shell.diffs.is_empty()));
+    click_selector(vcx, "required-actions-link-structured-3");
+    shell.read_with(vcx, |shell, _| assert!(!shell.browsers.is_empty()));
+    click_selector(vcx, "required-actions-link-structured-5");
+    shell.read_with(vcx, |shell, _| assert!(shell.browsers.len() >= 2));
+    click_selector(vcx, "required-actions-link-structured-4");
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some(CHAT_UI))
+    });
+}
+
+#[gpui::test]
+fn review_open_uses_the_first_artifact_reference(cx: &mut TestAppContext) {
+    use mast_proto::work_outline_user_actions::{RequestLink, RequestLinkTarget, UserActionKind};
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let mut action = request("review-reference", "s1", API, CHAT_API, "Review plan");
+        action.kind = Some(UserActionKind::Review);
+        action.links.push(RequestLink {
+            label: "Plan".into(),
+            target: RequestLinkTarget::Artifact {
+                id: crate::artifacts::tests::id(1),
+            },
+        });
+        snapshot.user_action_requests.push(action);
+    });
+    let state = shell.read_with(vcx, |shell, _| shell.state.clone());
+    state.update(vcx, |state, _| {
+        state.set_test_artifacts(crate::artifacts::tests::snapshot(vec![
+            crate::artifacts::tests::artifact(
+                &crate::artifacts::tests::id(1),
+                "Plan",
+                mast_proto::ArtifactKind::Markdown,
+            ),
+        ]))
+    });
+    draw(vcx);
+    click_selector(vcx, "required-actions-open-review-reference");
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.artifact_tabs.tabs.len(), 1)
+    });
+}
+
+#[gpui::test]
+fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
+    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let mut action = request("markdown-detail", "s1", API, CHAT_API, "Review details");
+        action.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff);
+        action.info = Some("**Details** https://github.com/acme/repo/pull/2".into());
+        snapshot.user_action_requests.push(action);
+    });
+    click_selector(vcx, "required-actions-info-toggle-markdown-detail");
+    assert!(has(vcx, "required-actions-info-markdown-detail"));
+}

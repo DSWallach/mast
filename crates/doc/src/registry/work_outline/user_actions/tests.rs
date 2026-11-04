@@ -119,6 +119,8 @@ fn request_params(
     dedupe: Option<&str>,
 ) -> WorkOutlineMutation {
     WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        links: Vec::new(),
+        facts: Vec::new(),
         kind: None,
         priority: None,
         work_item_id: work_item.into(),
@@ -272,6 +274,30 @@ fn pending_ops(doc: &RegistryDoc) -> usize {
 }
 
 // ── requests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn request_links_and_facts_round_trip_and_legacy_row() {
+    use mast_proto::{RequestFact, RequestLink, RequestLinkTarget};
+    let mut doc = doc_with_spaces("dev-a");
+    let item_id = item(&mut doc, "links-item", None);
+    let mut mutation = request_params("links-request", &item_id, "c1", None);
+    let link = RequestLink { label: "Plan".into(), target: RequestLinkTarget::Artifact { id: "artifact".into() } };
+    let fact = RequestFact { label: "Status".into(), value: "Ready".into() };
+    if let WorkOutlineMutation::CreateUserActionRequest(ref mut params) = mutation {
+        params.links = vec![link.clone()];
+        params.facts = vec![fact.clone()];
+    }
+    let id = apply(&mut doc, mutation).unwrap().user_action_request_id.unwrap();
+    let mut row = doc.overlay_row(KIND_USER_ACTION_REQUESTS, &id).unwrap();
+    let decoded = decode_request(&row).unwrap().view;
+    assert_eq!(decoded.links, vec![link]);
+    assert_eq!(decoded.facts, vec![fact]);
+    row.fields.remove("links");
+    row.fields.remove("facts");
+    let legacy = decode_request(&row).unwrap().view;
+    assert!(legacy.links.is_empty());
+    assert!(legacy.facts.is_empty());
+}
 
 #[test]
 fn request_kind_round_trip_and_legacy_row() {

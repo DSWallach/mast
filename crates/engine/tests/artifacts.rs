@@ -2118,3 +2118,195 @@ async fn publishing_and_resolving_trigger_the_background_sync_without_a_tick() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+async fn assert_request_link_targets(rig: &Rig, good: Value, bad: Value) {
+    let link = json!({"label": "Reference", "target": good});
+    let facts = json!([{ "label": "Status", "value": "Ready" }]);
+    let created = tool(
+        rig,
+        &rig.token,
+        "work_outline_create_user_action_request",
+        json!({
+            "request": "Review", "idempotencyKey": "links-good", "links": [link], "facts": facts
+        }),
+    )
+    .await
+    .unwrap();
+    let id = created["userActionRequestId"].as_str().unwrap();
+    let current = tool(rig, &rig.token, "work_outline_read_current", json!({}))
+        .await
+        .unwrap();
+    let request = current["userActionRequests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    assert_eq!(request["links"], json!([link]));
+    assert_eq!(request["facts"], facts);
+    let detail = tool(
+        rig,
+        &rig.token,
+        "get_user_action_request",
+        json!({"requestId": id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(detail["request"]["links"], json!([link]));
+    assert_eq!(detail["request"]["facts"], facts);
+    let subtree = tool(rig, &rig.token, "work_outline_read_subtree", json!({}))
+        .await
+        .unwrap();
+    let request = subtree["tree"]["openUserActionRequests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    assert_eq!(request["links"], json!([link]));
+    assert_eq!(request["facts"], facts);
+    let error = tool(rig, &rig.token, "work_outline_create_user_action_request", json!({
+        "request": "Review", "idempotencyKey": "links-bad", "links": [{"label": "Bad reference", "target": bad}]
+    })).await.unwrap_err();
+    assert!(
+        error.contains("Bad reference") && error.contains("artifact, file, diff, pr, chat, url"),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_link_artifact_scope() {
+    let rig = rig().await;
+    std::fs::write(rig.worktree.join("link-plan.md"), "# Plan\n").unwrap();
+    let own = publish(
+        &rig,
+        &rig.token,
+        json!({"path":"link-plan.md", "title":"Plan", "note":"n", "idempotencyKey":"own-plan"}),
+    )
+    .await;
+    let other = publish(
+        &rig,
+        &rig.other_token,
+        json!({"path":"link-plan.md", "title":"Other", "note":"n", "idempotencyKey":"other-plan"}),
+    )
+    .await;
+    assert_request_link_targets(
+        &rig,
+        json!({"type":"artifact", "id":own["artifactId"]}),
+        json!({"type":"artifact", "id":other["artifactId"]}),
+    )
+    .await;
+    let error = tool(&rig, &rig.token, "work_outline_create_user_action_request", json!({"request":"Review", "idempotencyKey":"missing-artifact", "links":[{"label":"Missing", "target":{"type":"artifact", "id":"absent"}}]})).await.unwrap_err();
+    assert!(error.contains("Missing"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_link_file_scope() {
+    let rig = rig().await;
+    assert_request_link_targets(
+        &rig,
+        json!({"type":"file", "path":"README.md", "line":1}),
+        json!({"type":"file", "path":"../outside"}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_link_diff_target() {
+    let rig = rig().await;
+    assert_request_link_targets(
+        &rig,
+        json!({"type":"diff", "branch":"feature"}),
+        json!({"type":"diff", "branch":""}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_link_pull_request_url() {
+    let rig = rig().await;
+    assert_request_link_targets(
+        &rig,
+        json!({"type":"pr", "url":"https://github.com/org/repo/pull/123"}),
+        json!({"type":"pr", "url":"https://github.com/org/repo/issues/123"}),
+    )
+    .await;
+    let result = tool(&rig, &rig.token, "work_outline_create_user_action_request", json!({"request":"Review", "idempotencyKey":"gitlab", "links":[{"label":"GitLab", "target":{"type":"pr", "url":"https://gitlab.com/group/project/-/merge_requests/12"}}]})).await;
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_link_chat_scope() {
+    let rig = rig().await;
+    assert_request_link_targets(
+        &rig,
+        json!({"type":"chat", "id":CHAT}),
+        json!({"type":"chat", "id":OTHER_CHAT}),
+    )
+    .await;
+    let error = tool(&rig, &rig.token, "work_outline_create_user_action_request", json!({"request":"Review", "idempotencyKey":"missing-chat", "links":[{"label":"Missing", "target":{"type":"chat", "id":"absent"}}]})).await.unwrap_err();
+    assert!(error.contains("Missing"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_link_https_url() {
+    let rig = rig().await;
+    assert_request_link_targets(
+        &rig,
+        json!({"type":"url", "url":"https://example.com/"}),
+        json!({"type":"url", "url":"http://example.com/"}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_link_and_fact_limits() {
+    let rig = rig().await;
+    let link =
+        json!({"label":"x".repeat(40), "target":{"type":"url", "url":"https://example.com"}});
+    let fact = json!({"label":"x".repeat(40), "value":"x".repeat(120)});
+    let create = |key: &str, links: Value, facts: Value| json!({"request":"Review", "idempotencyKey":key, "links":links, "facts":facts});
+    tool(
+        &rig,
+        &rig.token,
+        "work_outline_create_user_action_request",
+        create(
+            "limits-good",
+            json!(vec![link.clone(); 8]),
+            json!(vec![fact.clone(); 8]),
+        ),
+    )
+    .await
+    .unwrap();
+    for (key, links, facts) in [
+        ("links-count", json!(vec![link.clone(); 9]), json!([])),
+        ("facts-count", json!([]), json!(vec![fact.clone(); 9])),
+        (
+            "link-label",
+            json!([{ "label":"x".repeat(41), "target":{"type":"url", "url":"https://example.com"}}]),
+            json!([]),
+        ),
+        (
+            "fact-label",
+            json!([]),
+            json!([{ "label":"x".repeat(41), "value":"v"}]),
+        ),
+        (
+            "fact-value",
+            json!([]),
+            json!([{ "label":"x", "value":"x".repeat(121)}]),
+        ),
+    ] {
+        assert!(
+            tool(
+                &rig,
+                &rig.token,
+                "work_outline_create_user_action_request",
+                create(key, links, facts)
+            )
+            .await
+            .is_err(),
+            "{key}"
+        );
+    }
+}

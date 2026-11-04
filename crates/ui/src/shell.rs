@@ -3592,6 +3592,42 @@ impl Shell {
         });
     }
 
+    pub(crate) fn open_request_file(
+        &mut self,
+        chat_id: String,
+        path: String,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chat(chat_id.clone(), cx);
+        cx.defer_in(window, move |this, window, cx| {
+            if this.active_chat == chat_id {
+                let target = match line {
+                    Some(line) => format!("{path}:{line}"),
+                    None => path,
+                };
+                this.open_workspace_file_link(&target, window, cx);
+            }
+        });
+    }
+
+    pub(crate) fn open_request_diff(
+        &mut self,
+        chat_id: String,
+        branch: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(branch) = branch {
+            let task = self.state.update(cx, |state, cx| {
+                state.clear_chat_diff_member_pick(&chat_id);
+                state.bind_chat_ref_target(&chat_id, branch, None, cx)
+            });
+            task.detach();
+        }
+        self.open_chat_changes(chat_id, cx);
+    }
+
     fn add_diff_surface(&mut self, cx: &mut Context<Self>) {
         let chat_id = self.active_chat.clone();
         let changes = cx.new(|cx| Changes::for_chat(self.state.clone(), chat_id, cx));

@@ -96,13 +96,31 @@ pub(crate) fn decode_request(row: &RegistryRow) -> Result<DecodedRequest, WorkOu
         resolution.is_some() || row.fields.get("state").and_then(Value::as_str) == Some("resolved");
     Ok(DecodedRequest {
         view: UserActionRequestView {
-            kind: Some(row.fields.get("kind")
-                .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
-                .unwrap_or_else(|| mast_proto::work_outline_user_actions::classify_legacy_request(
-                    &str_field(row, "text").unwrap_or_default(),
-                    str_field(row, "dedupeKey").as_deref(),
-                ))),
-            priority: row.fields.get("priority").and_then(|v| serde_json::from_value(v.clone()).ok()),
+            links: row
+                .fields
+                .get("links")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default(),
+            facts: row
+                .fields
+                .get("facts")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default(),
+            kind: Some(
+                row.fields
+                    .get("kind")
+                    .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
+                    .unwrap_or_else(|| {
+                        mast_proto::work_outline_user_actions::classify_legacy_request(
+                            &str_field(row, "text").unwrap_or_default(),
+                            str_field(row, "dedupeKey").as_deref(),
+                        )
+                    }),
+            ),
+            priority: row
+                .fields
+                .get("priority")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
             id: row.id.clone(),
             space_id,
             work_item_id: str_field(row, "workItemId").unwrap_or_default(),
@@ -435,9 +453,15 @@ impl RegistryDoc {
                 "text": answer.text,
             });
         }
-        if let Some(outcome) = outcome { resolution["outcome"] = json!(outcome); }
-        if let Some(values) = values { resolution["values"] = values.clone(); }
-        if let Some(via) = via { resolution["via"] = json!(via); }
+        if let Some(outcome) = outcome {
+            resolution["outcome"] = json!(outcome);
+        }
+        if let Some(values) = values {
+            resolution["values"] = values.clone();
+        }
+        if let Some(via) = via {
+            resolution["via"] = json!(via);
+        }
         requests
             .into_iter()
             .filter(|request| request.is_open())
@@ -484,7 +508,10 @@ impl RegistryDoc {
             actor,
             now_ms,
             Some(COMPLETION_RESOLUTION_NOTE),
-            None, None, None, None,
+            None,
+            None,
+            None,
+            None,
         ))
     }
 
@@ -525,6 +552,15 @@ impl RegistryDoc {
                 user_action_limits::MAX_DEDUPE_KEY_CHARS,
                 true,
             )?;
+        }
+        if p.links.len() > 8 || p.facts.len() > 8 {
+            return Err(invalid("At most 8 links and 8 facts are allowed"));
+        }
+        if p.links.iter().any(|link| link.label.chars().count() > 40) {
+            return Err(invalid("A link label exceeds 40 characters"));
+        }
+        if p.facts.iter().any(|fact| fact.label.chars().count() > 40 || fact.value.chars().count() > 120) {
+            return Err(invalid("A fact label or value exceeds its character limit"));
         }
         let system_origin = p.origin.kind == UserActionOriginKind::System;
         if system_origin {
@@ -604,6 +640,8 @@ impl RegistryDoc {
             ("inputsHash".to_owned(), json!(hash)),
             ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
         ]);
+        set.insert("links".to_owned(), json!(p.links));
+        set.insert("facts".to_owned(), json!(p.facts));
         set.insert("kind".to_owned(), json!(p.kind.unwrap_or_default()));
         if let Some(priority) = p.priority {
             set.insert("priority".to_owned(), json!(priority));
@@ -640,20 +678,54 @@ impl RegistryDoc {
         check_id("request", &p.user_action_request_id)?;
         check_note("The resolution note", p.note.as_deref())?;
         if let Some(outcome) = p.outcome.as_deref() {
-            if !["approved", "declined", "changesRequested", "chosen", "answered", "done", "dismissed", "merged", "superseded"].contains(&outcome) {
-                return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Invalid resolution outcome"));
+            if ![
+                "approved",
+                "declined",
+                "changesRequested",
+                "chosen",
+                "answered",
+                "done",
+                "dismissed",
+                "merged",
+                "superseded",
+            ]
+            .contains(&outcome)
+            {
+                return Err(WorkOutlineError::new(
+                    WorkOutlineErrorCode::Invalid,
+                    "Invalid resolution outcome",
+                ));
             }
-            if actor.kind == WorkOutlineActorKind::Agent && !["done", "superseded", "declined"].contains(&outcome) && !(outcome == "answered" && p.answer.is_some()) {
-                return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Agents cannot record this outcome"));
+            if actor.kind == WorkOutlineActorKind::Agent
+                && !["done", "superseded", "declined"].contains(&outcome)
+                && !(outcome == "answered" && p.answer.is_some())
+            {
+                return Err(WorkOutlineError::new(
+                    WorkOutlineErrorCode::Invalid,
+                    "Agents cannot record this outcome",
+                ));
             }
         }
         if let Some(via) = p.via.as_deref() {
-            if !["card", "chat", "agent"].contains(&via) || (via == "card" && actor.kind != WorkOutlineActorKind::User) || (via == "chat" && p.answer.is_none()) || (via == "agent" && actor.kind != WorkOutlineActorKind::Agent) {
-                return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Invalid resolution provenance"));
+            if !["card", "chat", "agent"].contains(&via)
+                || (via == "card" && actor.kind != WorkOutlineActorKind::User)
+                || (via == "chat" && p.answer.is_none())
+                || (via == "agent" && actor.kind != WorkOutlineActorKind::Agent)
+            {
+                return Err(WorkOutlineError::new(
+                    WorkOutlineErrorCode::Invalid,
+                    "Invalid resolution provenance",
+                ));
             }
         }
-        if p.values.as_ref().is_some_and(|v| v.to_string().len() > 4000) {
-            return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Resolution values are too large"));
+        if p.values
+            .as_ref()
+            .is_some_and(|v| v.to_string().len() > 4000)
+        {
+            return Err(WorkOutlineError::new(
+                WorkOutlineErrorCode::Invalid,
+                "Resolution values are too large",
+            ));
         }
 
         if let Some(answer) = &p.answer {
@@ -707,8 +779,16 @@ impl RegistryDoc {
                 })
                 .collect(),
         };
-        let plan =
-            Self::plan_resolutions(&group, actor, now_ms, p.note.as_deref(), p.answer.as_ref(), p.outcome.as_deref(), p.values.as_ref(), p.via.as_deref());
+        let plan = Self::plan_resolutions(
+            &group,
+            actor,
+            now_ms,
+            p.note.as_deref(),
+            p.answer.as_ref(),
+            p.outcome.as_deref(),
+            p.values.as_ref(),
+            p.via.as_deref(),
+        );
         self.commit(plan, &[])
     }
 
@@ -1185,9 +1265,7 @@ impl RegistryDoc {
         space == request.space_id
             && self
                 .chat_assigned_work_item(agent_chat, &space)
-                .is_some_and(|root| {
-                    self.item_in_agent_reach(&space, &root, &request.work_item_id)
-                })
+                .is_some_and(|root| self.item_in_agent_reach(&space, &root, &request.work_item_id))
     }
 
     /// `item` is `root` or below it, or inside `root`'s nearest project (the
@@ -1219,7 +1297,8 @@ impl RegistryDoc {
 
     fn item_in_space(&self, item_id: &str, space: &str) -> bool {
         // Unknown ids fall through to the mutator's `notFound`.
-        self.live_item(item_id).map_or(true, |item| item.space_id == space)
+        self.live_item(item_id)
+            .map_or(true, |item| item.space_id == space)
     }
 
     /// Admin chats (contract amendment "admin chats"): within their granted
@@ -1284,17 +1363,21 @@ impl RegistryDoc {
                         }
                     },
             ),
-            WorkOutlineMutation::UpdateWorkItemInstruction(p) => self.admin_instruction(&p.instruction_id, space),
-            WorkOutlineMutation::MoveWorkItemInstruction(p) => self.admin_instruction(&p.instruction_id, space),
-            WorkOutlineMutation::ArchiveWorkItemInstruction(p) => self.admin_instruction(&p.instruction_id, space),
+            WorkOutlineMutation::UpdateWorkItemInstruction(p) => {
+                self.admin_instruction(&p.instruction_id, space)
+            }
+            WorkOutlineMutation::MoveWorkItemInstruction(p) => {
+                self.admin_instruction(&p.instruction_id, space)
+            }
+            WorkOutlineMutation::ArchiveWorkItemInstruction(p) => {
+                self.admin_instruction(&p.instruction_id, space)
+            }
             WorkOutlineMutation::ResolveUserActionRequest(p) => {
                 let row = self.overlay_row(KIND_USER_ACTION_REQUESTS, &p.user_action_request_id)?;
                 if str_field(&row, "dedupeKey")
                     .is_some_and(|key| key.starts_with(mast_proto::ADMIN_BULK_DEDUPE_PREFIX))
                 {
-                    return Some(Err(unauthorized(
-                        "Only the user can approve a bulk change",
-                    )));
+                    return Some(Err(unauthorized("Only the user can approve a bulk change")));
                 }
                 let item_ok = str_field(&row, "workItemId")
                     .is_none_or(|item| self.item_in_space(&item, space));
@@ -1310,8 +1393,7 @@ impl RegistryDoc {
                 self.admin_proposal(&p.proposal_id, space)
             }
             WorkOutlineMutation::AssignChatToWorkItem(p) => ok_if(
-                self.chat_in_space(&p.chat_id, space)
-                    && self.item_in_space(&p.work_item_id, space),
+                self.chat_in_space(&p.chat_id, space) && self.item_in_space(&p.work_item_id, space),
             ),
             WorkOutlineMutation::RemoveChatFromWorkItem(p) => {
                 ok_if(self.chat_in_space(&p.chat_id, space))
@@ -1337,9 +1419,9 @@ impl RegistryDoc {
             WorkOutlineMutation::SetContainerTemplate(p) => {
                 ok_if(p.space_id == space && self.item_in_space(&p.work_item_id, space))
             }
-            WorkOutlineMutation::SaveWorkItemTemplate(p) => ok_if(
-                p.space_id == space && self.item_in_space(&p.project_work_item_id, space),
-            ),
+            WorkOutlineMutation::SaveWorkItemTemplate(p) => {
+                ok_if(p.space_id == space && self.item_in_space(&p.project_work_item_id, space))
+            }
             // Linear / PR-sync settings, external references, repair and
             // template deletion stay with the user (and the normal agent
             // policy refuses them).
