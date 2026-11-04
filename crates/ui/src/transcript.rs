@@ -13233,7 +13233,7 @@ mod tests {
                 self.0.update(cx, |this, cx| this.render_row(0, window, cx))
             }
         }
-        let (_, vcx) = cx.add_window_view(|_, _| RowFixture(transcript.clone()));
+        let (fixture, vcx) = cx.add_window_view(|_, _| RowFixture(transcript.clone()));
         vcx.run_until_parked();
         assert!(vcx.debug_bounds("relay-source").is_some());
         let source = vcx.debug_bounds("relay-source").unwrap().center();
@@ -13246,6 +13246,17 @@ mod tests {
         let collapse = vcx.debug_bounds("relay-expander").unwrap().center();
         vcx.simulate_click(collapse, gpui::Modifiers::default());
         transcript.read_with(vcx, |this, _| assert_eq!(this.user_folds["relay"].open, Some(false)));
+        for (input, has_header) in [
+            ("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- Done", true),
+            ("[Message from Mast chat Admin (abc) (an admin chat, granted by Mikey; this is not Mikey's own message). Reply to it with the Mast `send_message` tool, chat abc.]\n\nHello", true),
+            ("Human text", false),
+        ] {
+            entry.parts = vec![text_part("text", input)];
+            transcript.update(vcx, |this, _| this.rows = rows_for_entry(&entry, false, &mut parse));
+            fixture.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            assert_eq!(vcx.debug_bounds("relay-source").is_some(), has_header);
+        }
     }
 
     #[test]

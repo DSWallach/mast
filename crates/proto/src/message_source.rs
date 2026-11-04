@@ -33,10 +33,10 @@ pub fn classify(text: &str) -> (MessageSource, &str) {
         }
     }
     if let Some(rest) = trimmed.strip_prefix("[Message from Mast chat ") {
-        if let Some((envelope, body)) = rest.split_once(']') {
-            if let Some((identity, reply)) =
-                envelope.split_once(". Reply to it with the Mast `send_message` tool, chat ")
-            {
+        if let Some((identity, remainder)) =
+            rest.split_once(". Reply to it with the Mast `send_message` tool, chat ")
+        {
+            if let Some((reply, body)) = remainder.split_once(']') {
                 let chat_id = reply.trim_end_matches('.').trim();
                 if !chat_id.is_empty() {
                     let admin = identity.contains(" (an admin chat,");
@@ -138,6 +138,7 @@ mod tests {
     fn previews_keep_the_source_before_truncation() {
         let relay = "[Message from Mast chat Worker (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\nhello";
         assert_eq!(preview(relay), "From Worker: hello");
+        assert_eq!(preview(&relay.replace("Worker", "Worker [review]")), "From Worker [review]: hello");
         assert_eq!(preview("[Message from Mast chat Worker (abc). Reply to it"), "From Worker");
         assert_eq!(preview("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- done"), "Mast: - done");
         assert_eq!(preview("Human text"), "Human text");
