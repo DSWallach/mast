@@ -1993,7 +1993,8 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
         .unwrap_err();
     assert!(err.contains("missing field `request`"), "{err}");
     assert!(err.contains("required: request"), "{err}");
-    assert!(err.contains("optional: detail"), "{err}");
+    assert!(err.contains("optional: kind"), "{err}");
+    assert!(err.contains("detail (context for the user)"), "{err}");
     assert!(err.contains("example: {\"request\""), "{err}");
     let err = call("work_outline_create_child", json!({ "title": "x" }))
         .await
