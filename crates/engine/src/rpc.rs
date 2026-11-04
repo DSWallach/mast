@@ -2155,6 +2155,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SEARCH_FILES
             | methods::LIST_WORKSPACE_DIRECTORY
             | methods::SEARCH_WORKSPACE_FILES
+            | methods::WATCH_WORKSPACE_SEARCH_FILES
             | methods::SEARCH_WORKSPACE_CONTENT
             | methods::READ_WORKSPACE_IMAGE
             | methods::READ_WORKSPACE_FILE
@@ -2231,6 +2232,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::WATCH_WORKSPACE_FILES
+            | methods::WATCH_WORKSPACE_SEARCH_FILES
             | methods::SEARCH_WORKSPACE_CONTENT
             | methods::UPDATE_STATUS
     )
@@ -4655,6 +4657,28 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&page)
             }
+            methods::WATCH_WORKSPACE_SEARCH_FILES => {
+                let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
+                let index = self.workspace_files
+                    .subscribe_search_files(request.target)
+                    .await
+                    .map_err(RpcError::from)?;
+                let stream = futures::stream::unfold((index, true), |(mut index, mut first)| async move {
+                    loop {
+                        if !first && index.changed().await.is_err() { return None; }
+                        first = false;
+                        let value = index.borrow_and_update().clone();
+                        if let Some(value) = value {
+                            let frame = match value {
+                                Ok(files) => serde_json::json!({"files": files}),
+                                Err(error) => serde_json::json!({"error": error}),
+                            };
+                            return Some((frame, (index, false)));
+                        }
+                    }
+                });
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
             methods::SEARCH_WORKSPACE_FILES => {
                 let request: mast_proto::SearchWorkspaceFilesRequest = parse_params(params)?;
                 let matches = tokio::time::timeout(
@@ -4676,6 +4700,10 @@ impl RpcService for EngineRpc {
                     ));
                 }
                 let workspace = self.workspace_files.resolve_target(&request.target).await?;
+                let indexed_paths = self.workspace_files
+                    .list_search_files(request.target.clone())
+                    .await
+                    .map_err(RpcError::from)?;
                 let changed_files = request
                     .changed_files
                     .map(|paths| {
@@ -4703,8 +4731,10 @@ impl RpcService for EngineRpc {
                 let worker_cancelled = cancelled.clone();
                 tokio::task::spawn_blocking(move || {
                     use mast_proto::WorkspaceContentSearchFrame as Frame;
-                    let result = crate::workspace_content_search::search_workspace_content(
+                    let progress_sender = sender.clone();
+                    let result = crate::workspace_content_search::search_indexed_content(
                         &workspace.root,
+                        &indexed_paths,
                         &query,
                         &worker_cancelled,
                         |item| {
@@ -4717,6 +4747,7 @@ impl RpcService for EngineRpc {
                                 })
                                 .is_ok()
                         },
+                        |files| { let _ = progress_sender.blocking_send(Frame::Progress { files }); },
                     );
                     let frame = match result {
                         Ok(summary) => Frame::Complete {
@@ -5782,6 +5813,8 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
+        assert!(forwardable(methods::WATCH_WORKSPACE_SEARCH_FILES));
+        assert!(is_stream_method(methods::WATCH_WORKSPACE_SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_WORKSPACE_CONTENT));
         assert!(is_stream_method(methods::SEARCH_WORKSPACE_CONTENT));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));

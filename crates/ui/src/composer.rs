@@ -1441,8 +1441,6 @@ fn enter_outcome(has_completion: bool, fallback: EnterOutcome) -> EnterOutcome {
 fn input_bindings(context: &'static str, result_navigation: bool) -> Vec<KeyBinding> {
     let ctx = Some(context);
     let mut bindings = vec![
-        KeyBinding::new("tab", MentionTab, ctx),
-        KeyBinding::new("shift-enter", Newline, ctx),
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
@@ -1470,6 +1468,8 @@ fn input_bindings(context: &'static str, result_navigation: bool) -> Vec<KeyBind
         KeyBinding::new("cmd-delete", DeleteToLineEnd, ctx),
     ];
     if !result_navigation {
+        bindings.push(KeyBinding::new("tab", MentionTab, ctx));
+        bindings.push(KeyBinding::new("shift-enter", Newline, ctx));
         bindings.push(KeyBinding::new("up", Up, ctx));
         bindings.push(KeyBinding::new("down", Down, ctx));
     }
@@ -9018,6 +9018,11 @@ mod tests {
         assert_eq!(text(cx), "hello big ");
         cx.simulate_keystrokes(window.into(), "left delete");
         assert_eq!(text(cx), "hello big");
+        cx.simulate_keystrokes(window.into(), "home delete");
+        assert_eq!(text(cx), "ello big");
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("replacement".into())));
+        cx.simulate_keystrokes(window.into(), "cmd-a cmd-v");
+        assert_eq!(text(cx), "replacement");
     }
 
     #[gpui::test]

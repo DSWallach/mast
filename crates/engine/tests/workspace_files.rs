@@ -52,6 +52,170 @@ fn assemble(data_dir: &Path, device_id: &str) -> EngineCore {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_index_tracks_file_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let core = assemble(&temp.path().join("data"), "device-index");
+    core.workspace
+        .create_space(
+            "space-index",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    core.workspace
+        .create_chat("chat-index", Some("space-index"), None, None, None)
+        .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let mut stream = client
+        .subscribe(
+            methods::WATCH_WORKSPACE_SEARCH_FILES,
+            serde_json::json!({"chatId":"chat-index"}),
+        )
+        .await
+        .unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(30), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        initial["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "README.md")
+    );
+    let mut content = client
+        .subscribe(
+            methods::SEARCH_WORKSPACE_CONTENT,
+            serde_json::json!({"chatId": "chat-index", "query": "hello"}),
+        )
+        .await
+        .unwrap();
+    let mut saw_progress = false;
+    let mut saw_match = false;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = content.recv().await.unwrap();
+            match frame["type"].as_str() {
+                Some("progress") => saw_progress = true,
+                Some("match") => saw_match |= frame["path"] == "README.md",
+                Some("complete") => break,
+                Some("error") => panic!("content search failed: {frame}"),
+                _ => panic!("unexpected content frame: {frame}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(saw_progress && saw_match);
+    std::fs::write(repo.join("created.rs"), "created").unwrap();
+    let created = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["files"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "created.rs"))
+            {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        created["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "created.rs")
+    );
+    std::fs::rename(repo.join("created.rs"), repo.join("renamed.rs")).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            let paths = frame["files"].as_array().unwrap();
+            if paths.iter().any(|path| path == "renamed.rs")
+                && !paths.iter().any(|path| path == "created.rs")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::remove_file(repo.join("renamed.rs")).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if !frame["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "renamed.rs")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_index_repairs_when_watcher_exceeds_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    for index in 0..=mast_engine::workspace_files::MAX_WATCH_DIRS {
+        std::fs::create_dir(repo.join(format!("directory-{index}"))).unwrap();
+    }
+    let core = assemble(&temp.path().join("data"), "device-index-repair");
+    core.workspace
+        .create_space(
+            "space-index",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    core.workspace
+        .create_chat("chat-index", Some("space-index"), None, None, None)
+        .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let mut stream = client
+        .subscribe(
+            methods::WATCH_WORKSPACE_SEARCH_FILES,
+            serde_json::json!({"chatId":"chat-index"}),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    std::fs::write(repo.join("created.rs"), "created").unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["files"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "created.rs"))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_file_rpcs_list_search_read_write_and_watch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

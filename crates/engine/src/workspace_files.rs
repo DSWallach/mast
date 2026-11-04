@@ -41,6 +41,7 @@ pub const WATCH_REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 pub const MAX_WATCH_DIRS: usize = 8_000;
 const WATCH_EVENT_BUFFER: usize = 256;
 const WATCH_BROADCAST_BUFFER: usize = 64;
+const SEARCH_INDEX_REPAIR_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct WorkspaceFiles {
@@ -53,6 +54,8 @@ struct WorkspaceFilesInner {
     device_id: String,
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
+    search_indexes:
+        Mutex<HashMap<String, tokio::sync::watch::Receiver<Option<Result<Vec<String>, String>>>>>,
     cancel: CancellationToken,
 }
 
@@ -65,6 +68,7 @@ struct WorkspaceFileKey {
 struct CheckoutWatch {
     checkout_id: String,
     root: PathBuf,
+    repair_only: bool,
     // Serializes publication with subscription baselines, including lag recovery.
     sequence: Mutex<u64>,
     subscribers: AtomicUsize,
@@ -223,6 +227,7 @@ impl WorkspaceFiles {
                 device_id: device_id.into(),
                 write_locks: Mutex::new(HashMap::new()),
                 watches: Mutex::new(HashMap::new()),
+                search_indexes: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
             }),
         }
@@ -251,18 +256,41 @@ impl WorkspaceFiles {
                     ));
                 }
                 if let Some(path) = target.checkout_path.as_deref() {
-                    let row = self.inner.workspace.chat_diff_targets(chat_id)
+                    let row = self
+                        .inner
+                        .workspace
+                        .chat_diff_targets(chat_id)
                         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?
-                        .ok_or_else(|| WorkspaceFilesError::Authorization("chat has no bound diff checkout".into()))?;
-                    let stored = row.targets.iter().find(|entry| entry.path == path)
-                        .ok_or_else(|| WorkspaceFilesError::Authorization("checkout is not bound to this chat".into()))?;
+                        .ok_or_else(|| {
+                            WorkspaceFilesError::Authorization(
+                                "chat has no bound diff checkout".into(),
+                            )
+                        })?;
+                    let stored = row
+                        .targets
+                        .iter()
+                        .find(|entry| entry.path == path)
+                        .ok_or_else(|| {
+                            WorkspaceFilesError::Authorization(
+                                "checkout is not bound to this chat".into(),
+                            )
+                        })?;
                     reject_broad_root(Path::new(path))?;
-                    let identity = self.inner.repos.checkout_identity(Path::new(path)).await
+                    let identity = self
+                        .inner
+                        .repos
+                        .checkout_identity(Path::new(path))
+                        .await
                         .map_err(|error| WorkspaceFilesError::Authorization(error.to_string()))?;
                     if identity.id != stored.worktree_id || identity.root != Path::new(path) {
-                        return Err(WorkspaceFilesError::Authorization("bound checkout identity changed".into()));
+                        return Err(WorkspaceFilesError::Authorization(
+                            "bound checkout identity changed".into(),
+                        ));
                     }
-                    return Ok(ResolvedWorkspace { checkout_id: identity.id, root: identity.root });
+                    return Ok(ResolvedWorkspace {
+                        checkout_id: identity.id,
+                        root: identity.root,
+                    });
                 }
                 let cwd = chat.cwd.map(PathBuf::from).ok_or_else(|| {
                     WorkspaceFilesError::NotFound("chat has no workspace folder".into())
@@ -373,6 +401,125 @@ impl WorkspaceFiles {
         .map_err(|error| WorkspaceFilesError::Io(format!("directory worker failed: {error}")))?;
         cancel_on_drop.disarm();
         result
+    }
+
+    pub async fn list_search_files(
+        &self,
+        target: WorkspaceTarget,
+    ) -> Result<Vec<String>, WorkspaceFilesError> {
+        let mut index = self.subscribe_search_files(target).await?;
+        loop {
+            if let Some(result) = index.borrow_and_update().clone() {
+                return result.map_err(WorkspaceFilesError::Io);
+            }
+            index
+                .changed()
+                .await
+                .map_err(|_| WorkspaceFilesError::Io("file index stopped".into()))?;
+        }
+    }
+
+    pub async fn subscribe_search_files(
+        &self,
+        target: WorkspaceTarget,
+    ) -> Result<
+        tokio::sync::watch::Receiver<Option<Result<Vec<String>, String>>>,
+        WorkspaceFilesError,
+    > {
+        let workspace = self.resolve_target(&target).await?;
+        let (receiver, sender) = {
+            let mut indexes = lock(&self.inner.search_indexes);
+            if let Some(index) = indexes.get(&workspace.checkout_id) {
+                (index.clone(), None)
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                indexes.insert(workspace.checkout_id, receiver.clone());
+                (receiver, Some(sender))
+            }
+        };
+        if let Some(sender) = sender {
+            let service = self.clone();
+            let cancel = self.inner.cancel.child_token();
+            tokio::spawn(async move {
+                // Start the first walk while the watcher checks its directory
+                // budget. A second walk after subscription closes that race.
+                let watch = tokio::spawn(async move {
+                    service
+                        .watch_files(WatchWorkspaceFilesRequest { target })
+                        .await
+                });
+                let root = workspace.root.clone();
+                let worker_cancel = cancel.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    build_search_file_index(&root, &worker_cancel)
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+                sender.send_replace(Some(result));
+                let mut changes = match watch.await {
+                    Ok(Ok(changes)) => changes,
+                    Ok(Err(error)) => {
+                        sender.send_replace(Some(Err(error.to_string())));
+                        return;
+                    }
+                    Err(error) => {
+                        sender.send_replace(Some(Err(error.to_string())));
+                        return;
+                    }
+                };
+                // The subscription precedes the second walk, so events during
+                // that walk are replayed after it completes.
+                let _ = changes.recv().await;
+                let repair_only = changes.watch.repair_only;
+                let mut repair = tokio::time::interval(SEARCH_INDEX_REPAIR_INTERVAL);
+                repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                repair.tick().await;
+                loop {
+                    let root = workspace.root.clone();
+                    let worker_cancel = cancel.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        build_search_file_index(&root, &worker_cancel)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result.map_err(|error| error.to_string()));
+                    let changed = sender.borrow().as_ref() != Some(&result);
+                    if changed {
+                        sender.send_replace(Some(result));
+                    }
+                    loop {
+                        let change = tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            _ = repair.tick(), if repair_only => break,
+                            change = changes.recv() => change,
+                        };
+                        let Some(change) = change else {
+                            return;
+                        };
+                        let index = sender.borrow();
+                        let known = index.as_ref().and_then(|result| result.as_ref().ok());
+                        let rebuild = change.resync_required
+                            || change.changes.iter().any(|change| {
+                                change.kind != WorkspaceFileChangeKind::Modified
+                                    || matches!(
+                                        Path::new(&change.path)
+                                            .file_name()
+                                            .and_then(|name| name.to_str()),
+                                        Some(".gitignore" | ".ignore")
+                                    )
+                                    || !known.is_some_and(|paths| paths.contains(&change.path))
+                                    || !workspace.root.join(&change.path).is_file()
+                            });
+                        drop(index);
+                        if rebuild {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        Ok(receiver)
     }
 
     pub async fn search(
@@ -602,6 +749,7 @@ impl CheckoutWatch {
         let watch = Arc::new(Self {
             checkout_id,
             root,
+            repair_only,
             sequence: Mutex::new(0),
             subscribers: AtomicUsize::new(0),
             changes_tx,
@@ -1124,6 +1272,57 @@ fn filtered_directory_paths(root: &Path, target: &Path) -> HashSet<String> {
         .collect()
 }
 
+fn build_search_file_index(
+    root: &Path,
+    cancel: &CancellationToken,
+) -> Result<Vec<String>, WorkspaceFilesError> {
+    let start = Instant::now();
+    let mut paths = Vec::new();
+    for entry in ignore::WalkBuilder::new(root)
+        .follow_links(false)
+        .hidden(false)
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
+        .build()
+    {
+        if cancel.is_cancelled() {
+            return Err(WorkspaceFilesError::Io("file index cancelled".into()));
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        if contains_git_component(relative) {
+            continue;
+        }
+        let Ok(path) = path_to_wire(relative) else {
+            continue;
+        };
+        if WorkspaceRelativePath::file(&path).is_err() {
+            continue;
+        }
+        if !is_internal_temp_wire_path(&path) {
+            paths.push(path);
+        }
+        if paths.len() > 250_000 {
+            return Err(WorkspaceFilesError::Io(
+                "workspace contains too many files to index".into(),
+            ));
+        }
+    }
+    paths.sort_unstable();
+    tracing::debug!(
+        files = paths.len(),
+        elapsed_ms = start.elapsed().as_millis(),
+        "workspace file index built"
+    );
+    Ok(paths)
+}
+
 fn search_workspace_blocking(
     root: &Path,
     query: &str,
@@ -1142,6 +1341,9 @@ fn search_workspace_blocking(
     }
     let query_lower = query.to_lowercase();
     let mut matches = Vec::new();
+    let started = std::time::Instant::now();
+    let mut matching_time = std::time::Duration::ZERO;
+    let mut examined = 0usize;
     for result in builder.build() {
         if cancel.load(Ordering::Relaxed) {
             return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
@@ -1178,7 +1380,11 @@ fn search_workspace_blocking(
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(score) = workspace_search_score(&name, &path, &query_lower) else {
+        examined += 1;
+        let match_started = std::time::Instant::now();
+        let score = workspace_search_score(&name, &path, &query_lower);
+        matching_time += match_started.elapsed();
+        let Some(score) = score else {
             continue;
         };
         matches.push(WorkspaceFileSearchMatch {
@@ -1193,6 +1399,12 @@ fn search_workspace_blocking(
         }
     }
     matches.sort_by(compare_workspace_search_matches);
+    tracing::debug!(
+        files = examined,
+        elapsed_ms = started.elapsed().as_millis(),
+        fuzzy_us = matching_time.as_micros(),
+        "workspace file search completed"
+    );
     Ok(matches)
 }
 
@@ -2023,6 +2235,55 @@ mod tests {
 
     fn no_cancel() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_indexed_content_search() {
+        let root = PathBuf::from(
+            std::env::var("MAST_BENCH_ROOT").expect("MAST_BENCH_ROOT must name the checkout"),
+        );
+        let paths = build_search_file_index(&root, &CancellationToken::new()).unwrap();
+        let query = crate::workspace_content_search::ContentSearchQuery {
+            text: "WorkspaceSearch".into(),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let mut first = None;
+        let summary = crate::workspace_content_search::search_indexed_content(
+            &root,
+            &paths,
+            &query,
+            &no_cancel(),
+            |_| {
+                if first.is_none() {
+                    first = Some(started.elapsed());
+                }
+                true
+            },
+            |_| {},
+        )
+        .unwrap();
+        eprintln!(
+            "indexed content first: {:?}; full: {:?}; matches: {}",
+            first,
+            started.elapsed(),
+            summary.matches
+        );
+    }
+
+    #[test]
+    fn search_index_builds_and_stops_on_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("visible.rs"), "content").unwrap();
+        std::fs::write(root.path().join(".ignore"), "ignored.txt\n").unwrap();
+        std::fs::write(root.path().join("ignored.txt"), "content").unwrap();
+        let cancel = CancellationToken::new();
+        let paths = build_search_file_index(root.path(), &cancel).unwrap();
+        assert!(paths.iter().any(|path| path == "visible.rs"));
+        assert!(!paths.iter().any(|path| path == "ignored.txt"));
+        cancel.cancel();
+        assert!(build_search_file_index(root.path(), &cancel).is_err());
     }
 
     #[test]
