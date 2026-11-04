@@ -350,6 +350,7 @@ pub(crate) fn decision_message(
         "declined" => "Declined",
         "changesRequested" => "Changes requested",
         "dismissed" => "Dismissed",
+        "chosen" => "Chosen",
         _ => "Answered",
     };
     let decision = if note.is_empty() {

@@ -763,15 +763,9 @@ fn system_required_actions_resolve_only_and_open_the_pr_item(cx: &mut gpui::Test
         "Resolve only"
     );
     assert!(row_bounds(vcx, "required-actions-view-pr-req-pr".into()).is_some());
-    // The resolve form has no Reply & resolve either.
+    // Dismiss resolves a system request without a chat relay.
     press(vcx, "required-actions-resolve-req-pr".into());
-    assert!(
-        vcx.debug_bounds("required-actions-resolve-submit")
-            .is_some()
-    );
     assert!(vcx.debug_bounds("required-actions-reply-submit").is_none());
-    list.update(vcx, |list, cx| list.cancel_resolve(cx));
-    draw(vcx);
     // Open lands on the PR item's details.
     press(vcx, "required-actions-open-req-pr".into());
     overview.read_with(vcx, |o, cx| {

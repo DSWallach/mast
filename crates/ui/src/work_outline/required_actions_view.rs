@@ -392,7 +392,7 @@ impl RequiredActionsList {
             return;
         };
         let note = self.typed_note(cx);
-        self.resolve(request_id, (!note.is_empty()).then_some(note), cx);
+        self.decide(request_id, "dismissed".into(), note, cx);
     }
 
     /// Reply & resolve the request whose note is open.
@@ -454,11 +454,12 @@ impl RequiredActionsList {
                 if required_actions::reply_unavailable_reason(&row, &note).is_some() {
                     return;
                 }
+                let outcome = if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose { "chosen" } else { "answered" };
                 ReplyIntent {
                     operation_id: super::actions::new_operation_id(),
                     chat_id: row.chat_id.clone(),
-                    message: required_actions::reply_message(&row.text, &note),
-                    outcome: "answered".into(),
+                    message: required_actions::decision_message(&row.text, &request_id, outcome, &note),
+                    outcome: outcome.into(),
                     note,
                     sent: false,
                 }
@@ -1003,8 +1004,10 @@ impl RequiredActionsList {
                             })
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    this.begin_resolve(decision_id.clone(), window, cx);
-                                    this.decision = Some(outcome.into());
+                                    if !busy {
+                                        this.begin_resolve(decision_id.clone(), window, cx);
+                                        this.decision = Some(outcome.into());
+                                    }
                                 },
                             )),
                         );
@@ -1012,6 +1015,7 @@ impl RequiredActionsList {
                         && !row.system
                     {
                         let reply_id = id.clone();
+                        let can_reply = !busy && row.chat_available;
                         el = el.child(
                             Self::button(
                                 SharedString::from(format!("required-actions-reply-{id}")),
@@ -1025,7 +1029,7 @@ impl RequiredActionsList {
                             })
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    this.begin_resolve(reply_id.clone(), window, cx)
+                                    if can_reply { this.begin_resolve(reply_id.clone(), window, cx) }
                                 },
                             )),
                         );

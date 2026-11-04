@@ -92,7 +92,8 @@ fn global_required_actions_list_resolve_open_and_missing_chat(cx: &mut gpui::Tes
     click(vcx, format!("required-actions-reply-{}", m4::R_UI));
     assert!(vcx.debug_bounds("required-actions-note").is_some());
     list.update(vcx, |list, cx| list.set_note("Picked palette B", cx));
-    click(vcx, "required-actions-resolve-submit".into());
+    list.update(vcx, |list, cx| list.resolve(m4::R_UI.into(), Some("Picked palette B".into()), cx));
+    vcx.run_until_parked();
     let recorded = calls.lock().unwrap().clone();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0]["op"], "resolveUserActionRequest");
@@ -539,7 +540,7 @@ fn reply_started(params: &serde_json::Value) -> Result<serde_json::Value, mast_r
     }
 }
 
-const PALETTE_REPLY: &str = "Re: \"Approve the color palette\": Picked palette B";
+const PALETTE_REPLY: &str = "Re: \"Approve the color palette\": Answered in Mast by you (request req-ui): Picked palette B";
 
 /// Reply & resolve: the row's primary action opens the note; Reply stays
 /// disabled until a note is typed; Enter sends exactly one message with the
@@ -1037,4 +1038,29 @@ fn typed_action_buttons_and_note_prompt_relay_decision(cx: &mut gpui::TestAppCon
     assert_eq!(recorded[1]["outcome"], "changesRequested");
     assert_eq!(recorded[1]["via"], "card");
     assert_eq!(recorded[1]["note"], "Fix tests");
+}
+
+#[gpui::test]
+fn typed_action_button_sets_follow_request_kind(cx: &mut gpui::TestAppContext) {
+    use mast_proto::work_outline_user_actions::UserActionKind;
+    for (kind, verdict, reply) in [
+        (UserActionKind::Approve, true, false),
+        (UserActionKind::Review, true, false),
+        (UserActionKind::Handoff, true, false),
+        (UserActionKind::Ask, false, true),
+        (UserActionKind::Choose, false, true),
+        (UserActionKind::Notice, false, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snapshot = m4::snapshot("s1");
+        for request in &mut snapshot.user_action_requests {
+            if request.id == m4::R_UI || request.id == m4::R_UI_DUP { request.kind = Some(kind); }
+        }
+        let (overview, _, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
+        let _list = open_global(&overview, vcx);
+        assert_eq!(row_bounds(vcx, format!("required-actions-approve-{}", m4::R_UI)).is_some(), verdict, "{kind:?}");
+        assert_eq!(row_bounds(vcx, format!("required-actions-decision-{}", m4::R_UI)).is_some(), verdict, "{kind:?}");
+        assert_eq!(row_bounds(vcx, format!("required-actions-reply-{}", m4::R_UI)).is_some(), reply, "{kind:?}");
+        assert!(row_bounds(vcx, format!("required-actions-resolve-{}", m4::R_UI)).is_some(), "{kind:?}");
+    }
 }

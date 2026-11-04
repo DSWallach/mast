@@ -643,12 +643,12 @@ impl RegistryDoc {
             if !["approved", "declined", "changesRequested", "chosen", "answered", "done", "dismissed", "merged", "superseded"].contains(&outcome) {
                 return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Invalid resolution outcome"));
             }
-            if actor.kind == WorkOutlineActorKind::Agent && !["done", "superseded", "declined", "answered"].contains(&outcome) {
+            if actor.kind == WorkOutlineActorKind::Agent && !["done", "superseded", "declined"].contains(&outcome) && !(outcome == "answered" && p.answer.is_some()) {
                 return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Agents cannot record this outcome"));
             }
         }
         if let Some(via) = p.via.as_deref() {
-            if !["card", "chat", "agent"].contains(&via) || (via == "card" && actor.kind != WorkOutlineActorKind::User) {
+            if !["card", "chat", "agent"].contains(&via) || (via == "card" && actor.kind != WorkOutlineActorKind::User) || (via == "chat" && p.answer.is_none()) || (via == "agent" && actor.kind != WorkOutlineActorKind::Agent) {
                 return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Invalid resolution provenance"));
             }
         }

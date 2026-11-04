@@ -1902,3 +1902,19 @@ fn resolution_outcome_values_and_via_round_trip() {
     );
     assert_eq!(resolution.via.as_deref(), Some("card"));
 }
+
+#[test]
+fn agent_cannot_forge_user_decision_provenance() {
+    let mut doc = doc_with_spaces("dev-a");
+    let w = item(&mut doc, "provenance-item", None);
+    let id = request(&mut doc, "provenance-request", &w, None);
+    for (index, (outcome, via)) in [("approved", "agent"), ("declined", "card"), ("answered", "chat")].iter().enumerate() {
+        let mut mutation = resolve_params(&format!("forgery-{index}"), &id, None);
+        if let WorkOutlineMutation::ResolveUserActionRequest(p) = &mut mutation {
+            p.outcome = Some((*outcome).into());
+            p.via = Some((*via).into());
+        }
+        assert!(apply_as(&mut doc, &agent("c1"), mutation).is_err());
+        assert!(snap(&doc).user_action_request(&id).unwrap().is_open());
+    }
+}
