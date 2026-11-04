@@ -454,11 +454,21 @@ impl RequiredActionsList {
                 if required_actions::reply_unavailable_reason(&row, &note).is_some() {
                     return;
                 }
-                let outcome = if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose { "chosen" } else { "answered" };
+                let outcome =
+                    if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose {
+                        "chosen"
+                    } else {
+                        "answered"
+                    };
                 ReplyIntent {
                     operation_id: super::actions::new_operation_id(),
                     chat_id: row.chat_id.clone(),
-                    message: required_actions::decision_message(&row.text, &request_id, outcome, &note),
+                    message: required_actions::decision_message(
+                        &row.text,
+                        &request_id,
+                        outcome,
+                        &note,
+                    ),
                     outcome: outcome.into(),
                     note,
                     sent: false,
@@ -612,7 +622,9 @@ impl RequiredActionsList {
         outcome: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let values = outcome.as_ref().map(|action| serde_json::json!({ "action": action }));
+        let values = outcome
+            .as_ref()
+            .map(|action| serde_json::json!({ "action": action }));
         let task = self
             .state
             .read(cx)
@@ -1030,7 +1042,9 @@ impl RequiredActionsList {
                             })
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    if can_reply { this.begin_resolve(reply_id.clone(), window, cx) }
+                                    if can_reply {
+                                        this.begin_resolve(reply_id.clone(), window, cx)
+                                    }
                                 },
                             )),
                         );
@@ -1203,6 +1217,7 @@ impl RequiredActionsList {
             format!("required-actions-history-row-{id}")
         };
         let artifact_links = self.render_artifact_links(&id, &row, theme, cx);
+        let request_links = self.render_request_links(&id, &row, theme, cx);
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
@@ -1245,6 +1260,12 @@ impl RequiredActionsList {
                     ),
             )
             .child(div().pl(px(12.0)).child(meta))
+            .children(row.facts.iter().map(|fact| {
+                div().pl(px(12.0)).text_size(crate::typography::ui_rems(10.5))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("{}: {}", fact.label, fact.value)))
+            }))
+            .when_some(request_links, |el, links| el.child(links))
             .when_some(artifact_links, |el, links| el.child(links))
             .when(info_open, |el| {
                 el.child(
@@ -1267,6 +1288,75 @@ impl RequiredActionsList {
                 el.child(div().pl(px(12.0)).child(form))
             })
             .into_any_element()
+    }
+
+    fn render_request_links(
+        &self,
+        id: &str,
+        row: &RequiredActionRow,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use mast_proto::work_outline_user_actions::RequestLinkTarget;
+        if row.links.is_empty() {
+            return None;
+        }
+        let buttons = row.links.iter().enumerate().map(|(index, link)| {
+            let selector = format!("required-actions-link-{id}-{index}");
+            let label = link.label.clone();
+            let target = link.target.clone();
+            let chat_id = row.chat_id.clone();
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .px(px(6.0))
+                .py(px(1.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.accent)
+                .text_size(crate::typography::ui_rems(10.5))
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.element_hover))
+                .child(SharedString::from(label))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if let RequestLinkTarget::Chat { id } = &target {
+                        cx.emit(RequiredActionsEvent::OpenChat(id.clone()));
+                    } else if let Some(shell) = &this.shell {
+                        shell
+                            .update(cx, |shell, cx| match &target {
+                                RequestLinkTarget::Artifact { id } => {
+                                    shell.open_artifact(id.clone(), window, cx)
+                                }
+                                RequestLinkTarget::File { path, line } => shell.open_request_file(
+                                    chat_id.clone(),
+                                    path.clone(),
+                                    *line,
+                                    window,
+                                    cx,
+                                ),
+                                RequestLinkTarget::Diff { branch } => {
+                                    shell.open_request_diff(chat_id.clone(), branch.clone(), cx)
+                                }
+                                RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } => {
+                                    shell.open_web_reference(url, false, window, cx)
+                                }
+                                RequestLinkTarget::Chat { .. } => {}
+                            })
+                            .ok();
+                    }
+                }))
+        });
+        Some(
+            div()
+                .pl(px(12.0))
+                .flex()
+                .flex_wrap()
+                .gap(px(4.0))
+                .children(buttons)
+                .into_any_element(),
+        )
     }
 
     /// `mast-artifact:` links in a request's text or detail, as chips that

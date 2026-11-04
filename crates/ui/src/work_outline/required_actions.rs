@@ -98,6 +98,8 @@ pub(crate) struct RequiredActionRow {
     pub work_item_id: String,
     pub text: String,
     pub info: Option<String>,
+    pub links: Vec<mast_proto::work_outline_user_actions::RequestLink>,
+    pub facts: Vec<mast_proto::work_outline_user_actions::RequestFact>,
     /// Breadcrumb of the work item (prefixed with the Space in a multi-Space
     /// global view); "Deleted work item" when the item is gone.
     pub path: String,
@@ -277,6 +279,8 @@ fn row_for(
         work_item_id: request.work_item_id.clone(),
         text: request.text.clone(),
         info: request.info.clone().filter(|info| !info.trim().is_empty()),
+        links: request.links.clone(),
+        facts: request.facts.clone(),
         path,
         chat_id: request.chat_id.clone(),
         chat_label: match chat {
