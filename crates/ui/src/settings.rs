@@ -1687,20 +1687,54 @@ impl UiSettings {
         } else {
             ProfileAtMigration::Fresh
         };
-        let compact_missing = std::fs::read_to_string(Self::path(data_dir))
+        let stored_settings = std::fs::read_to_string(Self::path(data_dir))
             .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|value| value.as_object().map(|object| !object.contains_key("compactSingleChat")))
-            .unwrap_or(true);
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let missing = |key: &str| {
+            stored_settings
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .is_none_or(|object| !object.contains_key(key))
+        };
         let mut settings = Self::load(data_dir);
         let mut migrated = false;
         if settings.profile_at_migration.is_none() {
             settings.migrate_profile_settings(profile);
             settings.profile_at_migration = Some(profile);
             migrated = true;
-        } else if compact_missing {
-            settings.compact_single_chat = settings.profile_at_migration == Some(ProfileAtMigration::Existing);
+        } else if missing("compactSingleChat") {
+            settings.compact_single_chat =
+                settings.profile_at_migration == Some(ProfileAtMigration::Existing);
             migrated = true;
+        }
+        // Preserve explicitly stored preferences. Missing fields on existing profiles
+        // retain the legacy defaults supplied by `load` and are written once.
+        let fresh = settings.profile_at_migration == Some(ProfileAtMigration::Fresh);
+        for (key, value) in [
+            ("soundEnabled", &mut settings.sound_enabled),
+            (
+                "soundCompletionEnabled",
+                &mut settings.sound_completion_enabled,
+            ),
+            ("soundInputEnabled", &mut settings.sound_input_enabled),
+            (
+                "soundAttentionEnabled",
+                &mut settings.sound_attention_enabled,
+            ),
+            ("notificationsEnabled", &mut settings.notifications_enabled),
+            (
+                "notificationsBackgroundOnly",
+                &mut settings.notifications_background_only,
+            ),
+            ("liveAppIcon", &mut settings.live_app_icon),
+            ("showMenuBarItem", &mut settings.show_menu_bar_item),
+        ] {
+            if missing(key) {
+                if fresh && !matches!(key, "notificationsEnabled" | "notificationsBackgroundOnly") {
+                    *value = false;
+                }
+                migrated = true;
+            }
         }
         if migrated {
             if let Err(error) = settings.save(data_dir) {
@@ -1902,17 +1936,26 @@ mod tests {
         for existing in [false, true] {
             let parent = tempfile::tempdir().unwrap();
             let dir = parent.path().join("profile");
-            if existing { std::fs::create_dir(&dir).unwrap(); }
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
             let mut settings = UiSettings::load_for_startup(&dir);
             assert_eq!(settings.compact_single_chat, existing);
             settings.compact_single_chat = !existing;
             settings.save(&dir).unwrap();
-            assert_eq!(UiSettings::load_for_startup(&dir).compact_single_chat, !existing);
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).compact_single_chat,
+                !existing
+            );
             let path = UiSettings::path(&dir);
-            let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let mut json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             json.as_object_mut().unwrap().remove("compactSingleChat");
             std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
-            assert_eq!(UiSettings::load_for_startup(&dir).compact_single_chat, existing);
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).compact_single_chat,
+                existing
+            );
         }
     }
 
@@ -1921,12 +1964,17 @@ mod tests {
         for existing in [false, true] {
             let parent = tempfile::tempdir().unwrap();
             let dir = parent.path().join("profile");
-            if existing { std::fs::create_dir(&dir).unwrap(); }
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
             let mut settings = UiSettings::load_for_startup(&dir);
             assert_eq!(settings.team_tab_visibility, TeamTabVisibility::Auto);
             settings.team_tab_visibility = TeamTabVisibility::Always;
             settings.save(&dir).unwrap();
-            assert_eq!(UiSettings::load_for_startup(&dir).team_tab_visibility, TeamTabVisibility::Always);
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).team_tab_visibility,
+                TeamTabVisibility::Always
+            );
         }
     }
 
@@ -1983,6 +2031,62 @@ mod tests {
             let reloaded = UiSettings::load_for_startup(&data_dir);
             assert_eq!(reloaded.profile_at_migration, Some(expected));
             assert_eq!(reloaded.sidebar_width, 345.0);
+        }
+    }
+
+    #[test]
+    fn notification_and_presence_defaults_migrate_and_persist() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(UiSettings::path(&dir), r#"{"sidebarWidth":300}"#).unwrap();
+            }
+            let settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.sound_enabled, existing);
+            assert_eq!(settings.sound_completion_enabled, existing);
+            assert_eq!(settings.sound_input_enabled, existing);
+            assert_eq!(settings.sound_attention_enabled, existing);
+            assert!(settings.notifications_enabled);
+            assert!(settings.notifications_background_only);
+            assert_eq!(settings.live_app_icon, existing);
+            assert_eq!(settings.show_menu_bar_item, existing);
+            let stored: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(UiSettings::path(&dir)).unwrap())
+                    .unwrap();
+            for key in [
+                "soundEnabled",
+                "soundCompletionEnabled",
+                "soundInputEnabled",
+                "soundAttentionEnabled",
+                "notificationsEnabled",
+                "notificationsBackgroundOnly",
+                "liveAppIcon",
+                "showMenuBarItem",
+            ] {
+                assert!(stored.get(key).is_some(), "{key} was not persisted");
+            }
+            assert_eq!(UiSettings::load_for_startup(&dir), settings);
+        }
+    }
+
+    #[test]
+    fn notification_and_presence_migration_preserves_explicit_preferences() {
+        for profile in ["fresh", "existing"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(UiSettings::path(dir.path()), format!(
+                r#"{{"profileAtMigration":"{profile}","soundEnabled":true,"soundCompletionEnabled":false,"soundInputEnabled":true,"soundAttentionEnabled":false,"notificationsEnabled":false,"notificationsBackgroundOnly":false,"liveAppIcon":true,"showMenuBarItem":true}}"#
+            )).unwrap();
+            let settings = UiSettings::load_for_startup(dir.path());
+            assert!(settings.sound_enabled);
+            assert!(!settings.sound_completion_enabled);
+            assert!(settings.sound_input_enabled);
+            assert!(!settings.sound_attention_enabled);
+            assert!(!settings.notifications_enabled);
+            assert!(!settings.notifications_background_only);
+            assert!(settings.live_app_icon);
+            assert!(settings.show_menu_bar_item);
         }
     }
 
