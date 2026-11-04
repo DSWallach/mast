@@ -146,6 +146,37 @@ impl WakeCore {
         self.orchs.get(orch).is_some_and(|o| !o.held.is_empty())
     }
 
+    /// Transfer undelivered events without reapplying settings or deduplication.
+    /// The caller serializes this with delivery and copies settings separately.
+    pub fn transfer_held(&mut self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        let Some(source) = self.orchs.get_mut(from) else {
+            return;
+        };
+        let held = std::mem::take(&mut source.held);
+        let window_start = source.window_start_ms.take();
+        if held.is_empty() {
+            return;
+        }
+        let destination = self.orchs.entry(to.to_owned()).or_default();
+        for event in held {
+            if !destination.held.iter().any(|existing| existing.key == event.key)
+                && !destination.delivered_keys.contains_key(&event.key)
+            {
+                push_log(destination, event.clone(), false);
+                destination.held.push(event);
+            }
+        }
+        if !destination.held.is_empty() {
+            destination.window_start_ms = match (destination.window_start_ms, window_start) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+    }
+
     /// Orchestrators with held events, for re-evaluation after a state change.
     pub fn orchestrators_with_held(&self) -> Vec<String> {
         self.orchs
@@ -387,6 +418,21 @@ mod tests {
         busy: false,
         queue_nonempty: false,
     };
+
+    #[test]
+    fn transfer_held_preserves_reports_and_is_safe_to_retry() {
+        let mut core = WakeCore::new();
+        let mut report = event(&mut core, "worker", WakeEventKind::WorkerReport, "report", 1_000);
+        report.report = Some("details".into());
+        assert!(core.record("source", report.clone(), 1_000));
+        core.transfer_held("source", "destination");
+        core.transfer_held("source", "destination");
+        assert!(!core.has_held("source"));
+        assert_eq!(
+            core.decide("destination", 50_000, IDLE, false),
+            Decision::Deliver(Batch { events: vec![report] })
+        );
+    }
 
     #[test]
     fn defaults_wake_for_required_actions_and_errors_only() {
