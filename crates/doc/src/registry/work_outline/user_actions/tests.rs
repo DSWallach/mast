@@ -119,6 +119,8 @@ fn request_params(
     dedupe: Option<&str>,
 ) -> WorkOutlineMutation {
     WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            kind: None,
+            priority: None,
         work_item_id: work_item.into(),
         origin: UserActionRequestOrigin {
             kind: Default::default(),
@@ -267,6 +269,30 @@ fn pending_ops(doc: &RegistryDoc) -> usize {
 }
 
 // ── requests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn request_kind_round_trip_and_legacy_row() {
+    use mast_proto::work_outline_user_actions::{UserActionKind, UserActionPriority};
+    let mut doc = doc_with_spaces("dev-a");
+    let w = item(&mut doc, "kind-item", None);
+    let mut mutation = request_params("kind-request", &w, "c1", None);
+    if let WorkOutlineMutation::CreateUserActionRequest(ref mut p) = mutation {
+        p.kind = Some(UserActionKind::Handoff);
+        p.priority = Some(UserActionPriority::Fyi);
+    }
+    let id = apply(&mut doc, mutation).unwrap().user_action_request_id.unwrap();
+    let mut row = doc.overlay_row(KIND_USER_ACTION_REQUESTS, &id).unwrap();
+    let decoded = decode_request(&row).unwrap().view;
+    assert_eq!(decoded.effective_kind(), UserActionKind::Handoff);
+    assert_eq!(decoded.priority, Some(UserActionPriority::Fyi));
+    row.fields.remove("kind");
+    row.fields.remove("priority");
+    row.fields.insert("text".into(), json!("Ready to merge: feature"));
+    let legacy = decode_request(&row).unwrap().view;
+    assert_eq!(legacy.kind, Some(UserActionKind::Handoff));
+    assert_eq!(legacy.effective_kind(), UserActionKind::Handoff);
+    assert_eq!(legacy.priority, None);
+}
 
 #[test]
 fn request_create_dedupe_resolve_and_history() {

@@ -1039,6 +1039,8 @@ pub mod agent_tools {
                 p("idempotencyKey", "or pass dedupeKey instead"),
             ],
             optional: &[
+                p("kind", "ask, review, approve, choose, handoff, or notice; defaults to ask"),
+                p("priority", "blocking, normal, or fyi"),
                 p("detail", "context for the user"),
                 p(
                     "dedupeKey",

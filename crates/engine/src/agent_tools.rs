@@ -448,6 +448,10 @@ struct SetStatusArgs {
 struct CreateUserActionRequestArgs {
     request: String,
     #[serde(default)]
+    kind: Option<mast_proto::work_outline_user_actions::UserActionKind>,
+    #[serde(default)]
+    priority: Option<mast_proto::work_outline_user_actions::UserActionPriority>,
+    #[serde(default)]
     detail: Option<String>,
     #[serde(default)]
     dedupe_key: Option<String>,
@@ -1371,6 +1375,8 @@ impl AgentToolsService {
                     })
                     .count()
                     .to_string();
+                let kind = serde_json::to_string(&args.kind).unwrap_or_default();
+                let priority = serde_json::to_string(&args.priority).unwrap_or_default();
                 Ok(agent_tools::derived_idempotency_key(
                     tools::CREATE_USER_ACTION_REQUEST,
                     &[
@@ -1378,6 +1384,8 @@ impl AgentToolsService {
                         &dedupe_key,
                         &args.request,
                         args.detail.as_deref().unwrap_or_default(),
+                        &kind,
+                        &priority,
                         &resolved,
                     ],
                 ))
@@ -1386,6 +1394,11 @@ impl AgentToolsService {
         };
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+                kind: args.kind.or_else(|| {
+                    args.dedupe_key.as_deref().filter(|key| key.starts_with("artopt:"))
+                        .map(|_| mast_proto::work_outline_user_actions::UserActionKind::Choose)
+                }),
+                priority: args.priority,
                 work_item_id: work_item_id.clone(),
                 origin: UserActionRequestOrigin {
                     kind: Default::default(),

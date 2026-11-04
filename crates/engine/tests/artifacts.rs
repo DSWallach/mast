@@ -1410,11 +1410,13 @@ async fn blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates(
     // The publishing Chat is the origin, so Reply & resolve reaches it.
     assert_eq!(blocking.chat_id, CHAT);
     assert!(blocking.info.as_deref().unwrap().contains("Blocks: ENG-1"));
+    assert_eq!(mast_proto::artifacts::artifact_links(blocking.info.as_deref().unwrap()).len(), 1);
     let rollup = all
         .iter()
         .find(|r| r.text.contains("open questions"))
         .unwrap();
     assert_eq!(rollup.dedupe_key.as_deref(), Some(rollup_key(&id).as_str()));
+    assert_eq!(mast_proto::artifacts::artifact_links(rollup.info.as_deref().unwrap()).len(), 1);
     assert!(
         rollup
             .info

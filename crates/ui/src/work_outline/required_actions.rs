@@ -63,17 +63,22 @@ impl NeedsGroup {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Blocking => "Blocking",
-            Self::ReadyToMerge => "Ready to merge",
+            Self::ReadyToMerge => "Ready",
             Self::Fyi => "FYI",
         }
     }
 
-    /// Classify an open request by its text, dedupe key and origin.
-    pub(crate) fn of(text: &str, dedupe_key: Option<&str>, system: bool) -> Self {
-        if crate::status_light::is_ready_to_merge(text) {
-            Self::ReadyToMerge
-        } else if system || dedupe_key.is_some_and(|key| key.starts_with("artq:") && key.ends_with(":rollup")) {
+    /// Classify an open request by its kind and optional priority.
+    pub(crate) fn of(kind: mast_proto::work_outline_user_actions::UserActionKind, priority: Option<mast_proto::work_outline_user_actions::UserActionPriority>) -> Self {
+        use mast_proto::work_outline_user_actions::{UserActionKind, UserActionPriority};
+        if kind == UserActionKind::Notice || priority == Some(UserActionPriority::Fyi) {
             Self::Fyi
+        } else if priority == Some(UserActionPriority::Blocking) {
+            Self::Blocking
+        } else if priority == Some(UserActionPriority::Normal) {
+            Self::ReadyToMerge
+        } else if kind == UserActionKind::Handoff {
+            Self::ReadyToMerge
         } else {
             Self::Blocking
         }
@@ -84,6 +89,7 @@ impl NeedsGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RequiredActionRow {
     pub group: NeedsGroup,
+    pub kind: mast_proto::work_outline_user_actions::UserActionKind,
     pub space_id: String,
     pub request_id: String,
     pub work_item_id: String,
@@ -261,7 +267,8 @@ fn row_for(
         .flatten()
         .map(|reference| reference.url.clone());
     RequiredActionRow {
-        group: NeedsGroup::of(&request.text, request.dedupe_key.as_deref(), system),
+        group: NeedsGroup::of(request.effective_kind(), request.priority),
+        kind: request.effective_kind(),
         space_id: space.space_id.clone(),
         request_id: request.id.clone(),
         work_item_id: request.work_item_id.clone(),
@@ -714,6 +721,8 @@ pub(crate) mod fixture {
         text: &str,
     ) -> UserActionRequestView {
         UserActionRequestView {
+            kind: None,
+            priority: None,
             id: id.into(),
             space_id: space_id.into(),
             work_item_id: item.into(),
@@ -1266,11 +1275,13 @@ mod needs_group_tests {
 
     #[test]
     fn requests_sort_into_blocking_ready_to_merge_and_fyi() {
-        assert_eq!(NeedsGroup::of("Which tenant?", None, false), NeedsGroup::Blocking);
-        assert_eq!(NeedsGroup::of("Q-2: pick", Some("artq:a:Q-2"), false), NeedsGroup::Blocking);
-        assert_eq!(NeedsGroup::of("Ready to merge: x", None, false), NeedsGroup::ReadyToMerge);
-        assert_eq!(NeedsGroup::of("2 questions", Some("artq:a:rollup"), false), NeedsGroup::Fyi);
-        assert_eq!(NeedsGroup::of("Review PR", None, true), NeedsGroup::Fyi);
+        use mast_proto::work_outline_user_actions::{UserActionKind as K, UserActionPriority as P};
+        assert_eq!(NeedsGroup::of(K::Ask, None), NeedsGroup::Blocking);
+        assert_eq!(NeedsGroup::of(K::Review, None), NeedsGroup::Blocking);
+        assert_eq!(NeedsGroup::of(K::Handoff, None), NeedsGroup::ReadyToMerge);
+        assert_eq!(NeedsGroup::of(K::Notice, None), NeedsGroup::Fyi);
+        assert_eq!(NeedsGroup::of(K::Review, Some(P::Fyi)), NeedsGroup::Fyi);
+        assert_eq!(NeedsGroup::of(K::Review, Some(P::Normal)), NeedsGroup::ReadyToMerge);
         assert!(NeedsGroup::Blocking < NeedsGroup::ReadyToMerge && NeedsGroup::ReadyToMerge < NeedsGroup::Fyi);
     }
 }

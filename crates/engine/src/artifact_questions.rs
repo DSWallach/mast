@@ -313,7 +313,7 @@ impl ArtifactQuestionSync {
             if let Some(blocks) = &q.blocks {
                 info.push(format!("Blocks: {}", one_line(blocks)));
             }
-            info.push(artifact.url());
+            info.push(format!("[Open plan]({})", artifact.url()));
             changes += self.create(
                 &item,
                 &origin,
@@ -338,7 +338,7 @@ impl ArtifactQuestionSync {
             if rollup.len() == 1 { "" } else { "s" },
             one_line(&artifact.title)
         );
-        let rollup_info_full = format!("{rollup_info}\n{}", artifact.url());
+        let rollup_info_full = format!("[Open plan]({})\n{rollup_info}", artifact.url());
         let rollup_info_full = truncate(
             &rollup_info_full,
             user_action_limits::MAX_REQUEST_INFO_CHARS,
@@ -468,6 +468,8 @@ impl ArtifactQuestionSync {
         );
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask),
+            priority: None,
                 work_item_id: item.to_owned(),
                 origin: origin.clone(),
                 text,

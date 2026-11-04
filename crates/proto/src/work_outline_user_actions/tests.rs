@@ -44,6 +44,8 @@ fn proposal_role_is_pinned() {
 #[test]
 fn user_action_request_view_field_names_are_pinned() {
     let view = UserActionRequestView {
+            kind: None,
+            priority: None,
         id: "r-1".into(),
         space_id: "sp".into(),
         work_item_id: "w-1".into(),
@@ -161,6 +163,8 @@ fn proposal_view_field_names_are_pinned() {
 fn mutation_field_names_are_pinned() {
     round_trip(
         &WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            kind: None,
+            priority: None,
             work_item_id: "w-1".into(),
             origin: UserActionRequestOrigin {
                 kind: UserActionOriginKind::Chat,
@@ -423,4 +427,23 @@ fn modification_proposals_round_trip_and_old_rows_read_as_add() {
     assert_eq!(old.action, ProposalAction::Add);
     let unknown: ProposalAction = serde_json::from_value(json!("rewrite")).unwrap();
     assert_eq!(unknown, ProposalAction::Add);
+}
+
+#[test]
+fn legacy_request_kinds_and_explicit_overrides() {
+    use UserActionKind::*;
+    for (text, key, expected) in [
+        ("Ready to merge: needs-kind-field", None, Handoff),
+        ("Approve bulk change: 12 outline changes", Some("admin-bulk:abc"), Approve),
+        ("Review requested: feature branch", Some("pr-review:repo#42:1"), Review),
+        ("Q-1: Which target?", Some("artq:abc:Q-1"), Ask),
+        ("Pick a layout", Some("artopt:abc"), Choose),
+        ("Which branch?", None, Ask),
+    ] {
+        assert_eq!(classify_legacy_request(text, key), expected);
+    }
+    let explicit: UserActionRequestView = serde_json::from_value(json!({"id": "r", "text": "Ready to merge: x", "kind": "ask"})).unwrap();
+    assert_eq!(explicit.effective_kind(), Ask);
+    let unknown: UserActionRequestView = serde_json::from_value(json!({"id": "r", "kind": "future"})).unwrap();
+    assert_eq!(unknown.effective_kind(), Ask);
 }

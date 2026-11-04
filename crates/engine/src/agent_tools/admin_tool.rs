@@ -839,6 +839,8 @@ impl AgentToolsService {
         let reply = self.apply(
             context,
             &WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Approve),
+            priority: None,
                 work_item_id: item.clone(),
                 origin: UserActionRequestOrigin {
                     kind: Default::default(),

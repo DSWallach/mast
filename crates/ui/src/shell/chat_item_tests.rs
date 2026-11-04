@@ -951,6 +951,8 @@ fn mixed_needs(snapshot: &mut WorkOutlineSnapshot) {
     ]);
     if let Some(r) = snapshot.user_action_requests.iter_mut().find(|r| r.id == "r-fyi") {
         r.dedupe_key = Some("artq:art1:rollup".into());
+        r.priority = Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi);
+        r.info = Some("[Open plan](mast-artifact:abc123)".into());
     }
 }
 
@@ -966,12 +968,15 @@ fn needs_you_cards_group_blocking_then_ready_to_merge_then_fyi_oldest_first(cx: 
     let (_, vcx) = mount(cx, CHAT_API, true, mixed_needs);
     for heading in [
         "required-actions-group-Blocking",
-        "required-actions-group-Ready to merge",
+        "required-actions-group-Ready",
         "required-actions-group-FYI",
     ] {
         assert!(has(vcx, heading), "{heading}");
     }
     let order = ["r-block-old", "r-block-new", "r-ready-old", "r-ready-new", "r-fyi"];
+    assert!(has(vcx, "required-actions-kind-r-block-old-Ask"));
+    assert!(has(vcx, "required-actions-kind-r-ready-old-Handoff"));
+    assert!(has(vcx, "required-actions-artifact-r-fyi-0"));
     let tops: Vec<_> = order.iter().map(|id| row_top(vcx, id)).collect();
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "{tops:?}");
     assert!(has(vcx, "chat-item-needs-you-count"));
@@ -1116,7 +1121,9 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
 
 fn worker_asks(snapshot: &mut WorkOutlineSnapshot) {
     snapshot.user_action_requests.push(request("a1", "s1", API, "w-1", "Which database?"));
-    snapshot.user_action_requests.push(request("a2", "s1", API, "w-2", "Ready to merge: feature/w-2"));
+    let mut handoff = request("a2", "s1", API, "w-2", "Work delivered");
+    handoff.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff);
+    snapshot.user_action_requests.push(handoff);
 }
 
 #[gpui::test]

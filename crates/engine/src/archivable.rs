@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 /// Idle longer than this, with the item completed or archived, is finished.
 pub const IDLE_DAYS: i64 = 3;
 
-const READY_TO_MERGE_PREFIX: &str = "Ready to merge";
 
 /// The verdict, shaped for JSON (`archivable` + `reason`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,9 +74,6 @@ pub fn requests_of<'a>(
         .collect()
 }
 
-fn is_ready_to_merge(text: &str) -> bool {
-    text.trim_start().starts_with(READY_TO_MERGE_PREFIX)
-}
 
 /// The rule. The first failing gate names the reason; otherwise the first
 /// matching finish condition does.
@@ -117,7 +113,7 @@ pub fn archivable(input: &ArchivableInput<'_>) -> Archivable {
     if input
         .requests
         .iter()
-        .any(|r| !r.is_open() && is_ready_to_merge(&r.text))
+        .any(|r| !r.is_open() && r.effective_kind() == mast_proto::work_outline_user_actions::UserActionKind::Handoff)
     {
         return Archivable::yes("its Ready to merge was resolved");
     }
