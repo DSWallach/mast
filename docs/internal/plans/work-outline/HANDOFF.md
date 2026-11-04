@@ -616,6 +616,14 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Auto-continue** (2026-11-04, `auto-continue`, Terra, 3 slices): when a worker ends a clean turn with its item
+  still open (no open Required Action, not awaiting input, no refused tool calls, no user send during the turn,
+  nothing queued), Mast sends it a `[Mast: auto-continue n/3]` nudge; after 3 it queues one "worker stopped
+  after 3 auto-continues" orchestrator wake. Counter per worker chat per item, reset by a user or orchestrator
+  message, persisted across restarts. Off by default (global `autoContinue` in `orchestrator-wakes.json` plus
+  per-orchestrator overrides); toggle "Auto-continue workers" in the Team tab header and Item tab Wakes row.
+  Known edge: an orchestrator saying "stop" without completing the item or raising a request still gets nudged.
+  Release run: nextest 2306/2306, UI 2443/0.
 - **Wake echoes + archivable PR rule** (2026-11-04, `wake-echo-redelivery`, `archivable-pr-rule`, Terra): a
   resolved-action wake is suppressed when the receiving orchestrator resolved the request itself (user and
   other-chat resolutions still wake); wake batch selection and queueing are serialized, so concurrent
@@ -796,13 +804,9 @@ a fresh chat wouldn't hear them until "Hand off to new chat" (item 6161edf6) exi
 DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`) because restarts kill session background shells;
 they don't wake the coordinator, so check logs when asked for status.
 
-**Running (Codex Terra, children of 74bc70e5):**
-- `auto-continue` (item 33fd6aa5), first slice; see Queued 1 for scope.
+**Running:** none. Auto-continue shipped; Mikey turns it on for this coordinator in the Team tab.
 
 **Queued (agreed with Mikey):**
-1. Auto-continue (item 33fd6aa5; started after wake-echo merged, same files): nudge a worker whose item is still open
-   after its turn ends (≤3 times, then wake the orchestrator); per-orchestrator setting, off by default, on for
-   Mast Dev.
 2. Hand off to new chat (item 6161edf6): reparent children, move held wakes/reports, post a summary.
 3. Quick wins from the feature audit: diff-target Remove button + prune missing paths; visual-compare
    "compared first N px" banner; PR-merged wake (also enables handoff auto-resolve on landing).
