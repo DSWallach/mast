@@ -162,9 +162,7 @@ impl WakeCore {
         }
         let destination = self.orchs.entry(to.to_owned()).or_default();
         for event in held {
-            if !destination.held.iter().any(|existing| existing.key == event.key)
-                && !destination.delivered_keys.contains_key(&event.key)
-            {
+            if !destination.held.iter().any(|existing| existing.id == event.id) {
                 push_log(destination, event.clone(), false);
                 destination.held.push(event);
             }
@@ -420,7 +418,7 @@ mod tests {
     };
 
     #[test]
-    fn transfer_held_preserves_reports_and_is_safe_to_retry() {
+    fn hand_off_transfer_held_preserves_reports_and_is_safe_to_retry() {
         let mut core = WakeCore::new();
         let mut report = event(&mut core, "worker", WakeEventKind::WorkerReport, "report", 1_000);
         report.report = Some("details".into());
@@ -431,6 +429,27 @@ mod tests {
         assert_eq!(
             core.decide("destination", 50_000, IDLE, false),
             Decision::Deliver(Batch { events: vec![report] })
+        );
+    }
+
+    #[test]
+    fn hand_off_transfer_held_merges_existing_events_and_preserves_window() {
+        let mut core = WakeCore::new();
+        let source = raised(&mut core, "worker-1", "one", 1_000);
+        let destination = raised(&mut core, "worker-2", "two", 10_000);
+        assert!(core.record("source", source.clone(), 1_000));
+        assert!(core.record("destination", destination.clone(), 10_000));
+        core.transfer_held("source", "destination");
+        assert_eq!(
+            core.decide("destination", 30_000, IDLE, false),
+            Decision::WaitUntil {
+                at_ms: 1_000 + WAKE_WINDOW_MS,
+                reason: WakeHoldReason::Window,
+            }
+        );
+        assert_eq!(
+            core.decide("destination", 50_000, IDLE, false),
+            Decision::Deliver(Batch { events: vec![destination, source] })
         );
     }
 
