@@ -5,7 +5,10 @@ use gpui::{Context, SharedString, div, prelude::*, px};
 use mast_proto::{
     FrictionKind, FrictionReport, FrictionSource, FrictionStatus, ListFrictionReportsParams,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+
+static FRICTION_DESTINATIONS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 fn friction_markdown(reports: &[FrictionReport]) -> String {
     fn value(value: Option<&str>) -> &str {
@@ -51,6 +54,7 @@ pub(super) struct FrictionDetailsState {
     reports: Option<Vec<FrictionReport>>,
     error: Option<String>,
     expanded: HashSet<String>,
+    picker: Option<String>,
     generation: u64,
 }
 
@@ -296,6 +300,213 @@ impl WorkItemDetails {
                             ))),
                     );
                 }
+                let fingerprint = report.fingerprint.clone();
+                let report_id = report.id.clone();
+                let picker_open = self.friction.picker.as_deref() == Some(report.id.as_str());
+                let create = Self::small_button(("friction-create", index), "Create bug", theme)
+                    .debug_selector({
+                        let selector = format!("friction-create-{}", report.id);
+                        move || selector.clone()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.friction.picker =
+                            if this.friction.picker.as_deref() == Some(&report_id) {
+                                None
+                            } else {
+                                Some(report_id.clone())
+                            };
+                        cx.notify();
+                    }));
+                if let Some(item_id) = &report.promoted_item_id {
+                    let title = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.items.iter().find(|item| &item.id == item_id))
+                        .map(|item| item.title.clone())
+                        .unwrap_or_else(|| report.summary.clone());
+                    let item_id = item_id.clone();
+                    let space_id = self.space_id.clone();
+                    details = details.child(
+                        div()
+                            .id(("friction-item", index))
+                            .cursor_pointer()
+                            .text_color(theme.text)
+                            .child(SharedString::from(format!("→ {title}")))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenItem {
+                                    space_id: space_id.clone(),
+                                    item_id: item_id.clone(),
+                                })
+                            })),
+                    );
+                } else if picker_open {
+                    if let Some(snapshot) = &self.snapshot {
+                        let last = FRICTION_DESTINATIONS
+                            .get_or_init(Default::default)
+                            .lock()
+                            .unwrap()
+                            .get(&self.space_id)
+                            .cloned();
+                        let mut choices: Vec<_> = snapshot
+                            .items
+                            .iter()
+                            .filter(|item| item.archived_at.is_none())
+                            .collect();
+                        choices.sort_by_key(|item| last.as_deref() != Some(item.id.as_str()));
+                        for (choice_index, item) in choices.into_iter().enumerate() {
+                            let parent_item_id = item.id.clone();
+                            let fingerprint = report.fingerprint.clone();
+                            let report_id = report.id.clone();
+                            details = details.child(
+                                div()
+                                    .id(("friction-parent", index * 10000 + choice_index))
+                                    .debug_selector({
+                                        let selector = format!("friction-parent-{}", item.id);
+                                        move || selector.clone()
+                                    })
+                                    .cursor_pointer()
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(item.title.clone()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let task = this
+                                            .state
+                                            .read(cx)
+                                            .work_outline_actions()
+                                            .promote_friction_to_item(
+                                                mast_proto::PromoteFrictionToItemParams {
+                                                    space_id: this.space_id.clone(),
+                                                    fingerprint: fingerprint.clone(),
+                                                    parent_item_id: parent_item_id.clone(),
+                                                },
+                                            );
+                                        let report_id = report_id.clone();
+                                        let parent_item_id = parent_item_id.clone();
+                                        let space_id = this.space_id.clone();
+                                        cx.spawn(async move |this, cx| {
+                                            let result = task.await;
+                                            this.update(cx, |this, cx| {
+                                                match result {
+                                                    Ok(result) => {
+                                                        FRICTION_DESTINATIONS
+                                                            .get_or_init(Default::default)
+                                                            .lock()
+                                                            .unwrap()
+                                                            .insert(space_id, parent_item_id);
+                                                        if let Some(report) = this
+                                                            .friction
+                                                            .reports
+                                                            .as_mut()
+                                                            .and_then(|reports| {
+                                                                reports.iter_mut().find(|report| {
+                                                                    report.id == report_id
+                                                                })
+                                                            })
+                                                        {
+                                                            report.promoted_item_id =
+                                                                Some(result.work_item_id);
+                                                        }
+                                                        this.friction.picker = None;
+                                                    }
+                                                    Err(error) => cx.emit(DetailsEvent::Notice {
+                                                        text: error.message,
+                                                        error: true,
+                                                    }),
+                                                }
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                        })
+                                        .detach();
+                                    })),
+                            );
+                        }
+                    }
+                }
+                let dismiss = Self::small_button(("friction-dismiss", index), "Dismiss", theme)
+                    .debug_selector({
+                        let selector = format!("friction-dismiss-{}", report.id);
+                        move || selector.clone()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let task = this
+                            .state
+                            .read(cx)
+                            .work_outline_actions()
+                            .set_friction_status(mast_proto::SetFrictionStatusParams {
+                                space_id: this.space_id.clone(),
+                                fingerprint: fingerprint.clone(),
+                                status: FrictionStatus::Dismissed,
+                            });
+                        cx.spawn(async move |this, cx| {
+                            let result = task.await;
+                            this.update(cx, |this, cx| match result {
+                                Ok(_) => this.fetch_friction(cx),
+                                Err(error) => cx.emit(DetailsEvent::Notice {
+                                    text: error.message,
+                                    error: true,
+                                }),
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    }));
+                let fingerprint = report.fingerprint.clone();
+                let suggestion = report
+                    .suggestion
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+                let propose =
+                    Self::small_button(("friction-propose", index), "Propose instruction", theme)
+                        .debug_selector({
+                            let selector = format!("friction-propose-{}", report.id);
+                            move || selector.clone()
+                        })
+                        .when(suggestion, |button| {
+                            button.on_click(cx.listener(move |this, _, _, cx| {
+                                let task = this
+                                    .state
+                                    .read(cx)
+                                    .work_outline_actions()
+                                    .propose_friction_instruction(
+                                        mast_proto::ProposeFrictionInstructionParams {
+                                            space_id: this.space_id.clone(),
+                                            fingerprint: fingerprint.clone(),
+                                        },
+                                    );
+                                cx.spawn(async move |this, cx| {
+                                    let result = task.await;
+                                    this.update(cx, |_, cx| {
+                                        cx.emit(match result {
+                                            Ok(_) => DetailsEvent::Notice {
+                                                text: "Proposal created, review it in Proposals"
+                                                    .into(),
+                                                error: false,
+                                            },
+                                            Err(error) => DetailsEvent::Notice {
+                                                text: error.message,
+                                                error: true,
+                                            },
+                                        })
+                                    })
+                                    .ok();
+                                })
+                                .detach();
+                            }))
+                        })
+                        .when(!suggestion, |button| {
+                            button.opacity(0.5).tooltip(|_, cx| {
+                                cx.new(|_| super::TextTooltip("No suggestion to propose".into()))
+                                    .into()
+                            })
+                        });
+                details = details.child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(create)
+                        .child(propose)
+                        .child(dismiss),
+                );
                 let chat_id = report.provenance.chat_id.clone();
                 details = details.child(
                     div()
