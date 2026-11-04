@@ -553,6 +553,15 @@ impl RegistryDoc {
                 true,
             )?;
         }
+        if p.links.len() > 8 || p.facts.len() > 8 {
+            return Err(invalid("At most 8 links and 8 facts are allowed"));
+        }
+        if p.links.iter().any(|link| link.label.chars().count() > 40) {
+            return Err(invalid("A link label exceeds 40 characters"));
+        }
+        if p.facts.iter().any(|fact| fact.label.chars().count() > 40 || fact.value.chars().count() > 120) {
+            return Err(invalid("A fact label or value exceeds its character limit"));
+        }
         let system_origin = p.origin.kind == UserActionOriginKind::System;
         if system_origin {
             if actor.kind != WorkOutlineActorKind::System {

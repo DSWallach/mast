@@ -1362,8 +1362,13 @@ impl AgentToolsService {
         if let Some(links) = arguments.get("links").and_then(Value::as_array) {
             for (index, link) in links.iter().enumerate() {
                 if serde_json::from_value::<mast_proto::RequestLink>(link.clone()).is_err() {
-                    let label = link.get("label").and_then(Value::as_str).unwrap_or("<unlabeled>");
-                    return Err(AgentToolError::invalid(format!("invalid link {index} '{label}'; allowed target types: artifact, file, diff, pr, chat, url")));
+                    let label = link
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unlabeled>");
+                    return Err(AgentToolError::invalid(format!(
+                        "invalid link {index} '{label}'; allowed target types: artifact, file, diff, pr, chat, url"
+                    )));
                 }
             }
         }
@@ -1372,51 +1377,127 @@ impl AgentToolsService {
             return Err(AgentToolError::invalid("request is empty"));
         }
         if args.links.len() > 8 || args.facts.len() > 8 {
-            return Err(AgentToolError::invalid("at most 8 links and 8 facts are allowed"));
+            return Err(AgentToolError::invalid(
+                "at most 8 links and 8 facts are allowed",
+            ));
         }
         for fact in &args.facts {
             if fact.label.chars().count() > 40 || fact.value.chars().count() > 120 {
-                return Err(AgentToolError::invalid(format!("fact '{}' exceeds the label or value limit", fact.label)));
+                return Err(AgentToolError::invalid(format!(
+                    "fact '{}' exceeds the label or value limit",
+                    fact.label
+                )));
             }
         }
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         for link in &args.links {
             use mast_proto::RequestLinkTarget;
-            let valid = link.label.chars().count() <= 40 && match &link.target {
-                RequestLinkTarget::Artifact { id } => self.workspace.artifact(id).is_some_and(|artifact| {
-                    artifact.archived_at.is_none() && artifact.space_id == context.grant.space_id &&
-                    (context.admin_space.as_deref() == Some(artifact.space_id.as_str()) ||
-                     artifact.chat_id.as_deref() == Some(context.grant.chat_id.as_str()) ||
-                     artifact.work_item_id.as_deref().is_some_and(|item| context.current_item_id().is_some_and(|root| in_agent_scope(&snapshot, &root, item))))
-                }),
-                RequestLinkTarget::Chat { id } => self.workspace.chat(id).ok().flatten().is_some_and(|chat| {
-                    chat.space_id.as_deref() == Some(context.grant.space_id.as_str()) &&
-                    (id == &context.grant.chat_id || chat.parent_chat_id.as_deref() == Some(context.grant.chat_id.as_str()) ||
-                    context.current_item_id().is_some_and(|root| snapshot.assignments.iter().any(|a| a.chat_id == *id && a.work_item_id.as_deref().is_some_and(|item| in_agent_scope(&snapshot, &root, item)))))
-                }),
-                RequestLinkTarget::File { path, line } => {
-                    let path = std::path::Path::new(path);
-                    !path.components().any(|c| matches!(c, std::path::Component::ParentDir)) && *line != Some(0) &&
-                    self.workspace.chat(&context.grant.chat_id).ok().flatten().and_then(|chat| chat.cwd).is_some_and(|cwd| {
-                        let root = std::path::Path::new(&cwd);
-                        let candidate = if path.is_absolute() { path.to_path_buf() } else { root.join(path) };
-                        root.canonicalize().ok().is_some_and(|root| {
-                            candidate.ancestors().find_map(|ancestor| ancestor.canonicalize().ok()).is_some_and(|ancestor| ancestor.starts_with(root))
+            let valid = link.label.chars().count() <= 40
+                && match &link.target {
+                    RequestLinkTarget::Artifact { id } => {
+                        self.workspace.artifact(id).is_some_and(|artifact| {
+                            artifact.archived_at.is_none()
+                                && artifact.space_id == context.grant.space_id
+                                && (context.admin_space.as_deref()
+                                    == Some(artifact.space_id.as_str())
+                                    || artifact.chat_id.as_deref()
+                                        == Some(context.grant.chat_id.as_str())
+                                    || artifact
+                                        .chat_id
+                                        .as_deref()
+                                        .and_then(|id| self.workspace.chat(id).ok().flatten())
+                                        .is_some_and(|chat| {
+                                            chat.parent_chat_id.as_deref()
+                                                == Some(context.grant.chat_id.as_str())
+                                        })
+                                    || artifact.work_item_id.as_deref().is_some_and(|item| {
+                                        context.current_item_id().is_some_and(|root| {
+                                            in_agent_scope(&snapshot, &root, item)
+                                        })
+                                    }))
                         })
-                    })
-                },
-                RequestLinkTarget::Diff { branch } => branch.as_ref().is_none_or(|b| !b.trim().is_empty()),
-                RequestLinkTarget::Url { url } => reqwest::Url::parse(url).is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some()),
-                RequestLinkTarget::Pr { url } => reqwest::Url::parse(url).is_ok_and(|url| {
-                    let parts: Vec<_> = url.path_segments().map(|p| p.collect()).unwrap_or_default();
-                    url.scheme() == "https" && match url.host_str() {
-                        Some("github.com") => parts.len() == 4 && parts[2] == "pull" && parts[3].parse::<u64>().is_ok(),
-                        Some("gitlab.com") => parts.len() >= 5 && parts[parts.len()-3] == "-" && parts[parts.len()-2] == "merge_requests" && parts[parts.len()-1].parse::<u64>().is_ok(),
-                        _ => false,
                     }
-                }),
-            };
-            if !valid { return Err(AgentToolError::invalid(format!("invalid link '{}'; allowed target types: artifact, file, diff, pr, chat, url", link.label))); }
+                    RequestLinkTarget::Chat { id } => {
+                        self.workspace.chat(id).ok().flatten().is_some_and(|chat| {
+                            chat.space_id.as_deref() == Some(context.grant.space_id.as_str())
+                                && (context.admin_space.as_deref()
+                                    == Some(context.grant.space_id.as_str())
+                                    || id == &context.grant.chat_id
+                                    || chat.parent_chat_id.as_deref()
+                                        == Some(context.grant.chat_id.as_str())
+                                    || context.current_item_id().is_some_and(|root| {
+                                        snapshot.assignments.iter().any(|a| {
+                                            a.chat_id == *id
+                                                && a.work_item_id.as_deref().is_some_and(|item| {
+                                                    in_agent_scope(&snapshot, &root, item)
+                                                })
+                                        })
+                                    }))
+                        })
+                    }
+                    RequestLinkTarget::File { path, line } => {
+                        let path = std::path::Path::new(path);
+                        !path
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir))
+                            && *line != Some(0)
+                            && self
+                                .workspace
+                                .chat(&context.grant.chat_id)
+                                .ok()
+                                .flatten()
+                                .and_then(|chat| chat.cwd)
+                                .is_some_and(|cwd| {
+                                    let root = std::path::Path::new(&cwd);
+                                    let candidate = if path.is_absolute() {
+                                        path.to_path_buf()
+                                    } else {
+                                        root.join(path)
+                                    };
+                                    root.canonicalize().ok().is_some_and(|root| {
+                                        candidate
+                                            .ancestors()
+                                            .find_map(|ancestor| ancestor.canonicalize().ok())
+                                            .is_some_and(|ancestor| ancestor.starts_with(root))
+                                    })
+                                })
+                    }
+                    RequestLinkTarget::Diff { branch } => {
+                        branch.as_ref().is_none_or(|b| !b.trim().is_empty())
+                    }
+                    RequestLinkTarget::Url { url } => reqwest::Url::parse(url)
+                        .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some()),
+                    RequestLinkTarget::Pr { url } => reqwest::Url::parse(url).is_ok_and(|url| {
+                        let parts: Vec<_> =
+                            url.path_segments().map(|p| p.collect()).unwrap_or_default();
+                        url.scheme() == "https"
+                            && match url.host_str() {
+                                Some("github.com") => {
+                                    parts.len() == 4
+                                        && !parts[0].is_empty()
+                                        && !parts[1].is_empty()
+                                        && parts[2] == "pull"
+                                        && parts[3].parse::<u64>().is_ok_and(|n| n > 0)
+                                }
+                                Some("gitlab.com") => {
+                                    parts.len() >= 5
+                                        && parts[..parts.len() - 3].iter().all(|p| !p.is_empty())
+                                        && parts[parts.len() - 3] == "-"
+                                        && parts[parts.len() - 2] == "merge_requests"
+                                        && parts[parts.len() - 1]
+                                            .parse::<u64>()
+                                            .is_ok_and(|n| n > 0)
+                                }
+                                _ => false,
+                            }
+                    }),
+                };
+            if !valid {
+                return Err(AgentToolError::invalid(format!(
+                    "invalid link '{}'; allowed target types: artifact, file, diff, pr, chat, url",
+                    link.label
+                )));
+            }
         }
         // Requests are created on the Chat's own item, with the Chat as origin.
         let work_item_id = context.require_item("asking the user for an action")?;
@@ -1443,19 +1524,22 @@ impl AgentToolsService {
                 let priority = serde_json::to_string(&args.priority).unwrap_or_default();
                 let links = serde_json::to_string(&args.links).unwrap_or_default();
                 let facts = serde_json::to_string(&args.facts).unwrap_or_default();
+                let mut inputs = vec![
+                    work_item_id.as_str(),
+                    dedupe_key.as_str(),
+                    args.request.as_str(),
+                    args.detail.as_deref().unwrap_or_default(),
+                    kind.as_str(),
+                    priority.as_str(),
+                    resolved.as_str(),
+                ];
+                // Preserve derived keys for requests created before links and facts existed.
+                if !args.links.is_empty() || !args.facts.is_empty() {
+                    inputs.extend([links.as_str(), facts.as_str()]);
+                }
                 Ok(agent_tools::derived_idempotency_key(
                     tools::CREATE_USER_ACTION_REQUEST,
-                    &[
-                        &work_item_id,
-                        &dedupe_key,
-                        &args.request,
-                        args.detail.as_deref().unwrap_or_default(),
-                        &kind,
-                        &priority,
-                        &links,
-                        &facts,
-                        &resolved,
-                    ],
+                    &inputs,
                 ))
             })?,
             None => context.operation_id(arguments)?,

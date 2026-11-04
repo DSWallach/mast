@@ -44,10 +44,10 @@ fn proposal_role_is_pinned() {
 #[test]
 fn user_action_request_view_field_names_are_pinned() {
     let view = UserActionRequestView {
-            links: Vec::new(),
-            facts: Vec::new(),
-            kind: None,
-            priority: None,
+        links: Vec::new(),
+        facts: Vec::new(),
+        kind: None,
+        priority: None,
         id: "r-1".into(),
         space_id: "sp".into(),
         work_item_id: "w-1".into(),
@@ -77,6 +77,8 @@ fn user_action_request_view_field_names_are_pinned() {
         &view,
         json!({
             "id": "r-1",
+            "links": [],
+            "facts": [],
             "spaceId": "sp",
             "workItemId": "w-1",
             "chatId": "chat-1",
