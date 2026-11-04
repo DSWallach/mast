@@ -289,6 +289,7 @@ fn request_kind_round_trip_and_legacy_row() {
     row.fields.remove("priority");
     row.fields.insert("text".into(), json!("Ready to merge: feature"));
     let legacy = decode_request(&row).unwrap().view;
+    assert_eq!(legacy.kind, Some(UserActionKind::Handoff));
     assert_eq!(legacy.effective_kind(), UserActionKind::Handoff);
     assert_eq!(legacy.priority, None);
 }
