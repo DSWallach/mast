@@ -758,6 +758,8 @@ pub(crate) mod fixture {
             tool_call_id: None,
             text: text.into(),
             info: None,
+            links: Vec::new(),
+            facts: Vec::new(),
             dedupe_key: None,
             created_by: Some(agent(chat)),
             created_at: NOW,
