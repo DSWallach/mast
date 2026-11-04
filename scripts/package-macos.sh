@@ -92,7 +92,7 @@ rm -rf "$UPDATE_STAGE"
 echo "packaged: $APP_TARBALL"
 
 # The dmg presents the classic drag-into-Applications layout over the
-# ascii-hands artwork (committed renders from scripts/dmg-background.py).
+# ascii-hands artwork (committed renders from scripts/dev/dmg-background.py).
 # dmgbuild writes the .DS_Store (background, icon view, icon positions)
 # directly — no Finder scripting, so it also works on headless CI runners.
 python3 -c 'import dmgbuild' 2>/dev/null ||
@@ -125,7 +125,7 @@ dmgbuild.build_dmg(
         "show_pathbar": False,
         "show_sidebar": False,
         "default_view": "icon-view",
-        # Window and icon geometry must match scripts/dmg-background.py.
+        # Window and icon geometry must match scripts/dev/dmg-background.py.
         "window_rect": ((200, 120), (660, 400)),
         "icon_size": 104,
         "text_size": 12,

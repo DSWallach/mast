@@ -5,7 +5,7 @@
 # Omit GIT_REF for working-tree code. Output is JSON; bytes are allocator
 # requests/live heap, not RSS. The parser is compiled optimized in both runs.
 set -euo pipefail
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/../.." && pwd)
 deps=$(realpath "$1")
 source_text=$(realpath "$2")
 bench_dir=$(mktemp -d)
@@ -22,7 +22,7 @@ mod markdown {
     #[path = "$bench_dir/mend.rs"] pub mod mend;
     #[path = "$bench_dir/parser.rs"] pub mod parser;
 }
-include!("$root/scripts/markdown-profile.rs");
+include!("$root/scripts/dev/markdown-profile.rs");
 EOF
 cmark=$(ls -t "$deps"/libpulldown_cmark-*.rlib | head -1)
 rustc --edition=2024 -O -Awarnings -L "dependency=$deps" \

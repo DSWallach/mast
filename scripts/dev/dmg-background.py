@@ -12,14 +12,14 @@ scripts/package-macos.sh pairs them into a hidpi tiff with tiffutil.
 Both outputs are committed so CI never needs Pillow — rerun this only
 when changing the artwork.
 
-Usage: python3 scripts/dmg-background.py
+Usage: python3 scripts/dev/dmg-background.py
 """
 
 import os
 
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FONT = os.path.join(ROOT, "crates/ui/assets/fonts/GeistMono.ttf")
 OUT = os.path.join(ROOT, "dist/macos")
 

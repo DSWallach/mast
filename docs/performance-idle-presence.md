@@ -42,12 +42,12 @@ still submit GPU work; this change does not promise a flat low footprint while
 rendering. The driver observation alone does not identify every smaller change
 in the app's memory.
 
-The reusable [standalone probe](../scripts/macos-metal-memory-probe.m) supports
+The reusable [standalone probe](../scripts/dev/macos-metal-memory-probe.m) supports
 `blit`, `render`, `mixed`, and `blur` workloads:
 
 ```sh
 clang -fobjc-arc -Wall -Wextra -framework Foundation -framework Metal \
-  -framework MetalPerformanceShaders scripts/macos-metal-memory-probe.m \
+  -framework MetalPerformanceShaders scripts/dev/macos-metal-memory-probe.m \
   -o /tmp/metal-memory-probe
 /tmp/metal-memory-probe mixed
 ```
@@ -172,10 +172,10 @@ Separate process memory peaks need not occur at the same instant.
 [Per-run summaries and executable hashes](performance/idle-presence-replay.json).
 
 ```sh
-CLAUDE_CODE_EXECUTABLE="$PWD/scripts/replay-claude.py" \
+CLAUDE_CODE_EXECUTABLE="$PWD/scripts/dev/replay-claude.py" \
 MAST_REPLAY_JOURNAL="$PWD/scripts/fixtures/resource-stream.jsonl" \
 MAST_PROFILE_BACKGROUND_CHATS=50 MAST_PROFILE_SUBMIT_UI=1 \
 MAST_PROFILE_PROMPT='Replay fixture.' MAST_PROFILE_IDLE_MS=10000 \
-MAST_FRAME_STATS=0 node scripts/resource-profile.mjs \
+MAST_FRAME_STATS=0 node scripts/dev/resource-profile.mjs \
   /path/to/immutable/zeron /tmp/fresh-replay-profile claude-code
 ```
