@@ -313,7 +313,7 @@ impl ArtifactQuestionSync {
             if let Some(blocks) = &q.blocks {
                 info.push(format!("Blocks: {}", one_line(blocks)));
             }
-            info.push(artifact.url());
+            info.push(format!("[Open plan]({})", artifact.url()));
             changes += self.create(
                 &item,
                 &origin,
@@ -338,7 +338,7 @@ impl ArtifactQuestionSync {
             if rollup.len() == 1 { "" } else { "s" },
             one_line(&artifact.title)
         );
-        let rollup_info_full = format!("{rollup_info}\n{}", artifact.url());
+        let rollup_info_full = format!("{rollup_info}\n[Open plan]({})", artifact.url());
         let rollup_info_full = truncate(
             &rollup_info_full,
             user_action_limits::MAX_REQUEST_INFO_CHARS,
