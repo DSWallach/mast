@@ -416,6 +416,27 @@ async fn auto_continue_stops_after_three_and_resets_on_a_user_message() {
         .filter(|event| event.kind == WakeEventKind::AutoContinueStopped)
         .count();
     assert_eq!(stopped, 1);
+    let mut running = session(worker, SessionStatus::Working);
+    running.last_completed_turn = sessions
+        .borrow()
+        .iter()
+        .find(|s| s.chat_id == worker)
+        .unwrap()
+        .last_completed_turn
+        .clone();
+    rig.wakes.ingest_sessions(&[running]).await;
+    let mut done = session(worker, SessionStatus::Idle);
+    done.last_completed_turn = Some("another-completed-turn".into());
+    rig.wakes.ingest_sessions(&[done]).await;
+    assert_eq!(
+        rig.wakes
+            .status(ORCH)
+            .held
+            .iter()
+            .filter(|event| event.kind == WakeEventKind::AutoContinueStopped)
+            .count(),
+        1
+    );
     rig.core
         .doc_host
         .open(worker)
