@@ -1406,7 +1406,7 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    for key in ["enabled", "required-actions", "errors", "worker-reports", "awaiting-input", "tool-calls-failed", "turn-finished", "prs"] {
+    for key in ["enabled", "required-actions", "errors", "worker-reports", "awaiting-input", "tool-calls-failed", "auto-continue", "turn-finished", "prs"] {
         let selector: &'static str = Box::leak(format!("team-wake-toggle-{key}").into_boxed_str());
         assert!(has(vcx, selector), "{selector}");
     }
@@ -1504,6 +1504,7 @@ fn the_item_tab_shows_the_compact_wake_control_only_for_chats_with_workers(cx: &
     assert!(!has(vcx, "chat-item-wake-held"));
     expand(&shell, vcx, &["wakes"]);
     assert!(has(vcx, "chat-item-wake-toggle-enabled"));
+    assert!(has(vcx, "chat-item-wake-toggle-auto-continue"));
     assert!(has(vcx, "chat-item-wake-toggle-prs"));
     set_wake_status(&shell, vcx, held_status());
     assert!(has(vcx, "chat-item-wake-held"));
@@ -1521,9 +1522,10 @@ fn toggling_a_wake_switch_updates_the_cached_settings_at_once(cx: &mut TestAppCo
     add_workers(&shell, vcx, 2);
     shell.update(vcx, |shell, cx| shell.toggle_wake(CHAT_API, WakeToggle::TurnFinished, cx));
     shell.update(vcx, |shell, cx| shell.toggle_wake(CHAT_API, WakeToggle::Enabled, cx));
+    shell.update(vcx, |shell, cx| shell.toggle_wake(CHAT_API, WakeToggle::AutoContinue, cx));
     shell.read_with(vcx, |shell, _| {
         let settings = shell.wakes.statuses[CHAT_API].settings;
-        assert!(settings.turn_finished && !settings.enabled && settings.errors);
+        assert!(settings.turn_finished && !settings.enabled && settings.errors && settings.auto_continue);
     });
 }
 

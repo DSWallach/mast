@@ -30,10 +30,12 @@ pub enum WakeEventKind {
     AwaitingInput,
     /// A completed worker turn had failed Mast tool calls.
     ToolCallsFailed,
+    /// A worker exhausted its automatic continuation attempts.
+    AutoContinueStopped,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 9] = [
+    pub const ALL: [WakeEventKind; 10] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -43,6 +45,7 @@ impl WakeEventKind {
         Self::WorkerReport,
         Self::AwaitingInput,
         Self::ToolCallsFailed,
+        Self::AutoContinueStopped,
     ];
 }
 
@@ -68,6 +71,8 @@ pub struct WakeSettings {
     pub awaiting_input: bool,
     /// Failed Mast agent-tool calls in a worker turn.
     pub tool_calls_failed: bool,
+    /// Continue eligible workers whose work item remains open.
+    pub auto_continue: bool,
 }
 
 impl Default for WakeSettings {
@@ -81,6 +86,7 @@ impl Default for WakeSettings {
             worker_reports: true,
             awaiting_input: true,
             tool_calls_failed: true,
+            auto_continue: false,
         }
     }
 }
@@ -99,6 +105,7 @@ impl WakeSettings {
                 WakeEventKind::WorkerReport => self.worker_reports,
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
+                WakeEventKind::AutoContinueStopped => self.auto_continue,
             }
     }
 }
@@ -243,7 +250,9 @@ mod tests {
 
     #[test]
     fn old_settings_enable_worker_blocker_wakes_and_allow_disabling_each() {
-        let mut settings: WakeSettings = serde_json::from_str(r#"{"enabled":true,"errors":false}"#).unwrap();
+        let mut settings: WakeSettings =
+            serde_json::from_str(r#"{"enabled":true,"errors":false}"#).unwrap();
+        assert!(!settings.auto_continue);
         assert!(settings.wakes_for(WakeEventKind::AwaitingInput));
         assert!(settings.wakes_for(WakeEventKind::ToolCallsFailed));
         settings.awaiting_input = false;
@@ -254,5 +263,6 @@ mod tests {
         let encoded = serde_json::to_value(settings).unwrap();
         assert_eq!(encoded["awaitingInput"], false);
         assert_eq!(encoded["toolCallsFailed"], false);
+        assert_eq!(encoded["autoContinue"], false);
     }
 }

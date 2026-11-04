@@ -14,6 +14,7 @@
 //! pulls back a wake that has not started and interrupts an event-started
 //! turn (see `DocHost::yield_event_turn_to_user`).
 
+mod auto_continue;
 mod core;
 
 use std::collections::{HashMap, HashSet};
@@ -44,6 +45,36 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 pub fn system_clock() -> Clock {
     Arc::new(|| chrono::Utc::now().timestamp_millis())
+}
+
+// The original file was a flat map of chat ids to settings. Preserve it on
+// read; missing autoContinue fields inherit the global default.
+fn read_settings(bytes: &[u8]) -> (bool, HashMap<String, WakeSettings>) {
+    let Ok(serde_json::Value::Object(mut root)) = serde_json::from_slice(bytes) else {
+        return (false, HashMap::new());
+    };
+    let default = root
+        .remove("autoContinue")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let entries = match root.remove("orchestrators") {
+        Some(serde_json::Value::Object(entries)) => entries,
+        _ => root,
+    };
+    let overrides = entries
+        .into_iter()
+        .filter_map(|(chat, mut value)| {
+            if let Some(object) = value.as_object_mut() {
+                object
+                    .entry("autoContinue")
+                    .or_insert(serde_json::Value::Bool(default));
+            }
+            serde_json::from_value(value)
+                .ok()
+                .map(|settings| (chat, settings))
+        })
+        .collect();
+    (default, overrides)
 }
 
 #[derive(Debug)]
@@ -146,9 +177,19 @@ struct ChatInfo {
     parent: Option<String>,
 }
 
+struct TurnStart {
+    last_message_id: Option<String>,
+    last_completed_turn: Option<String>,
+    user_sent_during_turn: bool,
+}
+
 #[derive(Default)]
 struct State {
     core: WakeCore,
+    auto_continue: auto_continue::AutoContinue,
+    turn_starts: HashMap<String, TurnStart>,
+    auto_continue_default: bool,
+    settings_overrides: HashMap<String, WakeSettings>,
     chats: HashMap<String, ChatInfo>,
     chats_seeded: bool,
     /// Per Space: worker chat → orchestrators by project worker destination.
@@ -192,10 +233,18 @@ impl OrchestratorWakes {
         let mut state = State::default();
         if let Some(path) = &store
             && let Ok(bytes) = std::fs::read(path)
-            && let Ok(saved) = serde_json::from_slice::<HashMap<String, WakeSettings>>(&bytes)
         {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let Some(saved) = value.get("autoContinueWorkers")
+                && let Ok(saved) = serde_json::from_value(saved.clone())
+            {
+                state.auto_continue = saved;
+            }
+            let (auto_continue_default, saved) = read_settings(&bytes);
+            state.auto_continue_default = auto_continue_default;
             for (chat, settings) in saved {
                 state.core.set_settings(&chat, settings);
+                state.settings_overrides.insert(chat, settings);
             }
         }
         Self {
@@ -330,13 +379,24 @@ impl OrchestratorWakes {
     // ── settings / status / user activity ─────────────────────────────────
 
     pub fn settings(&self, chat_id: &str) -> WakeSettings {
-        lock(&self.inner.state).core.settings(chat_id)
+        let state = lock(&self.inner.state);
+        state
+            .settings_overrides
+            .get(chat_id)
+            .copied()
+            .unwrap_or_else(|| WakeSettings {
+                auto_continue: state.auto_continue_default,
+                ..WakeSettings::default()
+            })
     }
 
     pub async fn set_settings(&self, chat_id: &str, settings: WakeSettings) -> WakeStatus {
         {
             let mut state = lock(&self.inner.state);
             state.core.set_settings(chat_id, settings);
+            state
+                .settings_overrides
+                .insert(chat_id.to_owned(), settings);
             self.persist(&state);
         }
         self.evaluate(chat_id, false).await;
@@ -347,8 +407,12 @@ impl OrchestratorWakes {
         let Some(path) = &self.inner.store else {
             return;
         };
-        let map = state.core.all_settings();
-        if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
+        let settings = serde_json::json!({
+            "autoContinue": state.auto_continue_default,
+            "orchestrators": state.settings_overrides,
+            "autoContinueWorkers": state.auto_continue,
+        });
+        if let Ok(bytes) = serde_json::to_vec_pretty(&settings) {
             let _ = std::fs::write(path, bytes);
         }
     }
@@ -358,6 +422,14 @@ impl OrchestratorWakes {
         let now = self.now();
         let mut state = lock(&self.inner.state);
         let mut status = state.core.status(chat_id, now, ctx);
+        status.settings = state
+            .settings_overrides
+            .get(chat_id)
+            .copied()
+            .unwrap_or_else(|| WakeSettings {
+                auto_continue: state.auto_continue_default,
+                ..WakeSettings::default()
+            });
         status.is_orchestrator = is_orchestrator(&state, chat_id);
         status
     }
@@ -457,6 +529,7 @@ impl OrchestratorWakes {
     pub async fn ingest_sessions(&self, sessions: &[Session]) {
         let now = self.now();
         let mut recorded: HashSet<String> = HashSet::new();
+        let mut finished = Vec::new();
         {
             let mut state = lock(&self.inner.state);
             let seeded = state.sessions_seeded;
@@ -471,6 +544,21 @@ impl OrchestratorWakes {
                 self.inner.event_turns.observe(&session.chat_id, in_flight);
                 if in_flight && prev.is_none_or(|p| !is_in_flight(p)) {
                     state.core.note_turn_start(&session.chat_id, now);
+                    if let Some(last_message) = self.last_external_message(&session.chat_id) {
+                        let user_sent_during_turn = session.started_at.is_some_and(|started| {
+                            last_message
+                                .as_ref()
+                                .is_some_and(|(_, at)| *at > started.timestamp_millis())
+                        });
+                        state.turn_starts.insert(
+                            session.chat_id.clone(),
+                            TurnStart {
+                                last_message_id: last_message.map(|(id, _)| id),
+                                last_completed_turn: session.last_completed_turn.clone(),
+                                user_sent_during_turn,
+                            },
+                        );
+                    }
                 }
                 if !seeded {
                     continue;
@@ -482,6 +570,13 @@ impl OrchestratorWakes {
                     (true, SessionStatus::Idle) => WakeEventKind::TurnFinished,
                     _ => continue,
                 };
+                if kind == WakeEventKind::TurnFinished {
+                    if let Some(start) = state.turn_starts.remove(&session.chat_id) {
+                        finished.push((session.clone(), start));
+                    }
+                } else {
+                    state.turn_starts.remove(&session.chat_id);
+                }
                 let summary = match kind {
                     WakeEventKind::Errored => "errored (read_chat for details)",
                     _ => "finished a turn",
@@ -502,7 +597,152 @@ impl OrchestratorWakes {
             }
             state.sessions_seeded = true;
         }
+        for (session, start) in finished {
+            self.continue_worker(&session, start).await;
+        }
         self.after_ingest(recorded).await;
+    }
+
+    /// The latest externally submitted message; Mast's system messages are
+    /// written as user entries by the queue and do not reset the budget.
+    fn last_external_message(&self, chat_id: &str) -> Option<Option<(String, i64)>> {
+        let handle = self.inner.doc_host.open(chat_id).ok()?;
+        let entries = handle.doc().read_entries().ok()?;
+        Some(entries.into_iter().rev().find(|entry| {
+            entry.role == mast_doc::MessageRole::User
+                && !entry.parts.iter().any(|part| matches!(part,
+                    mast_doc::MessagePart::Text { text, .. } if text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX)))
+        }).map(|entry| (entry.id, entry.created_at)))
+    }
+
+    async fn continue_worker(&self, session: &Session, start: TurnStart) {
+        let worker = &session.chat_id;
+        if !self.hosted_here(worker) || session.status != SessionStatus::Idle {
+            return;
+        }
+        let Ok(chats) = self.inner.workspace.read_chats() else {
+            return;
+        };
+        let Some(space_id) = chats
+            .iter()
+            .find(|chat| &chat.id == worker)
+            .and_then(|chat| chat.space_id.clone())
+        else {
+            return;
+        };
+        self.ingest_chats(&chats).await;
+        let workspace = self.inner.workspace.clone();
+        let Ok(snapshot) = tokio::task::spawn_blocking(move || {
+            mast_doc::materialize_work_outline(&space_id, &workspace.work_outline_inputs(&space_id))
+        })
+        .await
+        else {
+            return;
+        };
+        if !snapshot.available {
+            return;
+        }
+        self.ingest_snapshot(&snapshot).await;
+        let Some(item) = snapshot
+            .items
+            .iter()
+            .find(|item| item.chat_ids.contains(worker))
+        else {
+            return;
+        };
+        let Some(last_message) = self.last_external_message(worker) else {
+            return;
+        };
+        let last_message_id = last_message.map(|(id, _)| id);
+        let Ok(handle) = self.inner.doc_host.open(worker) else {
+            return;
+        };
+        let Ok(queue) = handle.doc().read_queue() else {
+            return;
+        };
+        let action_open = snapshot
+            .user_action_requests
+            .iter()
+            .any(|request| request.chat_id == *worker && request.is_unresolved());
+        let now = self.now();
+        let recorded = {
+            let mut state = lock(&self.inner.state);
+            let Some(orch) = parents_of(&state, worker).into_iter().next() else {
+                return;
+            };
+            let settings = state
+                .settings_overrides
+                .get(&orch)
+                .copied()
+                .unwrap_or_else(|| WakeSettings {
+                    auto_continue: state.auto_continue_default,
+                    ..WakeSettings::default()
+                });
+            let mut next = state.auto_continue.clone();
+            let decision = next.decide(auto_continue::Turn {
+                worker_id: worker,
+                item_id: &item.id,
+                last_message_id: last_message_id.as_deref(),
+                enabled: settings.auto_continue,
+                item_open: item.status != mast_proto::WorkItemStatus::Completed
+                    && item.archived_at.is_none(),
+                action_open,
+                completed: session.last_completed_turn.is_some()
+                    && session.last_completed_turn != start.last_completed_turn,
+                awaiting_input: session.awaiting_input.is_some(),
+                tool_failures: session.last_turn_tool_failures.is_some(),
+                user_sent_during_turn: start.user_sent_during_turn
+                    || last_message_id != start.last_message_id,
+                queue_nonempty: !queue.is_empty() || self.inner.sessions.turn_in_flight(worker),
+            });
+            match decision {
+                auto_continue::Decision::None => {
+                    if state.auto_continue != next {
+                        state.auto_continue = next;
+                        self.persist(&state);
+                    }
+                    None
+                }
+                auto_continue::Decision::Continue(count) => {
+                    let text = format!(
+                        "[Mast system message, not from the user: auto-continue {count}/3]\nYour work item is still open. Continue the task; if you are done, mark the item completed or raise a Required Action (kind handoff) — if you're blocked, raise one with kind ask."
+                    );
+                    match self.inner.doc_host.queue_event_message(worker, &text) {
+                        Ok(id) => {
+                            self.inner.event_turns.register(worker, id, Vec::new());
+                            state.auto_continue = next;
+                            self.persist(&state);
+                        }
+                        Err(err) => {
+                            tracing::warn!(chat = %worker, error = %err, "worker auto-continue queue failed")
+                        }
+                    }
+                    None
+                }
+                auto_continue::Decision::ReportStopped => {
+                    state.core.set_settings(&orch, settings);
+                    let line = format!(
+                        "{} — worker stopped with its item open after 3 auto-continues",
+                        label(&state, worker)
+                    );
+                    let event = make_event(
+                        &mut state,
+                        worker,
+                        WakeEventKind::AutoContinueStopped,
+                        format!("auto-continue:{worker}:{}", uuid::Uuid::new_v4()),
+                        &line,
+                        now,
+                    );
+                    state.core.record(&orch, event, now);
+                    state.auto_continue = next;
+                    self.persist(&state);
+                    Some(orch)
+                }
+            }
+        };
+        if let Some(orch) = recorded {
+            self.after_ingest(HashSet::from([orch])).await;
+        }
     }
 
     /// Chat rows: parent links, titles, and PR links (PR opened).
@@ -798,7 +1038,9 @@ impl OrchestratorWakes {
                 let text = batch.render();
                 match self.inner.doc_host.queue_event_message(orch, &text) {
                     Ok(message_id) => {
-                        self.inner.event_turns.register(orch, message_id, batch.events.clone());
+                        self.inner
+                            .event_turns
+                            .register(orch, message_id, batch.events.clone());
                         state.core.delivered(orch, &batch, now);
                     }
                     Err(err) => {
@@ -856,6 +1098,7 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::WorkerReport => "rep",
         WakeEventKind::AwaitingInput => "input",
         WakeEventKind::ToolCallsFailed => "tool-fail",
+        WakeEventKind::AutoContinueStopped => "auto-continue-stopped",
     }
 }
 

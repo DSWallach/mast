@@ -304,7 +304,7 @@ impl Shell {
         let mut kinds = div().flex().flex_wrap().items_center().gap(px(4.0));
         for toggle in WakeToggle::KINDS {
             kinds = kinds.child(self.wake_toggle_chip(
-                chat_id, prefix, toggle, &control.settings, !enabled, theme, cx,
+                chat_id, prefix, toggle, &control.settings, !enabled && toggle != WakeToggle::AutoContinue, theme, cx,
             ));
         }
         div()
