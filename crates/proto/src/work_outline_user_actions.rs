@@ -345,9 +345,9 @@ impl UserActionRequestView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateUserActionRequestParams {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<RequestLink>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<RequestFact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UserActionKind>,
