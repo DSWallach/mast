@@ -2079,6 +2079,30 @@ impl Render for DiffHeaderTooltip {
 }
 
 impl Changes {
+    pub(crate) fn diff_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.diff_focus.contains_focused(window, cx)
+    }
+    pub(crate) fn changed_paths(&self) -> Vec<String> {
+        self.parsed.as_ref().map(|parsed| parsed.files.iter().map(|file| file.path.clone()).collect()).unwrap_or_default()
+    }
+    pub(crate) fn go_to_line(&mut self, target: u32, cx: &mut Context<Self>) {
+        let Some(parsed) = &self.parsed else { return };
+        let top = self.list.logical_scroll_top().item_ix;
+        let Some(file_index) = self.rows.get(top).and_then(|row| row.file()).or(Some(0)) else { return };
+        let Some(file) = parsed.files.get(file_index) else { return };
+        let path = file.path.clone();
+        if self.folds.get(&path).is_some_and(|fold| fold.collapsed) {
+            self.toggle_fold(file_index, cx);
+            if let Some(fold) = self.folds.get_mut(&path) { fold.toggled_at = None; }
+            self.settle_folds(cx);
+        }
+        let Some(parsed) = &self.parsed else { return };
+        if let Some(index) = self.rows.iter().position(|row| match *row {
+            DiffRow::Line { file, hunk, line, .. } if file as usize == file_index => parsed.files[file as usize].hunks[hunk as usize].lines[line as usize].new_no == Some(target),
+            DiffRow::SplitLine { file, hunk, right: Some(line), .. } if file as usize == file_index => parsed.files[file as usize].hunks[hunk as usize].lines[line as usize].new_no == Some(target),
+            _ => false,
+        }) { self.list.scroll_to_reveal_item(index); cx.notify(); }
+    }
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let owner = state
             .read(cx)

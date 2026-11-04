@@ -68,6 +68,7 @@ mod admin_tests;
 mod chat_item_ui;
 mod closeout_ui;
 mod command_palette;
+mod workspace_search;
 mod files_panel;
 mod github_ui;
 mod instructions_ui;
@@ -110,6 +111,9 @@ actions!(
         ToggleChanges,
         ToggleFiles,
         OpenMyPrs,
+        QuickOpen,
+        SearchWorkspaceContent,
+        GoToLine,
         AddSpacePalette,
         ToggleCommandPalette,
         OpenModelPicker,
@@ -392,6 +396,26 @@ pub fn apply_keymap(
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
+    // gpui-base binds Replace to Cmd+Shift+F in every Input. Remove that
+    // binding before installing the user-configured search and replace keys.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-shift-f", gpui::Unbind("input::Replace".into()), Some("Input"))]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([KeyBinding::new("ctrl-h", gpui::Unbind("input::Replace".into()), Some("Input"))]);
+    for (id, action) in [
+        (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
+        (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
+        (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
+        (ShortcutId::ReplaceFile, Box::new(gpui_base::input::Replace) as Box<dyn Action>),
+    ] {
+        let combo = keymap.get(id);
+        if combo.is_empty() { continue; }
+        let context = (id == ShortcutId::ReplaceFile).then_some("Input");
+        let predicate = context.map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
+        if let Ok(binding) = KeyBinding::load(&valid_or_default(combo, id.default_combo()), action, predicate, false, None, &gpui::DummyKeyboardMapper) {
+            cx.bind_keys([binding]);
+        }
+    }
     cx.bind_keys([
         KeyBinding::new(
             &valid_or_default(&keymap.save_file, "mod-s"),
@@ -1740,6 +1764,8 @@ pub struct Shell {
     /// while open.
     add_space: Option<AddSpaceFlow>,
     command_palette: Option<command_palette::CommandPalette>,
+    workspace_search: Option<workspace_search::WorkspaceSearch>,
+    workspace_file_recents: std::collections::HashMap<String, Vec<String>>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
@@ -2224,6 +2250,8 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             command_palette: None,
+            workspace_search: None,
+            workspace_file_recents: std::collections::HashMap::new(),
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
@@ -3586,6 +3614,10 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
+        let recent = self.workspace_file_recents.entry(self.active_chat.clone()).or_default();
+        recent.retain(|item| item != &path);
+        recent.insert(0, path.clone());
+        recent.truncate(100);
         self.set_surfaces_open(true, cx);
         let panel_key = self.panel_key(cx);
         let lookup = (panel_key.clone(), path.clone());
@@ -5506,6 +5538,7 @@ impl Shell {
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
+            || self.workspace_search.is_some()
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
             || self.running.open
@@ -9076,6 +9109,11 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key == "escape" && self.workspace_search.is_some() {
+            self.close_workspace_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key == "escape" && self.capture_escape_surface(cx) {
             cx.stop_propagation();
         }
@@ -9481,6 +9519,9 @@ impl Shell {
             overlays.push(overlay);
         }
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
+            overlays.push(overlay);
+        }
+        if let Some(overlay) = self.render_workspace_search(viewport, window, cx) {
             overlays.push(overlay);
         }
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
@@ -12183,6 +12224,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.open_workspace_search(workspace_search::SearchMode::Files, window, cx)))
+            .on_action(cx.listener(|this, _: &SearchWorkspaceContent, window, cx| this.open_workspace_search(workspace_search::SearchMode::Content, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToLine, window, cx| this.open_workspace_search(workspace_search::SearchMode::Line, window, cx)))
             // Works from any route, like New session: the overview is a
             // top-level surface, not chat-scoped. Quiet under an open
             // picker/palette so it never navigates out from underneath one.

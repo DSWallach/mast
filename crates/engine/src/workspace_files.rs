@@ -239,11 +239,6 @@ impl WorkspaceFiles {
                 ));
             }
             (Some(chat_id), None) => {
-                if target.checkout_path.is_some() {
-                    return Err(WorkspaceFilesError::BadParams(
-                        "checkoutPath applies only to a space target".into(),
-                    ));
-                }
                 let chat = self
                     .inner
                     .workspace
@@ -254,6 +249,20 @@ impl WorkspaceFiles {
                     return Err(WorkspaceFilesError::Authorization(
                         "chat belongs to another device".into(),
                     ));
+                }
+                if let Some(path) = target.checkout_path.as_deref() {
+                    let row = self.inner.workspace.chat_diff_targets(chat_id)
+                        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?
+                        .ok_or_else(|| WorkspaceFilesError::Authorization("chat has no bound diff checkout".into()))?;
+                    let stored = row.targets.iter().find(|entry| entry.path == path)
+                        .ok_or_else(|| WorkspaceFilesError::Authorization("checkout is not bound to this chat".into()))?;
+                    reject_broad_root(Path::new(path))?;
+                    let identity = self.inner.repos.checkout_identity(Path::new(path)).await
+                        .map_err(|error| WorkspaceFilesError::Authorization(error.to_string()))?;
+                    if identity.id != stored.worktree_id || identity.root != Path::new(path) {
+                        return Err(WorkspaceFilesError::Authorization("bound checkout identity changed".into()));
+                    }
+                    return Ok(ResolvedWorkspace { checkout_id: identity.id, root: identity.root });
                 }
                 let cwd = chat.cwd.map(PathBuf::from).ok_or_else(|| {
                     WorkspaceFilesError::NotFound("chat has no workspace folder".into())

@@ -479,7 +479,7 @@ const GROUP_ORDER: [&str; 8] = [
 fn group(id: ShortcutId) -> &'static str {
     match id {
         ShortcutId::CaptureAppshot => "Appshots",
-        ShortcutId::SaveFile => "Files",
+        ShortcutId::SaveFile | ShortcutId::QuickOpen | ShortcutId::SearchWorkspaceContent | ShortcutId::GoToLine | ShortcutId::ReplaceFile => "Files",
         ShortcutId::BrowserReload => "Browser",
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
@@ -522,6 +522,10 @@ fn description(id: ShortcutId) -> &'static str {
             "Capture the focused application from anywhere on your desktop."
         }
         ShortcutId::SaveFile => "Save the active workspace file.",
+        ShortcutId::QuickOpen => "Open a workspace file by name.",
+        ShortcutId::SearchWorkspaceContent => "Search text in workspace files.",
+        ShortcutId::GoToLine => "Go to a line in the active file or diff.",
+        ShortcutId::ReplaceFile => "Replace text in the active file.",
         ShortcutId::BrowserReload => "Reload the focused browser tab.",
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
         ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",

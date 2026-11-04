@@ -68,6 +68,7 @@ pub fn search_workspace_content(
     let overrides = overrides.build().map_err(|error| error.to_string())?;
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
+        .heap_limit(Some(1024 * 1024))
         .binary_detection(grep_searcher::BinaryDetection::quit(b'\0'))
         .build();
     let mut summary = ContentSearchSummary::default();
@@ -75,6 +76,8 @@ pub fn search_workspace_content(
     for entry in WalkBuilder::new(root)
         .overrides(overrides)
         .follow_links(false)
+        .hidden(false)
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
         .build()
     {
         if cancelled.load(Ordering::Relaxed) || stopped {
@@ -90,6 +93,13 @@ pub fn search_workspace_content(
         let Ok(relative) = entry.path().strip_prefix(root) else {
             continue;
         };
+        if relative
+            .to_str()
+            .and_then(|path| crate::workspace_files::WorkspaceRelativePath::file(path).ok())
+            .is_none()
+        {
+            continue;
+        }
         if query
             .changed_files
             .as_ref()
@@ -138,11 +148,25 @@ pub fn search_workspace_content(
                     file_has_matches = true;
                 }
                 summary.matches += ranges.len();
+                let mut start = ranges[0].0.saturating_sub(512);
+                while !preview.is_char_boundary(start) {
+                    start -= 1;
+                }
+                let mut end = (start + 4096).min(preview.len());
+                while !preview.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let display_ranges = ranges
+                    .iter()
+                    .filter_map(|&(a, b)| {
+                        (a >= start && b <= end).then_some((a - start, b - start))
+                    })
+                    .collect();
                 if !emit(ContentSearchMatch {
                     path: relative.to_path_buf(),
                     line: line_number,
-                    preview: preview.to_owned(),
-                    ranges,
+                    preview: preview[start..end].to_owned(),
+                    ranges: display_ranges,
                 }) {
                     stopped = true;
                     return Ok(false);
@@ -238,5 +262,45 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].path, Path::new("12.txt"));
         assert!(!summary.truncated);
+    }
+
+    #[test]
+    fn content_search_counts_multiple_matches_and_cancels_during_emission() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("many"),
+            format!("{}\n", "hit ".repeat(MAX_MATCHES + 1)),
+        )
+        .unwrap();
+        let query = ContentSearchQuery {
+            text: "hit".into(),
+            ..Default::default()
+        };
+        let (matches, summary) = collect(root.path(), &query);
+        assert_eq!(summary.matches, MAX_MATCHES);
+        assert_eq!(matches.len(), 1);
+        assert!(summary.truncated);
+        let cancelled = AtomicBool::new(false);
+        let summary = search_workspace_content(root.path(), &query, &cancelled, |_| {
+            cancelled.store(true, Ordering::Relaxed);
+            true
+        })
+        .unwrap();
+        assert!(summary.cancelled);
+    }
+
+    #[test]
+    fn content_search_rejects_invalid_regex_and_respects_ignore() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(".ignore"), "ignored.txt\n").unwrap();
+        fs::write(root.path().join("ignored.txt"), "needle\n").unwrap();
+        fs::write(root.path().join(".visible"), "needle\n").unwrap();
+        let mut query = ContentSearchQuery { text: "needle".into(), ..Default::default() };
+        let (matches, _) = collect(root.path(), &query);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].path, Path::new(".visible"));
+        query.regex = true;
+        query.text = "(".into();
+        assert!(search_workspace_content(root.path(), &query, &AtomicBool::new(false), |_| true).is_err());
     }
 }

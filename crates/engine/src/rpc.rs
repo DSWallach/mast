@@ -5781,6 +5781,8 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
+        assert!(forwardable(methods::SEARCH_WORKSPACE_CONTENT));
+        assert!(is_stream_method(methods::SEARCH_WORKSPACE_CONTENT));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
         assert!(forwardable(methods::WRITE_WORKSPACE_FILE));

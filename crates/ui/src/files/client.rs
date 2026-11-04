@@ -24,18 +24,26 @@ pub struct FilesRequestContext {
 impl FilesRequestContext {
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-        let cwd = chat.cwd.clone()?;
+        let selected = state
+            .chat_diff_targets(chat_id)
+            .iter()
+            .find(|target| target.selected);
+        let cwd = selected
+            .map(|target| target.path.clone())
+            .or_else(|| chat.cwd.clone())?;
         let target_device_id = (state.local_device_id.as_deref() != Some(&chat.device_id))
             .then(|| chat.device_id.clone());
         Some(Self {
             target: WorkspaceTarget {
                 chat_id: Some(chat.id.clone()),
                 space_id: None,
-                checkout_path: None,
+                checkout_path: selected.map(|target| target.path.clone()),
             },
             target_device_id,
             cwd,
-            checkout_id: chat.checkout_id.clone(),
+            checkout_id: selected
+                .map(|target| target.checkout_id.clone())
+                .or_else(|| chat.checkout_id.clone()),
         })
     }
 }
@@ -82,12 +90,51 @@ pub(super) trait WorkspaceFilesTransport: Send + Sync {
         method: &str,
         params: Value,
     ) -> Result<mpsc::Receiver<Value>, RpcError>;
+    async fn subscribe_search(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<SearchSubscription, RpcError> {
+        self.subscribe(method, params)
+            .await
+            .map(SearchSubscription::Receiver)
+    }
+}
+
+pub enum SearchSubscription {
+    Checked(mast_rpc::RpcSubscription),
+    Receiver(mpsc::Receiver<Value>),
+}
+impl SearchSubscription {
+    pub async fn recv(&mut self) -> Option<Value> {
+        match self {
+            Self::Checked(stream) => stream.recv().await,
+            Self::Receiver(stream) => stream.recv().await,
+        }
+    }
+    pub fn try_recv(&mut self) -> Result<Value, mpsc::error::TryRecvError> {
+        match self {
+            Self::Checked(stream) => stream.try_recv(),
+            Self::Receiver(stream) => stream.try_recv(),
+        }
+    }
 }
 
 struct EngineFilesTransport(EngineHandle);
 
 #[async_trait]
 impl WorkspaceFilesTransport for EngineFilesTransport {
+    async fn subscribe_search(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<SearchSubscription, RpcError> {
+        self.0
+            .client()
+            .subscribe_checked(method, params)
+            .await
+            .map(SearchSubscription::Checked)
+    }
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.0.client().call(method, params).await
     }
@@ -172,10 +219,10 @@ impl WorkspaceFilesClient {
     pub async fn search_content(
         &self,
         request: mast_proto::SearchWorkspaceContentRequest,
-    ) -> Result<mpsc::Receiver<Value>, FilesClientError> {
+    ) -> Result<SearchSubscription, FilesClientError> {
         let params = request_params(&request, self.context.target_device_id.as_deref())?;
         self.transport
-            .subscribe(methods::SEARCH_WORKSPACE_CONTENT, params)
+            .subscribe_search(methods::SEARCH_WORKSPACE_CONTENT, params)
             .await
             .map_err(Into::into)
     }

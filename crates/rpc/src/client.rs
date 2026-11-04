@@ -56,6 +56,10 @@ impl RpcSubscription {
     pub async fn recv(&mut self) -> Option<serde_json::Value> {
         self.items.recv().await
     }
+
+    pub fn try_recv(&mut self) -> Result<serde_json::Value, mpsc::error::TryRecvError> {
+        self.items.try_recv()
+    }
 }
 
 impl Drop for RpcSubscription {
