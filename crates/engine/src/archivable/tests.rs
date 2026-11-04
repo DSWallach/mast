@@ -7,7 +7,9 @@ fn chat(extra: Value) -> Chat {
         "id": "w1", "deviceId": "d", "createdAt": "2026-10-01T00:00:00Z",
         "archived": false, "spaceId": "s",
     });
-    base.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    base.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
     serde_json::from_value(base).expect("chat fixture")
 }
 
@@ -86,6 +88,10 @@ fn a_merged_or_closed_pr_finishes_the_chat() {
     assert!(c.verdict().archivable);
     c.prs = vec!["MERGED", "OPEN"];
     assert!(!c.verdict().archivable);
+    c.prs = vec!["MERGED", "MERGED"];
+    assert!(c.verdict().archivable);
+    c.prs = vec!["MERGED", ""];
+    assert!(!c.verdict().archivable);
     c.prs = vec!["OPEN"];
     assert!(!c.verdict().archivable);
 }
@@ -94,7 +100,10 @@ fn a_merged_or_closed_pr_finishes_the_chat() {
 fn a_resolved_ready_to_merge_finishes_the_chat() {
     let mut c = Case::new();
     c.requests = vec![request("Ready to merge: feature", "resolved")];
-    assert_eq!(c.verdict(), Archivable::yes("its Ready to merge was resolved"));
+    assert_eq!(
+        c.verdict(),
+        Archivable::yes("its Ready to merge was resolved")
+    );
     // A resolved ordinary question does not.
     c.requests = vec![request("Which colour?", "resolved")];
     assert!(!c.verdict().archivable);
