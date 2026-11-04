@@ -87,6 +87,7 @@ pub mod terminal;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;
+mod message_source;
 pub mod typography;
 pub(crate) mod work_outline;
 pub mod workspace_chip;
