@@ -70,12 +70,39 @@ struct CommandResult {
 }
 trait Environment {
     fn executable(&self, name: &str) -> Option<PathBuf>;
-    fn run(&self, executable: &Path, args: &[&str], capture: bool) -> Option<CommandResult>;
+    fn run(
+        &self,
+        name: &str,
+        executable: &Path,
+        args: &[&str],
+        capture: bool,
+    ) -> Option<CommandResult>;
+}
+fn invocation_path(name: &str, resolved: &Path, directories: &[PathBuf]) -> PathBuf {
+    let canonical = std::fs::canonicalize(resolved).unwrap_or_else(|_| resolved.to_owned());
+    let mut dirs = directories.to_vec();
+    if let Some(parent) = resolved.parent() {
+        dirs.push(parent.to_owned());
+    }
+    for dir in dirs.into_iter().filter(|dir| dir.is_absolute()) {
+        #[cfg(not(windows))]
+        let names = vec![name.to_owned()];
+        #[cfg(windows)]
+        let names = std::iter::once(name.to_owned())
+            .chain(["exe", "com", "bat", "cmd"].map(|ext| format!("{name}.{ext}")))
+            .collect::<Vec<_>>();
+        for candidate in names.into_iter().map(|name| dir.join(name)) {
+            if std::fs::canonicalize(&candidate).is_ok_and(|path| path == canonical) {
+                return candidate;
+            }
+        }
+    }
+    resolved.to_owned()
 }
 struct System;
 impl Environment for System {
     fn executable(&self, name: &str) -> Option<PathBuf> {
-        match name {
+        let resolved = match name {
             "claude" => mast_harness::claude::ClaudeHarness::new()
                 .resolve_executable()
                 .ok(),
@@ -83,10 +110,37 @@ impl Environment for System {
                 .resolve_executable()
                 .ok(),
             _ => mast_harness::resolve_login_shell_executable(name),
+        }?;
+        // Harness resolution already preserves overrides and executable aliases.
+        if name == "claude" || name == "codex" {
+            return Some(resolved);
         }
+        let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
+            .as_deref()
+            .map(std::env::split_paths)
+            .into_iter()
+            .flatten()
+            .collect();
+        if let Some(path) = mast_harness::shell_env::login_shell_path() {
+            directories.extend(std::env::split_paths(path));
+        }
+        // Preserve invocation names for multicall binaries such as rustup.
+        // The harness returns canonical paths, which otherwise turn cargo into rustup.
+        Some(invocation_path(name, &resolved, &directories))
     }
-    fn run(&self, executable: &Path, args: &[&str], capture: bool) -> Option<CommandResult> {
-        let mut command = Command::new(executable);
+    fn run(
+        &self,
+        name: &str,
+        executable: &Path,
+        args: &[&str],
+        capture: bool,
+    ) -> Option<CommandResult> {
+        let is_git = name == "git";
+        let mut command = if is_git {
+            mast_harness::git_command()
+        } else {
+            Command::new(executable)
+        };
         command
             .args(args)
             .stdin(Stdio::null())
@@ -97,7 +151,17 @@ impl Environment for System {
             Stdio::null()
         });
         command.env("RUSTUP_AUTO_INSTALL", "0");
-        mast_harness::compose_login_shell_path_std(&mut command);
+        if is_git {
+            // git_command is required for all Git spawns; bind its lookup to the
+            // exact absolute directory selected by executable discovery.
+            if executable.file_stem().is_some_and(|stem| stem == "git") {
+                if let Some(parent) = executable.parent() {
+                    command.env("PATH", parent);
+                }
+            }
+        } else {
+            mast_harness::compose_login_shell_path_std(&mut command);
+        }
         let mut child = command.spawn().ok()?;
         // Drain bounded output concurrently so a broken executable cannot deadlock on a full pipe.
         let reader = child.stdout.take().map(|out| {
@@ -134,17 +198,20 @@ impl Environment for System {
     }
 }
 fn clean_version(output: &str) -> Option<String> {
-    // Only publish a numeric version, never arbitrary executable output.
-    output.split_whitespace().find_map(|word| {
-        let word = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
-        let parts: Vec<_> = word.split('.').collect();
-        (parts.len() >= 2
-            && parts.len() <= 4
-            && parts
-                .iter()
-                .all(|p| !p.is_empty() && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_digit())))
-        .then(|| word.to_owned())
-    })
+    // Publish numeric versions only, never arbitrary executable output. This also
+    // accepts prefixes such as git-lfs/3.7.1 and suffixes such as -nightly.
+    output
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .find_map(|word| {
+            let word = word.trim_matches('.');
+            let parts: Vec<_> = word.split('.').collect();
+            (parts.len() >= 2
+                && parts.len() <= 4
+                && parts.iter().all(|p| {
+                    !p.is_empty() && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_digit())
+                }))
+            .then(|| word.to_owned())
+        })
 }
 
 fn version_check(
@@ -170,7 +237,7 @@ fn version_check(
         );
     };
     let version = env
-        .run(&path, &["--version"], true)
+        .run(name, &path, &["--version"], true)
         .filter(|o| o.success)
         .and_then(|o| clean_version(&o.stdout));
     let check = match &version {
@@ -199,7 +266,7 @@ fn auth_check(env: &impl Environment, gh: Option<&Path>) -> Check {
         ),
         Some(path)
             if env
-                .run(path, &["auth", "status"], false)
+                .run("gh", path, &["auth", "status"], false)
                 .is_some_and(|r| r.success) =>
         {
             Check::new("gh authentication", Status::Ok, "signed in", None)
@@ -251,15 +318,49 @@ fn account_check(
         ),
     }
 }
-fn account_checks(data_dir: &Path, cursor: bool) -> Vec<Check> {
+fn account_checks(env: &impl Environment, data_dir: &Path, cursor: bool) -> Vec<Check> {
     let config = mast_engine::agent_accounts::AgentAccountsConfig::detect(data_dir);
+    account_checks_for(env, &config, cursor)
+}
+fn account_checks_for(
+    env: &impl Environment,
+    config: &mast_engine::agent_accounts::AgentAccountsConfig,
+    cursor: bool,
+) -> Vec<Check> {
+    let mut claude = account_check(
+        "claude",
+        &config.claude_config_file,
+        |v| nonempty(v.pointer("/oauthAccount/emailAddress")),
+        "Run claude auth status or connect an account in Mast",
+    );
+    if claude.status == Status::Ok {
+        let file_credentials = read_json(&config.claude_config_dir.join(".credentials.json"))
+            .ok()
+            .flatten()
+            .is_some_and(|v| nonempty(v.pointer("/claudeAiOauth/accessToken")));
+        #[cfg(target_os = "macos")]
+        let keychain_credentials = env.executable("security").is_some_and(|security| {
+            env.run(
+                "security",
+                &security,
+                &["find-generic-password", "-s", "Claude Code-credentials"],
+                false,
+            )
+            .is_some_and(|result| result.success)
+        });
+        #[cfg(not(target_os = "macos"))]
+        let keychain_credentials = {
+            let _ = env;
+            false
+        };
+        if !file_credentials && !keychain_credentials {
+            claude.status = Status::Warning;
+            claude.message = "account identity found; credentials unavailable".into();
+            claude.fix = Some("Run claude auth status or connect an account in Mast".into());
+        }
+    }
     let mut checks = vec![
-        account_check(
-            "claude",
-            &config.claude_config_file,
-            |v| nonempty(v.pointer("/oauthAccount/emailAddress")),
-            "Run claude auth login or connect an account in Mast",
-        ),
+        claude,
         account_check(
             "codex",
             &config.codex_home.join("auth.json"),
@@ -299,6 +400,7 @@ fn linear_check(env: &impl Environment) -> Check {
         };
         // No -w: security only reports item attributes, and stdout is discarded.
         return match env.run(
+            "security",
             &security,
             &[
                 "find-generic-password",
@@ -365,10 +467,10 @@ fn directory_size(path: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
-        let metadata = entry.metadata()?;
         if entry.file_type()?.is_symlink() {
             continue;
         }
+        let metadata = entry.metadata()?;
         total = total.saturating_add(if metadata.is_dir() {
             directory_size(&entry.path())?
         } else {
@@ -378,7 +480,33 @@ fn directory_size(path: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 fn gib(bytes: u64) -> String {
-    format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
+    if bytes < 1024 * 1024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
+    }
+}
+fn disk_space_check(space: Option<u64>) -> Check {
+    match space {
+        Some(bytes) if bytes < 20 * 1_000_000_000 => Check::new(
+            "disk space",
+            Status::Warning,
+            format!("{} free", gib(bytes)),
+            Some("Free at least 20 GB on the data volume"),
+        ),
+        Some(bytes) => Check::new(
+            "disk space",
+            Status::Ok,
+            format!("{} free", gib(bytes)),
+            None,
+        ),
+        None => Check::new(
+            "disk space",
+            Status::Warning,
+            "free space unavailable",
+            Some("Check free space on the data volume"),
+        ),
+    }
 }
 fn data_checks(path: &Path) -> Vec<Check> {
     let Some(parent) = nearest_existing(path) else {
@@ -406,26 +534,7 @@ fn data_checks(path: &Path) -> Vec<Check> {
         ),
         (!valid).then_some("Set MAST_DATA_DIR to a writable directory or fix its permissions"),
     )];
-    checks.push(match free_space(parent) {
-        Some(bytes) if bytes < 20 * 1_000_000_000 => Check::new(
-            "disk space",
-            Status::Warning,
-            format!("{} free", gib(bytes)),
-            Some("Free at least 20 GB on the data volume"),
-        ),
-        Some(bytes) => Check::new(
-            "disk space",
-            Status::Ok,
-            format!("{} free", gib(bytes)),
-            None,
-        ),
-        None => Check::new(
-            "disk space",
-            Status::Warning,
-            "free space unavailable",
-            Some("Check free space on the data volume"),
-        ),
-    });
+    checks.push(disk_space_check(free_space(parent)));
     checks.push(if !path.exists() {
         Check::new("data size", Status::Ok, "0 bytes (directory absent)", None)
     } else {
@@ -547,7 +656,12 @@ fn toolchain_channel(start: &Path) -> Result<Option<String>, ()> {
     }
     Ok(None)
 }
-fn toolchain_check(env: &impl Environment, start: &Path, rustc_version: Option<&str>) -> Check {
+fn toolchain_check(
+    env: &impl Environment,
+    start: &Path,
+    cargo_version: Option<&str>,
+    rustc_version: Option<&str>,
+) -> Check {
     let channel = match toolchain_channel(start) {
         Ok(Some(channel)) if !channel.is_empty() => channel,
         Ok(_) => {
@@ -582,7 +696,7 @@ fn toolchain_check(env: &impl Environment, start: &Path, rustc_version: Option<&
     }
     let rustup_match = env
         .executable("rustup")
-        .and_then(|p| env.run(&p, &["show", "active-toolchain"], true))
+        .and_then(|p| env.run("rustup", &p, &["show", "active-toolchain"], true))
         .filter(|r| r.success)
         .and_then(|r| r.stdout.split_whitespace().next().map(str::to_owned))
         .is_some_and(|active| {
@@ -593,11 +707,27 @@ fn toolchain_check(env: &impl Environment, start: &Path, rustc_version: Option<&
         });
     let numeric_match = channel.as_bytes().first().is_some_and(u8::is_ascii_digit)
         && rustc_version.is_some_and(|v| v == channel);
-    if rustup_match || numeric_match {
+    let versions_match = cargo_version
+        .zip(rustc_version)
+        .is_some_and(|(cargo, rustc)| {
+            let release = |s: &str| s.split('.').take(2).collect::<Vec<_>>().join(".");
+            release(cargo) == release(rustc)
+        });
+    let numeric_channel = channel.as_bytes().first().is_some_and(u8::is_ascii_digit);
+    if (if numeric_channel {
+        numeric_match
+    } else {
+        rustup_match
+    }) && versions_match
+    {
         Check::new(
             "Rust toolchain",
             Status::Ok,
-            format!("matches {channel}"),
+            if numeric_channel {
+                format!("rustc matches {channel}; cargo version agrees")
+            } else {
+                format!("{channel} selected; cargo and rustc versions agree")
+            },
             None,
         )
     } else {
@@ -615,25 +745,33 @@ fn toolchain_check(env: &impl Environment, start: &Path, rustc_version: Option<&
 pub async fn inspect(data_dir: PathBuf, port: u16) -> Report {
     let env = System;
     let mut checks = Vec::new();
-    let (claude, _, _) = version_check(
+    let (claude, claude_path, _) = version_check(
         &env,
         "claude",
-        false,
+        true,
         "Install Claude Code and make claude available on PATH",
     );
     checks.push(claude);
-    let (codex, _, _) = version_check(
+    let (codex, codex_path, _) = version_check(
         &env,
         "codex",
-        false,
+        true,
         "Install Codex and make codex available on PATH",
     );
     checks.push(codex);
+    if claude_path.is_none() && codex_path.is_none() {
+        checks.push(Check::new(
+            "agent CLI",
+            Status::Error,
+            "neither Claude Code nor Codex is installed",
+            Some("Install and sign in to Claude Code or Codex"),
+        ));
+    }
     let cursor = env.executable("cursor");
     if cursor.is_some() {
         checks.push(version_check(&env, "cursor", true, "Install Cursor CLI").0);
     }
-    checks.extend(account_checks(&data_dir, cursor.is_some()));
+    checks.extend(account_checks(&env, &data_dir, cursor.is_some()));
     let (gh, gh_path, _) = version_check(&env, "gh", false, "Install gh and run gh auth login");
     checks.push(gh);
     checks.push(auth_check(&env, gh_path.as_deref()));
@@ -649,11 +787,17 @@ pub async fn inspect(data_dir: PathBuf, port: u16) -> Report {
     );
     checks.extend(data_checks(&data_dir));
     checks.push(engine_check(&data_dir, port).await);
-    checks.push(version_check(&env, "cargo", false, "Install Rust with rustup").0);
+    let (cargo, _, cargo_version) = version_check(&env, "cargo", false, "Install Rust with rustup");
+    checks.push(cargo);
     let (rustc, _, rustc_version) = version_check(&env, "rustc", false, "Install Rust with rustup");
     checks.push(rustc);
     if let Ok(cwd) = std::env::current_dir() {
-        checks.push(toolchain_check(&env, &cwd, rustc_version.as_deref()));
+        checks.push(toolchain_check(
+            &env,
+            &cwd,
+            cargo_version.as_deref(),
+            rustc_version.as_deref(),
+        ));
     }
     checks.push(linear_check(&env));
     Report::new(checks)
@@ -686,7 +830,13 @@ mod tests {
         fn executable(&self, name: &str) -> Option<PathBuf> {
             self.programs.get(name).cloned()
         }
-        fn run(&self, executable: &Path, args: &[&str], _: bool) -> Option<CommandResult> {
+        fn run(
+            &self,
+            _name: &str,
+            executable: &Path,
+            args: &[&str],
+            _: bool,
+        ) -> Option<CommandResult> {
             let key = format!("{} {}", executable.file_name()?.to_str()?, args.join(" "));
             self.calls.lock().unwrap().push(key.clone());
             self.outputs
@@ -719,12 +869,37 @@ mod tests {
             Status::Warning
         );
         assert_eq!(clean_version("unparseable token"), None);
+        assert_eq!(
+            clean_version("git-lfs/3.7.1 (GitHub; darwin)"),
+            Some("3.7.1".into())
+        );
         for name in ["claude", "codex", "gh", "git-lfs", "cargo", "rustc"] {
             assert_eq!(
                 version_check(&env, name, false, "install").0.status,
                 Status::Error
             );
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn executable_invocation_preserves_the_selected_shim_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let rustup = dir.path().join("rustup");
+        std::fs::write(&rustup, "fake executable").unwrap();
+        std::os::unix::fs::symlink(&rustup, dir.path().join("cargo")).unwrap();
+        std::os::unix::fs::symlink(&rustup, dir.path().join("rustc")).unwrap();
+        assert_eq!(
+            invocation_path("cargo", &rustup, &[dir.path().to_owned()]),
+            dir.path().join("cargo")
+        );
+        assert_eq!(
+            invocation_path("rustc", &rustup, &[dir.path().to_owned()]),
+            dir.path().join("rustc")
+        );
+        assert_eq!(
+            invocation_path("missing", &rustup, &[dir.path().to_owned()]),
+            rustup
+        );
     }
     #[test]
     fn github_auth_uses_only_status_and_never_exposes_output() {
@@ -764,6 +939,48 @@ mod tests {
         assert_eq!(check("codex", |_| true).status, Status::Warning);
     }
     #[test]
+    fn account_detectors_use_injected_paths_and_require_claude_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mast_engine::agent_accounts::AgentAccountsConfig {
+            data_dir: dir.path().join("data"),
+            claude_config_dir: dir.path().join("claude"),
+            claude_config_file: dir.path().join("claude.json"),
+            codex_home: dir.path().join("codex"),
+            cursor_sdk_auth_file: dir.path().join("cursor.json"),
+        };
+        std::fs::create_dir_all(&config.claude_config_dir).unwrap();
+        std::fs::create_dir_all(&config.codex_home).unwrap();
+        std::fs::write(
+            &config.claude_config_file,
+            r#"{"oauthAccount":{"emailAddress":"private"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config.codex_home.join("auth.json"),
+            r#"{"tokens":{"id_token":"secret"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &config.cursor_sdk_auth_file,
+            r#"{"apiKey":"secret","apiKeyExpiresAtMs":1}"#,
+        )
+        .unwrap();
+        let env = FakeEnvironment::default();
+        let checks = account_checks_for(&env, &config, true);
+        assert_eq!(
+            checks.iter().map(|c| c.status).collect::<Vec<_>>(),
+            [Status::Warning, Status::Ok, Status::Warning]
+        );
+        std::fs::write(
+            config.claude_config_dir.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"secret"}}"#,
+        )
+        .unwrap();
+        let checks = account_checks_for(&env, &config, true);
+        assert_eq!(checks[0].status, Status::Ok);
+        assert!(!serde_json::to_string(&checks).unwrap().contains("secret"));
+    }
+    #[test]
     fn data_checks_do_not_create_directory_and_count_files_without_following_links() {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("missing");
@@ -779,6 +996,15 @@ mod tests {
         assert_eq!(data_checks(&file.join("child"))[0].status, Status::Error);
     }
     #[test]
+    fn disk_space_threshold_and_unknown_space_report_fixes() {
+        assert_eq!(
+            disk_space_check(Some(19_999_999_999)).status,
+            Status::Warning
+        );
+        assert_eq!(disk_space_check(Some(20_000_000_000)).status, Status::Ok);
+        assert!(disk_space_check(None).fix.is_some());
+    }
+    #[test]
     fn toolchain_comparison_uses_checkout_pin_and_injected_rustup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rust-toolchain.toml");
@@ -789,26 +1015,36 @@ mod tests {
             "stable-aarch64-apple-darwin (overridden)\n",
         );
         assert_eq!(
-            toolchain_check(&env, dir.path(), None).status,
+            toolchain_check(&env, dir.path(), None, None).status,
             Status::Warning
         );
         std::fs::write(&path, "[toolchain]\nchannel = \"stable\"\n").unwrap();
         assert_eq!(
-            toolchain_check(&env, dir.path(), Some("1.80.0")).status,
+            toolchain_check(&env, dir.path(), Some("1.80.1"), Some("1.80.0")).status,
             Status::Ok
         );
         std::fs::write(&path, "[toolchain]\nchannel = \"1.80.0\"\n").unwrap();
         assert_eq!(
-            toolchain_check(&env, dir.path(), Some("1.80.0")).status,
+            toolchain_check(&env, dir.path(), Some("1.80.1"), Some("1.80.0")).status,
             Status::Ok
         );
         assert_eq!(
-            toolchain_check(&env, dir.path(), Some("1.79.0")).status,
+            toolchain_check(&env, dir.path(), Some("1.79.0"), Some("1.79.0")).status,
+            Status::Warning
+        );
+        let misleading = FakeEnvironment::default().program(
+            "rustup",
+            &["show", "active-toolchain"],
+            true,
+            "1.80.0-aarch64-apple-darwin",
+        );
+        assert_eq!(
+            toolchain_check(&misleading, dir.path(), Some("1.79.0"), Some("1.79.0")).status,
             Status::Warning
         );
         std::fs::write(&path, "broken = [").unwrap();
         assert_eq!(
-            toolchain_check(&env, dir.path(), None).status,
+            toolchain_check(&env, dir.path(), None, None).status,
             Status::Warning
         );
     }

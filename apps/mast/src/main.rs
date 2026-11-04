@@ -176,9 +176,8 @@ fn main() -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // `zeron mcp` owns stdout for the protocol: a single log line on it
-        // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
-        if matches!(&cli.command, Some(Command::Mcp)) {
+        // MCP and doctor --json reserve stdout for machine-readable output.
+        if matches!(&cli.command, Some(Command::Mcp | Command::Doctor { .. })) {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -238,10 +237,15 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Doctor { json }) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            let report = runtime.block_on(doctor::inspect(paths::data_dir_read_only(),
-                mast_proto::env::var("MAST_IPC_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(27654)));
+            let port = mast_proto::env::var("MAST_IPC_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(27654);
+            let report = runtime.block_on(doctor::inspect(paths::data_dir_read_only(), port));
             doctor::print_report(&report, json)?;
-            if report.exit_code() != 0 { std::process::exit(1); }
+            if report.exit_code() != 0 {
+                std::process::exit(1);
+            }
             Ok(())
         }
         Some(Command::Sync) => {

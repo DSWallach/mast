@@ -67,6 +67,21 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn read_only_resolution_does_not_migrate_legacy_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join(".comet-native");
+        std::fs::create_dir(&old).unwrap();
+        let path = resolve_data_dir(
+            |name| (name == "HOME").then(|| home.path().as_os_str().to_owned()),
+            false,
+        );
+        assert_eq!(path, home.path().join(".zeron"));
+        assert!(old.exists());
+        assert!(!path.exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn explorer_launch_without_home_uses_local_app_data() {
