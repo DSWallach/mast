@@ -603,15 +603,15 @@ impl OrchestratorWakes {
         self.after_ingest(recorded).await;
     }
 
-    /// The latest externally submitted message; Mast's own continuation is
-    /// written as a user entry by the queue, so exclude its reserved prefix.
+    /// The latest externally submitted message; Mast's system messages are
+    /// written as user entries by the queue and do not reset the budget.
     fn last_external_message(&self, chat_id: &str) -> Option<Option<(String, i64)>> {
         let handle = self.inner.doc_host.open(chat_id).ok()?;
         let entries = handle.doc().read_entries().ok()?;
         Some(entries.into_iter().rev().find(|entry| {
             entry.role == mast_doc::MessageRole::User
                 && !entry.parts.iter().any(|part| matches!(part,
-                    mast_doc::MessagePart::Text { text, .. } if text.starts_with("[Mast: auto-continue ")))
+                    mast_doc::MessagePart::Text { text, .. } if text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX)))
         }).map(|entry| (entry.id, entry.created_at)))
     }
 
@@ -705,7 +705,7 @@ impl OrchestratorWakes {
                 }
                 auto_continue::Decision::Continue(count) => {
                     let text = format!(
-                        "[Mast: auto-continue {count}/3] Your work item is still open. Continue the task; if you are done, mark the item completed or raise a Required Action (kind handoff) — if you're blocked, raise one with kind ask."
+                        "[Mast system message, not from the user: auto-continue {count}/3]\nYour work item is still open. Continue the task; if you are done, mark the item completed or raise a Required Action (kind handoff) — if you're blocked, raise one with kind ask."
                     );
                     match self.inner.doc_host.queue_event_message(worker, &text) {
                         Ok(id) => {

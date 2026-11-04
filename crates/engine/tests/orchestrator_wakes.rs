@@ -334,7 +334,7 @@ async fn auto_continue_only_queues_for_an_open_unblocked_item() {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|p| p.contains("[Mast: auto-continue 1/3]"))
+                .any(|p| p.contains("auto-continue 1/3]"))
         },
         "worker continuation",
     )
@@ -366,7 +366,7 @@ async fn auto_continue_stops_after_three_and_resets_on_a_user_message() {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|prompt| prompt.contains(&format!("[Mast: auto-continue {number}/3]")))
+                    .any(|prompt| prompt.contains(&format!("auto-continue {number}/3]")))
             },
             "continuation prompt",
         )
@@ -445,7 +445,7 @@ async fn auto_continue_stops_after_three_and_resets_on_a_user_message() {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|prompt| prompt.contains("[Mast: auto-continue 1/3]"))
+                .filter(|prompt| prompt.contains("auto-continue 1/3]"))
                 .count()
                 == 2
         },
