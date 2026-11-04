@@ -1037,6 +1037,7 @@ fn typed_action_buttons_and_note_prompt_relay_decision(cx: &mut gpui::TestAppCon
     );
     assert_eq!(recorded[1]["outcome"], "changesRequested");
     assert_eq!(recorded[1]["via"], "card");
+    assert_eq!(recorded[1]["values"]["action"], "changesRequested");
     assert_eq!(recorded[1]["note"], "Fix tests");
 }
 

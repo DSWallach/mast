@@ -612,13 +612,14 @@ impl RequiredActionsList {
         outcome: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let values = outcome.as_ref().map(|action| serde_json::json!({ "action": action }));
         let task = self
             .state
             .read(cx)
             .work_outline_actions()
             .resolve_user_action_request(ResolveUserActionRequestParams {
                 outcome,
-                values: None,
+                values,
                 via: Some("card".into()),
                 user_action_request_id: request_id.clone(),
                 note,
