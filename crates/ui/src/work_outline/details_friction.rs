@@ -5,10 +5,7 @@ use gpui::{Context, SharedString, div, prelude::*, px};
 use mast_proto::{
     FrictionKind, FrictionReport, FrictionSource, FrictionStatus, ListFrictionReportsParams,
 };
-use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
-
-static FRICTION_DESTINATIONS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+use std::collections::HashSet;
 
 fn friction_markdown(reports: &[FrictionReport]) -> String {
     fn value(value: Option<&str>) -> &str {
@@ -341,10 +338,8 @@ impl WorkItemDetails {
                     );
                 } else if picker_open {
                     if let Some(snapshot) = &self.snapshot {
-                        let last = FRICTION_DESTINATIONS
-                            .get_or_init(Default::default)
-                            .lock()
-                            .unwrap()
+                        let last = crate::settings::current(cx)
+                            .friction_destination_by_space_id
                             .get(&self.space_id)
                             .cloned();
                         let mut choices: Vec<_> = snapshot
@@ -387,11 +382,9 @@ impl WorkItemDetails {
                                             this.update(cx, |this, cx| {
                                                 match result {
                                                     Ok(result) => {
-                                                        FRICTION_DESTINATIONS
-                                                            .get_or_init(Default::default)
-                                                            .lock()
-                                                            .unwrap()
-                                                            .insert(space_id, parent_item_id);
+                                                        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                                                            settings.friction_destination_by_space_id.insert(space_id, parent_item_id);
+                                                        });
                                                         if let Some(report) = this
                                                             .friction
                                                             .reports
