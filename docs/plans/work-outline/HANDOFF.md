@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **PR review phase 3** (2026-11-04 overnight, `pr-review-search`): ⌘O quick open (fuzzy, recents, changed-in-diff
+  group, `:line`), ⇧⌘F in-process streamed content search (ignore + grep-searcher; case/word/regex,
+  include/exclude globs, caps, cancellation, only-changed-files), ⌘G go to line in files and diffs, file
+  editor Replace moved to ⌥⌘F; all via the rebindable keymap. Back/forward history not built. Release run:
+  nextest 2310/2310, UI 2420/0.
 - **Typed Needs-you, phase 2** (2026-11-04 overnight, `needs-outcomes`): persisted `resolution.outcome`
   (approved, declined, changes_requested, chosen, answered, dismissed) + `values` + `via`; per-kind card
   buttons (approve → Approve/Decline, review/handoff → Approve/Request changes, Dismiss everywhere, note
