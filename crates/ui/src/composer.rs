@@ -1370,11 +1370,9 @@ enum EditKind {
 
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
 const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
-/// Key context for single-line search inputs: only this context (plus
-/// "Composer"/"MessageComposer") has editing bindings registered in
-/// `input_bindings`, so a `with_context` input in any other context gets
-/// typed characters (via the IME path) but no backspace/delete/motion.
+/// Key context for palettes that reserve the arrow keys for navigation.
 pub(crate) const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
+pub(crate) const WORKSPACE_SEARCH_CONTEXT: &str = "WorkspaceSearch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageEnterBindingAction {
@@ -1440,7 +1438,7 @@ fn enter_outcome(has_completion: bool, fallback: EnterOutcome) -> EnterOutcome {
     }
 }
 
-fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
+fn input_bindings(context: &'static str, result_navigation: bool) -> Vec<KeyBinding> {
     let ctx = Some(context);
     let mut bindings = vec![
         KeyBinding::new("tab", MentionTab, ctx),
@@ -1449,8 +1447,6 @@ fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
         KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("up", Up, ctx),
-        KeyBinding::new("down", Down, ctx),
         KeyBinding::new("shift-left", SelectLeft, ctx),
         KeyBinding::new("shift-right", SelectRight, ctx),
         KeyBinding::new("shift-up", SelectUp, ctx),
@@ -1473,6 +1469,10 @@ fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
         KeyBinding::new("cmd-backspace", DeleteToLineStart, ctx),
         KeyBinding::new("cmd-delete", DeleteToLineEnd, ctx),
     ];
+    if !result_navigation {
+        bindings.push(KeyBinding::new("up", Up, ctx));
+        bindings.push(KeyBinding::new("down", Down, ctx));
+    }
     for prefix in ["cmd", "ctrl"] {
         bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, ctx));
         bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, ctx));
@@ -1524,14 +1524,14 @@ fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
 
 /// Bind the composer keymap. Call once at app boot.
 pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
-    let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT);
+    let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT, false);
     generic_bindings.push(KeyBinding::new(
         "enter",
         Submit,
         Some(GENERIC_COMPOSER_CONTEXT),
     ));
 
-    let mut message_bindings = input_bindings(MESSAGE_COMPOSER_CONTEXT);
+    let mut message_bindings = input_bindings(MESSAGE_COMPOSER_CONTEXT, false);
     for binding in message_enter_bindings(send_behavior, &platform_combo("mod-enter")) {
         match binding.action {
             MessageEnterBindingAction::Submit => message_bindings.push(KeyBinding::new(
@@ -1617,6 +1617,7 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
         palette_bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, palette));
     }
     cx.bind_keys(palette_bindings);
+    cx.bind_keys(input_bindings(WORKSPACE_SEARCH_CONTEXT, true));
     cx.bind_keys(generic_bindings);
     cx.bind_keys(message_bindings);
 }
@@ -8991,6 +8992,32 @@ mod tests {
         assert_eq!(text(cx), "hello big ");
         cx.simulate_keystrokes(window.into(), "cmd-backspace");
         assert_eq!(text(cx), "");
+    }
+
+    #[gpui::test]
+    fn workspace_search_context_edits_text(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            init(cx, Default::default());
+        });
+        let window = cx.add_window(|_, cx| {
+            ComposerInput::with_context("Search", WORKSPACE_SEARCH_CONTEXT, cx)
+        });
+        window.update(cx, |input, window, cx| {
+            input.set_text("hello big world", cx);
+            window.focus(&input.focus_handle, cx);
+        }).unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        let text = |cx: &mut gpui::TestAppContext| {
+            window.read_with(cx, |input, _| input.text().to_string()).unwrap()
+        };
+        cx.simulate_keystrokes(window.into(), "backspace");
+        assert_eq!(text(cx), "hello big worl");
+        cx.simulate_keystrokes(window.into(), if cfg!(target_os = "macos") { "alt-backspace" } else { "ctrl-backspace" });
+        assert_eq!(text(cx), "hello big ");
+        cx.simulate_keystrokes(window.into(), "left delete");
+        assert_eq!(text(cx), "hello big");
     }
 
     #[gpui::test]
