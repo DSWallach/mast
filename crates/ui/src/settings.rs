@@ -607,9 +607,37 @@ impl WindowGeometry {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ProfileAtMigration {
+    Existing,
+    Fresh,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamTabVisibility {
+    Hide,
+    #[default]
+    Auto,
+    Always,
+}
+
+impl TeamTabVisibility {
+    pub(crate) fn visible(self, has_workers: bool) -> bool {
+        match self {
+            Self::Hide => false,
+            Self::Auto => has_workers,
+            Self::Always => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_at_migration: Option<ProfileAtMigration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
@@ -627,6 +655,8 @@ pub struct UiSettings {
     /// session title.
     pub sidebar_show_project_label: bool,
     pub sidebar_compact: bool,
+    pub team_tab_visibility: TeamTabVisibility,
+    pub compact_single_chat: bool,
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
@@ -662,6 +692,8 @@ pub struct UiSettings {
     /// list. Kept for file compatibility; no longer read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub space_order: Vec<String>,
+    /// Last duration used to grant administrator access.
+    pub(crate) admin_grant_duration: crate::admin::DurationChoice,
     /// Master switch for session notification chimes. `MAST_DISABLE_SOUND`
     /// overrides every per-event preference below.
     pub sound_enabled: bool,
@@ -778,6 +810,7 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            profile_at_migration: None,
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
@@ -786,6 +819,8 @@ impl Default for UiSettings {
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
             sidebar_compact: true,
+            team_tab_visibility: TeamTabVisibility::Auto,
+            compact_single_chat: true,
             sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
@@ -801,6 +836,7 @@ impl Default for UiSettings {
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
+            admin_grant_duration: crate::admin::DurationChoice::default(),
             sound_enabled: true,
             sound_completion_enabled: true,
             sound_input_enabled: true,
@@ -1643,6 +1679,76 @@ impl UiSettings {
         self
     }
 
+    /// Load and persist the one-time profile migration before other startup code
+    /// creates the data directory.
+    pub fn load_for_startup(data_dir: &Path) -> Self {
+        let profile = if data_dir.exists() || Self::path(data_dir).exists() {
+            ProfileAtMigration::Existing
+        } else {
+            ProfileAtMigration::Fresh
+        };
+        let stored_settings = std::fs::read_to_string(Self::path(data_dir))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let missing = |key: &str| {
+            stored_settings
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .is_none_or(|object| !object.contains_key(key))
+        };
+        let mut settings = Self::load(data_dir);
+        let mut migrated = false;
+        if settings.profile_at_migration.is_none() {
+            settings.migrate_profile_settings(profile);
+            settings.profile_at_migration = Some(profile);
+            migrated = true;
+        } else if missing("compactSingleChat") {
+            settings.compact_single_chat =
+                settings.profile_at_migration == Some(ProfileAtMigration::Existing);
+            migrated = true;
+        }
+        // Preserve explicitly stored preferences. Missing fields on existing profiles
+        // retain the legacy defaults supplied by `load` and are written once.
+        let fresh = settings.profile_at_migration == Some(ProfileAtMigration::Fresh);
+        for (key, value) in [
+            ("soundEnabled", &mut settings.sound_enabled),
+            (
+                "soundCompletionEnabled",
+                &mut settings.sound_completion_enabled,
+            ),
+            ("soundInputEnabled", &mut settings.sound_input_enabled),
+            (
+                "soundAttentionEnabled",
+                &mut settings.sound_attention_enabled,
+            ),
+            ("notificationsEnabled", &mut settings.notifications_enabled),
+            (
+                "notificationsBackgroundOnly",
+                &mut settings.notifications_background_only,
+            ),
+            ("liveAppIcon", &mut settings.live_app_icon),
+            ("showMenuBarItem", &mut settings.show_menu_bar_item),
+        ] {
+            if missing(key) {
+                if fresh && !matches!(key, "notificationsEnabled" | "notificationsBackgroundOnly") {
+                    *value = false;
+                }
+                migrated = true;
+            }
+        }
+        if migrated {
+            if let Err(error) = settings.save(data_dir) {
+                tracing::warn!(%error, "failed to save ui settings migration");
+            }
+        }
+        settings
+    }
+
+    fn migrate_profile_settings(&mut self, profile: ProfileAtMigration) {
+        self.compact_single_chat = profile == ProfileAtMigration::Existing;
+        self.admin_grant_duration = crate::admin::DurationChoice::FourHours;
+    }
+
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
@@ -1825,7 +1931,164 @@ pub use mast_proto::SidebarSection;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_single_chat_migrates_and_persists() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
+            let mut settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.compact_single_chat, existing);
+            settings.compact_single_chat = !existing;
+            settings.save(&dir).unwrap();
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).compact_single_chat,
+                !existing
+            );
+            let path = UiSettings::path(&dir);
+            let mut json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            json.as_object_mut().unwrap().remove("compactSingleChat");
+            std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).compact_single_chat,
+                existing
+            );
+        }
+    }
+
+    #[test]
+    fn team_tab_visibility_defaults_for_fresh_and_existing_profiles() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+            }
+            let mut settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.team_tab_visibility, TeamTabVisibility::Auto);
+            settings.team_tab_visibility = TeamTabVisibility::Always;
+            settings.save(&dir).unwrap();
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).team_tab_visibility,
+                TeamTabVisibility::Always
+            );
+        }
+    }
+
+    #[test]
+    fn team_tab_visibility_modes() {
+        for has_workers in [false, true] {
+            assert!(!TeamTabVisibility::Hide.visible(has_workers));
+            assert_eq!(TeamTabVisibility::Auto.visible(has_workers), has_workers);
+            assert!(TeamTabVisibility::Always.visible(has_workers));
+        }
+    }
+
+    #[test]
+    fn admin_grant_duration_defaults_and_persists_for_fresh_and_existing_profiles() {
+        use super::UiSettings;
+        use crate::admin::DurationChoice;
+
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(UiSettings::path(&dir), "{}").unwrap();
+            }
+            let mut settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.admin_grant_duration, DurationChoice::FourHours);
+            settings.admin_grant_duration = DurationChoice::UntilRevoked;
+            settings.save(&dir).unwrap();
+            assert_eq!(
+                UiSettings::load_for_startup(&dir).admin_grant_duration,
+                DurationChoice::UntilRevoked
+            );
+        }
+    }
     use super::*;
+
+    #[test]
+    fn profile_migration_records_fresh_and_existing_profiles_once() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let data_dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&data_dir).unwrap();
+            }
+            let expected = if existing {
+                ProfileAtMigration::Existing
+            } else {
+                ProfileAtMigration::Fresh
+            };
+            let mut settings = UiSettings::load_for_startup(&data_dir);
+            assert_eq!(settings.profile_at_migration, Some(expected));
+            settings.sidebar_width = 345.0;
+            settings.save(&data_dir).unwrap();
+            let reloaded = UiSettings::load_for_startup(&data_dir);
+            assert_eq!(reloaded.profile_at_migration, Some(expected));
+            assert_eq!(reloaded.sidebar_width, 345.0);
+        }
+    }
+
+    #[test]
+    fn notification_and_presence_defaults_migrate_and_persist() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(UiSettings::path(&dir), r#"{"sidebarWidth":300}"#).unwrap();
+            }
+            let settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.sound_enabled, existing);
+            assert_eq!(settings.sound_completion_enabled, existing);
+            assert_eq!(settings.sound_input_enabled, existing);
+            assert_eq!(settings.sound_attention_enabled, existing);
+            assert!(settings.notifications_enabled);
+            assert!(settings.notifications_background_only);
+            assert_eq!(settings.live_app_icon, existing);
+            assert_eq!(settings.show_menu_bar_item, existing);
+            let stored: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(UiSettings::path(&dir)).unwrap())
+                    .unwrap();
+            for key in [
+                "soundEnabled",
+                "soundCompletionEnabled",
+                "soundInputEnabled",
+                "soundAttentionEnabled",
+                "notificationsEnabled",
+                "notificationsBackgroundOnly",
+                "liveAppIcon",
+                "showMenuBarItem",
+            ] {
+                assert!(stored.get(key).is_some(), "{key} was not persisted");
+            }
+            assert_eq!(UiSettings::load_for_startup(&dir), settings);
+        }
+    }
+
+    #[test]
+    fn notification_and_presence_migration_preserves_explicit_preferences() {
+        for profile in ["fresh", "existing"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(UiSettings::path(dir.path()), format!(
+                r#"{{"profileAtMigration":"{profile}","soundEnabled":true,"soundCompletionEnabled":false,"soundInputEnabled":true,"soundAttentionEnabled":false,"notificationsEnabled":false,"notificationsBackgroundOnly":false,"liveAppIcon":true,"showMenuBarItem":true}}"#
+            )).unwrap();
+            let settings = UiSettings::load_for_startup(dir.path());
+            assert!(settings.sound_enabled);
+            assert!(!settings.sound_completion_enabled);
+            assert!(settings.sound_input_enabled);
+            assert!(!settings.sound_attention_enabled);
+            assert!(!settings.notifications_enabled);
+            assert!(!settings.notifications_background_only);
+            assert!(settings.live_app_icon);
+            assert!(settings.show_menu_bar_item);
+        }
+    }
 
     #[test]
     fn settings_saved_before_the_rename_still_load() {
@@ -2324,6 +2587,7 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
+            profile_at_migration: None,
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
@@ -2331,6 +2595,8 @@ mod tests {
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
             sidebar_compact: true,
+            team_tab_visibility: TeamTabVisibility::Auto,
+            compact_single_chat: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_show_harness: false,
@@ -2359,6 +2625,7 @@ mod tests {
                 vec!["b".to_string(), "a".to_string()],
             )]),
             space_order: vec!["space-2".to_string(), "space-1".to_string()],
+            admin_grant_duration: crate::admin::DurationChoice::EightHours,
             sound_enabled: false,
             sound_completion_enabled: false,
             sound_input_enabled: true,
@@ -3073,11 +3340,15 @@ mod tests {
     fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
         let mut keymap = KeymapConfig::default();
         assert_eq!(keymap.get(ShortcutId::QuickOpen), "mod-o");
-        assert_eq!(keymap.get(ShortcutId::SearchWorkspaceContent), "mod-shift-f");
+        assert_eq!(
+            keymap.get(ShortcutId::SearchWorkspaceContent),
+            "mod-shift-f"
+        );
         assert_eq!(keymap.get(ShortcutId::GoToLine), "mod-g");
         assert_eq!(keymap.get(ShortcutId::ReplaceFile), "mod-alt-f");
         keymap.set(ShortcutId::QuickOpen, "mod-alt-o".into());
-        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        let restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
         assert_eq!(restored.get(ShortcutId::QuickOpen), "mod-alt-o");
         keymap.set(ShortcutId::QuickOpen, "mod-p".into());
         assert!(!conflicted_shortcuts(&keymap).is_empty());

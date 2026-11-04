@@ -12,21 +12,19 @@
 //! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
 //! - [`loaders`] — zeron pulse loader, gradient spinner, boot splash.
 
+pub(crate) mod admin;
 pub mod app_menus;
 pub mod appearance;
 pub mod appshots;
 pub(crate) mod artifacts;
 pub mod attachments;
 pub mod badges;
-pub mod build_watch;
 pub mod browser;
+pub mod build_watch;
 pub mod change_requests;
 pub mod changes;
 pub mod chat_closeout;
 mod chat_item;
-pub(crate) mod admin;
-mod orchestrator_wakes;
-mod team;
 mod chat_metadata;
 pub mod chat_type_view;
 mod chat_work_context;
@@ -51,6 +49,7 @@ pub mod links;
 pub mod loaders;
 pub mod managed_accounts;
 pub mod markdown;
+pub mod menu_bar;
 pub mod motion;
 mod new_thread_background_effects;
 mod new_thread_background_image;
@@ -58,6 +57,7 @@ mod new_thread_background_mask;
 mod notice;
 pub mod notify;
 pub(crate) mod observe_gate;
+mod orchestrator_wakes;
 pub mod overview;
 pub mod overview_grouping;
 pub mod overview_positions;
@@ -69,12 +69,12 @@ pub(crate) mod pr_page;
 pub(crate) mod pr_review_launch;
 pub mod project_actions;
 pub mod queue;
-pub mod menu_bar;
-pub mod running_chats;
 pub mod rail;
 mod review_chats;
+pub mod running_chats;
 pub mod settings;
 pub mod shell;
+mod team;
 #[cfg(test)]
 #[global_allocator]
 static COUNTING_ALLOC: perf::CountingAlloc = perf::CountingAlloc;
@@ -160,6 +160,8 @@ impl gpui::Global for ReopenState {}
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
+    let data_dir = config.boot().data_dir.clone();
+    let ui_settings = settings::UiSettings::load(&data_dir);
     // Retain ownership for the whole application lifetime. The bridge's
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
@@ -189,8 +191,6 @@ pub fn run_app(config: UiConfig) {
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
-        let data_dir = config.boot().data_dir.clone();
-        let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
@@ -298,7 +298,11 @@ pub fn run_app(config: UiConfig) {
 /// A clicked banner: bring Mast forward on that chat through the sidebar's
 /// own path (chat route + composer focus), reopening the main window first if
 /// ⌘W closed it.
-fn open_notified_chat(chat_id: Option<String>, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+fn open_notified_chat(
+    chat_id: Option<String>,
+    state: &gpui::Entity<state::AppState>,
+    cx: &mut App,
+) {
     cx.activate(true);
     if cx.windows().is_empty()
         && let Some(reopen) = cx.try_global::<ReopenState>()

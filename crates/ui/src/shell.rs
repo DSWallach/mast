@@ -4908,6 +4908,22 @@ impl Shell {
                     self.appearance_settings_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                            AppearanceSettingsEvent::CompactSingleChatChanged(value) => {
+                                this.settings.compact_single_chat = value;
+                                if let Some(overview) = &this.overview_page {
+                                    overview.update(cx, |overview, cx| overview.set_compact_single_chat(value, cx));
+                                }
+                                this.schedule_save(cx);
+                                cx.notify();
+                            }
+                            AppearanceSettingsEvent::TeamTabVisibilityChanged(value) => {
+                                this.settings.team_tab_visibility = value;
+                                if value == crate::settings::TeamTabVisibility::Hide && this.resolved_right_active(cx) == RightSurface::Team {
+                                    this.set_right_active(RightSurface::Item, cx);
+                                }
+                                this.schedule_save(cx);
+                                cx.notify();
+                            }
                             AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
                                 this.set_code_font_size(size, cx);
                             }

@@ -1689,6 +1689,10 @@ pub struct Overview {
 }
 
 impl Overview {
+    pub(crate) fn set_compact_single_chat(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.outline.update(cx, |outline, cx| outline.set_compact_single_chat(value, cx));
+    }
+
     pub fn new(
         state: Entity<AppState>,
         shell: gpui::WeakEntity<Shell>,
