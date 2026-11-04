@@ -1375,6 +1375,8 @@ impl AgentToolsService {
                     })
                     .count()
                     .to_string();
+                let kind = serde_json::to_string(&args.kind).unwrap_or_default();
+                let priority = serde_json::to_string(&args.priority).unwrap_or_default();
                 Ok(agent_tools::derived_idempotency_key(
                     tools::CREATE_USER_ACTION_REQUEST,
                     &[
@@ -1382,6 +1384,8 @@ impl AgentToolsService {
                         &dedupe_key,
                         &args.request,
                         args.detail.as_deref().unwrap_or_default(),
+                        &kind,
+                        &priority,
                         &resolved,
                     ],
                 ))

@@ -96,7 +96,7 @@ pub(crate) fn decode_request(row: &RegistryRow) -> Result<DecodedRequest, WorkOu
         resolution.is_some() || row.fields.get("state").and_then(Value::as_str) == Some("resolved");
     Ok(DecodedRequest {
         view: UserActionRequestView {
-            kind: row.fields.get("kind").and_then(|v| serde_json::from_value(v.clone()).ok()),
+            kind: row.fields.get("kind").map(|v| serde_json::from_value(v.clone()).unwrap_or_default()),
             priority: row.fields.get("priority").and_then(|v| serde_json::from_value(v.clone()).ok()),
             id: row.id.clone(),
             space_id,

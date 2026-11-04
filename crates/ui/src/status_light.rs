@@ -13,7 +13,6 @@ use mast_proto::work_outline_user_actions::{UserActionKind, UserActionPriority};
 
 use crate::theme::Appearance;
 
-
 /// How long a new target must hold before the Dock is touched.
 pub const DEBOUNCE: Duration = Duration::from_millis(1000);
 
@@ -76,11 +75,9 @@ pub struct LightSummary {
 /// Most urgent state across all chats and open Required Actions.
 ///
 /// `indicators` are the staleness-checked indicators of the live chats;
-/// `open_requests` is the text of every unresolved Required Action.
-/// Error (any errored chat) > Input (any chat awaiting input, or any open
-/// request that is not "Ready to merge") > Ready (any open "Ready to merge")
-/// > Working > Idle. The badge counts awaiting-input chats, errored chats and
-/// every open request.
+/// `open_requests` supplies the kind and priority of each unresolved request.
+/// Error > Input > Ready > Working > Idle. Notices and FYI requests do not
+/// affect the light or badge.
 pub fn app_light(
     indicators: impl IntoIterator<Item = Indicator>,
     open_requests: impl IntoIterator<Item = (UserActionKind, Option<UserActionPriority>)>,
@@ -99,7 +96,9 @@ pub fn app_light(
         if kind == UserActionKind::Notice || priority == Some(UserActionPriority::Fyi) {
             continue;
         }
-        if kind == UserActionKind::Handoff && priority != Some(UserActionPriority::Blocking) {
+        if priority == Some(UserActionPriority::Normal)
+            || (kind == UserActionKind::Handoff && priority != Some(UserActionPriority::Blocking))
+        {
             ready += 1;
         } else {
             other += 1;

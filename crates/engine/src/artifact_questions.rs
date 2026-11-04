@@ -338,7 +338,7 @@ impl ArtifactQuestionSync {
             if rollup.len() == 1 { "" } else { "s" },
             one_line(&artifact.title)
         );
-        let rollup_info_full = format!("{rollup_info}\n[Open plan]({})", artifact.url());
+        let rollup_info_full = format!("[Open plan]({})\n{rollup_info}", artifact.url());
         let rollup_info_full = truncate(
             &rollup_info_full,
             user_action_limits::MAX_REQUEST_INFO_CHARS,
@@ -468,7 +468,7 @@ impl ArtifactQuestionSync {
         );
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
-            kind: Some(if dedupe_key.starts_with("artopt:") { mast_proto::work_outline_user_actions::UserActionKind::Choose } else { mast_proto::work_outline_user_actions::UserActionKind::Ask }),
+            kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask),
             priority: None,
                 work_item_id: item.to_owned(),
                 origin: origin.clone(),

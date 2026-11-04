@@ -872,7 +872,7 @@ impl RequiredActionsList {
                     .on_click(cx.listener(move |this, _, _, cx| this.open(&open_row, cx))),
                 )
                 .children(pr_link)
-                .when(!resolving && row.group == NeedsGroup::ReadyToMerge, |el| {
+                .when(!resolving && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff, |el| {
                     let approve_id = id.clone();
                     el.child(
                         Self::button(
@@ -1086,7 +1086,10 @@ impl RequiredActionsList {
                     .items_start()
                     .gap(px(6.0))
                     .child(
-                        crate::icons::icon(match row.kind {
+                        div().debug_selector({
+                            let selector = format!("required-actions-kind-{id}-{:?}", row.kind);
+                            move || selector.clone()
+                        }).child(crate::icons::icon(match row.kind {
                             mast_proto::work_outline_user_actions::UserActionKind::Ask => crate::icons::CHAT_ROUND_LINE,
                             mast_proto::work_outline_user_actions::UserActionKind::Review => crate::icons::EYE,
                             mast_proto::work_outline_user_actions::UserActionKind::Approve => crate::icons::CHECK,
@@ -1095,7 +1098,7 @@ impl RequiredActionsList {
                             mast_proto::work_outline_user_actions::UserActionKind::Notice => crate::icons::INFO_CIRCLE,
                         })
                             .size(px(12.0))
-                            .text_color(if open { attention } else { theme.text_faint }),
+                            .text_color(if open { attention } else { theme.text_faint })),
                     )
                     .child(
                         div()

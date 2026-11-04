@@ -299,18 +299,16 @@ fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFa
             {
                 continue;
             }
-            if request.effective_kind() == UserActionKind::Handoff {
+            if request.effective_kind() == UserActionKind::Handoff
+                && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Blocking)
+            {
                 ready.get_or_insert_with(|| ReadyAction {
                     space_id: snapshot.space_id.clone(),
                     item_id: request.work_item_id.clone(),
                     request_id: request.id.clone(),
                     text: request.text.clone(),
                 });
-            } else if !request
-                .dedupe_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(":rollup"))
-            {
+            } else if request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Normal) {
                 asks = true;
             }
         }

@@ -63,7 +63,7 @@ impl NeedsGroup {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Blocking => "Blocking",
-            Self::ReadyToMerge => "Ready to merge",
+            Self::ReadyToMerge => "Ready",
             Self::Fyi => "FYI",
         }
     }
@@ -75,6 +75,8 @@ impl NeedsGroup {
             Self::Fyi
         } else if priority == Some(UserActionPriority::Blocking) {
             Self::Blocking
+        } else if priority == Some(UserActionPriority::Normal) {
+            Self::ReadyToMerge
         } else if kind == UserActionKind::Handoff {
             Self::ReadyToMerge
         } else {
@@ -1279,6 +1281,7 @@ mod needs_group_tests {
         assert_eq!(NeedsGroup::of(K::Handoff, None), NeedsGroup::ReadyToMerge);
         assert_eq!(NeedsGroup::of(K::Notice, None), NeedsGroup::Fyi);
         assert_eq!(NeedsGroup::of(K::Review, Some(P::Fyi)), NeedsGroup::Fyi);
+        assert_eq!(NeedsGroup::of(K::Review, Some(P::Normal)), NeedsGroup::ReadyToMerge);
         assert!(NeedsGroup::Blocking < NeedsGroup::ReadyToMerge && NeedsGroup::ReadyToMerge < NeedsGroup::Fyi);
     }
 }
