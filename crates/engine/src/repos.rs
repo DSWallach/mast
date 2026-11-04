@@ -2278,7 +2278,7 @@ mod tests {
 
     #[test]
     fn broad_workspace_roots_stop_at_home_but_keep_projects_and_volumes() {
-        let home = Path::new("/Users/mikey");
+        let home = Path::new("/Users/example");
         assert!(is_broad_workspace_root_with_home(Path::new("/"), home));
         assert!(is_broad_workspace_root_with_home(Path::new("/Users"), home));
         assert!(is_broad_workspace_root_with_home(home, home));
@@ -2298,7 +2298,7 @@ mod tests {
 
     #[test]
     fn automatic_access_blocks_privacy_managed_home_subtrees_only() {
-        let home = Path::new("/Users/mikey");
+        let home = Path::new("/Users/example");
         for path in [
             "/Users/example/Desktop",
             "/Users/example/Documents/project",
@@ -2328,7 +2328,7 @@ mod tests {
 
     #[test]
     fn home_picker_recognizes_privacy_managed_children_before_metadata_probes() {
-        let home = Path::new("/Users/mikey");
+        let home = Path::new("/Users/example");
         for name in [
             "Desktop",
             "Documents",

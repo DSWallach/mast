@@ -415,8 +415,8 @@ async fn transient_refresh_failure_keeps_synced_recovery_supervisors_alive() {
         "peer routing must recover without restarting the app"
     );
     assert!(
-        runtime.core().updater().is_some(),
-        "the Edge updater supervisor must survive an offline boot"
+        runtime.core().updater().is_none(),
+        "Mast doesn't self-update; updates come from building from source"
     );
     runtime.shutdown().await;
 }
