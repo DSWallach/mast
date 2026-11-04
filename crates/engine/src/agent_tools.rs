@@ -464,6 +464,8 @@ struct CreateUserActionRequestArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ResolveUserActionRequestArgs {
+    #[serde(default)]
+    outcome: Option<String>,
     user_action_request_id: String,
     #[serde(default)]
     resolution: Option<String>,
@@ -966,6 +968,7 @@ impl AgentToolsService {
     ) -> Result<Value, AgentToolError> {
         match tool {
             tools::READ_CURRENT => Ok(self.read_current(context)),
+            tools::GET_USER_ACTION_REQUEST => self.get_user_action_request(context, arguments),
             tools::READ_SUBTREE => self.read_subtree(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
@@ -1010,7 +1013,8 @@ impl AgentToolsService {
                                 .and_then(|pr| pr.head_sha)
                         });
                         if let Some(current) = current {
-                            result["stale"] = (!current.eq_ignore_ascii_case(&reviewed_head)).into();
+                            result["stale"] =
+                                (!current.eq_ignore_ascii_case(&reviewed_head)).into();
                             result["currentHeadSha"] = current.into();
                         }
                     }
@@ -1178,6 +1182,7 @@ impl AgentToolsService {
             },
             "effectiveInstructions": agent.effective_instructions,
             "openUserActionRequests": agent.open_user_action_requests,
+            "userActionRequests": snapshot.user_action_requests.iter().filter(|r| r.chat_id == context.grant.chat_id).collect::<Vec<_>>(),
             "note": "You may create children under this item or its descendants, set their \
                      status to active or completed, ask the user for an action on this item, \
                      resolve requests you or chats you created raised, and propose \
@@ -1395,7 +1400,9 @@ impl AgentToolsService {
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
                 kind: args.kind.or_else(|| {
-                    args.dedupe_key.as_deref().filter(|key| key.starts_with("artopt:"))
+                    args.dedupe_key
+                        .as_deref()
+                        .filter(|key| key.starts_with("artopt:"))
                         .map(|_| mast_proto::work_outline_user_actions::UserActionKind::Choose)
                 }),
                 priority: args.priority,
@@ -1418,6 +1425,42 @@ impl AgentToolsService {
         }))
     }
 
+    fn get_user_action_request(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let id = arguments
+            .get("requestId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| AgentToolError::invalid("requestId is required"))?;
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let request = snapshot
+            .user_action_requests
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| {
+                WorkOutlineError::new(
+                    mast_proto::work_outline::WorkOutlineErrorCode::NotFound,
+                    "Request not found",
+                )
+            })?;
+        let origin = self.workspace.chat(&request.chat_id).ok().flatten();
+        let allowed = context.admin_space.as_deref() == Some(request.space_id.as_str())
+            || request.chat_id == context.grant.chat_id
+            || origin.as_ref().is_some_and(|c| {
+                c.parent_chat_id.as_deref() == Some(context.grant.chat_id.as_str())
+            })
+            || context
+                .current_item_id()
+                .is_some_and(|id| in_agent_scope(&snapshot, &id, &request.work_item_id));
+        if !allowed {
+            return Err(WorkOutlineError::unauthorized("Request is outside your scope").into());
+        }
+        Ok(json!({"request": request}))
+    }
+
     fn resolve_user_action_request(
         &self,
         context: &CallContext,
@@ -1436,9 +1479,9 @@ impl AgentToolsService {
         })?;
         let mutation =
             WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
-                outcome: None,
+                outcome: args.outcome,
                 values: None,
-                via: None,
+                via: Some("agent".into()),
                 user_action_request_id: args.user_action_request_id.clone(),
                 note: attributed_note(context, non_empty(args.resolution)),
                 answer: None,
@@ -1638,9 +1681,9 @@ impl AgentToolsService {
         self.workspace.ledger_mark(&ledger_key).map_err(ledger)?;
         let mutation =
             WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
-                outcome: None,
+                outcome: Some("answered".into()),
                 values: None,
-                via: None,
+                via: Some("chat".into()),
                 user_action_request_id: request_id.clone(),
                 note: Some(text.clone()),
                 answer: Some(mast_proto::UserActionAnswer {

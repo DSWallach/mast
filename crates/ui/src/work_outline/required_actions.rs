@@ -69,7 +69,10 @@ impl NeedsGroup {
     }
 
     /// Classify an open request by its kind and optional priority.
-    pub(crate) fn of(kind: mast_proto::work_outline_user_actions::UserActionKind, priority: Option<mast_proto::work_outline_user_actions::UserActionPriority>) -> Self {
+    pub(crate) fn of(
+        kind: mast_proto::work_outline_user_actions::UserActionKind,
+        priority: Option<mast_proto::work_outline_user_actions::UserActionPriority>,
+    ) -> Self {
         use mast_proto::work_outline_user_actions::{UserActionKind, UserActionPriority};
         if kind == UserActionKind::Notice || priority == Some(UserActionPriority::Fyi) {
             Self::Fyi
@@ -333,6 +336,28 @@ pub(crate) const REPLY_RESOLVE_ROLE: &str = "reply-resolve";
 /// to [`REPLY_QUOTE_MAX_CHARS`] (with an ellipsis); the note is sent as typed.
 pub(crate) fn reply_message(request_text: &str, note: &str) -> String {
     mast_proto::user_reply_message(request_text, note)
+}
+
+/// A typed card decision is delivered as the user's message to the origin chat.
+pub(crate) fn decision_message(
+    request: &str,
+    request_id: &str,
+    outcome: &str,
+    note: &str,
+) -> String {
+    let label = match outcome {
+        "approved" => "Approved",
+        "declined" => "Declined",
+        "changesRequested" => "Changes requested",
+        "dismissed" => "Dismissed",
+        _ => "Answered",
+    };
+    let decision = if note.is_empty() {
+        format!("{label} in Mast by you (request {request_id})")
+    } else {
+        format!("{label} in Mast by you (request {request_id}): {note}")
+    };
+    reply_message(request, &decision)
 }
 
 /// Why Reply & resolve is unavailable for `row` (`None` when it can send).
@@ -1006,7 +1031,10 @@ mod tests {
         auth.resolution.as_mut().unwrap().by = agent(CHAT_UI);
         let rows = collect_rows(&spaces(snap), &chats, &RequestScope::Global);
         let resolution = rows.resolved[0].resolution.as_ref().unwrap();
-        assert_eq!((resolution.by, resolution.answer.clone()), ("an agent", None));
+        assert_eq!(
+            (resolution.by, resolution.answer.clone()),
+            ("an agent", None)
+        );
     }
 
     #[test]
@@ -1287,7 +1315,37 @@ mod needs_group_tests {
         assert_eq!(NeedsGroup::of(K::Handoff, None), NeedsGroup::ReadyToMerge);
         assert_eq!(NeedsGroup::of(K::Notice, None), NeedsGroup::Fyi);
         assert_eq!(NeedsGroup::of(K::Review, Some(P::Fyi)), NeedsGroup::Fyi);
-        assert_eq!(NeedsGroup::of(K::Review, Some(P::Normal)), NeedsGroup::ReadyToMerge);
-        assert!(NeedsGroup::Blocking < NeedsGroup::ReadyToMerge && NeedsGroup::ReadyToMerge < NeedsGroup::Fyi);
+        assert_eq!(
+            NeedsGroup::of(K::Review, Some(P::Normal)),
+            NeedsGroup::ReadyToMerge
+        );
+        assert!(
+            NeedsGroup::Blocking < NeedsGroup::ReadyToMerge
+                && NeedsGroup::ReadyToMerge < NeedsGroup::Fyi
+        );
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::decision_message;
+
+    #[test]
+    fn decision_relay_records_outcome_and_optional_note() {
+        assert_eq!(
+            decision_message("Ship?", "r1", "approved", ""),
+            "Re: \"Ship?\": Approved in Mast by you (request r1)"
+        );
+        assert_eq!(
+            decision_message("Ship?", "r1", "changesRequested", "Fix tests"),
+            "Re: \"Ship?\": Changes requested in Mast by you (request r1): Fix tests"
+        );
+        assert!(
+            decision_message("Ship?", "r1", "declined", "No")
+                .contains("Declined in Mast by you (request r1): No")
+        );
+        assert!(
+            decision_message("Ship?", "r1", "dismissed", "").contains("Dismissed in Mast by you")
+        );
     }
 }

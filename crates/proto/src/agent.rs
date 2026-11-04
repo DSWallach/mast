@@ -753,6 +753,7 @@ pub mod agent_tools {
     pub mod tools {
         /// The Chat's work item, its effective instructions, and the Space.
         pub const READ_CURRENT: &str = "work_outline_read_current";
+        pub const GET_USER_ACTION_REQUEST: &str = "get_user_action_request";
         /// The Chat's item (or a descendant) with its descendants, their
         /// attached Chats, and open user action requests; read-only.
         pub const READ_SUBTREE: &str = "work_outline_read_subtree";
@@ -841,8 +842,9 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 11] = [
+        pub const WORK_OUTLINE: [&str; 12] = [
             READ_CURRENT,
+            GET_USER_ACTION_REQUEST,
             READ_SUBTREE,
             CREATE_CHILD,
             ASSOCIATE_CURRENT_CHAT,
@@ -1001,6 +1003,12 @@ pub mod agent_tools {
             example: "{}",
         },
         ToolUsage {
+            tool: tools::GET_USER_ACTION_REQUEST,
+            required: &[p("requestId", "request id")],
+            optional: &[],
+            example: r#"{"requestId": "<request id>"}"#,
+        },
+        ToolUsage {
             tool: tools::READ_SUBTREE,
             required: &[],
             optional: &[
@@ -1039,7 +1047,10 @@ pub mod agent_tools {
                 p("idempotencyKey", "or pass dedupeKey instead"),
             ],
             optional: &[
-                p("kind", "ask, review, approve, choose, handoff, or notice; defaults to ask"),
+                p(
+                    "kind",
+                    "ask, review, approve, choose, handoff, or notice; defaults to ask",
+                ),
                 p("priority", "blocking, normal, or fyi"),
                 p("detail", "context for the user"),
                 p(
@@ -1058,6 +1069,7 @@ pub mod agent_tools {
             )],
             optional: &[
                 p("resolution", "note recorded with the resolution"),
+                p("outcome", "done, superseded, or declined"),
                 KEY_DERIVED,
             ],
             example: r#"{"userActionRequestId": "<request id>", "resolution": "Answered in chat"}"#,

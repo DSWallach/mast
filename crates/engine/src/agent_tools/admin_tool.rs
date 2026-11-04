@@ -754,12 +754,12 @@ impl AgentToolsService {
                         !r.is_open()
                             && r.resolution
                                 .as_ref()
-                                .is_some_and(|res| res.by.kind == mast_proto::WorkOutlineActorKind::User)
+                                .is_some_and(|res| res.by.kind == mast_proto::WorkOutlineActorKind::User && res.outcome.as_deref() == Some("approved"))
                     });
                     if !approved {
                         return Err(forbidden(
                             "The user has not approved this bulk change yet: the Required Action \
-                             \"Approve bulk change\" must be resolved by the user themself (an \
+                             \"Approve bulk change\" must be approved by the user themself (an \
                              agent's resolve does not count). Ask them, then retry with the same \
                              confirmToken.",
                         ));
@@ -868,7 +868,7 @@ impl AgentToolsService {
             "confirmToken": token,
             "requestId": request_id,
             "note": "Nothing was changed. A Required Action \"Approve bulk change\" now waits on \
-                     the user. Tell them in chat, then wait. When they resolve it themself, call \
+                     the user. Tell them in chat, then wait. When they approve it themself, call \
                      work_outline_admin again with the SAME steps and this confirmToken (valid \
                      30 minutes, one use).",
         }))
