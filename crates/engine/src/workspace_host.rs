@@ -995,6 +995,22 @@ impl WorkspaceHost {
         self.read(|doc| doc.batches_written())
     }
 
+    pub fn set_friction_status(&self, space_id: &str, fingerprint: &str, status: mast_proto::FrictionStatus, item_id: Option<String>, promoted_at: Option<i64>) -> Result<mast_proto::FrictionReport, EngineError> {
+        Ok(self.mutate(|doc| doc.set_friction_status(space_id, fingerprint, status, item_id, promoted_at))?)
+    }
+
+    pub fn record_friction(&self, report: mast_proto::FrictionReport) -> Result<mast_proto::FrictionReport, EngineError> {
+        Ok(self.mutate(|doc| doc.record_friction(report))?)
+    }
+
+    pub fn answer_friction_approval(&self, id: &str, answer: bool) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.answer_friction_approval(id, answer))?)
+    }
+
+    pub fn friction_reports(&self, space_id: &str) -> Vec<mast_proto::FrictionReport> {
+        self.read(|doc| doc.friction_reports(space_id))
+    }
+
     // ── Planning artifacts (registry rows; policy in `crate::artifacts`) ──
 
     /// A live artifact row.

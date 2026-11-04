@@ -9576,7 +9576,10 @@ mod logic_tests {
         state.update(vcx, |state, _| {
             state.work_outline_actions_override =
                 Some(crate::work_outline::WorkOutlineActions::scripted(
-                    std::sync::Arc::new(move |_, params| {
+                    std::sync::Arc::new(move |method, params| {
+                        if method == mast_rpc::methods::LIST_FRICTION_REPORTS {
+                            return Ok(serde_json::json!([]));
+                        }
                         sink.lock().unwrap().push(params.clone());
                         reply(&params)
                     }),

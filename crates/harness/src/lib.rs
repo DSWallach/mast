@@ -243,6 +243,7 @@ pub mod mock;
 mod model_context;
 pub mod opencode;
 pub mod process;
+pub mod redact;
 mod scratch;
 pub mod shell_env;
 #[cfg(windows)]
@@ -497,43 +498,7 @@ pub(crate) fn describe_exit(status: Option<std::process::ExitStatus>) -> String 
     "unknown exit".into()
 }
 
-/// Remove recognizable credentials at the boundary where diagnostics become UI text.
-fn redact_secrets(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let markers = ["bearer ", "basic ", "sk-", "ghp_", "xox", "api_key="];
-    let mut result = String::new();
-    let mut offset = 0;
-    while let Some((start, marker)) = markers
-        .iter()
-        .filter_map(|marker| {
-            lower[offset..]
-                .find(marker)
-                .map(|at| (offset + at, *marker))
-        })
-        .min_by_key(|(at, _)| *at)
-    {
-        let credential = if marker.ends_with(' ') || marker.ends_with('=') {
-            start + marker.len()
-        } else {
-            start
-        };
-        let credential = credential + text[credential..].len()
-            - text[credential..]
-                .trim_start_matches(|c: char| c.is_whitespace() || c == '\"' || c == '\'')
-                .len();
-        let end = text[credential..]
-            .find(|c: char| {
-                c.is_whitespace() || matches!(c, '\"' | '\'' | ',' | ';' | '&' | '<' | '>')
-            })
-            .map_or(text.len(), |at| credential + at);
-        result.push_str(&text[offset..credential]);
-        result.push_str("[REDACTED]");
-        // Empty credentials still advance past the marker.
-        offset = end.max(start + marker.len());
-    }
-    result.push_str(&text[offset..]);
-    result
-}
+use redact::redact_secrets;
 
 #[cfg(test)]
 #[test]

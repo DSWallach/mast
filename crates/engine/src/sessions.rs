@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use futures::StreamExt;
@@ -61,6 +62,14 @@ pub enum SteerOutcome {
 }
 
 type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+
+fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
+    let header = question.header.as_str();
+    if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header == "MCP server request" || header == "Permission") { return None; }
+    let command = question.question.split('`').nth(1).unwrap_or(&question.question);
+    let why = question.question.split_once(" Reason: ").map(|(_, why)| why).unwrap_or(&question.question);
+    Some(mast_proto::FrictionApproval { command: command.into(), why: why.into(), answer: None })
+}
 
 /// A harness-native session id plus the cwd it was created under. Harness
 /// session stores are cwd-scoped (claude keys conversations by project
@@ -164,6 +173,8 @@ struct Inner {
     worker_signals: broadcast::Sender<WorkerSignal>,
     awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
     turn_failures: Mutex<HashMap<String, mast_proto::ToolFailures>>,
+    auto_capture_friction: AtomicBool,
+    friction_approvals: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -286,6 +297,8 @@ impl SessionsEngine {
                 worker_signals,
                 awaiting_inputs: Mutex::new(HashMap::new()),
                 turn_failures: Mutex::new(HashMap::new()),
+                auto_capture_friction: AtomicBool::new(true),
+                friction_approvals: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -503,7 +516,7 @@ impl SessionsEngine {
     }
 
     /// Record a failed agent-tool dispatch only while its token's run is live.
-    pub fn note_agent_tool_failure(&self, chat_id: &str, run_id: &str, tool: &str) {
+    pub fn note_agent_tool_failure(&self, chat_id: &str, run_id: &str, tool: &str, error: &str) {
         let runs = lock(&self.inner.runs);
         if !runs.get(chat_id).is_some_and(|run| run.run_id == run_id) { return; }
         let mut failures = lock(&self.inner.turn_failures);
@@ -512,6 +525,24 @@ impl SessionsEngine {
         if failure.tools.len() < 10 && !failure.tools.iter().any(|name| name == tool) {
             failure.tools.push(tool.to_owned());
         }
+        drop(failures);
+        drop(runs);
+        let code = error.split_once(": ").map(|(code, _)| code.rsplit('/').next().unwrap_or(code)).unwrap_or("failed");
+        self.inner.capture_friction(chat_id, mast_proto::FrictionKind::ToolFailure, &format!("{tool} refused: {code}"), error, None);
+    }
+
+    pub fn auto_capture_friction(&self) -> bool {
+        self.inner.auto_capture_friction.load(Ordering::Relaxed)
+    }
+
+    /// Enable or disable automatic friction capture for this engine.
+    pub fn set_auto_capture_friction(&self, enabled: bool) {
+        self.inner.auto_capture_friction.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Harness for the authenticated live run, when it is still active.
+    pub fn run_harness(&self, chat_id: &str, run_id: &str) -> Option<HarnessId> {
+        lock(&self.inner.runs).get(chat_id).filter(|run| run.run_id == run_id).map(|run| run.runtime_config.harness_id)
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -1006,10 +1037,22 @@ impl SessionsEngine {
         let request_input = {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
+            let inner = self.inner.clone();
+            let chat_id = chat_id.to_owned();
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
                 let request_id = new_id();
                 lock(&pending).insert(request_id.clone(), tx);
+                let mut captured = Vec::new();
+                for question in &questions {
+                    if let Some(approval) = friction_approval(question) {
+                        let summary = format!("{} requested", question.header);
+                        if let Some(id) = inner.capture_friction(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, Some(approval)) {
+                            captured.push((question.id.clone(), id));
+                        }
+                    }
+                }
+                if !captured.is_empty() { lock(&inner.friction_approvals).insert(request_id.clone(), captured); }
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id,
                     questions,
@@ -1201,6 +1244,17 @@ impl SessionsEngine {
         let Some(resolver) = lock(&pending).remove(request_id) else {
             return Ok(false);
         };
+        if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id) {
+            if let Some(ws) = self.inner.workspace() {
+                for (question_id, row_id) in rows {
+                    if let Some(answer) = answers.iter().find(|a| a.question_id == question_id).and_then(|a| a.labels.first()).and_then(|label| {
+                        if label.eq_ignore_ascii_case("yes") { Some(true) } else if label.eq_ignore_ascii_case("no") { Some(false) } else { None }
+                    }) {
+                        if let Err(err) = ws.answer_friction_approval(&row_id, answer) { tracing::warn!(error = %err, "friction approval update failed"); }
+                    }
+                }
+            }
+        }
         let _ = resolver.send(answers);
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
@@ -1741,6 +1795,24 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
+    }
+
+    fn capture_friction(&self, chat_id: &str, kind: mast_proto::FrictionKind, summary: &str, detail: &str, approval: Option<mast_proto::FrictionApproval>) -> Option<String> {
+        if !self.auto_capture_friction.load(Ordering::Relaxed) { return None; }
+        let ws = self.workspace()?;
+        let chat = ws.chat(chat_id).ok()??;
+        let space_id = chat.space_id.clone().filter(|s| !s.is_empty())?;
+        let clean = |text: &str, limit: usize| mast_harness::redact::redact_secrets(text).chars().take(limit).collect::<String>();
+        let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id).or_else(|| chat.config.as_ref().map(|c| c.harness));
+        let harness = harness.and_then(|h| serde_json::to_value(h).ok()).and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into());
+        let now = now_ms();
+        let report = mast_proto::FrictionReport {
+            id: String::new(), kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
+            workaround: None, suggestion: None, approval: approval.map(|a| mast_proto::FrictionApproval { command: clean(&a.command, 1024), why: clean(&a.why, 2048), answer: a.answer }), severity: None, links: vec![],
+            provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto },
+            fingerprint: String::new(), occurrences: 0, last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
+        };
+        match ws.record_friction(report) { Ok(row) => Some(row.id), Err(err) => { tracing::warn!(error = %err, "automatic friction capture failed"); None } }
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.
@@ -2717,6 +2789,7 @@ async fn drive_run(
         std::collections::HashMap::new();
 
     let mut final_completed_turn = None;
+    let mut friction_turn_error: Option<String> = None;
     let final_status = loop {
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
@@ -2891,6 +2964,17 @@ async fn drive_run(
             };
             event
         };
+
+        if let AgentEvent::ServerRequestRejected { method, server_name } = &event {
+            inner.capture_friction(&chat_id, mast_proto::FrictionKind::ToolFailure, &format!("{server_name} rejected server request: {method}"), &format!("Unsupported server request {method} from {server_name}"), None);
+            continue;
+        }
+        if let AgentEvent::Error { message } = &event { friction_turn_error = Some(message.clone()); }
+        if let AgentEvent::Done { status: DoneStatus::Errored, error, .. } = &event {
+            let detail = error.as_deref().filter(|text| !text.trim().is_empty()).or(friction_turn_error.as_deref().filter(|text| !text.trim().is_empty())).unwrap_or("Session errored");
+            inner.capture_friction(&chat_id, mast_proto::FrictionKind::Environment, &format!("Session errored: {detail}"), detail, None);
+        }
+        if matches!(&event, AgentEvent::Done { .. }) { friction_turn_error = None; }
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
@@ -3151,6 +3235,7 @@ async fn drive_run(
                         let resolver = lock(&inner.runs)
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
+                        lock(&inner.friction_approvals).remove(request_id);
                         if let Some(tx) = resolver {
                             let _ = tx.send(Vec::new());
                         }
@@ -3423,7 +3508,8 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (_, tx) in lock(&pending).drain() {
+                for (request_id, tx) in lock(&pending).drain() {
+                    lock(&inner.friction_approvals).remove(&request_id);
                     let _ = tx.send(Vec::new());
                 }
             }

@@ -153,7 +153,11 @@ fn new_from_template(
 ) {
     outline.update_in(vcx, |outline, window, cx| {
         outline
-            .begin_new_from_template(TemplateFlow::new("s1", parent.map(str::to_owned)), window, cx)
+            .begin_new_from_template(
+                TemplateFlow::new("s1", parent.map(str::to_owned)),
+                window,
+                cx,
+            )
             .unwrap()
     });
     draw(vcx);
@@ -162,7 +166,10 @@ fn new_from_template(
         outline.choose_picker_entry(0, window, cx)
     });
     draw(vcx);
-    assert!(outline.read_with(vcx, |o, _| o.is_editing()), "the title row");
+    assert!(
+        outline.read_with(vcx, |o, _| o.is_editing()),
+        "the title row"
+    );
     vcx.simulate_keystrokes("cmd-a");
     vcx.simulate_input(title);
     draw(vcx);
@@ -249,15 +256,22 @@ fn save_as_template_sends_the_mutation_and_is_not_undoable(cx: &mut gpui::TestAp
     assert_eq!(sent[0]["spaceId"], "s1");
     assert_eq!(sent[0]["projectWorkItemId"], HOUSEKEEPING);
     assert_eq!(sent[0]["name"], "Housekeeping", "prefilled with the title");
-    assert!(sent[0].get("templateId").is_none_or(|t| t.is_null()), "a new template");
+    assert!(
+        sent[0].get("templateId").is_none_or(|t| t.is_null()),
+        "a new template"
+    );
     let id = sent[0]["operationId"].as_str().unwrap();
     assert!(!id.is_empty() && id.len() <= 64);
     assert_eq!(
-        outline.read_with(vcx, |o, _| o.notice().map(str::to_owned)).as_deref(),
+        outline
+            .read_with(vcx, |o, _| o.notice().map(str::to_owned))
+            .as_deref(),
         Some("Saved template \u{2018}Housekeeping\u{2019} \u{b7} rev 1")
     );
     assert!(
-        outline.read_with(vcx, |o, cx| o.next_undo_label(cx)).is_none(),
+        outline
+            .read_with(vcx, |o, cx| o.next_undo_label(cx))
+            .is_none(),
         "saving is not an undo step"
     );
 }
@@ -286,7 +300,9 @@ fn a_project_linked_to_a_template_offers_update_or_save_as_new(cx: &mut gpui::Te
     assert_eq!(sent[0]["templateId"], "t-1", "replaces the linked template");
     assert_eq!(sent[0]["name"], "Launch kit", "prefilled with its name");
     assert_eq!(
-        outline.read_with(vcx, |o, _| o.notice().map(str::to_owned)).as_deref(),
+        outline
+            .read_with(vcx, |o, _| o.notice().map(str::to_owned))
+            .as_deref(),
         Some("Saved template \u{2018}Launch kit\u{2019} \u{b7} rev 3")
     );
 }
@@ -306,7 +322,9 @@ fn a_failing_save_shows_an_error_and_keeps_the_prompt(cx: &mut gpui::TestAppCont
     open_details(&overview, vcx, HOUSEKEEPING);
     click(vcx, "work-item-save-template");
     click(vcx, "work-item-template-save");
-    let error = outline.read_with(vcx, |o, _| o.error_notice().map(|(t, d)| format!("{t} {d}")));
+    let error = outline.read_with(vcx, |o, _| {
+        o.error_notice().map(|(t, d)| format!("{t} {d}"))
+    });
     assert!(error.unwrap().contains("already exists"));
     assert!(
         row_bounds(vcx, "work-item-template-save".into()).is_some(),
@@ -411,7 +429,10 @@ fn new_from_template_sends_the_ordered_sequence_with_derived_ids(cx: &mut gpui::
         ]
     );
     let item = |ix: usize| {
-        mast_proto::derive_id(sent[ix]["operationId"].as_str().unwrap(), mast_proto::roles::ITEM)
+        mast_proto::derive_id(
+            sent[ix]["operationId"].as_str().unwrap(),
+            mast_proto::roles::ITEM,
+        )
     };
     let (root, tickets, docs) = (item(0), item(1), item(2));
     assert_eq!(sent[0]["title"], "Q3 launch");
@@ -436,7 +457,11 @@ fn new_from_template_sends_the_ordered_sequence_with_derived_ids(cx: &mut gpui::
         assert!(!id.is_empty() && id.len() <= 64, "{id}");
     }
     outline.read_with(vcx, |o, _| {
-        assert_eq!(o.template_toast_text().map(|t| t.starts_with("Created project")), Some(true));
+        assert_eq!(
+            o.template_toast_text()
+                .map(|t| t.starts_with("Created project")),
+            Some(true)
+        );
     });
     assert!(row_bounds(vcx, "outline-template-toast".into()).is_some());
 }
@@ -460,13 +485,22 @@ fn one_undo_archives_the_new_project_and_redo_restores_it(cx: &mut gpui::TestApp
     new_from_template(&outline, vcx, Some(API), "Q3 launch");
     let sent = mutations(&calls);
     assert_eq!(sent.len(), 7);
-    let root = mast_proto::derive_id(sent[0]["operationId"].as_str().unwrap(), mast_proto::roles::ITEM);
+    let root = mast_proto::derive_id(
+        sent[0]["operationId"].as_str().unwrap(),
+        mast_proto::roles::ITEM,
+    );
     settle_snapshot(&overview, vcx, created_snapshot(&sent, "Q3 launch", false));
     outline.read_with(vcx, |o, _| {
-        assert_eq!(o.selected_key(), Some(item_key(&root).as_str()), "the new root is selected");
+        assert_eq!(
+            o.selected_key(),
+            Some(item_key(&root).as_str()),
+            "the new root is selected"
+        );
     });
     assert_eq!(
-        outline.read_with(vcx, |o, cx| o.next_undo_label(cx)).as_deref(),
+        outline
+            .read_with(vcx, |o, cx| o.next_undo_label(cx))
+            .as_deref(),
         Some("created project \u{2018}Q3 launch\u{2019} from template \u{2018}Launch kit\u{2019}")
     );
 
@@ -476,9 +510,14 @@ fn one_undo_archives_the_new_project_and_redo_restores_it(cx: &mut gpui::TestApp
     assert_eq!(sent_after.len(), 8, "a single ⌘Z is one request");
     assert_eq!(sent_after[7]["op"], "archiveWorkItem");
     assert_eq!(sent_after[7]["workItemId"], root);
-    assert_eq!(sent_after[7]["descendantArchivePolicy"]["type"], "archiveDescendants");
+    assert_eq!(
+        sent_after[7]["descendantArchivePolicy"]["type"],
+        "archiveDescendants"
+    );
     assert!(
-        outline.read_with(vcx, |o, cx| o.next_undo_label(cx)).is_none(),
+        outline
+            .read_with(vcx, |o, cx| o.next_undo_label(cx))
+            .is_none(),
         "the whole instantiation was one step"
     );
 
@@ -521,9 +560,15 @@ fn a_failing_step_shows_an_error_and_a_first_step_failure_is_not_undoable(
         });
     new_from_template(&outline, vcx, Some(API), "Q3 launch");
     assert_eq!(mutations(&calls).len(), 1, "stops at the first failure");
-    let error = outline.read_with(vcx, |o, _| o.error_notice().map(|(t, d)| format!("{t} {d}")));
+    let error = outline.read_with(vcx, |o, _| {
+        o.error_notice().map(|(t, d)| format!("{t} {d}"))
+    });
     assert!(error.unwrap().contains("too many items"));
-    assert!(outline.read_with(vcx, |o, cx| o.next_undo_label(cx)).is_none());
+    assert!(
+        outline
+            .read_with(vcx, |o, cx| o.next_undo_label(cx))
+            .is_none()
+    );
     assert!(outline.read_with(vcx, |o, _| o.template_toast_text().is_none()));
 }
 
@@ -534,14 +579,20 @@ fn an_empty_title_or_archived_parent_is_refused_without_sending(cx: &mut gpui::T
         template_overview(cx, dir.path(), template_fixture(), template_reply);
     let mut flow = TemplateFlow::new("s1", Some(API.into()));
     flow.template_id = Some("t-1".into());
-    let empty = outline.update(vcx, |o, cx| o.instantiate_template(flow.clone(), "  ".into(), cx));
+    let empty = outline.update(vcx, |o, cx| {
+        o.instantiate_template(flow.clone(), "  ".into(), cx)
+    });
     assert!(empty.is_err());
     flow.parent = Some(RETIRED.into());
     let archived = outline.update(vcx, |o, cx| o.instantiate_template(flow, "x".into(), cx));
     assert!(archived.is_err());
     vcx.run_until_parked();
     assert!(mutations(&calls).is_empty());
-    assert!(outline.read_with(vcx, |o, cx| o.next_undo_label(cx)).is_none());
+    assert!(
+        outline
+            .read_with(vcx, |o, cx| o.next_undo_label(cx))
+            .is_none()
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -584,7 +635,10 @@ fn a_linear_project_row_creates_a_project_item_from_a_template_and_links_it(
     assert_eq!(ops[7], "linkLinearProject");
     assert_eq!(sent[0]["title"], "Launch", "the Linear project's name");
     assert_eq!(sent[0]["parentWorkItemId"], API);
-    let root = mast_proto::derive_id(sent[0]["operationId"].as_str().unwrap(), mast_proto::roles::ITEM);
+    let root = mast_proto::derive_id(
+        sent[0]["operationId"].as_str().unwrap(),
+        mast_proto::roles::ITEM,
+    );
     assert_eq!(sent[7]["workItemId"], root);
     assert_eq!(sent[7]["project"]["id"], "p-launch");
     assert_eq!(sent[7]["project"]["name"], "Launch");
@@ -595,23 +649,22 @@ fn a_linear_project_row_creates_a_project_item_from_a_template_and_links_it(
     assert!(toast.contains("linked to Linear project Launch"), "{toast}");
     // One undo step for the whole thing.
     assert_eq!(
-        outline
-            .read_with(vcx, |o, cx| o.recent_changes(cx))
-            .len(),
+        outline.read_with(vcx, |o, cx| o.recent_changes(cx)).len(),
         1
     );
 }
 
 #[test]
 fn template_preview_lists_nodes_instructions_and_badges() {
-    let node = |title: &str, project, dest, instructions: &[&str], children| mast_proto::TemplateNode {
-        title: title.into(),
-        description: None,
-        is_project: project,
-        is_worker_destination: dest,
-        instructions: instructions.iter().map(|s| s.to_string()).collect(),
-        children,
-    };
+    let node =
+        |title: &str, project, dest, instructions: &[&str], children| mast_proto::TemplateNode {
+            title: title.into(),
+            description: None,
+            is_project: project,
+            is_worker_destination: dest,
+            instructions: instructions.iter().map(|s| s.to_string()).collect(),
+            children,
+        };
     let long = "word ".repeat(60);
     let tree = node(
         "Project",
@@ -629,4 +682,120 @@ fn template_preview_lists_nodes_instructions_and_badges() {
         lines[3],
         (1, "Tickets  [worker destination]".to_owned(), false)
     );
+}
+
+#[gpui::test]
+fn friction_reports_expand_and_filter_to_empty(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, _outline, calls, vcx) = template_overview(
+        cx,
+        dir.path(),
+        template_fixture(),
+        |method, params| {
+            if method == mast_rpc::methods::LIST_FRICTION_REPORTS {
+                if params["status"] == "dismissed" {
+                    return Ok(serde_json::json!([]));
+                }
+                let report = |id: &str, occurrences| {
+                    serde_json::json!({
+                        "id": id, "kind": "bug", "summary": "A problem", "whatHappened": "It failed",
+                        "workaround": "Retry", "suggestion": "Repair it", "approval": {"command": "build", "why": "needed", "answer": true},
+                        "provenance": {"chatId": "chat-1", "harness": "codex", "model": "model", "spaceId": "s1", "createdAt": 1, "source": "agent"},
+                        "fingerprint": id, "occurrences": occurrences, "lastSeen": 1, "status": "open"
+                    })
+                };
+                return Ok(serde_json::json!([report("one", 3), report("two", 5)]));
+            }
+            template_reply(method, params)
+        },
+    );
+    open_details(&overview, vcx, "");
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(row_bounds(vcx, "friction-count-one-3".into()).is_some());
+    assert!(row_bounds(vcx, "friction-count-two-5".into()).is_some());
+    click(vcx, "friction-row-one");
+    assert!(row_bounds(vcx, "friction-details-one".into()).is_some());
+    assert!(row_bounds(vcx, "friction-detail-one-What happened".into()).is_some());
+    assert!(row_bounds(vcx, "friction-detail-one-Workaround".into()).is_some());
+    assert!(row_bounds(vcx, "friction-detail-one-Suggestion".into()).is_some());
+    assert!(row_bounds(vcx, "friction-approval-one".into()).is_some());
+    click(vcx, "friction-filter-Dismissed");
+    assert!(row_bounds(vcx, "friction-empty".into()).is_some());
+    assert!(calls.lock().unwrap().iter().any(|(method, params)| method
+        == mast_rpc::methods::LIST_FRICTION_REPORTS
+        && params["status"] == "open"));
+}
+
+#[gpui::test]
+fn friction_actions_call_engine(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let report = serde_json::json!({
+        "id": "one", "kind": "bug", "summary": "A problem", "whatHappened": "It failed",
+        "workaround": null, "suggestion": "Repair it", "approval": null,
+        "provenance": {"chatId": "chat-1", "harness": "codex", "model": null, "spaceId": "s1", "createdAt": 1, "source": "agent"},
+        "fingerprint": "fingerprint-one", "occurrences": 1, "lastSeen": 1, "status": "open"
+    });
+    let (overview, _outline, calls, vcx) = template_overview(
+        cx,
+        dir.path(),
+        template_fixture(),
+        move |method, params| match method {
+            mast_rpc::methods::LIST_FRICTION_REPORTS => Ok(serde_json::json!([report])),
+            mast_rpc::methods::SET_FRICTION_STATUS => Ok(report.clone()),
+            mast_rpc::methods::PROPOSE_FRICTION_INSTRUCTION => Ok(serde_json::Value::Null),
+            mast_rpc::methods::PROMOTE_FRICTION_TO_ITEM => {
+                Ok(serde_json::json!({"workItemId": "created"}))
+            }
+            _ => template_reply(method, params),
+        },
+    );
+    open_details(&overview, vcx, "");
+    vcx.run_until_parked();
+    draw(vcx);
+    click(vcx, "friction-row-one");
+    click(vcx, "friction-propose-one");
+    click(vcx, "friction-create-one");
+    click(vcx, &format!("friction-parent-{HOUSEKEEPING}"));
+    click(vcx, "friction-dismiss-one");
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(|(method, params)| method
+        == mast_rpc::methods::PROPOSE_FRICTION_INSTRUCTION
+        && params["fingerprint"] == "fingerprint-one"));
+    assert!(calls.iter().any(|(method, params)| method
+        == mast_rpc::methods::PROMOTE_FRICTION_TO_ITEM
+        && params["parentItemId"] == HOUSEKEEPING));
+    assert!(calls.iter().any(
+        |(method, params)| method == mast_rpc::methods::SET_FRICTION_STATUS
+            && params["status"] == "dismissed"
+    ));
+}
+
+#[gpui::test]
+fn friction_auto_capture_toggle_calls_engine(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, state, vcx) = outline_overview(cx, dir.path());
+    let calls: TemplateCalls = Default::default();
+    let sink = calls.clone();
+    state.update(vcx, |state, _| {
+        state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(
+            std::sync::Arc::new(move |method, params| {
+                sink.lock().unwrap().push((method.to_owned(), params.clone()));
+                match method {
+                    mast_rpc::methods::GET_FRICTION_SETTINGS => Ok(serde_json::json!({"autoCapture": true})),
+                    mast_rpc::methods::SET_FRICTION_SETTINGS => Ok(params),
+                    _ => Ok(serde_json::Value::Null),
+                }
+            }),
+        ));
+    });
+    vcx.update(|window, cx| {
+        window.replace_root(cx, |_, cx| crate::settings::harnesses::HarnessesPage::new(state, cx));
+    });
+    vcx.run_until_parked();
+    draw(vcx);
+    click(vcx, "friction-auto-capture");
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(|(method, _)| method == mast_rpc::methods::GET_FRICTION_SETTINGS));
+    assert!(calls.iter().any(|(method, params)| method == mast_rpc::methods::SET_FRICTION_SETTINGS && params["autoCapture"] == false));
 }

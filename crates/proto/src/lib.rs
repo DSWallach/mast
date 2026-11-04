@@ -10,6 +10,7 @@ pub mod chat_diff_target;
 pub mod diff_review;
 pub mod entities;
 pub mod env;
+pub mod friction;
 pub mod linear;
 pub mod motion;
 pub mod orchestrator_wakes;
@@ -52,6 +53,7 @@ pub use artifacts::{
 pub use chat_diff_target::*;
 pub use diff_review::*;
 pub use entities::*;
+pub use friction::*;
 pub use linear::*;
 pub use orchestrator_wakes::*;
 pub use pr_dash::*;

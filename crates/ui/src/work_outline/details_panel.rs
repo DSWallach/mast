@@ -58,6 +58,9 @@ mod linear_section;
 #[path = "details_pr_sync.rs"]
 mod pr_sync_section;
 
+#[path = "details_friction.rs"]
+mod friction_section;
+
 #[path = "details_templates.rs"]
 pub(crate) mod templates_section;
 
@@ -252,6 +255,7 @@ pub(crate) struct WorkItemDetails {
     pub(crate) artifacts: artifacts_section::ArtifactsDetailsState,
     /// Project templates (`details_templates.rs`).
     pub(crate) templates: templates_section::TemplatesDetailsState,
+    friction: friction_section::FrictionDetailsState,
     /// Container templates: the rules editor (`details_container_template.rs`).
     pub(crate) container_template: container_template_section::ContainerTemplateState,
     template_name_input: Entity<ComposerInput>,
@@ -467,6 +471,7 @@ impl WorkItemDetails {
             pr_sync: Default::default(),
             artifacts: Default::default(),
             templates: Default::default(),
+            friction: Default::default(),
             container_template: Default::default(),
             template_name_input,
             _subscriptions: subscriptions,

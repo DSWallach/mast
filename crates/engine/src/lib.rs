@@ -291,6 +291,7 @@ impl EngineCore {
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        sessions.set_auto_capture_friction(registry.friction_settings().auto_capture);
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {

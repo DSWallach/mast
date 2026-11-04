@@ -668,6 +668,9 @@ pub struct UiSettings {
     /// Last successfully launched Action per project in this viewport.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
+    /// Last destination selected when promoting friction in each Space.
+    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub friction_destination_by_space_id: std::collections::HashMap<String, String>,
     /// Open session tabs in visual order (drag-reorder edits in place).
     /// Device-local: a tab is a local viewport onto the synced session list —
     /// closing one never archives the session. Ids of archived/deleted chats
@@ -827,6 +830,7 @@ impl Default for UiSettings {
             sidebar_show_pull_request: true,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
+            friction_destination_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
@@ -2607,6 +2611,7 @@ mod tests {
                 "space-1".into(),
                 "dev".into(),
             )]),
+            friction_destination_by_space_id: HashMap::from([("space-1".into(), "bugs".into())]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),

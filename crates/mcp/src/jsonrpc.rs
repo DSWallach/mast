@@ -25,10 +25,11 @@ const LATEST_PROTOCOL: &str = "2025-11-25";
 /// guidance every agent needs first. Detail that does not fit belongs in the
 /// tool descriptions (`tools.rs`).
 const INSTRUCTIONS: &str = "\
-Mast runs coding agents in project chats. These tools run the local engine.\n\
+Mast runs coding agents in project chats.\n\
+If you hit a bug, a failed tool call, or need a workaround, report it with `report_friction`.\n\
 \n\
-Worktrees: right after `git worktree add`, or when resuming a worktree for \
-this chat's work, call `bind_chat_worktree` with its absolute top-level \
+Worktrees: after `git worktree add` or resuming a worktree for \
+this chat, call `bind_chat_worktree` with its absolute top-level \
 path.\n\
 \n\
 Blocked decisions: if your chat has a work item \
@@ -37,8 +38,7 @@ missing information from the user, call \
 `work_outline_create_user_action_request` (one-line question, context in \
 `detail`, a `dedupeKey` per topic; optional `kind`, `links`, `facts`) as well \
 as asking in chat; resolve it \
-with `work_outline_resolve_user_action_request` once answered. Use the \
-built-in question prompt only for small clarifications.\n\
+with `work_outline_resolve_user_action_request` once answered. Use built-in questions for small clarifications.\n\
 \n\
 Planning artifacts: publish plans, docs and mockups you want the user to \
 review with `artifact_publish`, linking the returned \
@@ -50,15 +50,12 @@ Chats: reference by id, unique prefix, or exact title; `whoami` is yours. `send_
 the reply once that turn finishes; answer an `awaitingInput` chat with \
 `respond_to_input`.\n\
 \n\
-Work Outline tools (`work_outline_*`) manage your item, its subtree, and \
-child items. Mutations and `create_chat` need an idempotency key: reuse it for retries, \
+Work Outline tools (`work_outline_*`) manage your item and descendants. Mutations and `create_chat` need an idempotency key: reuse it for retries, \
 use a new key for a new change.\n\
 \n\
 Coordinating: `create_chat` with `workItemId` (your item or a descendant) \
 and a `prompt` runs work. Workers can use `report_to_parent`; use \
-`wait_for_turn` / `read_chat` or `work_outline_read_subtree` for requests. Workers can raise \
-a `kind: handoff` request when ready; finished workers (`archivable: true`) \
-can be archived.\n\
+`wait_for_turn` / `read_chat` or `work_outline_read_subtree` for requests. Workers can raise a `kind: handoff` request when ready; archive finished workers (`archivable: true`).\n\
 \n\
 Admin (user-granted only): `work_outline_admin` batches Space-wide outline \
 changes; bulk ones need the user's approval first.";

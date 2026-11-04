@@ -52,6 +52,8 @@ struct GatedHarness {
     /// Every Run request as the harness received it.
     requests: Arc<Mutex<Vec<RunRequest>>>,
     release: Arc<Notify>,
+    questions: Arc<Mutex<Vec<mast_proto::UserInputQuestion>>>,
+    events: Arc<Mutex<Vec<AgentEvent>>>,
 }
 
 impl GatedHarness {
@@ -75,7 +77,8 @@ impl GatedHarness {
                 session_id: Some("sess-agent".into()),
             })
         });
-        started.chain(done).boxed()
+        let events = futures::stream::iter(self.events.lock().unwrap().clone().into_iter().map(Ok));
+        started.chain(events).chain(done).boxed()
     }
 }
 
@@ -123,9 +126,14 @@ impl Harness for GatedHarness {
     async fn run_with_agent_tools(
         &self,
         request: RunRequest,
-        _controls: RunControls,
+        controls: RunControls,
         tools: AgentToolsInjection,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let questions = self.questions.lock().unwrap().clone();
+        if !questions.is_empty() {
+            let answer = (controls.request_input)(questions);
+            tokio::spawn(async move { let _ = answer.await; });
+        }
         self.spawns.lock().unwrap().push(Spawn::WithTools {
             prompt: request.prompt.clone(),
             tools,
@@ -3708,4 +3716,114 @@ async fn typed_request_outcomes_are_readable_by_request_and_current() {
         .await
         .unwrap();
     assert_eq!(current["userActionRequests"].as_array().unwrap().len(), 9);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_provenance_deduplication_and_filters() {
+    let rig = rig().await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let first = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let second = tokens.mint(OTHER_CHAT, "run-2", SPACE, &rig.core.device_id);
+    rig.core.workspace.set_chat_actual_model(CHAT, "model-actual");
+    let input = json!({"kind":"bug", "summary":"Tool failed", "whatHappened":"It failed"});
+    let row = tool(&rig, first.token(), "report_friction", input.clone()).await.unwrap();
+    assert_eq!(row["report"]["provenance"]["chatId"], CHAT);
+    assert_eq!(row["report"]["provenance"]["spaceId"], SPACE);
+    assert_eq!(row["report"]["provenance"]["source"], "agent");
+    assert_eq!(row["report"]["provenance"]["model"], "model-actual");
+    let next = tool(&rig, second.token(), "report_friction", input).await.unwrap();
+    assert_eq!(next["report"]["id"], row["report"]["id"]);
+    assert_eq!(next["report"]["occurrences"], 2);
+    let list = tool(&rig, first.token(), "list_friction", json!({"kind":"bug", "status":"open", "since":0, "limit":1})).await.unwrap();
+    assert_eq!(list["reports"].as_array().unwrap().len(), 1);
+    assert_eq!(list["reports"][0]["occurrences"], 2);
+    for filter in [json!({"kind":"docs"}), json!({"status":"dismissed"}), json!({"since":i64::MAX})] {
+        let list = tool(&rig, first.token(), "list_friction", filter).await.unwrap();
+        assert!(list["reports"].as_array().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_live_run_harness() {
+    let rig = rig().await;
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "live run").await;
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[0].clone() else { panic!("missing tools") };
+    let row = tool(&rig, &tools.env["MAST_AGENT_TOKEN"], "report_friction", json!({"kind":"bug", "summary":"Failure", "whatHappened":"Failed"})).await.unwrap();
+    assert_eq!(row["report"]["provenance"]["harness"], "mock");
+    rig.harness.release.notify_one();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_tool_failures_and_can_be_disabled() {
+    let rig = rig().await;
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "run").await;
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[0].clone() else { panic!("missing tools") };
+    let token = &tools.env["MAST_AGENT_TOKEN"];
+    for _ in 0..2 {
+        assert!(tool(&rig, token, "missing_tool", json!({})).await.is_err());
+    }
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].occurrences, 2);
+    assert_eq!(rows[0].provenance.source, mast_proto::FrictionSource::Auto);
+    assert!(tool(&rig, token, "token=fake-credential", json!({})).await.is_err());
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    let serialized = serde_json::to_string(&rows).unwrap();
+    assert!(!serialized.contains("fake-credential"));
+    assert!(serialized.contains("[REDACTED]"));
+    rig.core.sessions.set_auto_capture_friction(false);
+    assert!(tool(&rig, token, "another_missing_tool", json!({})).await.is_err());
+    assert_eq!(rig.core.workspace.friction_reports(SPACE).len(), 2);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_approval_and_answer() {
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+    };
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows.len(), 1);
+    let approval = rows[0].approval.as_ref().unwrap();
+    assert_eq!(approval.command, "echo token=[REDACTED]");
+    assert_eq!(approval.why, "sandbox");
+    assert_eq!(approval.answer, None);
+    assert!(rig.core.sessions.respond_input(CHAT, &input.request_id, vec![mast_proto::UserInputAnswer { question_id: "approval".into(), labels: vec!["No".into()] }]).unwrap());
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(false));
+    assert_eq!(rows[0].occurrences, 1);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_rejected_server_requests() {
+    let rig = rig().await;
+    *rig.harness.events.lock().unwrap() = vec![AgentEvent::ServerRequestRejected { method: "method/token=fake-secret".into(), server_name: "example".into() }, AgentEvent::ServerRequestRejected { method: "method/token=fake-secret".into(), server_name: "example".into() }];
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| rig.core.workspace.friction_reports(SPACE).first().is_some_and(|r| r.occurrences == 2), "friction report").await;
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows[0].kind, mast_proto::FrictionKind::ToolFailure);
+    assert!(!serde_json::to_string(&rows).unwrap().contains("fake-secret"));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_errored_turn() {
+    let rig = rig().await;
+    *rig.harness.events.lock().unwrap() = vec![AgentEvent::Error { message: "password=fake-secret".into() }, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: None, session_id: None }];
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.core.workspace.friction_reports(SPACE).is_empty(), "friction report").await;
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows[0].kind, mast_proto::FrictionKind::Environment);
+    assert_eq!(rows[0].what_happened, "password=[REDACTED]");
+    rig.core.shutdown().await;
 }

@@ -573,6 +573,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::Usage { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
+        | AgentEvent::ServerRequestRejected { .. }
         | AgentEvent::UserMessage { .. } => {}
     }
 }

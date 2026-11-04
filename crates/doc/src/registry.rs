@@ -44,6 +44,7 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 pub mod artifacts;
 mod chat_diff_targets;
 mod diff_review;
+pub mod friction;
 mod sidebar_pins;
 mod sidebar_sections;
 pub mod work_outline;

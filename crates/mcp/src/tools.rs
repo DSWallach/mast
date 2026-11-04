@@ -523,11 +523,40 @@ fn diff_target_catalog() -> Vec<ToolDef> {
     }]
 }
 
+fn friction_catalog() -> Vec<ToolDef> {
+    let links = work_outline_catalog().into_iter().find(|def| def.name == agent_tool_names::CREATE_USER_ACTION_REQUEST).expect("request tool").input_schema["properties"]["links"].clone();
+    vec![
+        ToolDef {
+            name: agent_tool_names::REPORT_FRICTION,
+            description: "Record a bug, failed tool call, permission issue, environment problem, workflow issue, or documentation issue. Mast fills provenance and groups matching reports within the Space.",
+            input_schema: json!({"type":"object", "properties": {
+                "kind":{"type":"string","enum":["bug","tool_failure","permission","environment","workflow","docs"]},
+                "summary":{"type":"string","maxLength":140}, "whatHappened":{"type":"string"},
+                "workaround":{"type":"string"}, "suggestion":{"type":"string"},
+                "approval":{"type":"object","properties":{"command":{"type":"string"},"why":{"type":"string"}},"required":["command","why"]},
+                "severity":{"type":"string","enum":["low","medium","high"]},
+                "links":links
+            }, "required":["kind","summary","whatHappened"]}),
+        },
+        ToolDef {
+            name: agent_tool_names::LIST_FRICTION,
+            description: "List grouped friction reports for this Space, including occurrence counts. Filter by kind, status, or last-seen timestamp (milliseconds since epoch).",
+            input_schema: json!({"type":"object", "properties": {
+                "kind":{"type":"string","enum":["bug","tool_failure","permission","environment","workflow","docs"]},
+                "status":{"type":"string","enum":["open","dismissed","promoted"]},
+                "since":{"type":"integer"}, "limit":{"type":"integer","minimum":1,"maximum":500}
+            }}),
+        },
+    ]
+}
+
 /// Whether `name` is an engine-side agent tool (`AgentToolCall`).
 fn is_engine_agent_tool(name: &str) -> bool {
     agent_tool_names::WORK_OUTLINE.contains(&name)
         || agent_tool_names::ARTIFACTS.contains(&name)
         || DIFF_TARGET_TOOLS.contains(&name)
+        || name == agent_tool_names::REPORT_FRICTION
+        || name == agent_tool_names::LIST_FRICTION
 }
 
 /// Split a render-check result into MCP content: every screenshot as an
@@ -812,6 +841,7 @@ impl Tools {
             defs.extend(work_outline_catalog());
             defs.extend(artifact_catalog());
             defs.extend(diff_target_catalog());
+            defs.extend(friction_catalog());
         }
         defs
     }
@@ -3937,4 +3967,19 @@ mod tests {
         // The small user message before it still fits: nothing paged out.
         assert_eq!(read["olderRemaining"], 0);
     }
+    #[tokio::test]
+    async fn friction_tools_are_agent_scoped_and_forwarded() {
+        let world = Arc::new(World::default());
+        let anonymous = tools(world.clone(), None);
+        let agent = tools(world.clone(), Some(BETA_TOKEN));
+        for name in [agent_tool_names::REPORT_FRICTION, agent_tool_names::LIST_FRICTION] {
+            assert!(!anonymous.has(name));
+            assert!(agent.has(name));
+            agent.call(name, json!({})).await.unwrap();
+            assert_eq!(world.agent_calls(name).len(), 1);
+        }
+        let definitions = friction_catalog();
+        assert_eq!(definitions[0].input_schema["properties"]["links"]["items"]["properties"]["target"]["oneOf"].as_array().unwrap().len(), 6);
+    }
+
 }

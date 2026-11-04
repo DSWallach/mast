@@ -3049,6 +3049,64 @@ impl RpcService for EngineRpc {
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
+            methods::GET_FRICTION_SETTINGS => RpcReply::value(&self.registry.friction_settings()),
+            methods::SET_FRICTION_SETTINGS => {
+                let settings: mast_proto::FrictionSettings = parse_params(params)?;
+                self.registry.set_friction_settings(settings.clone()).map_err(RpcError::Failed)?;
+                self.sessions.set_auto_capture_friction(settings.auto_capture);
+                RpcReply::value(&settings)
+            }
+            methods::LIST_FRICTION_REPORTS => {
+                let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;
+                let mut rows = self.workspace.friction_reports(&p.space_id);
+                rows.retain(|r| p.kind.is_none_or(|v| r.kind == v)
+                    && r.status == p.status.unwrap_or(mast_proto::FrictionStatus::Open)
+                    && p.harness.as_ref().is_none_or(|v| &r.provenance.harness == v)
+                    && p.model.as_ref().is_none_or(|v| r.provenance.model.as_ref() == Some(v))
+                    && p.since.is_none_or(|v| r.last_seen >= v));
+                rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.id.cmp(&b.id)));
+                rows.truncate(p.limit.unwrap_or(100).min(1000));
+                RpcReply::value(&rows)
+            }
+            methods::SET_FRICTION_STATUS => {
+                let p: mast_proto::SetFrictionStatusParams = parse_params(params)?;
+                if p.status == mast_proto::FrictionStatus::Promoted { return Err(RpcError::BadParams("Use PromoteFrictionToItem to promote a report".into())); }
+                let row = self.workspace.set_friction_status(&p.space_id, &p.fingerprint, p.status, None, None).map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&row)
+            }
+            methods::PROMOTE_FRICTION_TO_ITEM => {
+                let p: mast_proto::PromoteFrictionToItemParams = parse_params(params)?;
+                let row = self.workspace.friction_reports(&p.space_id).into_iter().find(|r| r.fingerprint == p.fingerprint).ok_or_else(|| RpcError::Failed("friction report not found".into()))?;
+                if let Some(id) = row.promoted_item_id { return RpcReply::value(&serde_json::json!({"workItemId": id})); }
+                use sha2::{Digest, Sha256};
+                let scope = self.engine_info.workspace_scope;
+                let identity = match scope {
+                    mast_proto::WorkspaceScope::Local => Some(format!("device:{}", self.engine_info.device_id)),
+                    _ => self.auth.as_ref().and_then(|auth| match auth.state() {
+                        crate::auth::AuthState::SignedIn { user, org_id } => Some(format!("user:{}:org:{}", user.id, org_id.as_deref().unwrap_or("personal"))),
+                        _ => None,
+                    }),
+                };
+                let chat = identity.map(|identity| {
+                    let hash = Sha256::digest(format!("{scope:?}\0{identity}"));
+                    format!("[{}](zeron://open/chat/{}?workspace={})", row.provenance.chat_id, row.provenance.chat_id, &format!("{:x}", hash)[..16])
+                }).unwrap_or_else(|| row.provenance.chat_id.clone());
+                let description = format!("## What happened\n\n{}\n\n## Workaround\n\n{}\n\n## Suggestion\n\n{}\n\n## Approval\n\n{}\n\n## Provenance\n\nChat: {}\nHarness: {}\nModel: {}\nBranch: {}\n", row.what_happened, row.workaround.as_deref().unwrap_or("None"), row.suggestion.as_deref().unwrap_or("None"), row.approval.as_ref().map(|a| format!("Command: `{}`\n\nReason: {}\n\nAnswer: {:?}", a.command, a.why, a.answer)).unwrap_or_else(|| "None".into()), chat, row.provenance.harness, row.provenance.model.as_deref().unwrap_or("Unknown"), row.provenance.branch.as_deref().unwrap_or("Unknown"));
+                let op = mast_proto::derive_id(&format!("{}:{}", row.id, p.parent_item_id), "friction-promotion");
+                let mutation = mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams { space_id: p.space_id.clone(), parent_work_item_id: Some(p.parent_item_id), placement: Default::default(), title: row.summary, description: Some(description), status: None, operation_id: op });
+                let reply = self.work_outline.mutate(&mutation).map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                let id = reply.work_item_id.ok_or_else(|| RpcError::Failed("work item id missing".into()))?;
+                self.workspace.set_friction_status(&p.space_id, &p.fingerprint, mast_proto::FrictionStatus::Promoted, Some(id.clone()), Some(chrono::Utc::now().timestamp_millis())).map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({"workItemId": id}))
+            }
+            methods::PROPOSE_FRICTION_INSTRUCTION => {
+                let p: mast_proto::ProposeFrictionInstructionParams = parse_params(params)?;
+                let row = self.workspace.friction_reports(&p.space_id).into_iter().find(|r| r.fingerprint == p.fingerprint).ok_or_else(|| RpcError::Failed("friction report not found".into()))?;
+                let text = row.suggestion.filter(|s| !s.trim().is_empty()).ok_or_else(|| RpcError::BadParams("friction report has no suggestion".into()))?;
+                let mutation = mast_proto::WorkOutlineMutation::ProposeWorkItemInstruction(mast_proto::ProposeWorkItemInstructionParams { space_id: Some(p.space_id), target: mast_proto::InstructionProposalTarget::space_root(), origin: Default::default(), text, action: mast_proto::ProposalAction::Add, instruction_id: None, rationale: None, operation_id: mast_proto::derive_id(&row.id, "friction-proposal") });
+                let reply = self.work_outline.mutate(&mutation).map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                RpcReply::value(&reply)
+            }
             methods::WATCH_WORK_OUTLINE => {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
@@ -3334,11 +3392,11 @@ impl RpcService for EngineRpc {
                             Err(e) => Err(RpcError::Failed(e.to_string())),
                         }
                     };
-                if result.is_err()
+                if let Err(error) = &result
                     && let Some(grant) = grant
                 {
                     self.sessions
-                        .note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool);
+                        .note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool, &error.to_string());
                 }
                 RpcReply::value(&result?)
             }
