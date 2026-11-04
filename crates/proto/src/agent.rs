@@ -1052,6 +1052,8 @@ pub mod agent_tools {
                     "ask, review, approve, choose, handoff, or notice; defaults to ask",
                 ),
                 p("priority", "blocking, normal, or fyi"),
+                p("links", "up to eight labeled targets"),
+                p("facts", "up to eight labeled values"),
                 p("detail", "context for the user"),
                 p(
                     "dedupeKey",
@@ -1470,6 +1472,9 @@ pub mod agent_tools {
                 serde_json::from_str::<Value>(example)
                     .unwrap_or_else(|e| panic!("{name} example is not JSON: {e}"));
             }
+            let request_usage = usage_text(tools::CREATE_USER_ACTION_REQUEST).unwrap();
+            assert!(request_usage.contains("links ("), "{request_usage}");
+            assert!(request_usage.contains("facts ("), "{request_usage}");
             let text = with_usage(
                 tools::SET_STATUS,
                 "invalid arguments: missing field `status`",
