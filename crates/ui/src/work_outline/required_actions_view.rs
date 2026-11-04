@@ -843,6 +843,7 @@ impl RequiredActionsList {
         row: RequiredActionRow,
         now: chrono::DateTime<chrono::Utc>,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = row.request_id.clone();
@@ -1231,6 +1232,22 @@ impl RequiredActionsList {
         };
         let artifact_links = self.render_artifact_links(&id, &row, theme, cx);
         let request_links = self.render_request_links(&id, &row, theme, cx);
+        let detail = row.info.as_deref().map(|source| {
+            let source = link_legacy_artifacts(source);
+            let tree = crate::markdown::parser::parse_full(&source);
+            let mut options = crate::markdown::render::RenderOptions::settled(format!("required-actions-info-{id}").into());
+            let shell = self.shell.clone();
+            options.link = Some(crate::markdown::render::LinkUi {
+                source_session: Some(row.chat_id.clone()),
+                handler: std::rc::Rc::new(move |activation, window, cx| {
+                    if let Some(shell) = &shell {
+                        shell.update(cx, |shell, cx| shell.open_web_reference(&activation.target.original, false, window, cx)).ok();
+                        crate::markdown::render::LinkOutcome::Internal
+                    } else { crate::markdown::render::LinkOutcome::Rejected }
+                }),
+            });
+            crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
+        });
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
@@ -1290,7 +1307,7 @@ impl RequiredActionsList {
                         .pl(px(12.0))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(row.info.clone().unwrap_or_default())),
+                        .children(detail),
                 )
             })
             .when_some(resolution, |el, line| {
@@ -1311,13 +1328,17 @@ impl RequiredActionsList {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         use mast_proto::work_outline_user_actions::RequestLinkTarget;
-        if row.links.is_empty() {
-            return None;
+        let mut links = row.links.clone();
+        for url in legacy_pr_links(&row.text) {
+            if !links.iter().any(|link| matches!(&link.target, RequestLinkTarget::Pr { url: existing } if existing == &url)) {
+                links.push(mast_proto::work_outline_user_actions::RequestLink { label: "View PR".into(), target: RequestLinkTarget::Pr { url } });
+            }
         }
+        if links.is_empty() { return None; }
         let review_artifact = (row.kind == mast_proto::work_outline_user_actions::UserActionKind::Review)
             .then(|| row.links.iter().position(|link| matches!(link.target, RequestLinkTarget::Artifact { .. })))
             .flatten();
-        let buttons = row.links.iter().enumerate().filter(|(index, _)| Some(*index) != review_artifact).map(|(index, link)| {
+        let buttons = links.iter().enumerate().filter(|(index, _)| Some(*index) != review_artifact).map(|(index, link)| {
             let selector = format!("required-actions-link-{id}-{index}");
             let label = link.label.clone();
             let target = link.target.clone();
@@ -1384,8 +1405,8 @@ impl RequiredActionsList {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let mut links = mast_proto::artifacts::artifact_links(&row.text);
-        for link in mast_proto::artifacts::artifact_links(row.info.as_deref().unwrap_or_default()) {
+        let mut links = mast_proto::artifacts::artifact_links(&link_legacy_artifacts(&row.text));
+        for link in mast_proto::artifacts::artifact_links(&link_legacy_artifacts(row.info.as_deref().unwrap_or_default())) {
             if !links.iter().any(|seen| seen.target == link.target) {
                 links.push(link);
             }
@@ -1446,6 +1467,7 @@ impl RequiredActionsList {
         &self,
         rows: RequiredActionRows,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let now = chrono::Utc::now();
@@ -1478,7 +1500,7 @@ impl RequiredActionsList {
                     .unwrap_or(0)];
                 body = body.child(group_heading(row.group, count, theme));
             }
-            body = body.child(self.render_row(row, now, theme, cx));
+            body = body.child(self.render_row(row, now, theme, window, cx));
         }
         if let Some(replied) = self
             .replied
@@ -1540,7 +1562,7 @@ impl RequiredActionsList {
             );
             if self.history_open {
                 for row in rows.resolved {
-                    body = body.child(self.render_row(row, now, theme, cx));
+                    body = body.child(self.render_row(row, now, theme, window, cx));
                 }
             }
         }
@@ -1573,6 +1595,33 @@ impl RequiredActionsList {
     }
 }
 
+fn legacy_pr_links(source: &str) -> Vec<String> {
+    let pattern = regex::Regex::new(r"https://github\.com/[^\s/()]+/[^\s/()]+/pull/[0-9]+").expect("valid PR pattern");
+    pattern.find_iter(source).map(|found| found.as_str().to_owned()).collect()
+}
+
+/// Turn bare artifact ids into Markdown links; existing Markdown targets stay intact.
+fn link_legacy_artifacts(source: &str) -> String {
+    const SCHEME: &str = "mast-artifact:";
+    let mut result = String::new();
+    let mut rest = source;
+    while let Some(index) = rest.find(SCHEME) {
+        let (before, tail) = rest.split_at(index);
+        result.push_str(before);
+        let id = tail.get(SCHEME.len()..SCHEME.len() + 32);
+        if !before.ends_with('(') && id.is_some_and(mast_proto::artifacts::is_artifact_id) {
+            let target = &tail[..SCHEME.len() + 32];
+            result.push_str(&format!("[{target}]({target})"));
+            rest = &tail[target.len()..];
+        } else {
+            result.push_str(SCHEME);
+            rest = &tail[SCHEME.len()..];
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
 fn rows_in_group(rows: &[RequiredActionRow], group: NeedsGroup) -> usize {
     rows.iter().filter(|row| row.group == group).count()
 }
@@ -1599,14 +1648,14 @@ fn group_heading(group: NeedsGroup, count: usize, theme: &Theme) -> gpui::Div {
 }
 
 impl Render for RequiredActionsList {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let rows = self.rows();
         if !self.global {
             return div()
                 .id("required-actions-list")
                 .debug_selector(|| "required-actions-list".into())
-                .child(self.render_body(rows, &theme, cx));
+                .child(self.render_body(rows, &theme, window, cx));
         }
         let count = rows.open.len();
         let close = div()
@@ -1688,7 +1737,7 @@ impl Render for RequiredActionsList {
                     .overflow_y_scroll()
                     .px(px(8.0))
                     .pb(px(10.0))
-                    .child(self.render_body(rows, &theme, cx)),
+                    .child(self.render_body(rows, &theme, window, cx)),
             )
     }
 }
