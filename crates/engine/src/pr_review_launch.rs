@@ -483,9 +483,7 @@ fn behind_by(path: &Path, branch: &str) -> u64 {
     .unwrap_or(0)
 }
 
-/// launch.sh's `location` text. The devcontainer mount note is added only
-/// when the workspace has a `.devcontainer` (Cofactr), where launch.sh's
-/// wording applies verbatim.
+/// Describe a checkout without assuming a devcontainer mount from its configuration.
 pub fn describe_location(ws: &Path, root: &Path, path: &Path, branch: &str, behind: u64) -> String {
     let shown = path.display();
     let mut location = if path == ws {
@@ -495,7 +493,9 @@ pub fn describe_location(ws: &Path, root: &Path, path: &Path, branch: &str, behi
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if ws.join(".devcontainer").is_dir() {
+        let container_path = Path::new("/workspace/.worktrees").join(&base);
+        if path.canonicalize().ok().zip(container_path.canonicalize().ok())
+            .is_some_and(|(actual, mounted)| actual == mounted) {
             format!("the worktree `{shown}` (`/workspace/.worktrees/{base}` in the devcontainer)")
         } else {
             format!("the worktree `{shown}`")
@@ -1181,7 +1181,7 @@ mod tests {
         assert_eq!(
             describe_location(&ws, &root, &wt, "b", 2),
             format!(
-                "the worktree `{}` (`/workspace/.worktrees/flagship-pr-7` in the devcontainer), 2 commit(s) behind origin/b — pull before you start",
+                "the worktree `{}`, 2 commit(s) behind origin/b — pull before you start",
                 wt.display()
             )
         );
