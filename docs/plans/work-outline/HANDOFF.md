@@ -735,26 +735,28 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-03 ~11:35; a fresh coordinator starts here)
+## In flight (snapshot 2026-11-03 ~23:00; overnight run, a fresh coordinator starts here)
 
-**State of the branches.** `origin/work-outline-implementation` = the 2026-11-03 morning release:
-`faster-releases`, `resolve-subtree-reach`, `compact-row-grant-admin`, `inherit-auto-approve`, plus a
-test-helper fix (agent_tools launch children on Ask). Installed 2026-11-03 11:32 (backup
-`zeron-before-codex-git-roots-2026-11-03`). Tests: first release run with the new script — engine etc.
-under nextest `release` 2275 passed in 22 min (3 failures were the stale helper, now 43/43), UI 2391/0.
-All four feature branches deleted. Nothing is mid-release.
-
-**Next for the coordinator.** Claude usage is low: use Codex `gpt-6.1-terra` for implementers. Codex
-chats in workspace-write can now commit/push without prompts (git dirs are writable roots); if one
-still stalls, check `pendingInput` with `read_chat` — approval prompts don't wake the orchestrator.
-- PR review workflow (item 17137624; brief + mockups copied to `.worktrees/pr-review-brief/`). Phases 1
-  (`pr-review-read-diff`, item 26e4768e) and 2 (`pr-review-sidecar`, item 7463e980) were interrupted at
-  their first step; their worktrees exist with no commits. Restart both on Codex (archive the old
-  chats 63d1abb5 / ae1de40e), then phase 3 (item 7125da84). Phase 4 after 1+2. Using the brief's
-  suggested defaults (recorded on item 17137624); Required Action 5241f29f stays open until Mikey
-  confirms.
-- Mikey's admin chat test: "Outline admin" item at the Cofactr Space root, stock lot traceability
-  only, dry run + Required Action before applying.
+**Overnight plan (Mikey, 2026-11-03: "I trust your judgment", keep usage reasonable, caffeinate):**
+1. Finish the in-flight features first: `pr-review-search` (PR review phase 3, Codex chat f69159ac,
+   item 7125da84) and `needs-outcomes` (Needs-you phase 2, Codex chat 915056bd, item cfb3bf7c; includes the
+   admin bulk "no still approves" fix, item b05c3e04). Then Needs-you phase 3 (`needs-links-facts`) on Terra.
+   Plan: mast-artifact:e0a05a3d0248e2e8d8d0fda6bb6214c4 (section 7). Q-1..Q-5 open: use its recommendations.
+2. Merge everything ready into `work-outline-implementation` (this is "main" for Mikey; never touch the
+   literal `main` branch), release with `caffeinate -i scripts/run_release_tests.sh`, install, push. Never
+   restart Mast; resend children after Mikey restarts.
+3. Then the coworker cleanup on a NEW branch `coworker-cleanup` that stays UNMERGED for Mikey's review:
+   repo cleanup proposal defaults (mast-artifact:bacfa5c96fe27d73a2821e8f4e2aa446: internal docs →
+   `docs/internal/`, iOS → `archive/ios` branch then delete, delete landing/www-redirect/edge worker, drop
+   upstream workflows, unlinked media after listing, dev scripts → `scripts/dev/`, .gitignore gaps, gitleaks
+   history scan), visible zeron/creel copy (names audit branch 1), `zeron.sh` install/update links removed
+   (local-only), and `mast doctor` on its own branch. Not tonight: internal identifier rename, binary/data
+   migration, bundle id (tabled; coworkers build from source), repo location (fork vs Cofactr org, open).
+- Model routing per the Space-root instruction: Terra implements and researches; Sonnet for write-ups; Opus
+  only for short decisions and coordinating. Terra tends to end turns early with "not complete": resend
+  "continue until Ready to merge".
+- Known: wake echoes ("resolved: …" after the coordinator's own resolve) cost a coordinator turn each; file
+  as a small bug if not done.
 
 **What Mikey is doing next:** using an admin chat in the Cofactr Space to set up the Projects container
 template (matching his current copy template), move existing projects under it with a preview, and
