@@ -11,7 +11,7 @@
 //!   ancestors, then the Space default, then the implicit
 //!   `{ executionRoot: Space.path }`.
 //!
-//! Binding references: `docs/plans/work-outline/m0-contract.md` section 6,
+//! Binding references: `docs/internal/plans/work-outline/m0-contract.md` section 6,
 //! `m0-execution-scope.md` sections 4-5, `m0-registry-persistence.md` 7.4.
 //! Wire conventions match `work_outline.rs`: camelCase fields, defaulted
 //! non-identity fields, lenient snapshot enums (unknown variants read as

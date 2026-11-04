@@ -1,5 +1,5 @@
 //! Linear integration rows and operations (contract:
-//! `docs/plans/work-outline/linear-contract.md`).
+//! `docs/internal/plans/work-outline/linear-contract.md`).
 //!
 //! - `workOutlineSpaceSettings` (row id = Space id): `spaceId`,
 //!   `linearEnabled` (LWW bool, default false), `updatedAt`, `v`. Created by

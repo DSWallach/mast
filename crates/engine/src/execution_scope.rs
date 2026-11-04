@@ -1,5 +1,5 @@
 //! Execution-scope validation (Work Outline Milestone 3; contract section 6,
-//! `docs/plans/work-outline/m0-execution-scope.md` sections 2 and 5).
+//! `docs/internal/plans/work-outline/m0-execution-scope.md` sections 2 and 5).
 //!
 //! [`validate`] checks a resolved execution configuration on the Space's
 //! OWNING device: device, live Space, execution root, each repository (path,

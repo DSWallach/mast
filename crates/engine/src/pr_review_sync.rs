@@ -1,4 +1,4 @@
-//! PR review sync (contract `docs/plans/work-outline/pr-sync-contract.md`).
+//! PR review sync (contract `docs/internal/plans/work-outline/pr-sync-contract.md`).
 //!
 //! For every Space with a destination (`setPrReviewSyncDestination`) that
 //! this device owns, every open PR requesting the user's review in one of the

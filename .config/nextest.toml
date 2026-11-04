@@ -4,7 +4,7 @@
 # (mast-ui) is NOT run under nextest: its gpui tests share process-global state and
 # need one thread in one process, which `cargo test -p mast-ui --lib -- --test-threads=1`
 # provides and nextest (one process per test) does not. See
-# docs/plans/work-outline/release-testing.md.
+# docs/internal/plans/work-outline/release-testing.md.
 #
 # Profiles
 #   default     local development; quarantined tests run and may fail.

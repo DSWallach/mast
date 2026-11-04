@@ -243,7 +243,7 @@ pub mod methods {
     /// to the Space's owning device (`pr-review-launch-v1`). Errors are
     /// `pr-review/<code>: <message>`.
     pub const START_PR_REVIEW: &str = "StartPrReview";
-    // ── Linear integration v1 (`mast_proto::linear`, docs/plans/work-outline/
+    // ── Linear integration v1 (`mast_proto::linear`, docs/internal/plans/work-outline/
     // linear-contract.md). All local/IPC (the key is this device's), never
     // forwardable. Failures are `linear/<code>: <message>`
     // (`mast_proto::LinearError::from_wire_message`).
@@ -289,7 +289,7 @@ pub mod methods {
     /// (open PRs in the Space's repositories requesting the user's review).
     pub const PR_REVIEW_REQUESTED: &str = "PrReviewRequested";
     // ── Planning artifacts v1 (`mast_proto::artifacts`,
-    // docs/plans/artifacts-contract.md). Failures are
+    // docs/internal/plans/artifacts-contract.md). Failures are
     // `artifact/<code>: <message>` (`mast_proto::ArtifactError::from_wire_message`).
     /// `WatchArtifactsParams {spaceId}` → stream of `ArtifactsSnapshot`
     /// (current value first, then one frame per change). Served from the

@@ -1,6 +1,6 @@
 //! Linear integration v1, client side (contract:
-//! `docs/plans/work-outline/linear-contract.md`; reviewed UX:
-//! `docs/plans/work-outline/parked-proposals.md` "Linear integration").
+//! `docs/internal/plans/work-outline/linear-contract.md`; reviewed UX:
+//! `docs/internal/plans/work-outline/parked-proposals.md` "Linear integration").
 //!
 //! - Linear is OFF per Space until the user turns it on in the Space-root
 //!   details. A Space with Linear off shows no Linear UI and makes no Linear

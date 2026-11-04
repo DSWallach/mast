@@ -1,6 +1,6 @@
 //! Planning artifacts in the UI (phase 1: design A + B).
 //!
-//! Contract: `docs/plans/artifacts-contract.md`. Layout:
+//! Contract: `docs/internal/plans/artifacts-contract.md`. Layout:
 //!
 //! - [`store`] — `WatchArtifacts` snapshots per Space (fed by `AppState`'s
 //!   reconciler, which follows the Work Outline watch set);

@@ -1,6 +1,6 @@
 //! PR review sync wire contract (version 1).
 //!
-//! Contract doc: `docs/plans/work-outline/pr-sync-contract.md`.
+//! Contract doc: `docs/internal/plans/work-outline/pr-sync-contract.md`.
 //!
 //! - Per Space the user picks ONE work item as the PR review sync
 //!   destination (`setPrReviewSyncDestination`, a `WorkOutlineMutate` op;

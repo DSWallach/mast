@@ -1,5 +1,5 @@
 //! PR review sync rows and operations (contract:
-//! `docs/plans/work-outline/pr-sync-contract.md`).
+//! `docs/internal/plans/work-outline/pr-sync-contract.md`).
 //!
 //! - `workOutlineSpaceSettings.prReviewSyncWorkItemId` (LWW string or null):
 //!   the Space's sync destination. Written by `setPrReviewSyncDestination`

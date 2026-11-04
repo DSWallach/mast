@@ -6,7 +6,7 @@
 //! part* of base-62 digits that never ends in `0`. The alphabet `0-9A-Za-z`
 //! is in ASCII order, so plain byte comparison of two keys orders them.
 //!
-//! Rules fixed by the registry audit (`docs/plans/work-outline/m0-registry-persistence.md`
+//! Rules fixed by the registry audit (`docs/internal/plans/work-outline/m0-registry-persistence.md`
 //! §9, `m0-contract.md` §3.3):
 //! - keys are 1..=[`MAX_ORDER_KEY_LEN`] bytes and sort by byte order; siblings
 //!   sort `(orderKey, id)`, so equal keys minted by two devices are fine;

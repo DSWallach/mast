@@ -381,7 +381,7 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   C: "Updated since you last viewed · rev N → M" chip opens the compare view; drift badge (commits on
   the item's chats' branches since the latest revision, or unreflected answers). Not done: answering
   from HTML cards, marker on artifact lists, multi-device answers are last-writer-wins. See the
-  phase-3 amendment in `docs/plans/artifacts-contract.md`.
+  phase-3 amendment in `docs/internal/plans/artifacts-contract.md`.
 - **Compare and zoom gaps** (2026-10-28): Markdown compare panes sync on scrollbar drag, paging and
   `scroll_to` (each pane reports position on paint; follower moves aren't echoed). Compare view is
   zoomable and panes zoom together (HTML/Mermaid frames mirror via SYNC scripts and
@@ -475,7 +475,7 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   alias), `mast-artifact:` / `mast-file:` / `mast-msg:` / `mast-link:` schemes, `data-mast-*`,
   `.mast/` artifacts folders (existing `.zeron/` folders still used), `mast.json` (`zeron.json`
   fallback), `mast/<name>` worktree branches (`zeron/` still recognised). Not renamed (see
-  `docs/plans/rename-migration.md`): `~/.zeron`, bundle id `sh.zeron.app.dev`, Keychain names, the
+  `docs/internal/plans/rename-migration.md`): `~/.zeron`, bundle id `sh.zeron.app.dev`, Keychain names, the
   `zeron` binary, the `zeron/` submodule folder. `scripts/rename-map.sh` maps upstream code onto the
   new names. New git spawns use `mast_harness::git_command()`.
 - **Chat header revamp** (2026-10-28, option C + B's card on hover): `chat_item.rs` fact sheet feeds
@@ -616,6 +616,15 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Search fixes + coworker cleanup** (2026-11-04, `search-overlay-fixes`, `coworker-cleanup`): ⌘O/⇧⌘F inputs use
+  ComposerInput (full editing); a per-checkout file index prewarms when a chat opens and follows the watcher
+  (5 s repair in over-budget repos); ⌘O 300 ms → 13–16 ms per keystroke, indexed content search 13 ms first
+  match. Follow-up: don't count gitignored dirs toward the watcher's 8,000-dir budget. Cleanup: upstream iOS
+  (kept on `archive/ios`), landing, www-redirect, edge worker, workflows, Windows/Linux packaging and unlinked
+  media removed; dev scripts → scripts/dev; brand test covers README + guides; `zeron update` says build from
+  source; fixtures use /Users/example; internal docs moved to **docs/internal/** (this file is now
+  `docs/internal/plans/work-outline/HANDOFF.md`). gitleaks: 40 history hits, all hashes/upstream test data/a
+  public analytics key. Repo git auto-gc is off (`gc.auto 0`); run `git gc` manually when idle.
 - **Typed Needs-you, phase 3** (2026-11-04, `needs-links-facts`, built in two small Terra slices after one
   stalled chat): `links[]` (artifact, file+line, diff/branch, PR, chat, https URL; validated for reach and
   shape) and `facts[]` (label/value, capped) on requests, persisted and in MCP create/read; card buttons use the

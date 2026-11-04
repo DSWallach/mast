@@ -1,6 +1,6 @@
 //! Work Outline UI (Milestone 1).
 //!
-//! Layout and ownership (`docs/plans/work-outline/m0-ui-integration.md` §10):
+//! Layout and ownership (`docs/internal/plans/work-outline/m0-ui-integration.md` §10):
 //! pure, GUI-free logic lives in separately testable files; rendering files
 //! depend on them, never the reverse. This scaffold commit defines only the
 //! three cross-owner seams, all with stub bodies:

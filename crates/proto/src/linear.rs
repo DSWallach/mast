@@ -1,7 +1,7 @@
 //! Linear integration wire contract (version 1: read-only, per-Space opt-in).
 //!
-//! Contract doc: `docs/plans/work-outline/linear-contract.md`. Plan:
-//! `docs/plans/work-outline/parked-proposals.md` ("Linear integration").
+//! Contract doc: `docs/internal/plans/work-outline/linear-contract.md`. Plan:
+//! `docs/internal/plans/work-outline/parked-proposals.md` ("Linear integration").
 //!
 //! - The engine holds one Linear personal API key per device (macOS
 //!   Keychain, else `LINEAR_API_KEY`). The key is never sent to clients,

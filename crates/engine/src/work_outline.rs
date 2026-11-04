@@ -1,5 +1,5 @@
 //! Work Outline service: the policy layer over the registry mutators in
-//! `mast_doc::registry::work_outline` (contract `docs/plans/work-outline/
+//! `mast_doc::registry::work_outline` (contract `docs/internal/plans/work-outline/
 //! m0-contract.md`, registry audit section 7.11).
 //!
 //! - `WorkOutlineMutate`: kill switch, operation-id replay protection (same

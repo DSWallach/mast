@@ -1,5 +1,5 @@
 //! Planning artifacts (phase 1: design A + B; contract
-//! `docs/plans/artifacts-contract.md`, agent conventions
+//! `docs/internal/plans/artifacts-contract.md`, agent conventions
 //! `docs/planning-artifact-conventions.md`).
 //!
 //! - **Location.** [`ArtifactsService::canonical_root`]: the main checkout of

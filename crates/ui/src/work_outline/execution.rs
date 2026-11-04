@@ -2,7 +2,7 @@
 //! behind the Work Item Details **Execution** section, the exception markers,
 //! and the per-member branch/diff selector of bound Chats.
 //!
-//! Binding references: `docs/plans/work-outline/m0-contract.md` section 6 and
+//! Binding references: `docs/internal/plans/work-outline/m0-contract.md` section 6 and
 //! "Milestone 3 execution discoveries". Resolution, the shape check, and the
 //! error vocabulary (`message()` / `remediation()`) come from `mast_proto`;
 //! nothing here re-implements them.

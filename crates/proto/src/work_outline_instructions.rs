@@ -10,7 +10,7 @@
 //!   [`build_revision_body`] / [`verify_revision_body`]: revision integrity;
 //! - [`compare_instruction_revisions`]: entry-level and line-level diff.
 //!
-//! Binding references: `docs/plans/work-outline/m0-contract.md` section 5 and
+//! Binding references: `docs/internal/plans/work-outline/m0-contract.md` section 5 and
 //! "Milestone 2 contract notes", `m0-registry-persistence.md` 7.2 and 7.7-7.9,
 //! `m0-instruction-delivery.md` sections 5-7. Wire conventions match
 //! `work_outline.rs`: camelCase fields, defaulted non-identity fields,

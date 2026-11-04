@@ -1,5 +1,5 @@
 //! Engine side of the PR page: a port of the Cofactr workspace's `pr-dash`
-//! (spec: `docs/plans/work-outline/pr-dash-spec.md`).
+//! (spec: `docs/internal/plans/work-outline/pr-dash-spec.md`).
 //!
 //! * [`GhRunner`] is the only thing that talks to GitHub (`gh api …`); tests
 //!   plug in a canned implementation, so nothing here needs the network.

@@ -3,7 +3,7 @@
 //! registry kinds, their `WorkOutlineMutate` operations, and the read-only
 //! context an agent acting for a Chat may see.
 //!
-//! Binding references: `docs/plans/work-outline/m0-contract.md` (sections 4
+//! Binding references: `docs/internal/plans/work-outline/m0-contract.md` (sections 4
 //! and 8, "Milestone 4 registry discoveries"), `m0-registry-persistence.md`
 //! 7.6 and 7.7, and the specification's "Status and user actions" and
 //! "Create instructions from Chats" sections. Wire conventions match

@@ -1,7 +1,7 @@
 //! Work Outline wire contract: snapshot view types, operation requests and
 //! replies, error codes, limits, and the operation-id derivation helper.
 //!
-//! Binding references: `docs/plans/work-outline/m0-contract.md` (sections 2-4),
+//! Binding references: `docs/internal/plans/work-outline/m0-contract.md` (sections 2-4),
 //! `m0-registry-persistence.md` (sections 7-9), `m0-idempotency-command-plane.md`
 //! (section 3). The Work Outline is a *view* over additive registry rows;
 //! these types are what `WatchWorkOutline` emits and what the mutation RPC

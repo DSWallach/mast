@@ -2,7 +2,7 @@
 //! tabs, buckets, needs-you counts). The engine fetches and normalizes PRs
 //! into [`PrDashRow`] facts; [`classify`], [`needs_you_count`] and
 //! [`ordered_rows`] are pure functions over those facts, shared by the engine
-//! and the UI. Spec: `docs/plans/work-outline/pr-dash-spec.md`.
+//! and the UI. Spec: `docs/internal/plans/work-outline/pr-dash-spec.md`.
 
 use serde::{Deserialize, Serialize};
 

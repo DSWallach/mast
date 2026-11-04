@@ -2,7 +2,7 @@
 //! `instructionRevisions`, `instructionRevisionApplications`, and the
 //! host-written `executionSession` report on session-status rows.
 //!
-//! Schemas: `docs/plans/work-outline/m0-registry-persistence.md` 7.2, 7.8,
+//! Schemas: `docs/internal/plans/work-outline/m0-registry-persistence.md` 7.2, 7.8,
 //! 7.9 as amended by `m0-contract.md` sections 5.2 and 5.6 and the
 //! "Milestone 2 contract notes". The write rules are the Milestone 1 ones
 //! (create-if-absent that never revives a tombstone, `update` ops without

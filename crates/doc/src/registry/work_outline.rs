@@ -12,7 +12,7 @@
 //! needs engine state (kill switch, actor derivation, operation-id replay
 //! cache) lives in `crates/engine/src/work_outline.rs`.
 //!
-//! Row schemas: `docs/plans/work-outline/m0-registry-persistence.md` 7.1, 7.3,
+//! Row schemas: `docs/internal/plans/work-outline/m0-registry-persistence.md` 7.1, 7.3,
 //! 7.5. Write rules R1-R8 (section 10):
 //! - creation is one `upsert` after a [`RowState`] check that never revives a
 //!   tombstone; every later write is an `update` without immutable fields;

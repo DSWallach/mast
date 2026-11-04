@@ -1,4 +1,4 @@
-//! Planning artifact rows (`artifacts`; contract `docs/plans/artifacts-contract.md`).
+//! Planning artifact rows (`artifacts`; contract `docs/internal/plans/artifacts-contract.md`).
 //!
 //! Metadata only: one row per artifact whose fields are exactly
 //! `mast_proto::ArtifactView`. Content lives in the owning device's profile

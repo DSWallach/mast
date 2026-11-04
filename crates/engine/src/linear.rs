@@ -1,5 +1,5 @@
 //! Linear integration v1 (read-only; contract
-//! `docs/plans/work-outline/linear-contract.md`).
+//! `docs/internal/plans/work-outline/linear-contract.md`).
 //!
 //! - [`LinearService`]: this device's key ([`credentials`]), the GraphQL
 //!   client ([`client`], [`queries`]), a ~5 minute per-identifier issue

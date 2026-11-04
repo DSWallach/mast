@@ -1,8 +1,8 @@
 //! Planning artifacts wire contract (version 1, phase 1 = design A + B).
 //!
-//! Contract doc: `docs/plans/artifacts-contract.md`. Agent conventions:
+//! Contract doc: `docs/internal/plans/artifacts-contract.md`. Agent conventions:
 //! `docs/planning-artifact-conventions.md`. Design:
-//! `docs/plans/planning-artifacts-design.md`.
+//! `docs/internal/plans/planning-artifacts-design.md`.
 //!
 //! - An artifact is a file Mast owns under the work item's canonical
 //!   checkout: `<canonical>/.mast/artifacts/<folder>/<file>` (chats without a

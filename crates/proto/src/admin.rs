@@ -1,5 +1,5 @@
 //! Admin chats: a user-granted, Space-scoped, expiring widening of what one
-//! chat's agent tools may reach (`docs/plans/work-outline/m0-contract.md`,
+//! chat's agent tools may reach (`docs/internal/plans/work-outline/m0-contract.md`,
 //! "Amendment: admin chats"). Only the user grants or revokes (IPC RPCs);
 //! no agent tool does.
 

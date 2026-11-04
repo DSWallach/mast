@@ -2,7 +2,7 @@
 //! ("Authored by me", "Review requested"). Rows arrive classified from the
 //! engine's `PrDashboard` RPC; this module owns what the page derives from
 //! them: needs-you badges, bucket chips, the text filter, grouping, and the
-//! per-column strings of docs/plans/work-outline/pr-dash-spec.md §4-§7. The
+//! per-column strings of docs/internal/plans/work-outline/pr-dash-spec.md §4-§7. The
 //! rendering lives in `chat_type_view/pr_tabs.rs`.
 
 use std::time::{Duration, Instant};
