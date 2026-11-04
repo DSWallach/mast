@@ -6,7 +6,7 @@
 //!
 //! A chat is archivable when it is idle (not working, awaiting input, or with
 //! a queued message), has no open Required Actions, and at least one of:
-//! its item is completed; its linked PR is merged or closed; it raised a
+//! its item is completed; all its own linked PRs are merged or closed; it raised a
 //! "Ready to merge" that was resolved; it has been idle for more than
 //! [`IDLE_DAYS`] days with its item completed or archived.
 
@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 /// Idle longer than this, with the item completed or archived, is finished.
 pub const IDLE_DAYS: i64 = 3;
-
 
 /// The verdict, shaped for JSON (`archivable` + `reason`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +56,7 @@ pub struct ArchivableInput<'a> {
     pub item: Option<&'a WorkItemView>,
     /// Every Required Action the chat originated (open and resolved).
     pub requests: Vec<&'a UserActionRequestView>,
-    /// States of the chat's linked PRs ("MERGED", "CLOSED", "OPEN", ...).
+    /// States of the chat's own linked PRs ("MERGED", "CLOSED", "OPEN", ...).
     pub pr_states: Vec<String>,
     pub now: DateTime<Utc>,
 }
@@ -73,7 +72,6 @@ pub fn requests_of<'a>(
         .filter(|r| r.chat_id == chat_id && !r.deduped)
         .collect()
 }
-
 
 /// The rule. The first failing gate names the reason; otherwise the first
 /// matching finish condition does.
@@ -110,11 +108,10 @@ pub fn archivable(input: &ArchivableInput<'_>) -> Archivable {
             "its PR is merged or closed"
         });
     }
-    if input
-        .requests
-        .iter()
-        .any(|r| !r.is_open() && r.effective_kind() == mast_proto::work_outline_user_actions::UserActionKind::Handoff)
-    {
+    if input.requests.iter().any(|r| {
+        !r.is_open()
+            && r.effective_kind() == mast_proto::work_outline_user_actions::UserActionKind::Handoff
+    }) {
         return Archivable::yes("its Ready to merge was resolved");
     }
     let item_archived = input.item.is_some_and(|i| i.archived_at.is_some());

@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
-use mast_proto::{Chat, ChatIndicator, WorkOutlineSnapshot, chat_indicator};
+use mast_proto::{
+    Chat, ChatIndicator, ChatLinkSource, ChatPrLink, WorkOutlineSnapshot, chat_indicator,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -42,7 +44,11 @@ impl AgentToolsService {
     }
 
     /// The finished rule for one chat, from live engine state.
-    pub(super) fn archivable_verdict(&self, chat: &Chat, snapshot: &WorkOutlineSnapshot) -> Archivable {
+    pub(super) fn archivable_verdict(
+        &self,
+        chat: &Chat,
+        snapshot: &WorkOutlineSnapshot,
+    ) -> Archivable {
         let live = lock(&self.sessions)
             .as_ref()
             .and_then(|s| s.session_status(&chat.id));
@@ -72,7 +78,7 @@ impl AgentToolsService {
         })
     }
 
-    /// States of the chat's durable PR links, from the status cache.
+    /// States of the chat's own durable PR links, from the status cache.
     fn pr_states(&self, chat: &Chat) -> Vec<String> {
         let Some(cache) = lock(&self.pr_ticket_cache).clone() else {
             return Vec::new();
@@ -84,15 +90,17 @@ impl AgentToolsService {
         let status = cache.status_for_chat_links(
             chat.space_id.as_deref(),
             chat.cwd.as_deref(),
-            chat.branch.as_deref(),
+            None,
             &links,
             None,
         );
-        status
-            .pr_links
-            .iter()
-            .filter_map(|l| l.detail.as_ref().map(|d| d.state.clone()))
-            .collect()
+        owned_pr_states(&links, |url| {
+            status
+                .pr_links
+                .iter()
+                .find(|link| link.url == url)
+                .and_then(|link| link.detail.as_ref().map(|detail| detail.state.clone()))
+        })
     }
 
     fn archive_scope(
@@ -130,12 +138,9 @@ impl AgentToolsService {
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         let (chats, scope) = self.archive_scope(context, &snapshot);
         let mut out = serde_json::Map::new();
-        for chat in chats
-            .iter()
-            .filter(|c| {
-                (args.chat_ids.is_empty() || args.chat_ids.contains(&c.id)) && scope.contains(&c.id)
-            })
-        {
+        for chat in chats.iter().filter(|c| {
+            (args.chat_ids.is_empty() || args.chat_ids.contains(&c.id)) && scope.contains(&c.id)
+        }) {
             let v = self.archivable_verdict(chat, &snapshot);
             out.insert(
                 chat.id.clone(),
@@ -193,7 +198,11 @@ impl AgentToolsService {
                 reason = why.to_owned();
             }
         }
-        if let Some(why) = args.reason.as_deref().map(str::trim).filter(|w| !w.is_empty())
+        if let Some(why) = args
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
             && !forced
             && child
         {
@@ -228,5 +237,51 @@ impl AgentToolsService {
     /// Agent archives after `seq`, for the Recent changes list and undo.
     pub fn agent_archives_since(&self, seq: u64) -> Vec<AgentArchive> {
         self.archive_log.since(seq)
+    }
+}
+
+fn owned_pr_states(links: &[ChatPrLink], state: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    links
+        .iter()
+        .filter(|link| {
+            matches!(
+                link.source,
+                ChatLinkSource::Manual
+                    | ChatLinkSource::CreatedInChat
+                    | ChatLinkSource::Branch
+                    | ChatLinkSource::DiffTarget
+            )
+        })
+        .map(|link| state(&link.url).unwrap_or_default())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archivable_pr_states_include_only_owned_links_and_preserve_unknown_states() {
+        let links = [
+            ("merged", ChatLinkSource::CreatedInChat),
+            ("open", ChatLinkSource::Branch),
+            ("pending", ChatLinkSource::DiffTarget),
+            ("manual", ChatLinkSource::Manual),
+            ("mentioned", ChatLinkSource::Mentioned),
+            ("ticket", ChatLinkSource::Ticket),
+            ("review", ChatLinkSource::ReviewLauncher),
+        ]
+        .map(|(url, source)| ChatPrLink {
+            url: url.into(),
+            source,
+        });
+        let states = owned_pr_states(&links, |url| match url {
+            "merged" | "manual" | "mentioned" => Some("MERGED".into()),
+            "open" => Some("OPEN".into()),
+            _ => None,
+        });
+        assert_eq!(states, ["MERGED", "OPEN", "", "MERGED"]);
+        assert!(owned_pr_states(&links[4..], |_| Some("MERGED".into())).is_empty());
+        assert!(owned_pr_states(&[], |_| Some("MERGED".into())).is_empty());
     }
 }
