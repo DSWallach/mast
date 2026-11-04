@@ -6,6 +6,7 @@
 
 mod auth_cli;
 mod daemon;
+mod doctor;
 mod paths;
 mod update_cli;
 
@@ -38,6 +39,12 @@ enum Command {
     Logout,
     /// Show workspace mode, optional auth, and engine status.
     Status,
+    /// Check local prerequisites without changing them.
+    Doctor {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Live sync introspection from the running engine: per-room connection
     /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
     Sync,
@@ -228,6 +235,14 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Status) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(auth_cli::status(engine_config_from_env()))
+        }
+        Some(Command::Doctor { json }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let report = runtime.block_on(doctor::inspect(paths::data_dir_read_only(),
+                mast_proto::env::var("MAST_IPC_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(27654)));
+            doctor::print_report(&report, json)?;
+            if report.exit_code() != 0 { std::process::exit(1); }
+            Ok(())
         }
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;

@@ -6,6 +6,8 @@ This gets you from a fresh install to a first chat running inside a work item.
 
 Follow the install steps in the [README](../../README.md). You need Rust, the Xcode command line tools, a signed-in agent CLI (Claude Code or Codex) and `gh`.
 
+After building, run `target/installed/zeron doctor` from the checkout to check your tools, sign-ins, storage and engine. Each warning or error includes a suggested fix; use `--json` for machine-readable output.
+
 ## Add a project
 
 A project (Mast also calls it a Space) is a folder with your code in it, usually a git repo.
