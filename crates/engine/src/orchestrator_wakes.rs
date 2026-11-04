@@ -14,6 +14,7 @@
 //! pulls back a wake that has not started and interrupts an event-started
 //! turn (see `DocHost::yield_event_turn_to_user`).
 
+mod auto_continue;
 mod core;
 
 use std::collections::{HashMap, HashSet};
