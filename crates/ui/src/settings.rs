@@ -656,6 +656,7 @@ pub struct UiSettings {
     pub sidebar_show_project_label: bool,
     pub sidebar_compact: bool,
     pub team_tab_visibility: TeamTabVisibility,
+    pub compact_single_chat: bool,
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
@@ -819,6 +820,7 @@ impl Default for UiSettings {
             sidebar_show_project_label: true,
             sidebar_compact: true,
             team_tab_visibility: TeamTabVisibility::Auto,
+            compact_single_chat: true,
             sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
@@ -1685,10 +1687,22 @@ impl UiSettings {
         } else {
             ProfileAtMigration::Fresh
         };
+        let compact_missing = std::fs::read_to_string(Self::path(data_dir))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| value.as_object().map(|object| !object.contains_key("compactSingleChat")))
+            .unwrap_or(true);
         let mut settings = Self::load(data_dir);
+        let mut migrated = false;
         if settings.profile_at_migration.is_none() {
             settings.migrate_profile_settings(profile);
             settings.profile_at_migration = Some(profile);
+            migrated = true;
+        } else if compact_missing {
+            settings.compact_single_chat = settings.profile_at_migration == Some(ProfileAtMigration::Existing);
+            migrated = true;
+        }
+        if migrated {
             if let Err(error) = settings.save(data_dir) {
                 tracing::warn!(%error, "failed to save ui settings migration");
             }
@@ -1696,7 +1710,8 @@ impl UiSettings {
         settings
     }
 
-    fn migrate_profile_settings(&mut self, _profile: ProfileAtMigration) {
+    fn migrate_profile_settings(&mut self, profile: ProfileAtMigration) {
+        self.compact_single_chat = profile == ProfileAtMigration::Existing;
         self.admin_grant_duration = crate::admin::DurationChoice::FourHours;
     }
 
@@ -1882,6 +1897,25 @@ pub use mast_proto::SidebarSection;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_single_chat_migrates_and_persists() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing { std::fs::create_dir(&dir).unwrap(); }
+            let mut settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.compact_single_chat, existing);
+            settings.compact_single_chat = !existing;
+            settings.save(&dir).unwrap();
+            assert_eq!(UiSettings::load_for_startup(&dir).compact_single_chat, !existing);
+            let path = UiSettings::path(&dir);
+            let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            json.as_object_mut().unwrap().remove("compactSingleChat");
+            std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+            assert_eq!(UiSettings::load_for_startup(&dir).compact_single_chat, existing);
+        }
+    }
+
     #[test]
     fn team_tab_visibility_defaults_for_fresh_and_existing_profiles() {
         for existing in [false, true] {
@@ -2458,6 +2492,7 @@ mod tests {
             sidebar_sort: SidebarSort::Created,
             sidebar_compact: true,
             team_tab_visibility: TeamTabVisibility::Auto,
+            compact_single_chat: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_show_harness: false,

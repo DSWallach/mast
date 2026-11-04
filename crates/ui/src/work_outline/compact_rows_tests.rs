@@ -101,6 +101,20 @@ fn a_single_chat_item_renders_one_row_with_the_chat_state(cx: &mut gpui::TestApp
 }
 
 #[gpui::test]
+fn changing_compact_single_chat_rebuilds_the_outline(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, _outline, _calls, _events, vcx) =
+        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    assert!(!shown(vcx, &row_key::chat(CHAT_UI)));
+    overview.update(vcx, |overview, cx| overview.set_compact_single_chat(false, cx));
+    draw(vcx);
+    assert!(shown(vcx, &row_key::chat(CHAT_UI)));
+    overview.update(vcx, |overview, cx| overview.set_compact_single_chat(true, cx));
+    draw(vcx);
+    assert!(!shown(vcx, &row_key::chat(CHAT_UI)));
+}
+
+#[gpui::test]
 fn enter_and_double_click_open_the_chat_and_the_menu_reaches_the_item(
     cx: &mut gpui::TestAppContext,
 ) {

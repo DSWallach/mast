@@ -575,7 +575,7 @@ impl OutlineView {
             move_toast: None,
             move_toast_seq: 0,
             templates: Default::default(),
-            compact_single_chat: true,
+            compact_single_chat: crate::settings::current(cx).compact_single_chat,
             log_busy: false,
             skip_log: false,
             glyph_press: false,
