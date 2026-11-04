@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Typed Needs-you, phase 3** (2026-11-04, `needs-links-facts`, built in two small Terra slices after one
+  stalled chat): `links[]` (artifact, file+line, diff/branch, PR, chat, https URL; validated for reach and
+  shape) and `facts[]` (label/value, capped) on requests, persisted and in MCP create/read; card buttons use the
+  existing handlers; review cards get a primary Open, handoff cards show Branch/Tests + Diff/PR; `detail`
+  renders as Markdown and legacy text auto-links mast-artifact ids and PR URLs. Release run: nextest
+  2269/2269, UI 2424/0. Phases 4–6 (inline answers + replaceOpen, handoff lifecycle, preview surfaces) not started.
 - **PR review phase 3** (2026-11-04 overnight, `pr-review-search`): ⌘O quick open (fuzzy, recents, changed-in-diff
   group, `:line`), ⇧⌘F in-process streamed content search (ignore + grep-searcher; case/word/regex,
   include/exclude globs, caps, cancellation, only-changed-files), ⌘G go to line in files and diffs, file
