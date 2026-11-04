@@ -93,6 +93,7 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    friction: mast_proto::FrictionSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -304,6 +305,24 @@ impl HarnessRegistry {
         if let Err(err) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
             tracing::warn!(error = %err, "harness-prefs save failed");
         }
+    }
+
+    pub fn friction_settings(&self) -> mast_proto::FrictionSettings {
+        self.prefs().friction.clone()
+    }
+
+    pub fn set_friction_settings(&self, settings: mast_proto::FrictionSettings) -> Result<(), String> {
+        let path = self.prefs_path.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let mut prefs = self.prefs();
+        let mut updated = prefs.clone();
+        updated.friction = settings;
+        if let Some(path) = path {
+            let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| e.to_string())?;
+        }
+        *prefs = updated;
+        Ok(())
     }
 
     pub fn title_settings(&self) -> TitleSettings {

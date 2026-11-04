@@ -3049,6 +3049,13 @@ impl RpcService for EngineRpc {
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
+            methods::GET_FRICTION_SETTINGS => RpcReply::value(&self.registry.friction_settings()),
+            methods::SET_FRICTION_SETTINGS => {
+                let settings: mast_proto::FrictionSettings = parse_params(params)?;
+                self.registry.set_friction_settings(settings.clone()).map_err(RpcError::Failed)?;
+                self.sessions.set_auto_capture_friction(settings.auto_capture);
+                RpcReply::value(&settings)
+            }
             methods::LIST_FRICTION_REPORTS => {
                 let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;
                 let mut rows = self.workspace.friction_reports(&p.space_id);

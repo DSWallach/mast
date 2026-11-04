@@ -38,6 +38,8 @@ pub mod methods {
     pub const INSTALL_HARNESS: &str = "InstallHarness";
     /// Flip a harness's enablement on the target device (Settings → Agents);
     /// replies with the device's fresh `ListHarnesses` catalog.
+    pub const GET_FRICTION_SETTINGS: &str = "GetFrictionSettings";
+    pub const SET_FRICTION_SETTINGS: &str = "SetFrictionSettings";
     pub const LIST_FRICTION_REPORTS: &str = "ListFrictionReports";
     pub const SET_FRICTION_STATUS: &str = "SetFrictionStatus";
     pub const PROMOTE_FRICTION_TO_ITEM: &str = "PromoteFrictionToItem";

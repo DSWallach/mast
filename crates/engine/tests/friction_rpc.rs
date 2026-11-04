@@ -1,6 +1,6 @@
 use mast_engine::{EngineCore, HarnessRegistry};
 use mast_proto::{
-    HarnessId, FrictionKind, FrictionProvenance, FrictionReport, FrictionSource, FrictionStatus,
+    FrictionKind, FrictionProvenance, FrictionReport, FrictionSource, FrictionStatus, HarnessId,
 };
 use mast_rpc::methods;
 use serde_json::json;
@@ -125,4 +125,50 @@ async fn friction_rpc_list_dismiss_promote_and_propose() {
     assert_eq!(stored.promoted_item_id.as_deref(), Some(item_id));
     assert_eq!(stored.status, FrictionStatus::Promoted);
     assert!(stored.promoted_at.is_some());
+}
+
+#[tokio::test]
+async fn friction_settings_persist_across_engine_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    assert_eq!(
+        client
+            .call(methods::GET_FRICTION_SETTINGS, json!({}))
+            .await
+            .unwrap()["autoCapture"],
+        true
+    );
+    client
+        .call(
+            methods::SET_FRICTION_SETTINGS,
+            json!({"autoCapture": false}),
+        )
+        .await
+        .unwrap();
+    assert!(!core.sessions.auto_capture_friction());
+    drop(client);
+    drop(core);
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    assert_eq!(
+        client
+            .call(methods::GET_FRICTION_SETTINGS, json!({}))
+            .await
+            .unwrap()["autoCapture"],
+        false
+    );
+    assert!(!core.sessions.auto_capture_friction());
 }

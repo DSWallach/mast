@@ -531,6 +531,10 @@ impl SessionsEngine {
         self.inner.capture_friction(chat_id, mast_proto::FrictionKind::ToolFailure, &format!("{tool} refused: {code}"), error, None);
     }
 
+    pub fn auto_capture_friction(&self) -> bool {
+        self.inner.auto_capture_friction.load(Ordering::Relaxed)
+    }
+
     /// Enable or disable automatic friction capture for this engine.
     pub fn set_auto_capture_friction(&self, enabled: bool) {
         self.inner.auto_capture_friction.store(enabled, Ordering::Relaxed);

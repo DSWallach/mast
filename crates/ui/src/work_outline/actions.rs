@@ -372,6 +372,14 @@ impl WorkOutlineActions {
         })
     }
 
+    pub(crate) fn get_friction_settings(&self) -> Task<Result<mast_proto::FrictionSettings, WorkOutlineError>> {
+        self.call(methods::GET_FRICTION_SETTINGS, serde_json::json!({}), decode_json::<mast_proto::FrictionSettings>)
+    }
+
+    pub(crate) fn set_friction_settings(&self, settings: mast_proto::FrictionSettings) -> Task<Result<mast_proto::FrictionSettings, WorkOutlineError>> {
+        self.call(methods::SET_FRICTION_SETTINGS, serde_json::to_value(settings).unwrap(), decode_json::<mast_proto::FrictionSettings>)
+    }
+
     pub(crate) fn list_friction_reports(&self, params: mast_proto::ListFrictionReportsParams) -> Task<Result<Vec<mast_proto::FrictionReport>, WorkOutlineError>> {
         self.call(methods::LIST_FRICTION_REPORTS, serde_json::to_value(params).unwrap(), decode_json::<Vec<mast_proto::FrictionReport>>)
     }

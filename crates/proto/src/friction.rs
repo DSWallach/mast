@@ -117,3 +117,15 @@ pub struct ProposeFrictionInstructionParams {
     pub space_id: String,
     pub fingerprint: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrictionSettings {
+    pub auto_capture: bool,
+}
+
+impl Default for FrictionSettings {
+    fn default() -> Self {
+        Self { auto_capture: true }
+    }
+}
