@@ -180,6 +180,7 @@ struct ChatInfo {
 struct TurnStart {
     last_message_id: Option<String>,
     last_completed_turn: Option<String>,
+    user_sent_during_turn: bool,
 }
 
 #[derive(Default)]
@@ -233,6 +234,12 @@ impl OrchestratorWakes {
         if let Some(path) = &store
             && let Ok(bytes) = std::fs::read(path)
         {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let Some(saved) = value.get("autoContinueWorkers")
+                && let Ok(saved) = serde_json::from_value(saved.clone())
+            {
+                state.auto_continue = saved;
+            }
             let (auto_continue_default, saved) = read_settings(&bytes);
             state.auto_continue_default = auto_continue_default;
             for (chat, settings) in saved {
@@ -403,6 +410,7 @@ impl OrchestratorWakes {
         let settings = serde_json::json!({
             "autoContinue": state.auto_continue_default,
             "orchestrators": state.settings_overrides,
+            "autoContinueWorkers": state.auto_continue,
         });
         if let Ok(bytes) = serde_json::to_vec_pretty(&settings) {
             let _ = std::fs::write(path, bytes);
@@ -536,12 +544,18 @@ impl OrchestratorWakes {
                 self.inner.event_turns.observe(&session.chat_id, in_flight);
                 if in_flight && prev.is_none_or(|p| !is_in_flight(p)) {
                     state.core.note_turn_start(&session.chat_id, now);
-                    if let Some(last_message_id) = self.last_external_message(&session.chat_id) {
+                    if let Some(last_message) = self.last_external_message(&session.chat_id) {
+                        let user_sent_during_turn = session.started_at.is_some_and(|started| {
+                            last_message
+                                .as_ref()
+                                .is_some_and(|(_, at)| *at > started.timestamp_millis())
+                        });
                         state.turn_starts.insert(
                             session.chat_id.clone(),
                             TurnStart {
-                                last_message_id,
+                                last_message_id: last_message.map(|(id, _)| id),
                                 last_completed_turn: session.last_completed_turn.clone(),
+                                user_sent_during_turn,
                             },
                         );
                     }
@@ -591,14 +605,14 @@ impl OrchestratorWakes {
 
     /// The latest externally submitted message; Mast's own continuation is
     /// written as a user entry by the queue, so exclude its reserved prefix.
-    fn last_external_message(&self, chat_id: &str) -> Option<Option<String>> {
+    fn last_external_message(&self, chat_id: &str) -> Option<Option<(String, i64)>> {
         let handle = self.inner.doc_host.open(chat_id).ok()?;
         let entries = handle.doc().read_entries().ok()?;
         Some(entries.into_iter().rev().find(|entry| {
             entry.role == mast_doc::MessageRole::User
                 && !entry.parts.iter().any(|part| matches!(part,
                     mast_doc::MessagePart::Text { text, .. } if text.starts_with("[Mast: auto-continue ")))
-        }).map(|entry| entry.id))
+        }).map(|entry| (entry.id, entry.created_at)))
     }
 
     async fn continue_worker(&self, session: &Session, start: TurnStart) {
@@ -636,9 +650,10 @@ impl OrchestratorWakes {
         else {
             return;
         };
-        let Some(last_message_id) = self.last_external_message(worker) else {
+        let Some(last_message) = self.last_external_message(worker) else {
             return;
         };
+        let last_message_id = last_message.map(|(id, _)| id);
         let Ok(handle) = self.inner.doc_host.open(worker) else {
             return;
         };
@@ -676,12 +691,16 @@ impl OrchestratorWakes {
                     && session.last_completed_turn != start.last_completed_turn,
                 awaiting_input: session.awaiting_input.is_some(),
                 tool_failures: session.last_turn_tool_failures.is_some(),
-                user_sent_during_turn: last_message_id != start.last_message_id,
+                user_sent_during_turn: start.user_sent_during_turn
+                    || last_message_id != start.last_message_id,
                 queue_nonempty: !queue.is_empty() || self.inner.sessions.turn_in_flight(worker),
             });
             match decision {
                 auto_continue::Decision::None => {
-                    state.auto_continue = next;
+                    if state.auto_continue != next {
+                        state.auto_continue = next;
+                        self.persist(&state);
+                    }
                     None
                 }
                 auto_continue::Decision::Continue(count) => {
@@ -692,6 +711,7 @@ impl OrchestratorWakes {
                         Ok(id) => {
                             self.inner.event_turns.register(worker, id, Vec::new());
                             state.auto_continue = next;
+                            self.persist(&state);
                         }
                         Err(err) => {
                             tracing::warn!(chat = %worker, error = %err, "worker auto-continue queue failed")
@@ -715,6 +735,7 @@ impl OrchestratorWakes {
                     );
                     state.core.record(&orch, event, now);
                     state.auto_continue = next;
+                    self.persist(&state);
                     Some(orch)
                 }
             }

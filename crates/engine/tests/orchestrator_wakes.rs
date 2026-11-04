@@ -206,6 +206,285 @@ fn session(chat: &str, status: SessionStatus) -> Session {
     }
 }
 
+fn auto_continue_worker(rig: &Rig, chat: &str, status: &str) -> String {
+    let space = "space-auto";
+    rig.core
+        .workspace
+        .create_space(space, &rig.core.device_id, "/tmp", None, false)
+        .unwrap();
+    rig.core
+        .workspace
+        .create_chat_with_parent(chat, Some(space), None, None, None, Some(ORCH.into()))
+        .unwrap();
+    rig.core.workspace.rename_chat(chat, chat).unwrap();
+    let actor = mast_proto::WorkOutlineActor {
+        kind: mast_proto::WorkOutlineActorKind::User,
+        device_id: rig.core.device_id.clone(),
+        ..Default::default()
+    };
+    let operation = format!("create-{chat}");
+    let item = mast_proto::derive_id(&operation, mast_proto::roles::ITEM);
+    let create: mast_proto::WorkOutlineMutation = serde_json::from_value(serde_json::json!({
+        "op": "createWorkItem", "spaceId": space, "title": "Worker item", "status": status, "operationId": operation
+    })).unwrap();
+    rig.core
+        .workspace
+        .work_outline_mutate(&create, &actor, &[])
+        .unwrap();
+    let assign: mast_proto::WorkOutlineMutation = serde_json::from_value(serde_json::json!({
+        "op": "assignChatToWorkItem", "chatId": chat, "workItemId": item, "operationId": format!("assign-{chat}")
+    })).unwrap();
+    rig.core
+        .workspace
+        .work_outline_mutate(&assign, &actor, &[])
+        .unwrap();
+    item
+}
+
+async fn auto_continue_finish(rig: &Rig, chat: &str) {
+    rig.wakes
+        .ingest_sessions(&[session(chat, SessionStatus::Working)])
+        .await;
+    let mut done = session(chat, SessionStatus::Idle);
+    done.last_completed_turn = Some(format!("completed-{chat}"));
+    rig.wakes.ingest_sessions(&[done]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_continue_only_queues_for_an_open_unblocked_item() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "off-worker", "active");
+    auto_continue_finish(&rig, "off-worker").await;
+    rig.wakes
+        .set_settings(
+            ORCH,
+            WakeSettings {
+                auto_continue: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    auto_continue_worker(&rig, "completed-worker", "completed");
+    auto_continue_finish(&rig, "completed-worker").await;
+    let item = auto_continue_worker(&rig, "blocked-worker", "active");
+    let actor = mast_proto::WorkOutlineActor {
+        kind: mast_proto::WorkOutlineActorKind::Agent,
+        device_id: rig.core.device_id.clone(),
+        chat_id: Some("blocked-worker".into()),
+        ..Default::default()
+    };
+    let action: mast_proto::WorkOutlineMutation = serde_json::from_value(serde_json::json!({
+        "op": "createUserActionRequest", "workItemId": item, "origin": {"chatId":"blocked-worker"},
+        "text": "Need input", "operationId": "blocked-action"
+    }))
+    .unwrap();
+    rig.core
+        .workspace
+        .work_outline_mutate(&action, &actor, &[])
+        .unwrap();
+    auto_continue_finish(&rig, "blocked-worker").await;
+    auto_continue_worker(&rig, "user-worker", "active");
+    rig.wakes
+        .ingest_sessions(&[session("user-worker", SessionStatus::Working)])
+        .await;
+    rig.core
+        .doc_host
+        .open("user-worker")
+        .unwrap()
+        .write_user_message(
+            "user-during-turn",
+            "Please wait",
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    let mut done = session("user-worker", SessionStatus::Idle);
+    done.last_completed_turn = Some("user-worker-turn".into());
+    rig.wakes.ingest_sessions(&[done]).await;
+    auto_continue_worker(&rig, "failed-worker", "active");
+    rig.wakes
+        .ingest_sessions(&[session("failed-worker", SessionStatus::Working)])
+        .await;
+    let mut failed = session("failed-worker", SessionStatus::Idle);
+    failed.last_completed_turn = Some("failed-worker-turn".into());
+    failed.last_turn_tool_failures = Some(mast_proto::ToolFailures {
+        count: 1,
+        tools: vec!["tool".into()],
+    });
+    rig.wakes.ingest_sessions(&[failed]).await;
+    auto_continue_worker(&rig, "awaiting-worker", "active");
+    rig.wakes
+        .ingest_sessions(&[session("awaiting-worker", SessionStatus::Working)])
+        .await;
+    rig.wakes
+        .ingest_sessions(&[session("awaiting-worker", SessionStatus::AwaitingInput)])
+        .await;
+    rig.settle().await;
+    assert!(
+        !rig.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.contains("auto-continue"))
+    );
+    auto_continue_worker(&rig, "open-worker", "active");
+    auto_continue_finish(&rig, "open-worker").await;
+    rig.wait_for(
+        || {
+            rig.prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("[Mast: auto-continue 1/3]"))
+        },
+        "worker continuation",
+    )
+    .await;
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_continue_stops_after_three_and_resets_on_a_user_message() {
+    let rig = Rig::new().await;
+    let worker = "capped-worker";
+    auto_continue_worker(&rig, worker, "active");
+    rig.wakes
+        .set_settings(
+            ORCH,
+            WakeSettings {
+                auto_continue: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    auto_continue_finish(&rig, worker).await;
+    let sessions = rig.core.sessions.watch_sessions();
+    for number in 1..=3 {
+        rig.wait_for(
+            || {
+                rig.prompts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|prompt| prompt.contains(&format!("[Mast: auto-continue {number}/3]")))
+            },
+            "continuation prompt",
+        )
+        .await;
+        rig.wait_for(
+            || {
+                sessions
+                    .borrow()
+                    .iter()
+                    .any(|s| s.chat_id == worker && s.status == SessionStatus::Working)
+            },
+            "working worker",
+        )
+        .await;
+        let running = sessions
+            .borrow()
+            .iter()
+            .find(|s| s.chat_id == worker)
+            .unwrap()
+            .clone();
+        rig.wakes.ingest_sessions(&[running]).await;
+        let _ = rig.finish.send(());
+        rig.wait_for(
+            || {
+                sessions.borrow().iter().any(|s| {
+                    s.chat_id == worker
+                        && s.status == SessionStatus::Idle
+                        && s.last_completed_turn.is_some()
+                })
+            },
+            "completed worker",
+        )
+        .await;
+        let done = sessions
+            .borrow()
+            .iter()
+            .find(|s| s.chat_id == worker)
+            .unwrap()
+            .clone();
+        rig.wakes.ingest_sessions(&[done]).await;
+    }
+    let stopped = rig
+        .wakes
+        .status(ORCH)
+        .held
+        .into_iter()
+        .filter(|event| event.kind == WakeEventKind::AutoContinueStopped)
+        .count();
+    assert_eq!(stopped, 1);
+    rig.core
+        .doc_host
+        .open(worker)
+        .unwrap()
+        .write_user_message(
+            "new-user-message",
+            "Continue",
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    let last = sessions
+        .borrow()
+        .iter()
+        .find(|s| s.chat_id == worker)
+        .unwrap()
+        .last_completed_turn
+        .clone();
+    let mut running = session(worker, SessionStatus::Working);
+    running.last_completed_turn = last;
+    rig.wakes.ingest_sessions(&[running]).await;
+    let mut done = session(worker, SessionStatus::Idle);
+    done.last_completed_turn = Some("after-user-message".into());
+    rig.wakes.ingest_sessions(&[done]).await;
+    rig.wait_for(
+        || {
+            rig.prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|prompt| prompt.contains("[Mast: auto-continue 1/3]"))
+                .count()
+                == 2
+        },
+        "reset continuation",
+    )
+    .await;
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_continue_orchestrator_override_disables_global_default() {
+    let mut rig = Rig::new().await;
+    std::fs::write(
+        &rig.store,
+        r#"{"autoContinue":true,"orchestrators":{"orch":{"autoContinue":false}}}"#,
+    )
+    .unwrap();
+    rig.wakes = OrchestratorWakes::new(
+        rig.core.sessions.clone(),
+        rig.core.doc_host.clone(),
+        rig.core.workspace.clone(),
+        Some(rig.store.clone()),
+        Arc::new(|| 1_000_000),
+    );
+    rig.wakes.ingest_sessions(&[]).await;
+    auto_continue_worker(&rig, "override-worker", "active");
+    auto_continue_finish(&rig, "override-worker").await;
+    rig.settle().await;
+    assert!(
+        !rig.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|prompt| prompt.contains("auto-continue"))
+    );
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn child_errors_batch_into_one_system_message_after_the_window() {
     let rig = Rig::new().await;

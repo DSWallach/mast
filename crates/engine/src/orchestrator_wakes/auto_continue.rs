@@ -2,14 +2,13 @@
 
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AutoContinue {
-    workers: HashMap<String, WorkerState>,
+    workers: HashMap<String, HashMap<String, WorkerState>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct WorkerState {
-    item_id: String,
     last_message_id: Option<String>,
     count: u8,
     reported: bool,
@@ -42,16 +41,14 @@ impl AutoContinue {
         let worker = self
             .workers
             .entry(turn.worker_id.to_owned())
+            .or_default()
+            .entry(turn.item_id.to_owned())
             .or_insert_with(|| WorkerState {
-                item_id: turn.item_id.to_owned(),
                 last_message_id: turn.last_message_id.map(str::to_owned),
                 count: 0,
                 reported: false,
             });
-        if worker.item_id != turn.item_id
-            || worker.last_message_id.as_deref() != turn.last_message_id
-        {
-            worker.item_id = turn.item_id.to_owned();
+        if worker.last_message_id.as_deref() != turn.last_message_id {
             worker.last_message_id = turn.last_message_id.map(str::to_owned);
             worker.count = 0;
             worker.reported = false;
@@ -121,6 +118,24 @@ mod tests {
             }),
             Decision::Continue(1)
         );
+    }
+
+    #[test]
+    fn auto_continue_retains_each_items_limit_across_restart() {
+        let mut state = AutoContinue::default();
+        for n in 1..=3 {
+            assert_eq!(state.decide(turn()), Decision::Continue(n));
+        }
+        let saved = serde_json::to_vec(&state).unwrap();
+        let mut state: AutoContinue = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(
+            state.decide(Turn {
+                item_id: "other",
+                ..turn()
+            }),
+            Decision::Continue(1)
+        );
+        assert_eq!(state.decide(turn()), Decision::ReportStopped);
     }
 
     #[test]
