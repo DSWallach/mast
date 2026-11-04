@@ -61,7 +61,7 @@ impl Shell {
         }
         self.admin_ui.dialog = Some(AdminDialog {
             chat_id: chat_id.to_owned(),
-            choice: DurationChoice::default(),
+            choice: self.settings.admin_grant_duration,
             skip_bulk: false,
         });
         cx.notify();
@@ -92,6 +92,10 @@ impl Shell {
         let Some(dialog) = self.admin_ui.dialog.take() else {
             return;
         };
+        self.settings.admin_grant_duration = dialog.choice;
+        settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+            settings.admin_grant_duration = dialog.choice;
+        });
         let params = admin::grant_params(&dialog.chat_id, dialog.choice, dialog.skip_bulk);
         self.state.update(cx, |state, cx| state.grant_admin(params, cx));
         cx.notify();

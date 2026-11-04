@@ -135,6 +135,21 @@ fn the_grant_dialog_sends_the_picked_duration(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn admin_grant_dialog_preselects_remembered_duration(cx: &mut TestAppContext) {
+    let (mut wire, engine, _guard) = Wire::new();
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    prepare(&shell, vcx, Some(engine));
+    shell.update(vcx, |shell, cx| {
+        shell.settings.admin_grant_duration = DurationChoice::EightHours;
+        shell.open_admin_dialog(CHAT_API, cx);
+    });
+    draw(vcx);
+    click(vcx, "admin-dialog-grant");
+    let sent = admin_requests(&mut wire);
+    assert_eq!(sent[0].1["durationSecs"], 8 * 3600);
+}
+
+#[gpui::test]
 fn only_chats_in_a_space_can_open_the_grant_dialog(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
     prepare(&shell, vcx, None);

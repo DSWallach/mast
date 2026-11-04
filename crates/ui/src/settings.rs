@@ -671,6 +671,8 @@ pub struct UiSettings {
     /// list. Kept for file compatibility; no longer read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub space_order: Vec<String>,
+    /// Last duration used to grant administrator access.
+    pub(crate) admin_grant_duration: crate::admin::DurationChoice,
     /// Master switch for session notification chimes. `MAST_DISABLE_SOUND`
     /// overrides every per-event preference below.
     pub sound_enabled: bool,
@@ -811,6 +813,7 @@ impl Default for UiSettings {
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
+            admin_grant_duration: crate::admin::DurationChoice::default(),
             sound_enabled: true,
             sound_completion_enabled: true,
             sound_input_enabled: true,
@@ -1673,7 +1676,7 @@ impl UiSettings {
     }
 
     fn migrate_profile_settings(&mut self, _profile: ProfileAtMigration) {
-        // Per-setting migrations are added here.
+        self.admin_grant_duration = crate::admin::DurationChoice::FourHours;
     }
 
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
@@ -1858,6 +1861,25 @@ pub use mast_proto::SidebarSection;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admin_grant_duration_defaults_and_persists_for_fresh_and_existing_profiles() {
+        use super::UiSettings;
+        use crate::admin::DurationChoice;
+
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(UiSettings::path(&dir), "{}").unwrap();
+            }
+            let mut settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(settings.admin_grant_duration, DurationChoice::FourHours);
+            settings.admin_grant_duration = DurationChoice::UntilRevoked;
+            settings.save(&dir).unwrap();
+            assert_eq!(UiSettings::load_for_startup(&dir).admin_grant_duration, DurationChoice::UntilRevoked);
+        }
+    }
     use super::*;
 
     #[test]
@@ -2416,6 +2438,7 @@ mod tests {
                 vec!["b".to_string(), "a".to_string()],
             )]),
             space_order: vec!["space-2".to_string(), "space-1".to_string()],
+            admin_grant_duration: crate::admin::DurationChoice::EightHours,
             sound_enabled: false,
             sound_completion_enabled: false,
             sound_input_enabled: true,

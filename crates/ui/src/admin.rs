@@ -30,8 +30,9 @@ pub(crate) const ACTIONS_SHOWN: usize = 6;
 // ----------------------------------------------------------------------
 
 /// The grant dialog's duration choices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum DurationChoice {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DurationChoice {
     OneHour,
     #[default]
     FourHours,
