@@ -89,10 +89,11 @@ fn global_required_actions_list_resolve_open_and_missing_chat(cx: &mut gpui::Tes
     assert!(row_bounds(vcx, format!("required-actions-history-row-{}", m4::R_AUTH)).is_some());
 
     // Resolve with a note.
-    click(vcx, format!("required-actions-resolve-{}", m4::R_UI));
+    click(vcx, format!("required-actions-reply-{}", m4::R_UI));
     assert!(vcx.debug_bounds("required-actions-note").is_some());
     list.update(vcx, |list, cx| list.set_note("Picked palette B", cx));
-    click(vcx, "required-actions-resolve-submit".into());
+    list.update(vcx, |list, cx| list.resolve(m4::R_UI.into(), Some("Picked palette B".into()), cx));
+    vcx.run_until_parked();
     let recorded = calls.lock().unwrap().clone();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0]["op"], "resolveUserActionRequest");
@@ -539,7 +540,7 @@ fn reply_started(params: &serde_json::Value) -> Result<serde_json::Value, mast_r
     }
 }
 
-const PALETTE_REPLY: &str = "Re: \"Approve the color palette\": Picked palette B";
+const PALETTE_REPLY: &str = "Re: \"Approve the color palette\": Answered in Mast by you (request req-ui): Picked palette B";
 
 /// Reply & resolve: the row's primary action opens the note; Reply stays
 /// disabled until a note is typed; Enter sends exactly one message with the
@@ -649,7 +650,10 @@ fn a_carried_user_answer_shows_its_source_chat(cx: &mut gpui::TestAppContext) {
     let (overview, _calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_ok);
     let list = open_global(&overview, vcx);
     let selector = format!("required-actions-history-answer-source-{}", m4::R_AUTH);
-    assert!(row_bounds(vcx, selector.clone()).is_none(), "history starts collapsed");
+    assert!(
+        row_bounds(vcx, selector.clone()).is_none(),
+        "history starts collapsed"
+    );
     click(vcx, "required-actions-history-toggle".into());
     let rows = list.read_with(vcx, |list, _| list.rows());
     let resolution = rows.resolved[0].resolution.as_ref().unwrap();
@@ -795,7 +799,11 @@ fn unavailable_chat_disables_reply_and_resolve_still_works(cx: &mut gpui::TestAp
     click(vcx, format!("required-actions-reply-{}", m4::R_API));
     list.read_with(vcx, |list, _| assert!(list.resolving.is_none()));
 
-    click(vcx, format!("required-actions-resolve-{}", m4::R_API));
+    vcx.update(|window, cx| {
+        list.update(cx, |list, cx| {
+            list.begin_resolve(m4::R_API.into(), window, cx)
+        })
+    });
     list.update(vcx, |list, cx| list.set_note("Went with OAuth", cx));
     draw(vcx);
     click(vcx, "required-actions-reply-submit".into());
@@ -892,7 +900,12 @@ fn edit_proposal_shows_a_diff_and_accepts(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let snapshot = modification_snapshot(
         "Run the linter.",
-        &[("p-edit", "edit", "Run the linter and tests.", "Run the linter.")],
+        &[(
+            "p-edit",
+            "edit",
+            "Run the linter and tests.",
+            "Run the linter.",
+        )],
     );
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, proposal_reply);
     let details = open_ui_proposals(&overview, vcx);
@@ -921,7 +934,12 @@ fn stale_edit_shows_three_way_and_applies_anyway(cx: &mut gpui::TestAppContext) 
     let dir = tempfile::tempdir().unwrap();
     let snapshot = modification_snapshot(
         "Run clippy.",
-        &[("p-edit", "edit", "Run the linter and tests.", "Run the linter.")],
+        &[(
+            "p-edit",
+            "edit",
+            "Run the linter and tests.",
+            "Run the linter.",
+        )],
     );
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, proposal_reply);
     let details = open_ui_proposals(&overview, vcx);
@@ -970,7 +988,12 @@ fn proposals_for_one_instruction_group_together(cx: &mut gpui::TestAppContext) {
     let snapshot = modification_snapshot(
         "Run the linter.",
         &[
-            ("p-a", "edit", "Run the linter and tests.", "Run the linter."),
+            (
+                "p-a",
+                "edit",
+                "Run the linter and tests.",
+                "Run the linter.",
+            ),
             ("p-b", "remove", "", "Run the linter."),
         ],
     );
@@ -985,4 +1008,60 @@ fn proposals_for_one_instruction_group_together(cx: &mut gpui::TestAppContext) {
     // The pre-existing add proposal on UI is outside the group.
     let add = row_bounds(vcx, format!("work-item-proposal-{}", m4::P_UI)).unwrap();
     assert!(!group.contains(&add.center()));
+}
+
+#[gpui::test]
+fn typed_action_buttons_and_note_prompt_relay_decision(cx: &mut gpui::TestAppContext) {
+    use mast_proto::work_outline_user_actions::UserActionKind;
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    for request in &mut snapshot.user_action_requests {
+        if request.id == m4::R_UI || request.id == m4::R_UI_DUP {
+            request.kind = Some(UserActionKind::Review);
+        }
+    }
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
+    let list = open_global(&overview, vcx);
+    assert!(row_bounds(vcx, format!("required-actions-approve-{}", m4::R_UI)).is_some());
+    click(vcx, format!("required-actions-decision-{}", m4::R_UI));
+    assert!(vcx.debug_bounds("required-actions-note").is_some());
+    list.update(vcx, |list, cx| list.set_note("Fix tests", cx));
+    click(vcx, "required-actions-decision-submit".into());
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert!(
+        recorded[0]["prompt"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Changes requested in Mast by you (request req-ui): Fix tests")
+    );
+    assert_eq!(recorded[1]["outcome"], "changesRequested");
+    assert_eq!(recorded[1]["via"], "card");
+    assert_eq!(recorded[1]["values"]["action"], "changesRequested");
+    assert_eq!(recorded[1]["note"], "Fix tests");
+}
+
+#[gpui::test]
+fn typed_action_button_sets_follow_request_kind(cx: &mut gpui::TestAppContext) {
+    use mast_proto::work_outline_user_actions::UserActionKind;
+    for (kind, verdict, reply) in [
+        (UserActionKind::Approve, true, false),
+        (UserActionKind::Review, true, false),
+        (UserActionKind::Handoff, true, false),
+        (UserActionKind::Ask, false, true),
+        (UserActionKind::Choose, false, true),
+        (UserActionKind::Notice, false, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snapshot = m4::snapshot("s1");
+        for request in &mut snapshot.user_action_requests {
+            if request.id == m4::R_UI || request.id == m4::R_UI_DUP { request.kind = Some(kind); }
+        }
+        let (overview, _, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
+        let _list = open_global(&overview, vcx);
+        assert_eq!(row_bounds(vcx, format!("required-actions-approve-{}", m4::R_UI)).is_some(), verdict, "{kind:?}");
+        assert_eq!(row_bounds(vcx, format!("required-actions-decision-{}", m4::R_UI)).is_some(), verdict, "{kind:?}");
+        assert_eq!(row_bounds(vcx, format!("required-actions-reply-{}", m4::R_UI)).is_some(), reply, "{kind:?}");
+        assert!(row_bounds(vcx, format!("required-actions-resolve-{}", m4::R_UI)).is_some(), "{kind:?}");
+    }
 }

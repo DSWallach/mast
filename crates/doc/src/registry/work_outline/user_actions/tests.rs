@@ -119,8 +119,8 @@ fn request_params(
     dedupe: Option<&str>,
 ) -> WorkOutlineMutation {
     WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
-            kind: None,
-            priority: None,
+        kind: None,
+        priority: None,
         work_item_id: work_item.into(),
         origin: UserActionRequestOrigin {
             kind: Default::default(),
@@ -144,6 +144,9 @@ fn request(doc: &mut RegistryDoc, op: &str, work_item: &str, dedupe: Option<&str
 
 fn resolve_params(op: &str, id: &str, note: Option<&str>) -> WorkOutlineMutation {
     WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+        outcome: None,
+        values: None,
+        via: None,
         user_action_request_id: id.into(),
         note: note.map(str::to_owned),
         answer: None,
@@ -280,14 +283,18 @@ fn request_kind_round_trip_and_legacy_row() {
         p.kind = Some(UserActionKind::Handoff);
         p.priority = Some(UserActionPriority::Fyi);
     }
-    let id = apply(&mut doc, mutation).unwrap().user_action_request_id.unwrap();
+    let id = apply(&mut doc, mutation)
+        .unwrap()
+        .user_action_request_id
+        .unwrap();
     let mut row = doc.overlay_row(KIND_USER_ACTION_REQUESTS, &id).unwrap();
     let decoded = decode_request(&row).unwrap().view;
     assert_eq!(decoded.effective_kind(), UserActionKind::Handoff);
     assert_eq!(decoded.priority, Some(UserActionPriority::Fyi));
     row.fields.remove("kind");
     row.fields.remove("priority");
-    row.fields.insert("text".into(), json!("Ready to merge: feature"));
+    row.fields
+        .insert("text".into(), json!("Ready to merge: feature"));
     let legacy = decode_request(&row).unwrap().view;
     assert_eq!(legacy.kind, Some(UserActionKind::Handoff));
     assert_eq!(legacy.effective_kind(), UserActionKind::Handoff);
@@ -1252,6 +1259,9 @@ fn an_answer_is_agent_only_and_recorded_with_its_source() {
         .unwrap();
     let with_answer = |op: &str, request: &str| {
         WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
+            outcome: None,
+            values: None,
+            via: None,
             user_action_request_id: request.into(),
             note: Some("go ahead".into()),
             answer: Some(mast_proto::UserActionAnswer {
@@ -1734,17 +1744,39 @@ fn stale_edit_needs_allow_stale_and_remove_archives() {
     .unwrap();
     let s = snap(&doc);
     let current = s.instructions.iter().find(|x| x.id == i).unwrap();
-    assert!(s.instruction_proposal(&p).unwrap().is_stale_against(current));
-    let error = apply(&mut doc, approve_params("a1", &p, "Run the linter and tests")).unwrap_err();
+    assert!(
+        s.instruction_proposal(&p)
+            .unwrap()
+            .is_stale_against(current)
+    );
+    let error = apply(
+        &mut doc,
+        approve_params("a1", &p, "Run the linter and tests"),
+    )
+    .unwrap_err();
     assert_eq!(error.code, WorkOutlineErrorCode::Invalid);
-    assert_eq!(snap(&doc).instructions[0].text, "Run clippy", "nothing written");
-    apply(&mut doc, approve_stale_params("a2", &p, "Run clippy and tests")).unwrap();
+    assert_eq!(
+        snap(&doc).instructions[0].text,
+        "Run clippy",
+        "nothing written"
+    );
+    apply(
+        &mut doc,
+        approve_stale_params("a2", &p, "Run clippy and tests"),
+    )
+    .unwrap();
     assert_eq!(snap(&doc).instructions[0].text, "Run clippy and tests");
     // The remove is now stale too; apply anyway archives.
     assert!(apply(&mut doc, approve_params("a3", &rm, "")).is_err());
     apply(&mut doc, approve_stale_params("a4", &rm, "")).unwrap();
     let s = snap(&doc);
-    assert!(s.instructions.iter().find(|x| x.id == i).unwrap().archived());
+    assert!(
+        s.instructions
+            .iter()
+            .find(|x| x.id == i)
+            .unwrap()
+            .archived()
+    );
     assert_eq!(
         s.instruction_proposal(&rm).unwrap().status,
         InstructionProposalStatus::Approved
@@ -1758,11 +1790,17 @@ fn modification_proposals_validate() {
     let i = instruct_in(&mut doc, "i1", &w, "Run the linter");
     let invalid_code = |doc: &mut RegistryDoc, m| apply(doc, m).unwrap_err().code;
     assert_eq!(
-        invalid_code(&mut doc, modify_params("v1", ProposalAction::Edit, "nope", "x")),
+        invalid_code(
+            &mut doc,
+            modify_params("v1", ProposalAction::Edit, "nope", "x")
+        ),
         WorkOutlineErrorCode::NotFound
     );
     assert_eq!(
-        invalid_code(&mut doc, modify_params("v2", ProposalAction::Edit, &i, "Run the linter")),
+        invalid_code(
+            &mut doc,
+            modify_params("v2", ProposalAction::Edit, &i, "Run the linter")
+        ),
         WorkOutlineErrorCode::Invalid,
         "no change"
     );
@@ -1771,7 +1809,10 @@ fn modification_proposals_validate() {
         WorkOutlineErrorCode::Invalid
     );
     assert_eq!(
-        invalid_code(&mut doc, modify_params("v4", ProposalAction::Remove, &i, "text")),
+        invalid_code(
+            &mut doc,
+            modify_params("v4", ProposalAction::Remove, &i, "text")
+        ),
         WorkOutlineErrorCode::Invalid
     );
     assert_eq!(
@@ -1788,7 +1829,10 @@ fn modification_proposals_validate() {
     )
     .unwrap();
     assert_eq!(
-        invalid_code(&mut doc, modify_params("v6", ProposalAction::Remove, &i, "")),
+        invalid_code(
+            &mut doc,
+            modify_params("v6", ProposalAction::Remove, &i, "")
+        ),
         WorkOutlineErrorCode::Archived
     );
 }
@@ -1808,7 +1852,10 @@ fn agent_modifications_reach_only_inherited_instructions() {
         .unwrap()
         .proposal_id
         .unwrap();
-        let view = snap(&f.doc).instruction_proposal(&proposal).unwrap().clone();
+        let view = snap(&f.doc)
+            .instruction_proposal(&proposal)
+            .unwrap()
+            .clone();
         assert_eq!(view.source_ref.chat_id.as_deref(), Some("c1"));
     }
     denied(
@@ -1827,4 +1874,47 @@ fn agent_modifications_reach_only_inherited_instructions() {
     // Agents never approve.
     let p = snap(&f.doc).instruction_proposals[0].id.clone();
     denied(&mut f, approve_params("m5", &p, "x"));
+}
+
+#[test]
+fn resolution_outcome_values_and_via_round_trip() {
+    let mut doc = doc_with_spaces("dev-a");
+    let w = item(&mut doc, "outcome-item", None);
+    let id = request(&mut doc, "outcome-request", &w, None);
+    let mut mutation = resolve_params("outcome-resolve", &id, Some("Looks good"));
+    if let WorkOutlineMutation::ResolveUserActionRequest(p) = &mut mutation {
+        p.outcome = Some("approved".into());
+        p.values = Some(serde_json::json!({"selection": "a"}));
+        p.via = Some("card".into());
+    }
+    apply(&mut doc, mutation).unwrap();
+    let snapshot = snap(&doc);
+    let resolution = snapshot
+        .user_action_request(&id)
+        .unwrap()
+        .resolution
+        .as_ref()
+        .unwrap();
+    assert_eq!(resolution.outcome.as_deref(), Some("approved"));
+    assert_eq!(
+        resolution.values,
+        Some(serde_json::json!({"selection": "a"}))
+    );
+    assert_eq!(resolution.via.as_deref(), Some("card"));
+}
+
+#[test]
+fn agent_cannot_forge_user_decision_provenance() {
+    let mut doc = doc_with_spaces("dev-a");
+    let w = item(&mut doc, "provenance-item", None);
+    let id = request(&mut doc, "provenance-request", &w, None);
+    for (index, (outcome, via)) in [("approved", "agent"), ("declined", "card"), ("answered", "chat")].iter().enumerate() {
+        let mut mutation = resolve_params(&format!("forgery-{index}"), &id, None);
+        if let WorkOutlineMutation::ResolveUserActionRequest(p) = &mut mutation {
+            p.outcome = Some((*outcome).into());
+            p.via = Some((*via).into());
+        }
+        assert!(apply_as(&mut doc, &agent("c1"), mutation).is_err());
+        assert!(snap(&doc).user_action_request(&id).unwrap().is_open());
+    }
 }

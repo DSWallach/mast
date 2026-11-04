@@ -3301,7 +3301,7 @@ async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
     // The user resolves it.
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
         "op": "resolveUserActionRequest", "userActionRequestId": request_id,
-        "operationId": "user-approves" })).await.unwrap();
+        "outcome": "approved", "via": "card", "operationId": "user-approves" })).await.unwrap();
     let done = admin(&rig, &token, with_token("b5", &confirm)).await.unwrap();
     assert_eq!(done["applied"], 11, "{done}");
     assert!(ids.iter().all(|id| title_of(&rig, id) == "Renamed"));
@@ -3623,4 +3623,89 @@ async fn an_admin_chat_archives_any_chat_of_its_space_without_the_rule_and_it_is
             .is_err());
         assert!(!chat_archived(&a.rig, target), "{target}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bulk_change_rejects_non_approval_resolutions() {
+    for outcome in [
+        None,
+        Some("dismissed"),
+        Some("declined"),
+        Some("changesRequested"),
+        Some("answered"),
+    ] {
+        let rig = rig().await;
+        let item = create_item(&rig, "admin-item", "Admin", None).await;
+        let mut ids = Vec::new();
+        for n in 0..11 {
+            ids.push(create_item(&rig, &format!("item-{n}"), &format!("Item {n}"), None).await);
+        }
+        assign_chat(&rig, "assign-admin", CHAT, &item).await;
+        let tokens = rig.core.sessions.agent_tokens();
+        let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+        let token = lease.token().to_owned();
+        grant(&rig, CHAT, Some(36000), false).await;
+        let steps: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({"op":"rename", "itemId":id, "title":"Changed"}))
+            .collect();
+        let preview = admin(
+            &rig,
+            &token,
+            json!({"idempotencyKey":"preview", "steps":steps}),
+        )
+        .await
+        .unwrap();
+        let request_id = preview["requestId"].as_str().unwrap();
+        rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"resolveUserActionRequest", "userActionRequestId":request_id, "outcome":outcome, "note":"no", "via":"card", "operationId":"user-declines"})).await.unwrap();
+        let err = admin(&rig, &token, json!({"idempotencyKey":"apply", "steps":steps, "confirmToken":preview["confirmToken"]})).await.unwrap_err();
+        assert!(err.contains("not approved"), "{outcome:?}: {err}");
+        assert!(ids.iter().all(|id| title_of(&rig, id) != "Changed"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_request_outcomes_are_readable_by_request_and_current() {
+    let rig = rig().await;
+    let item = create_item(&rig, "outcome-item", "Outcomes", None).await;
+    assign_chat(&rig, "outcome-assign", CHAT, &item).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    for (index, (kind, outcome)) in [
+        ("approve", "approved"),
+        ("approve", "declined"),
+        ("review", "approved"),
+        ("review", "changesRequested"),
+        ("handoff", "approved"),
+        ("handoff", "changesRequested"),
+        ("ask", "answered"),
+        ("choose", "chosen"),
+        ("notice", "dismissed"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let raised = tool(&rig, token, "work_outline_create_user_action_request", json!({
+            "request": format!("Request {index}"), "kind": kind, "idempotencyKey": format!("create-{index}")
+        })).await.unwrap();
+        let id = raised["userActionRequestId"].as_str().unwrap();
+        rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"resolveUserActionRequest", "userActionRequestId":id,
+            "outcome":outcome, "values":{"choice":"a"}, "via":"card", "operationId":format!("resolve-{index}")})).await.unwrap();
+        let result = tool(
+            &rig,
+            token,
+            "get_user_action_request",
+            json!({"requestId":id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["request"]["kind"], *kind);
+        assert_eq!(result["request"]["resolution"]["outcome"], *outcome);
+        assert_eq!(result["request"]["resolution"]["values"]["choice"], "a");
+    }
+    let current = tool(&rig, token, "work_outline_read_current", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(current["userActionRequests"].as_array().unwrap().len(), 9);
 }

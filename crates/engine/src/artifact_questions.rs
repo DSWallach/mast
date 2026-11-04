@@ -483,6 +483,9 @@ impl ArtifactQuestionSync {
     fn resolve(&self, request: &UserActionRequestView, note: String) -> bool {
         self.apply(WorkOutlineMutation::ResolveUserActionRequest(
             ResolveUserActionRequestParams {
+                outcome: None,
+                values: None,
+                via: None,
                 user_action_request_id: request.id.clone(),
                 note: Some(truncate(&note, user_action_limits::MAX_NOTE_CHARS)),
                 answer: None,

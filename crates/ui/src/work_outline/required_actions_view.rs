@@ -143,6 +143,7 @@ pub(crate) struct ReplyIntent {
     pub chat_id: String,
     pub note: String,
     pub message: String,
+    pub outcome: String,
     /// The host accepted the send (queued or written).
     pub sent: bool,
 }
@@ -200,6 +201,7 @@ pub(crate) struct RequiredActionsList {
     note_input: Entity<ComposerInput>,
     /// The request whose resolve note is open (one at a time).
     pub(crate) resolving: Option<String>,
+    decision: Option<String>,
     info_open: HashSet<String>,
     pub(crate) history_open: bool,
     /// One operation id per request, reused across retries of the same note.
@@ -258,6 +260,7 @@ impl RequiredActionsList {
             chats: Arc::default(),
             note_input,
             resolving: None,
+            decision: None,
             info_open: HashSet::new(),
             history_open: false,
             ops: HashMap::new(),
@@ -309,6 +312,7 @@ impl RequiredActionsList {
             "Optional note"
         };
         self.resolving = Some(request_id);
+        self.decision = None;
         self.reply_notice = false;
         self.clear_error();
         self.note_input.update(cx, |input, cx| {
@@ -322,6 +326,7 @@ impl RequiredActionsList {
 
     pub(crate) fn cancel_resolve(&mut self, cx: &mut Context<Self>) {
         self.resolving = None;
+        self.decision = None;
         cx.notify();
     }
 
@@ -366,6 +371,11 @@ impl RequiredActionsList {
         let Some(request_id) = self.resolving.clone() else {
             return;
         };
+        if let Some(outcome) = self.decision.clone() {
+            let note = self.typed_note(cx);
+            self.decide(request_id, outcome, note, cx);
+            return;
+        }
         let can_reply = self.open_row(&request_id).is_some_and(|row| {
             required_actions::reply_unavailable_reason(&row, &self.typed_note(cx)).is_none()
         });
@@ -382,7 +392,7 @@ impl RequiredActionsList {
             return;
         };
         let note = self.typed_note(cx);
-        self.resolve(request_id, (!note.is_empty()).then_some(note), cx);
+        self.decide(request_id, "dismissed".into(), note, cx);
     }
 
     /// Reply & resolve the request whose note is open.
@@ -409,7 +419,14 @@ impl RequiredActionsList {
             .entry(request_id.clone())
             .or_default()
             .id_for(note.as_deref().unwrap_or(""));
-        self.send_resolve(request_id, note, operation_id, None, cx);
+        self.send_resolve(
+            request_id,
+            note,
+            operation_id,
+            None,
+            Some("dismissed".into()),
+            cx,
+        );
     }
 
     /// Reply & resolve: send `note` to the request's origin Chat as a user
@@ -437,15 +454,77 @@ impl RequiredActionsList {
                 if required_actions::reply_unavailable_reason(&row, &note).is_some() {
                     return;
                 }
+                let outcome = if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose { "chosen" } else { "answered" };
                 ReplyIntent {
                     operation_id: super::actions::new_operation_id(),
                     chat_id: row.chat_id.clone(),
-                    message: required_actions::reply_message(&row.text, &note),
+                    message: required_actions::decision_message(&row.text, &request_id, outcome, &note),
+                    outcome: outcome.into(),
                     note,
                     sent: false,
                 }
             }
         };
+        self.replies.insert(request_id.clone(), intent.clone());
+        self.in_flight.insert(request_id.clone());
+        self.clear_error();
+        cx.notify();
+        if intent.sent {
+            self.resolve_reply(request_id, intent, cx);
+        } else {
+            self.send_reply(request_id, intent, cx);
+        }
+    }
+
+    fn decide(
+        &mut self,
+        request_id: String,
+        outcome: String,
+        note: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.in_flight.contains(&request_id) {
+            return;
+        }
+        let Some(row) = self.open_row(&request_id) else {
+            return;
+        };
+        if row.system || !row.chat_available {
+            if !row.system && outcome != "dismissed" {
+                self.error = Some("The requesting chat is unavailable".into());
+                cx.notify();
+                return;
+            }
+            self.in_flight.insert(request_id.clone());
+            let operation_id = super::actions::new_operation_id();
+            self.send_resolve(
+                request_id,
+                (!note.is_empty()).then_some(note),
+                operation_id,
+                None,
+                Some(outcome),
+                cx,
+            );
+            return;
+        }
+        let intent = self
+            .replies
+            .get(&request_id)
+            .filter(|intent| intent.sent)
+            .cloned()
+            .unwrap_or_else(|| ReplyIntent {
+                operation_id: super::actions::new_operation_id(),
+                chat_id: row.chat_id.clone(),
+                message: required_actions::decision_message(
+                    &row.text,
+                    &request_id,
+                    &outcome,
+                    &note,
+                ),
+                note,
+                outcome,
+                sent: false,
+            });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
         self.clear_error();
@@ -515,9 +594,10 @@ impl RequiredActionsList {
         };
         self.send_resolve(
             request_id,
-            Some(intent.note),
+            (!intent.note.is_empty()).then_some(intent.note),
             operation_id,
             Some(replied),
+            Some(intent.outcome),
             cx,
         );
     }
@@ -529,13 +609,18 @@ impl RequiredActionsList {
         note: Option<String>,
         operation_id: String,
         replied: Option<RepliedRequest>,
+        outcome: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let values = outcome.as_ref().map(|action| serde_json::json!({ "action": action }));
         let task = self
             .state
             .read(cx)
             .work_outline_actions()
             .resolve_user_action_request(ResolveUserActionRequestParams {
+                outcome,
+                values,
+                via: Some("card".into()),
                 user_action_request_id: request_id.clone(),
                 note,
                 answer: None,
@@ -872,29 +957,89 @@ impl RequiredActionsList {
                     .on_click(cx.listener(move |this, _, _, cx| this.open(&open_row, cx))),
                 )
                 .children(pr_link)
-                .when(!resolving && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff, |el| {
-                    let approve_id = id.clone();
-                    el.child(
-                        Self::button(
-                            SharedString::from(format!("required-actions-approve-{id}")),
-                            "Approve",
-                            !busy,
-                            theme,
-                        )
-                        .debug_selector({
-                            let selector = format!("required-actions-approve-{id}");
-                            move || selector.clone()
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.resolve(approve_id.clone(), Some("Approved".to_owned()), cx)
-                        })),
-                    )
-                })
-                .when(!resolving, |el| {
+                .when(!resolving, |mut el| {
+                    use mast_proto::work_outline_user_actions::UserActionKind;
+                    if matches!(
+                        row.kind,
+                        UserActionKind::Approve | UserActionKind::Review | UserActionKind::Handoff
+                    ) {
+                        let approve_id = id.clone();
+                        el = el.child(
+                            Self::button(
+                                SharedString::from(format!("required-actions-approve-{id}")),
+                                "Approve",
+                                !busy,
+                                theme,
+                            )
+                            .debug_selector({
+                                let selector = format!("required-actions-approve-{id}");
+                                move || selector.clone()
+                            })
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.decide(
+                                        approve_id.clone(),
+                                        "approved".into(),
+                                        String::new(),
+                                        cx,
+                                    )
+                                },
+                            )),
+                        );
+                        let decision_id = id.clone();
+                        let (label, outcome) = if row.kind == UserActionKind::Approve {
+                            ("Decline", "declined")
+                        } else {
+                            ("Request changes", "changesRequested")
+                        };
+                        el = el.child(
+                            Self::button(
+                                SharedString::from(format!("required-actions-decision-{id}")),
+                                label,
+                                !busy,
+                                theme,
+                            )
+                            .debug_selector({
+                                let selector = format!("required-actions-decision-{id}");
+                                move || selector.clone()
+                            })
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    if !busy {
+                                        this.begin_resolve(decision_id.clone(), window, cx);
+                                        this.decision = Some(outcome.into());
+                                    }
+                                },
+                            )),
+                        );
+                    } else if matches!(row.kind, UserActionKind::Ask | UserActionKind::Choose)
+                        && !row.system
+                    {
+                        let reply_id = id.clone();
+                        let can_reply = !busy && row.chat_available;
+                        el = el.child(
+                            Self::button(
+                                SharedString::from(format!("required-actions-reply-{id}")),
+                                "Reply",
+                                !busy && row.chat_available,
+                                theme,
+                            )
+                            .debug_selector({
+                                let selector = format!("required-actions-reply-{id}");
+                                move || selector.clone()
+                            })
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    if can_reply { this.begin_resolve(reply_id.clone(), window, cx) }
+                                },
+                            )),
+                        );
+                    }
+                    let dismiss_id = resolve_id.clone();
                     el.child(
                         Self::button(
                             SharedString::from(format!("required-actions-resolve-{id}")),
-                            if busy { "Resolving\u{2026}" } else { "Resolve" },
+                            "Dismiss",
                             !busy,
                             theme,
                         )
@@ -902,36 +1047,10 @@ impl RequiredActionsList {
                             let selector = format!("required-actions-resolve-{id}");
                             move || selector.clone()
                         })
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.begin_resolve(resolve_id.clone(), window, cx)
-                            },
-                        )),
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.decide(dismiss_id.clone(), "dismissed".into(), String::new(), cx)
+                        })),
                     )
-                    // A system request has no Chat to reply to: Resolve only.
-                    .when(!row.system, |el| {
-                        el.child({
-                            let reply_id = id.clone();
-                            let unavailable = (!row.chat_available).then(|| {
-                                required_actions::reply_unavailable_reason(&row, "x")
-                                    .unwrap_or_default()
-                            });
-                            let button = Self::reply_button(
-                                &format!("required-actions-reply-{id}"),
-                                "Reply & resolve",
-                                unavailable,
-                                busy,
-                                theme,
-                            );
-                            if unavailable.is_none() && !busy {
-                                button.on_click(cx.listener(move |this, _, window, cx| {
-                                    this.begin_resolve(reply_id.clone(), window, cx)
-                                }))
-                            } else {
-                                button
-                            }
-                        })
-                    })
                 })
         });
         let resolve_form = resolving.then(|| {
@@ -962,7 +1081,19 @@ impl RequiredActionsList {
                     div()
                         .flex()
                         .gap(px(6.0))
-                        .when(!row.system, |el| {
+                        .when(self.decision.is_some(), |el| {
+                            el.child(
+                                Self::button(
+                                    "required-actions-decision-submit",
+                                    "Send decision",
+                                    !busy,
+                                    theme,
+                                )
+                                .debug_selector(|| "required-actions-decision-submit".into())
+                                .on_click(cx.listener(|this, _, _, cx| this.submit_note(cx))),
+                            )
+                        })
+                        .when(self.decision.is_none() && !row.system, |el| {
                             el.child({
                                 let note = self.note_input.read(cx).text().to_owned();
                                 let intent = self.replies.get(&id);
@@ -994,16 +1125,18 @@ impl RequiredActionsList {
                                 }
                             })
                         })
-                        .child(
-                            Self::button(
-                                "required-actions-resolve-submit",
-                                "Resolve",
-                                !busy,
-                                theme,
+                        .when(self.decision.is_none(), |el| {
+                            el.child(
+                                Self::button(
+                                    "required-actions-resolve-submit",
+                                    "Resolve",
+                                    !busy,
+                                    theme,
+                                )
+                                .debug_selector(|| "required-actions-resolve-submit".into())
+                                .on_click(cx.listener(|this, _, _, cx| this.submit_resolve(cx))),
                             )
-                            .debug_selector(|| "required-actions-resolve-submit".into())
-                            .on_click(cx.listener(|this, _, _, cx| this.submit_resolve(cx))),
-                        )
+                        })
                         .child(
                             Self::button("required-actions-resolve-cancel", "Cancel", true, theme)
                                 .on_click(cx.listener(|this, _, _, cx| this.cancel_resolve(cx))),
@@ -1233,7 +1366,10 @@ impl RequiredActionsList {
         for row in open_rows {
             if group != Some(row.group) {
                 group = Some(row.group);
-                let count = counts[NeedsGroup::ALL.iter().position(|g| *g == row.group).unwrap_or(0)];
+                let count = counts[NeedsGroup::ALL
+                    .iter()
+                    .position(|g| *g == row.group)
+                    .unwrap_or(0)];
                 body = body.child(group_heading(row.group, count, theme));
             }
             body = body.child(self.render_row(row, now, theme, cx));

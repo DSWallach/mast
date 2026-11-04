@@ -329,13 +329,19 @@ fn work_outline_catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: agent_tool_names::GET_USER_ACTION_REQUEST,
+            description: "Read a request in your scope, including its kind and resolution outcome and values. Required: requestId.",
+            input_schema: json!({"type": "object", "properties": {"requestId": {"type": "string"}}, "required": ["requestId"]}),
+        },
+        ToolDef {
             name: agent_tool_names::RESOLVE_USER_ACTION_REQUEST,
-            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Within your project you may also resolve requests of chats you did not create. When the user answered YOU in chat (not in Required Actions), use `answer_user_action_request` so their answer reaches the request's chat with provenance. Required: userActionRequestId. Optional: resolution (a note), idempotencyKey (derived when omitted).",
+            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Within your project you may also resolve requests of chats you did not create. When the user answered YOU in chat (not in Required Actions), use `answer_user_action_request` so their answer reaches the request's chat with provenance. Required: userActionRequestId. Optional: resolution (a note), outcome (done, superseded, declined), idempotencyKey (derived when omitted).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "userActionRequestId": { "type": "string" },
                     "resolution": { "type": "string" },
+                    "outcome": { "type": "string", "enum": ["done", "superseded", "declined"] },
                     "idempotencyKey": optional_idempotency_key_schema()
                 },
                 "required": ["userActionRequestId"]
@@ -2513,6 +2519,7 @@ mod tests {
         // create-style ones demand it (the rest derive one when omitted).
         for def in work_outline_catalog() {
             if def.name != agent_tool_names::READ_CURRENT
+                && def.name != agent_tool_names::GET_USER_ACTION_REQUEST
                 && def.name != agent_tool_names::READ_SUBTREE
             {
                 assert!(
