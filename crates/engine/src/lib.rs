@@ -71,6 +71,7 @@ pub mod work_outline;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
 pub mod workspace_files;
+pub mod workspace_content_search;
 pub mod workspace_host;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig, PromotableSlot};
