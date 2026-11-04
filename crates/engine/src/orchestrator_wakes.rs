@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use futures::FutureExt;
 
 use mast_proto::{
-    Chat, Session, SessionStatus, WakeEventKind, WakeSettings, WakeStatus, WorkOutlineSnapshot,
+    Chat, Session, SessionStatus, WakeEventKind, WakeSettings, WakeStatus, WorkOutlineActorKind,
+    WorkOutlineSnapshot,
 };
 
 pub use self::core::{
@@ -387,17 +388,24 @@ impl OrchestratorWakes {
         // catches up. Refresh its Space so project-destination orchestrators
         // receive the event as well as its direct parent.
         let worker = match &signal {
-            WorkerSignal::Input { chat_id, .. } | WorkerSignal::ToolFailures { chat_id, .. } => chat_id,
+            WorkerSignal::Input { chat_id, .. } | WorkerSignal::ToolFailures { chat_id, .. } => {
+                chat_id
+            }
         };
         if let Ok(chats) = self.inner.workspace.read_chats() {
-            let space_id = chats.iter().find(|chat| &chat.id == worker).and_then(|chat| chat.space_id.clone());
+            let space_id = chats
+                .iter()
+                .find(|chat| &chat.id == worker)
+                .and_then(|chat| chat.space_id.clone());
             self.ingest_chats(&chats).await;
             if let Some(space_id) = space_id {
                 let workspace = self.inner.workspace.clone();
                 if let Ok(snapshot) = tokio::task::spawn_blocking(move || {
                     let inputs = workspace.work_outline_inputs(&space_id);
                     mast_doc::materialize_work_outline(&space_id, &inputs)
-                }).await {
+                })
+                .await
+                {
                     self.ingest_snapshot(&snapshot).await;
                 }
             }
@@ -405,15 +413,28 @@ impl OrchestratorWakes {
         let now = self.now();
         let (worker, kind, detail, key) = match signal {
             WorkerSignal::Input { chat_id, input } => {
-                let question = input.questions.iter().map(|q| q.question.as_str()).collect::<Vec<_>>().join("; ");
-                let approval = input.questions.iter().any(|q| { let header = q.header.to_lowercase(); header.contains("approval") || header.contains("permission") });
+                let question = input
+                    .questions
+                    .iter()
+                    .map(|q| q.question.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let approval = input.questions.iter().any(|q| {
+                    let header = q.header.to_lowercase();
+                    header.contains("approval") || header.contains("permission")
+                });
                 let kind = if approval { "approval" } else { "input" };
                 let detail = format!("is waiting for {kind}: {}", truncate(&question, 300));
                 let key = format!("input:{}:{}", chat_id, input.request_id);
                 (chat_id, WakeEventKind::AwaitingInput, detail, key)
             }
             WorkerSignal::ToolFailures { chat_id, failures } => {
-                let detail = format!("turn ended after {} failed Mast tool call{} ({})", failures.count, if failures.count == 1 { "" } else { "s" }, failures.tools.join(", "));
+                let detail = format!(
+                    "turn ended after {} failed Mast tool call{} ({})",
+                    failures.count,
+                    if failures.count == 1 { "" } else { "s" },
+                    failures.tools.join(", ")
+                );
                 let key = format!("tool-fail:{}:{}", chat_id, uuid::Uuid::new_v4());
                 (chat_id, WakeEventKind::ToolCallsFailed, detail, key)
             }
@@ -691,6 +712,15 @@ impl OrchestratorWakes {
                     line.push_str(&format!(" [request {id8}]"));
                 }
                 for orch in parents_of(&state, &request.chat_id) {
+                    if kind == WakeEventKind::ActionResolved
+                        && request.resolution.as_ref().is_some_and(|resolution| {
+                            !resolution.answered_by_user()
+                                && resolution.by.kind == WorkOutlineActorKind::Agent
+                                && resolution.by.chat_id.as_deref() == Some(orch.as_str())
+                        })
+                    {
+                        continue;
+                    }
                     let event = make_event(
                         &mut state,
                         &request.chat_id,
