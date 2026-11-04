@@ -53,6 +53,7 @@ struct GatedHarness {
     requests: Arc<Mutex<Vec<RunRequest>>>,
     release: Arc<Notify>,
     questions: Arc<Mutex<Vec<mast_proto::UserInputQuestion>>>,
+    events: Arc<Mutex<Vec<AgentEvent>>>,
 }
 
 impl GatedHarness {
@@ -76,7 +77,8 @@ impl GatedHarness {
                 session_id: Some("sess-agent".into()),
             })
         });
-        started.chain(done).boxed()
+        let events = futures::stream::iter(self.events.lock().unwrap().clone().into_iter().map(Ok));
+        started.chain(events).chain(done).boxed()
     }
 }
 
@@ -3798,5 +3800,30 @@ async fn friction_captures_approval_and_answer() {
     assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(false));
     assert_eq!(rows[0].occurrences, 1);
     rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_rejected_server_requests() {
+    let rig = rig().await;
+    *rig.harness.events.lock().unwrap() = vec![AgentEvent::ServerRequestRejected { method: "method/token=fake-secret".into(), server_name: "example".into() }, AgentEvent::ServerRequestRejected { method: "method/token=fake-secret".into(), server_name: "example".into() }];
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| rig.core.workspace.friction_reports(SPACE).first().is_some_and(|r| r.occurrences == 2), "friction report").await;
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows[0].kind, mast_proto::FrictionKind::ToolFailure);
+    assert!(!serde_json::to_string(&rows).unwrap().contains("fake-secret"));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_errored_turn() {
+    let rig = rig().await;
+    *rig.harness.events.lock().unwrap() = vec![AgentEvent::Error { message: "password=fake-secret".into() }, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: None, session_id: None }];
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.core.workspace.friction_reports(SPACE).is_empty(), "friction report").await;
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows[0].kind, mast_proto::FrictionKind::Environment);
+    assert_eq!(rows[0].what_happened, "password=[REDACTED]");
     rig.core.shutdown().await;
 }

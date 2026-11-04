@@ -449,6 +449,12 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// Harness rejected an unsupported server request. Engine-internal diagnostic.
+    #[serde(rename_all = "camelCase")]
+    ServerRequestRejected {
+        method: String,
+        server_name: String,
+    },
     #[serde(rename_all = "camelCase")]
     InputRequested {
         request_id: String,

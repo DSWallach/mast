@@ -1548,11 +1548,12 @@ async fn run_session(session: Session) {
                         request.auto_approve,
                         &request_input,
                         &ApprovalCtx {
+                            event_tx: &event_tx,
                             root_thread: &thread_id,
                             file_paths: &file_change_paths,
                             done: &approvals_done,
                         },
-                    );
+                    ).await;
                 }
 
                 // stdout EOF or reader gone: the app server exited.
@@ -1762,6 +1763,7 @@ type RequestInputFn = Box<
 
 /// Session context an approval needs beyond the request itself.
 struct ApprovalCtx<'a> {
+    event_tx: &'a mpsc::Sender<Result<AgentEvent, HarnessError>>,
     /// The parent thread; a request from any other thread is a subagent's.
     root_thread: &'a str,
     /// `fileChange` item id → paths, from the item's `item/started` (0.154.0's
@@ -1829,7 +1831,7 @@ async fn ask_yes_no(
 /// Approvals from subagent child threads arrive on this same channel (the
 /// app-server multiplexes every thread) and surface in the parent chat,
 /// labelled as a subagent's.
-fn handle_server_request(
+async fn handle_server_request(
     client: &RpcClient,
     id: Value,
     method: &str,
@@ -1901,6 +1903,7 @@ fn handle_server_request(
             "rejecting unsupported Codex server request"
         );
         client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
+        let _ = ctx.event_tx.send(Ok(AgentEvent::ServerRequestRejected { method: method.to_owned(), server_name: server_name.to_owned() })).await;
         return;
     }
     if auto_approve {

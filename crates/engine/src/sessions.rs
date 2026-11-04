@@ -2785,6 +2785,7 @@ async fn drive_run(
         std::collections::HashMap::new();
 
     let mut final_completed_turn = None;
+    let mut friction_turn_error: Option<String> = None;
     let final_status = loop {
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
@@ -2959,6 +2960,17 @@ async fn drive_run(
             };
             event
         };
+
+        if let AgentEvent::ServerRequestRejected { method, server_name } = &event {
+            inner.capture_friction(&chat_id, mast_proto::FrictionKind::ToolFailure, &format!("{server_name} rejected server request: {method}"), &format!("Unsupported server request {method} from {server_name}"), None);
+            continue;
+        }
+        if let AgentEvent::Error { message } = &event { friction_turn_error = Some(message.clone()); }
+        if let AgentEvent::Done { status: DoneStatus::Errored, error, .. } = &event {
+            let detail = error.as_deref().filter(|text| !text.trim().is_empty()).or(friction_turn_error.as_deref().filter(|text| !text.trim().is_empty())).unwrap_or("Session errored");
+            inner.capture_friction(&chat_id, mast_proto::FrictionKind::Environment, &format!("Session errored: {detail}"), detail, None);
+        }
+        if matches!(&event, AgentEvent::Done { .. }) { friction_turn_error = None; }
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
