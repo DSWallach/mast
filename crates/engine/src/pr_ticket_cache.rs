@@ -1580,17 +1580,17 @@ mod tests {
     #[test]
     fn is_worktree_cwd_matches_both_known_layouts() {
         assert!(is_worktree_cwd(
-            "/Users/mikey/Projects/cofactr/workspace/.worktrees/eng-1"
+            "/Users/example/Projects/cofactr/workspace/.worktrees/eng-1"
         ));
         assert!(is_worktree_cwd(
-            "/Users/mikey/Projects/cofactr/workspace/.agent-worktrees/ENG-2713"
+            "/Users/example/Projects/cofactr/workspace/.agent-worktrees/ENG-2713"
         ));
-        assert!(!is_worktree_cwd("/Users/mikey/Projects/cofactr/workspace"));
+        assert!(!is_worktree_cwd("/Users/example/Projects/cofactr/workspace"));
         // A substring match elsewhere in the path must not false-positive —
         // the check is specifically for the `/.worktrees/`/`.agent-worktrees/`
         // path segment, not any occurrence of the word.
         assert!(!is_worktree_cwd(
-            "/Users/mikey/Projects/worktrees-are-fun/workspace"
+            "/Users/example/Projects/worktrees-are-fun/workspace"
         ));
     }
 
@@ -1631,7 +1631,7 @@ mod tests {
     fn status_for_computes_is_worktree_without_touching_the_diff_stat_cache_for_non_worktrees() {
         let cache = PrTicketCache::new();
         let status = cache.status_for(
-            Some("/Users/mikey/Projects/cofactr/workspace"),
+            Some("/Users/example/Projects/cofactr/workspace"),
             None,
             None,
             None,
@@ -1647,7 +1647,7 @@ mod tests {
     #[test]
     fn status_for_registers_a_worktree_cwd_as_pending_then_reads_the_cache_on_hit() {
         let cache = PrTicketCache::new();
-        let cwd = "/Users/mikey/Projects/cofactr/workspace/.agent-worktrees/ENG-2713";
+        let cwd = "/Users/example/Projects/cofactr/workspace/.agent-worktrees/ENG-2713";
         let status = cache.status_for(Some(cwd), None, None, None);
         assert!(status.is_worktree);
         assert!(status.diff_stat.is_none(), "nothing cached yet");
