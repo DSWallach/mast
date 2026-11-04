@@ -2155,6 +2155,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SEARCH_FILES
             | methods::LIST_WORKSPACE_DIRECTORY
             | methods::SEARCH_WORKSPACE_FILES
+            | methods::SEARCH_WORKSPACE_CONTENT
             | methods::READ_WORKSPACE_IMAGE
             | methods::READ_WORKSPACE_FILE
             | methods::WRITE_WORKSPACE_FILE
@@ -2230,6 +2231,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::WATCH_WORKSPACE_FILES
+            | methods::SEARCH_WORKSPACE_CONTENT
             | methods::UPDATE_STATUS
     )
 }
@@ -2705,10 +2707,11 @@ impl RpcService for EngineRpc {
             methods::ADMIN_UNDO_TURN => {
                 let p: mast_proto::AdminUndoTurnParams = parse_params(params)?;
                 let service = self.agent_tools.clone();
-                let reply = tokio::task::spawn_blocking(move || service.admin_undo_turn(&p.turn_id))
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                let reply =
+                    tokio::task::spawn_blocking(move || service.admin_undo_turn(&p.turn_id))
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
                 RpcReply::value(&reply)
             }
             methods::LIST_INTERRUPTED_RUNS => RpcReply::value(&self.sessions.interrupted_runs()),
@@ -3305,23 +3308,35 @@ impl RpcService for EngineRpc {
                 // attributable when the per-run token itself is still valid.
                 let grant = service.tokens().authenticate(&p.token).ok();
                 let tool = p.tool.clone();
-                let result: Result<serde_json::Value, RpcError> = if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
-                    match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p)).await {
-                        Ok(Ok(launch)) => self.launch.create_chat_for_work_item(&launch).await
-                            .map_err(|e| RpcError::Failed(e.to_wire_message()))
-                            .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string()))),
-                        Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
-                        Err(e) => Err(RpcError::Failed(e.to_string())),
-                    }
-                } else {
-                    match tokio::task::spawn_blocking(move || service.call(&p)).await {
-                        Ok(Ok(reply)) => Ok(reply),
-                        Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
-                        Err(e) => Err(RpcError::Failed(e.to_string())),
-                    }
-                };
-                if result.is_err() && let Some(grant) = grant {
-                    self.sessions.note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool);
+                let result: Result<serde_json::Value, RpcError> =
+                    if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
+                        match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p))
+                            .await
+                        {
+                            Ok(Ok(launch)) => self
+                                .launch
+                                .create_chat_for_work_item(&launch)
+                                .await
+                                .map_err(|e| RpcError::Failed(e.to_wire_message()))
+                                .and_then(|reply| {
+                                    serde_json::to_value(reply)
+                                        .map_err(|e| RpcError::Failed(e.to_string()))
+                                }),
+                            Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
+                            Err(e) => Err(RpcError::Failed(e.to_string())),
+                        }
+                    } else {
+                        match tokio::task::spawn_blocking(move || service.call(&p)).await {
+                            Ok(Ok(reply)) => Ok(reply),
+                            Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
+                            Err(e) => Err(RpcError::Failed(e.to_string())),
+                        }
+                    };
+                if result.is_err()
+                    && let Some(grant) = grant
+                {
+                    self.sessions
+                        .note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool);
                 }
                 RpcReply::value(&result?)
             }
@@ -3954,21 +3969,48 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&reply)
             }
             methods::GET_DIFF_REVIEW_STATE => {
-                let target = params.get("target").and_then(serde_json::Value::as_str)
+                let target = params
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
                     .filter(|target| !target.trim().is_empty())
                     .ok_or_else(|| RpcError::Failed("target is required".into()))?;
-                let state = self.workspace.diff_review_state(target).map_err(|error| RpcError::Failed(error.to_string()))?;
+                let state = self
+                    .workspace
+                    .diff_review_state(target)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
                 RpcReply::value(&mast_proto::DiffReviewStateReply { state })
             }
             methods::SET_DIFF_REVIEW_STATE => {
                 let update: mast_proto::DiffReviewUpdate = parse_params(params)?;
-                if let Some(pr) = update.after.target.strip_prefix("pr:").and_then(mast_proto::PullRequestRef::parse_external_id) {
-                    let params = mast_proto::PrStatusParams { owner: pr.owner, repo: pr.repo, number: pr.number, force_refresh: false };
-                    if self.pr_review_sync.status(&params).await.is_ok_and(|status| status.state.is_finished()) {
-                        return Err(RpcError::Failed("This PR is closed; its review state was cleared.".into()));
+                if let Some(pr) = update
+                    .after
+                    .target
+                    .strip_prefix("pr:")
+                    .and_then(mast_proto::PullRequestRef::parse_external_id)
+                {
+                    let params = mast_proto::PrStatusParams {
+                        owner: pr.owner,
+                        repo: pr.repo,
+                        number: pr.number,
+                        force_refresh: false,
+                    };
+                    if self
+                        .pr_review_sync
+                        .status(&params)
+                        .await
+                        .is_ok_and(|status| status.state.is_finished())
+                    {
+                        return Err(RpcError::Failed(
+                            "This PR is closed; its review state was cleared.".into(),
+                        ));
                     }
                 }
-                RpcReply::value(&self.workspace.update_diff_review_state(&update).map_err(|error| RpcError::Failed(error.to_string()))?)
+                RpcReply::value(
+                    &self
+                        .workspace
+                        .update_diff_review_state(&update)
+                        .map_err(|error| RpcError::Failed(error.to_string()))?,
+                )
             }
             methods::SET_CHAT_DIFF_TARGET => {
                 let p: mast_proto::SetChatDiffTargetParams = parse_params(params)?;
@@ -4624,6 +4666,84 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&matches)
             }
+            methods::SEARCH_WORKSPACE_CONTENT => {
+                let request: mast_proto::SearchWorkspaceContentRequest = parse_params(params)?;
+                if request.query.chars().count() > 256
+                    || request.include.len() + request.exclude.len() > 100
+                {
+                    return Err(RpcError::BadParams(
+                        "Content search query or glob list is too large".into(),
+                    ));
+                }
+                let workspace = self.workspace_files.resolve_target(&request.target).await?;
+                let changed_files = request
+                    .changed_files
+                    .map(|paths| {
+                        paths
+                            .into_iter()
+                            .map(|path| {
+                                crate::workspace_files::WorkspaceRelativePath::file(&path)
+                                    .map(|path| path.as_path().to_path_buf())
+                            })
+                            .collect::<Result<std::collections::HashSet<_>, _>>()
+                    })
+                    .transpose()
+                    .map_err(RpcError::from)?;
+                let query = crate::workspace_content_search::ContentSearchQuery {
+                    text: request.query,
+                    case_sensitive: request.case_sensitive,
+                    whole_word: request.whole_word,
+                    regex: request.regex,
+                    include: request.include,
+                    exclude: request.exclude,
+                    changed_files,
+                };
+                let (sender, receiver) = tokio::sync::mpsc::channel(32);
+                let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let worker_cancelled = cancelled.clone();
+                tokio::task::spawn_blocking(move || {
+                    use mast_proto::WorkspaceContentSearchFrame as Frame;
+                    let result = crate::workspace_content_search::search_workspace_content(
+                        &workspace.root,
+                        &query,
+                        &worker_cancelled,
+                        |item| {
+                            sender
+                                .blocking_send(Frame::Match {
+                                    path: item.path.to_string_lossy().into_owned(),
+                                    line: item.line,
+                                    preview: item.preview,
+                                    ranges: item.ranges,
+                                })
+                                .is_ok()
+                        },
+                    );
+                    let frame = match result {
+                        Ok(summary) => Frame::Complete {
+                            matches: summary.matches,
+                            files: summary.files,
+                            skipped_files: summary.skipped_files,
+                            truncated: summary.truncated,
+                        },
+                        Err(message) => Frame::Error { message },
+                    };
+                    let _ = sender.blocking_send(frame);
+                });
+                struct CancelOnStreamDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for CancelOnStreamDrop {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                let stream = futures::stream::unfold(
+                    (receiver, CancelOnStreamDrop(cancelled)),
+                    |(mut receiver, guard)| async move {
+                        let frame = receiver.recv().await?;
+                        Some((serde_json::to_value(frame).ok()?, (receiver, guard)))
+                    },
+                );
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
             methods::READ_WORKSPACE_IMAGE => {
                 let request: mast_proto::ReadWorkspaceImageRequest = parse_params(params)?;
                 let chunk = tokio::time::timeout(
@@ -4958,7 +5078,11 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_MANAGED_ACCOUNTS => {
                 let p: ListAgentAccountsParams = parse_params(params)?;
-                RpcReply::value(&self.managed_snapshot(p.force_usage.unwrap_or(false)).await?)
+                RpcReply::value(
+                    &self
+                        .managed_snapshot(p.force_usage.unwrap_or(false))
+                        .await?,
+                )
             }
             methods::CREATE_MANAGED_ACCOUNT => {
                 let p: CreateManagedAccountParams = parse_params(params)?;
@@ -5015,9 +5139,9 @@ impl RpcService for EngineRpc {
                 let account = accounts
                     .promote(p.harness, "", &slot)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                if let Err(err) = self
-                    .agent_accounts
-                    .mark_promoted(p.harness, &p.slot_id, &account.id)
+                if let Err(err) =
+                    self.agent_accounts
+                        .mark_promoted(p.harness, &p.slot_id, &account.id)
                 {
                     // Never leave one login in two places: undo the copy.
                     let _ = accounts.remove(&account.id);
@@ -5658,6 +5782,8 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
+        assert!(forwardable(methods::SEARCH_WORKSPACE_CONTENT));
+        assert!(is_stream_method(methods::SEARCH_WORKSPACE_CONTENT));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
         assert!(forwardable(methods::WRITE_WORKSPACE_FILE));

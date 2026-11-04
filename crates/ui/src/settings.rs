@@ -896,6 +896,10 @@ pub enum ShortcutId {
     ToggleFiles,
     ToggleTerminal,
     OpenMyPrs,
+    QuickOpen,
+    SearchWorkspaceContent,
+    GoToLine,
+    ReplaceFile,
     NewSession,
     NewProject,
     OpenModelPicker,
@@ -924,7 +928,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 14 + WORK_OUTLINE_SHORTCUTS + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 18 + WORK_OUTLINE_SHORTCUTS + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -933,6 +937,10 @@ impl ShortcutId {
         ShortcutId::ToggleFiles,
         ShortcutId::ToggleTerminal,
         ShortcutId::OpenMyPrs,
+        ShortcutId::QuickOpen,
+        ShortcutId::SearchWorkspaceContent,
+        ShortcutId::GoToLine,
+        ShortcutId::ReplaceFile,
         ShortcutId::NewSession,
         ShortcutId::NewProject,
         ShortcutId::OpenModelPicker,
@@ -983,6 +991,10 @@ impl ShortcutId {
             ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::OpenMyPrs => "Open PR page",
+            ShortcutId::ReplaceFile => "Replace in file",
+            ShortcutId::GoToLine => "Go to line",
+            ShortcutId::SearchWorkspaceContent => "Search in files",
+            ShortcutId::QuickOpen => "Quick open",
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenModelPicker => "Open model picker",
@@ -1029,6 +1041,10 @@ impl ShortcutId {
             ShortcutId::ToggleFiles => "mod-e",
             ShortcutId::ToggleTerminal => "mod-j",
             ShortcutId::OpenMyPrs => "mod-p",
+            ShortcutId::ReplaceFile => "mod-alt-f",
+            ShortcutId::GoToLine => "mod-g",
+            ShortcutId::SearchWorkspaceContent => "mod-shift-f",
+            ShortcutId::QuickOpen => "mod-o",
             ShortcutId::NewSession => "mod-n",
             ShortcutId::NewProject => "mod-shift-n",
             ShortcutId::OpenModelPicker => "mod-/",
@@ -1129,6 +1145,10 @@ pub struct KeymapConfig {
     pub toggle_files: String,
     pub toggle_terminal: String,
     pub open_my_prs: String,
+    pub replace_file: String,
+    pub go_to_line: String,
+    pub search_workspace_content: String,
+    pub quick_open: String,
     pub new_session: String,
     pub new_project: String,
     pub open_model_picker: String,
@@ -1212,6 +1232,10 @@ impl Default for KeymapConfig {
             toggle_files: ShortcutId::ToggleFiles.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
             open_my_prs: ShortcutId::OpenMyPrs.default_combo().into(),
+            replace_file: ShortcutId::ReplaceFile.default_combo().into(),
+            go_to_line: ShortcutId::GoToLine.default_combo().into(),
+            search_workspace_content: ShortcutId::SearchWorkspaceContent.default_combo().into(),
+            quick_open: ShortcutId::QuickOpen.default_combo().into(),
             new_session: ShortcutId::NewSession.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
             open_model_picker: ShortcutId::OpenModelPicker.default_combo().into(),
@@ -1258,6 +1282,10 @@ impl KeymapConfig {
             ShortcutId::ToggleFiles => &self.toggle_files,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
             ShortcutId::OpenMyPrs => &self.open_my_prs,
+            ShortcutId::ReplaceFile => &self.replace_file,
+            ShortcutId::GoToLine => &self.go_to_line,
+            ShortcutId::SearchWorkspaceContent => &self.search_workspace_content,
+            ShortcutId::QuickOpen => &self.quick_open,
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NewProject => &self.new_project,
             ShortcutId::OpenModelPicker => &self.open_model_picker,
@@ -1300,6 +1328,10 @@ impl KeymapConfig {
             ShortcutId::ToggleFiles => self.toggle_files = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
             ShortcutId::OpenMyPrs => self.open_my_prs = combo,
+            ShortcutId::ReplaceFile => self.replace_file = combo,
+            ShortcutId::GoToLine => self.go_to_line = combo,
+            ShortcutId::SearchWorkspaceContent => self.search_workspace_content = combo,
+            ShortcutId::QuickOpen => self.quick_open = combo,
             ShortcutId::NewSession => self.new_session = combo,
             ShortcutId::NewProject => self.new_project = combo,
             ShortcutId::OpenModelPicker => self.open_model_picker = combo,
@@ -1712,6 +1744,10 @@ impl UiSettings {
                         for (id, field) in [
                             (ShortcutId::ToggleFiles, "toggleFiles"),
                             (ShortcutId::OpenMyPrs, "openMyPrs"),
+                            (ShortcutId::ReplaceFile, "replaceFile"),
+                            (ShortcutId::GoToLine, "goToLine"),
+                            (ShortcutId::SearchWorkspaceContent, "searchWorkspaceContent"),
+                            (ShortcutId::QuickOpen, "quickOpen"),
                             (ShortcutId::OpenOutline, "openOutline"),
                             (ShortcutId::ToggleOutlineFocus, "toggleOutlineFocus"),
                             (ShortcutId::OpenFullChat, "openFullChat"),
@@ -3031,6 +3067,20 @@ mod tests {
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-alt-p");
         restored.reset(ShortcutId::NewProject);
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-shift-n");
+    }
+
+    #[test]
+    fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
+        let mut keymap = KeymapConfig::default();
+        assert_eq!(keymap.get(ShortcutId::QuickOpen), "mod-o");
+        assert_eq!(keymap.get(ShortcutId::SearchWorkspaceContent), "mod-shift-f");
+        assert_eq!(keymap.get(ShortcutId::GoToLine), "mod-g");
+        assert_eq!(keymap.get(ShortcutId::ReplaceFile), "mod-alt-f");
+        keymap.set(ShortcutId::QuickOpen, "mod-alt-o".into());
+        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.get(ShortcutId::QuickOpen), "mod-alt-o");
+        keymap.set(ShortcutId::QuickOpen, "mod-p".into());
+        assert!(!conflicted_shortcuts(&keymap).is_empty());
     }
 
     #[test]

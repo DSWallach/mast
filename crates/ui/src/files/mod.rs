@@ -729,6 +729,11 @@ impl FilesSurface {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_location_for_test(&self) -> Option<(u32, Option<u32>)> {
+        self.pending_editor_location
+    }
+
     fn ensure_tree_loaded(&mut self, cx: &mut Context<Self>) {
         if self.started {
             return;

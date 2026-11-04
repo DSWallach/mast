@@ -700,6 +700,47 @@ pub struct WorkspaceFileSearchMatch {
     pub score: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchWorkspaceContentRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    pub query: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub whole_word: bool,
+    #[serde(default)]
+    pub regex: bool,
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    #[serde(default)]
+    pub changed_files: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum WorkspaceContentSearchFrame {
+    Match {
+        path: String,
+        line: u64,
+        preview: String,
+        ranges: Vec<(usize, usize)>,
+    },
+    Complete {
+        matches: usize,
+        files: usize,
+        #[serde(default)]
+        skipped_files: usize,
+        truncated: bool,
+    },
+    Error {
+        message: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadWorkspaceFileRequest {

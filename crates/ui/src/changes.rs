@@ -2079,6 +2079,49 @@ impl Render for DiffHeaderTooltip {
 }
 
 impl Changes {
+    pub(crate) fn diff_is_focused(&self, window: &Window, _cx: &App) -> bool {
+        self.diff_focus.is_focused(window)
+    }
+
+    pub(crate) fn changed_paths(&self) -> Option<Vec<String>> {
+        self.parsed.as_ref().map(|parsed| {
+            parsed.files.iter().filter(|file| file.status != FileStatus::Deleted)
+                .map(|file| file.path.clone()).collect()
+        })
+    }
+
+    pub(crate) fn go_to_line(&mut self, target: u32, cx: &mut Context<Self>) {
+        let Some(parsed) = &self.parsed else { return; };
+        let top = self.list.logical_scroll_top().item_ix;
+        let file_index = self.rows.get(top).and_then(|row| row.file()).unwrap_or(0);
+        let Some(file) = parsed.files.get(file_index) else { return; };
+        let path = file.path.clone();
+        if self.folds.get(&path).is_some_and(|fold| fold.collapsed) {
+            self.toggle_fold(file_index, cx);
+            if let Some(fold) = self.folds.get_mut(&path) {
+                fold.toggled_at = None;
+            }
+            self.settle_folds(cx);
+        }
+        let Some(parsed) = &self.parsed else { return; };
+        let find = |new_side| self.rows.iter().position(|row| {
+            let (file, hunk, line) = match *row {
+                DiffRow::Line { file, hunk, line, .. } => (file, hunk, Some(line)),
+                DiffRow::SplitLine { file, hunk, left, right } => (file, hunk, if new_side { right } else { left }),
+                _ => return false,
+            };
+            if file as usize != file_index { return false; }
+            line.is_some_and(|line| {
+                let line = &parsed.files[file as usize].hunks[hunk as usize].lines[line as usize];
+                if new_side { line.new_no == Some(target) } else { line.old_no == Some(target) }
+            })
+        });
+        if let Some(index) = find(true).or_else(|| find(false)) {
+            self.list.scroll_to_reveal_item(index);
+            cx.notify();
+        }
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let owner = state
             .read(cx)
@@ -7911,6 +7954,31 @@ index 1111111..2222222 160000
             body_height(added),
             NOTICE_HEIGHT + HUNK_HEADER_HEIGHT + 3.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
+    }
+
+    #[gpui::test]
+    fn go_to_line_scrolls_to_the_requested_diff_line(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window.update(cx, |changes, _, cx| {
+            let files = parse_patch(PATCH);
+            let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |_| false);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            let target = rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 1, line: 2, .. })).unwrap();
+            changes.list.reset_with_uniform_height(rows.len(), px(20.0));
+            changes.rows = rows;
+            changes.row_ranges = ranges.into_iter().map(Some).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 0, deletions: 0, file_count: files.len(), horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes.go_to_line(12, cx);
+            assert!(changes.list.logical_scroll_top().item_ix >= target);
+            changes.list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+            let replacement = changes.rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 0, line: 2, .. })).unwrap();
+            changes.go_to_line(2, cx);
+            assert!(changes.list.logical_scroll_top().item_ix >= replacement);
+        }).unwrap();
     }
 
     fn diff(checkout: &str, device: &str, cwd: &str, patch: &str) -> CheckoutDiff {

@@ -34,6 +34,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 nucleo-matcher.workspace = true
 
 tempfile.workspace = true
