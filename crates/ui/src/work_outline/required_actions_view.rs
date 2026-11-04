@@ -915,7 +915,13 @@ impl RequiredActionsList {
                     .child(SharedString::from(format!("+{} retried", row.duplicates))),
             );
         }
-        let can_open = self.can_open(&row);
+        let review_artifact = if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Review {
+            row.links.iter().find_map(|link| match &link.target {
+                mast_proto::work_outline_user_actions::RequestLinkTarget::Artifact { id } => Some(id.clone()),
+                _ => None,
+            })
+        } else { None };
+        let can_open = review_artifact.is_some() || self.can_open(&row);
         let pr_link = row.pr_url.clone().filter(|_| row.system).map(|url| {
             let shell = self.shell.clone();
             Self::button(
@@ -966,7 +972,14 @@ impl RequiredActionsList {
                         let selector = format!("required-actions-open-{id}");
                         move || selector.clone()
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| this.open(&open_row, cx))),
+                    .when(review_artifact.is_some(), |el| el.bg(theme.accent.opacity(0.15)).text_color(theme.accent))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(artifact_id) = &review_artifact {
+                            if let Some(shell) = &this.shell {
+                                shell.update(cx, |shell, cx| shell.open_artifact(artifact_id.clone(), window, cx)).ok();
+                            }
+                        } else { this.open(&open_row, cx); }
+                    })),
                 )
                 .children(pr_link)
                 .when(!resolving, |mut el| {
@@ -1260,7 +1273,7 @@ impl RequiredActionsList {
                     ),
             )
             .child(div().pl(px(12.0)).child(meta))
-            .children(row.facts.iter().map(|fact| {
+            .children(row.facts.iter().filter(|fact| row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests"))).chain(row.facts.iter().filter(|fact| row.kind != mast_proto::work_outline_user_actions::UserActionKind::Handoff || !(fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")))).map(|fact| {
                 div().pl(px(12.0)).text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(format!("{}: {}", fact.label, fact.value)))
@@ -1301,7 +1314,10 @@ impl RequiredActionsList {
         if row.links.is_empty() {
             return None;
         }
-        let buttons = row.links.iter().enumerate().map(|(index, link)| {
+        let review_artifact = (row.kind == mast_proto::work_outline_user_actions::UserActionKind::Review)
+            .then(|| row.links.iter().position(|link| matches!(link.target, RequestLinkTarget::Artifact { .. })))
+            .flatten();
+        let buttons = row.links.iter().enumerate().filter(|(index, _)| Some(*index) != review_artifact).map(|(index, link)| {
             let selector = format!("required-actions-link-{id}-{index}");
             let label = link.label.clone();
             let target = link.target.clone();
