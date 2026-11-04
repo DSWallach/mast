@@ -398,7 +398,7 @@ fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFa
         title,
         state,
         last_active: chat.last_message_at.or(Some(chat.created_at)),
-        activity: chat.last_message_preview.as_deref().and_then(activity_line),
+        activity: chat.last_message_preview.as_deref().and_then(|text| activity_line(&crate::message_source::preview(text))),
         branch: chat
             .branch
             .as_deref()

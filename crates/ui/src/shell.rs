@@ -3878,6 +3878,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,
