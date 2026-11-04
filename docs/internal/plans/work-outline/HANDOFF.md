@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Neutral defaults 1B** (2026-11-04, `neutral-defaults-settings`, 3 Terra slices): one-time UI settings migration
+  marker (existing vs fresh profile); fresh profiles get neutral defaults, existing ones keep their effective
+  values: admin grant duration remembered (4 h), Team tab hide/auto/always (auto for both, matches today),
+  compact single-chat rows (fresh off, existing on), sounds off / banners background-only / live Dock icon off
+  / menu bar item off for fresh profiles. Orchestrator wakes default deliberately unchanged (already opt-in via
+  starting workers). Rebindable outline/Team shortcuts split out (item 3b6f9919). UI 2436/0.
 - **Neutral defaults 1A** (2026-11-04, `neutral-defaults-agent-text`): MCP instructions reworded neutrally (publish
   what you want reviewed; workers raise `kind: handoff`; finished workers can be archived), tool descriptions
   match the engine's real reach/archive rules, examples no longer use Mikey's process; per-Space editable PR
