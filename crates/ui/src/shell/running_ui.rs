@@ -127,7 +127,7 @@ impl Shell {
                 activity: chat
                     .last_message_preview
                     .as_deref()
-                    .map(crate::transcript::single_line)
+                    .map(|text| crate::transcript::single_line(&crate::message_source::preview(text)))
                     .unwrap_or_default(),
                 item_path,
                 account: facts.as_ref().and_then(|facts| facts.account.clone()),

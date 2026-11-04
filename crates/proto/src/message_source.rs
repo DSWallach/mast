@@ -65,6 +65,29 @@ pub fn classify(text: &str) -> (MessageSource, &str) {
     (MessageSource::Human, text)
 }
 
+/// Prepare a concise sidebar preview before truncating the transport text.
+pub fn preview(text: &str) -> String {
+    let (source, body) = classify(text);
+    match source {
+        MessageSource::OtherChat { title, .. } | MessageSource::Admin { title, .. } => {
+            format!("From {title}: {body}")
+        }
+        MessageSource::System { .. } => format!("Mast: {body}"),
+        MessageSource::Human => {
+            // Old previews were truncated before the envelope was stripped.
+            if let Some(rest) = text.trim_start().strip_prefix("[Message from Mast chat ") {
+                if let Some((title, _)) = rest.split_once(" (") {
+                    return format!("From {title}");
+                }
+            }
+            if text.trim_start().starts_with("[Mast system message") {
+                return "Mast".into();
+            }
+            text.to_owned()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +132,14 @@ mod tests {
             classify("[Message from Mast chat unfinished"),
             (MessageSource::Human, "[Message from Mast chat unfinished")
         );
+    }
+
+    #[test]
+    fn previews_keep_the_source_before_truncation() {
+        let relay = "[Message from Mast chat Worker (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\nhello";
+        assert_eq!(preview(relay), "From Worker: hello");
+        assert_eq!(preview("[Message from Mast chat Worker (abc). Reply to it"), "From Worker");
+        assert_eq!(preview("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- done"), "Mast: - done");
+        assert_eq!(preview("Human text"), "Human text");
     }
 }

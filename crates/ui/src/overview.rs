@@ -4337,7 +4337,7 @@ impl Overview {
         }
 
         if let Some(preview) = &row.chat.last_message_preview {
-            rows.push(detail_row("last message", text(preview.clone())));
+            rows.push(detail_row("last message", text(crate::message_source::preview(preview))));
         }
 
         let archived = row.chat.archived;
