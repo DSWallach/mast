@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Neutral defaults 1A** (2026-11-04, `neutral-defaults-agent-text`): MCP instructions reworded neutrally (publish
+  what you want reviewed; workers raise `kind: handoff`; finished workers can be archived), tool descriptions
+  match the engine's real reach/archive rules, examples no longer use Mikey's process; per-Space editable PR
+  review / self-review / fix-CI prompt templates (existing Spaces keep `/code-review` and `/fix-ci`, new Spaces
+  get neutral prompts; Spaces arriving later via sync are migrated too, untested against a live remote);
+  devcontainer paths only when the mount is verified. Release run: nextest 2279/2279, UI 2427/0.
 - **Search fixes + coworker cleanup** (2026-11-04, `search-overlay-fixes`, `coworker-cleanup`): ⌘O/⇧⌘F inputs use
   ComposerInput (full editing); a per-checkout file index prewarms when a chat opens and follows the watcher
   (5 s repair in over-budget repos); ⌘O 300 ms → 13–16 ms per keystroke, indexed content search 13 ms first
