@@ -2082,27 +2082,46 @@ impl Changes {
     pub(crate) fn diff_is_focused(&self, window: &Window, _cx: &App) -> bool {
         self.diff_focus.is_focused(window)
     }
+
     pub(crate) fn changed_paths(&self) -> Option<Vec<String>> {
-        self.parsed.as_ref().map(|parsed| parsed.files.iter().filter(|file| file.status != FileStatus::Deleted).map(|file| file.path.clone()).collect())
+        self.parsed.as_ref().map(|parsed| {
+            parsed.files.iter().filter(|file| file.status != FileStatus::Deleted)
+                .map(|file| file.path.clone()).collect()
+        })
     }
+
     pub(crate) fn go_to_line(&mut self, target: u32, cx: &mut Context<Self>) {
-        let Some(parsed) = &self.parsed else { return };
+        let Some(parsed) = &self.parsed else { return; };
         let top = self.list.logical_scroll_top().item_ix;
-        let Some(file_index) = self.rows.get(top).and_then(|row| row.file()).or(Some(0)) else { return };
-        let Some(file) = parsed.files.get(file_index) else { return };
+        let file_index = self.rows.get(top).and_then(|row| row.file()).unwrap_or(0);
+        let Some(file) = parsed.files.get(file_index) else { return; };
         let path = file.path.clone();
         if self.folds.get(&path).is_some_and(|fold| fold.collapsed) {
             self.toggle_fold(file_index, cx);
-            if let Some(fold) = self.folds.get_mut(&path) { fold.toggled_at = None; }
+            if let Some(fold) = self.folds.get_mut(&path) {
+                fold.toggled_at = None;
+            }
             self.settle_folds(cx);
         }
-        let Some(parsed) = &self.parsed else { return };
-        if let Some(index) = self.rows.iter().position(|row| match *row {
-            DiffRow::Line { file, hunk, line, .. } if file as usize == file_index => { let line = &parsed.files[file as usize].hunks[hunk as usize].lines[line as usize]; line.new_no.or(line.old_no) == Some(target) },
-            DiffRow::SplitLine { file, hunk, left, right } if file as usize == file_index => right.or(left).is_some_and(|line| { let line = &parsed.files[file as usize].hunks[hunk as usize].lines[line as usize]; line.new_no.or(line.old_no) == Some(target) }),
-            _ => false,
-        }) { self.list.scroll_to_reveal_item(index); cx.notify(); }
+        let Some(parsed) = &self.parsed else { return; };
+        let find = |new_side| self.rows.iter().position(|row| {
+            let (file, hunk, line) = match *row {
+                DiffRow::Line { file, hunk, line, .. } => (file, hunk, Some(line)),
+                DiffRow::SplitLine { file, hunk, left, right } => (file, hunk, if new_side { right } else { left }),
+                _ => return false,
+            };
+            if file as usize != file_index { return false; }
+            line.is_some_and(|line| {
+                let line = &parsed.files[file as usize].hunks[hunk as usize].lines[line as usize];
+                if new_side { line.new_no == Some(target) } else { line.old_no == Some(target) }
+            })
+        });
+        if let Some(index) = find(true).or_else(|| find(false)) {
+            self.list.scroll_to_reveal_item(index);
+            cx.notify();
+        }
     }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let owner = state
             .read(cx)
@@ -7955,6 +7974,10 @@ index 1111111..2222222 160000
             changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 0, deletions: 0, file_count: files.len(), horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
             changes.go_to_line(12, cx);
             assert!(changes.list.logical_scroll_top().item_ix >= target);
+            changes.list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+            let replacement = changes.rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 0, line: 2, .. })).unwrap();
+            changes.go_to_line(2, cx);
+            assert!(changes.list.logical_scroll_top().item_ix >= replacement);
         }).unwrap();
     }
 
