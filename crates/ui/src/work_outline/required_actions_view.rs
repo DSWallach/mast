@@ -916,12 +916,17 @@ impl RequiredActionsList {
                     .child(SharedString::from(format!("+{} retried", row.duplicates))),
             );
         }
-        let review_artifact = if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Review {
-            row.links.iter().find_map(|link| match &link.target {
-                mast_proto::work_outline_user_actions::RequestLinkTarget::Artifact { id } => Some(id.clone()),
-                _ => None,
-            })
-        } else { None };
+        let review_artifact =
+            if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Review {
+                row.links.iter().find_map(|link| match &link.target {
+                    mast_proto::work_outline_user_actions::RequestLinkTarget::Artifact { id } => {
+                        Some(id.clone())
+                    }
+                    _ => None,
+                })
+            } else {
+                None
+            };
         let can_open = review_artifact.is_some() || self.can_open(&row);
         let pr_link = row.pr_url.clone().filter(|_| row.system).map(|url| {
             let shell = self.shell.clone();
@@ -973,13 +978,21 @@ impl RequiredActionsList {
                         let selector = format!("required-actions-open-{id}");
                         move || selector.clone()
                     })
-                    .when(review_artifact.is_some(), |el| el.bg(theme.accent.opacity(0.15)).text_color(theme.accent))
+                    .when(review_artifact.is_some(), |el| {
+                        el.bg(theme.accent.opacity(0.15)).text_color(theme.accent)
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(artifact_id) = &review_artifact {
                             if let Some(shell) = &this.shell {
-                                shell.update(cx, |shell, cx| shell.open_artifact(artifact_id.clone(), window, cx)).ok();
+                                shell
+                                    .update(cx, |shell, cx| {
+                                        shell.open_artifact(artifact_id.clone(), window, cx)
+                                    })
+                                    .ok();
                             }
-                        } else { this.open(&open_row, cx); }
+                        } else {
+                            this.open(&open_row, cx);
+                        }
                     })),
                 )
                 .children(pr_link)
@@ -1235,15 +1248,28 @@ impl RequiredActionsList {
         let detail = row.info.as_deref().map(|source| {
             let source = link_legacy_artifacts(source);
             let tree = crate::markdown::parser::parse_full(&source);
-            let mut options = crate::markdown::render::RenderOptions::settled(format!("required-actions-info-{id}").into());
+            let mut options = crate::markdown::render::RenderOptions::settled(
+                format!("required-actions-info-{id}").into(),
+            );
             let shell = self.shell.clone();
             options.link = Some(crate::markdown::render::LinkUi {
                 source_session: Some(row.chat_id.clone()),
                 handler: std::rc::Rc::new(move |activation, window, cx| {
                     if let Some(shell) = &shell {
-                        shell.update(cx, |shell, cx| shell.open_web_reference(&activation.target.original, false, window, cx)).ok();
+                        shell
+                            .update(cx, |shell, cx| {
+                                shell.open_web_reference(
+                                    &activation.target.original,
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .ok();
                         crate::markdown::render::LinkOutcome::Internal
-                    } else { crate::markdown::render::LinkOutcome::Rejected }
+                    } else {
+                        crate::markdown::render::LinkOutcome::Rejected
+                    }
                 }),
             });
             crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
@@ -1291,8 +1317,9 @@ impl RequiredActionsList {
             )
             .child(div().pl(px(12.0)).child(meta))
             .children(row.facts.iter().filter(|fact| row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests"))).chain(row.facts.iter().filter(|fact| row.kind != mast_proto::work_outline_user_actions::UserActionKind::Handoff || !(fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")))).map(|fact| {
-                div().pl(px(12.0)).text_size(crate::typography::ui_rems(10.5))
+                div().debug_selector({ let selector = format!("required-actions-fact-{id}-{}", fact.label); move || selector.clone() }).pl(px(12.0)).text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_muted)
+                    .when(row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")), |el| el.text_color(theme.text).font_weight(gpui::FontWeight::SEMIBOLD))
                     .child(SharedString::from(format!("{}: {}", fact.label, fact.value)))
             }))
             .when_some(request_links, |el, links| el.child(links))
@@ -1334,57 +1361,70 @@ impl RequiredActionsList {
                 links.push(mast_proto::work_outline_user_actions::RequestLink { label: "View PR".into(), target: RequestLinkTarget::Pr { url } });
             }
         }
-        if links.is_empty() { return None; }
-        let review_artifact = (row.kind == mast_proto::work_outline_user_actions::UserActionKind::Review)
-            .then(|| row.links.iter().position(|link| matches!(link.target, RequestLinkTarget::Artifact { .. })))
+        if links.is_empty() {
+            return None;
+        }
+        let review_artifact = (row.kind
+            == mast_proto::work_outline_user_actions::UserActionKind::Review)
+            .then(|| {
+                row.links
+                    .iter()
+                    .position(|link| matches!(link.target, RequestLinkTarget::Artifact { .. }))
+            })
             .flatten();
-        let buttons = links.iter().enumerate().filter(|(index, _)| Some(*index) != review_artifact).map(|(index, link)| {
-            let selector = format!("required-actions-link-{id}-{index}");
-            let label = link.label.clone();
-            let target = link.target.clone();
-            let chat_id = row.chat_id.clone();
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .px(px(6.0))
-                .py(px(1.0))
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(theme.border)
-                .text_color(theme.accent)
-                .text_size(crate::typography::ui_rems(10.5))
-                .cursor_pointer()
-                .hover(|el| el.bg(theme.element_hover))
-                .child(SharedString::from(label))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    if let RequestLinkTarget::Chat { id } = &target {
-                        cx.emit(RequiredActionsEvent::OpenChat(id.clone()));
-                    } else if let Some(shell) = &this.shell {
-                        shell
-                            .update(cx, |shell, cx| match &target {
-                                RequestLinkTarget::Artifact { id } => {
-                                    shell.open_artifact(id.clone(), window, cx)
-                                }
-                                RequestLinkTarget::File { path, line } => shell.open_request_file(
-                                    chat_id.clone(),
-                                    path.clone(),
-                                    *line,
-                                    window,
-                                    cx,
-                                ),
-                                RequestLinkTarget::Diff { branch } => {
-                                    shell.open_request_diff(chat_id.clone(), branch.clone(), cx)
-                                }
-                                RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } => {
-                                    shell.open_web_reference(url, false, window, cx)
-                                }
-                                RequestLinkTarget::Chat { .. } => {}
-                            })
-                            .ok();
-                    }
-                }))
-        });
+        let buttons = links
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != review_artifact)
+            .map(|(index, link)| {
+                let selector = format!("required-actions-link-{id}-{index}");
+                let label = link.label.clone();
+                let target = link.target.clone();
+                let chat_id = row.chat_id.clone();
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(theme.accent)
+                    .text_size(crate::typography::ui_rems(10.5))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.element_hover))
+                    .child(SharedString::from(label))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if let RequestLinkTarget::Chat { id } = &target {
+                            cx.emit(RequiredActionsEvent::OpenChat(id.clone()));
+                        } else if let Some(shell) = &this.shell {
+                            shell
+                                .update(cx, |shell, cx| match &target {
+                                    RequestLinkTarget::Artifact { id } => {
+                                        shell.open_artifact(id.clone(), window, cx)
+                                    }
+                                    RequestLinkTarget::File { path, line } => shell
+                                        .open_request_file(
+                                            chat_id.clone(),
+                                            path.clone(),
+                                            *line,
+                                            window,
+                                            cx,
+                                        ),
+                                    RequestLinkTarget::Diff { branch } => {
+                                        shell.open_request_diff(chat_id.clone(), branch.clone(), cx)
+                                    }
+                                    RequestLinkTarget::Pr { url }
+                                    | RequestLinkTarget::Url { url } => {
+                                        shell.open_web_reference(url, false, window, cx)
+                                    }
+                                    RequestLinkTarget::Chat { .. } => {}
+                                })
+                                .ok();
+                        }
+                    }))
+            });
         Some(
             div()
                 .pl(px(12.0))
@@ -1406,7 +1446,9 @@ impl RequiredActionsList {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let mut links = mast_proto::artifacts::artifact_links(&link_legacy_artifacts(&row.text));
-        for link in mast_proto::artifacts::artifact_links(&link_legacy_artifacts(row.info.as_deref().unwrap_or_default())) {
+        for link in mast_proto::artifacts::artifact_links(&link_legacy_artifacts(
+            row.info.as_deref().unwrap_or_default(),
+        )) {
             if !links.iter().any(|seen| seen.target == link.target) {
                 links.push(link);
             }
@@ -1596,8 +1638,23 @@ impl RequiredActionsList {
 }
 
 fn legacy_pr_links(source: &str) -> Vec<String> {
-    let pattern = regex::Regex::new(r"https://github\.com/[^\s/()]+/[^\s/()]+/pull/[0-9]+").expect("valid PR pattern");
-    pattern.find_iter(source).map(|found| found.as_str().to_owned()).collect()
+    source
+        .split_whitespace()
+        .filter_map(|word| {
+            let start = word.find("https://github.com/")?;
+            let url =
+                word[start..].trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '>'));
+            let path = url.strip_prefix("https://github.com/")?;
+            let parts: Vec<_> = path.split('/').collect();
+            (parts.len() == 4
+                && !parts[0].is_empty()
+                && !parts[1].is_empty()
+                && parts[2] == "pull"
+                && !parts[3].is_empty()
+                && parts[3].bytes().all(|b| b.is_ascii_digit()))
+            .then(|| url.to_owned())
+        })
+        .collect()
 }
 
 /// Turn bare artifact ids into Markdown links; existing Markdown targets stay intact.
@@ -1739,5 +1796,25 @@ impl Render for RequiredActionsList {
                     .pb(px(10.0))
                     .child(self.render_body(rows, &theme, window, cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::{legacy_pr_links, link_legacy_artifacts};
+
+    #[test]
+    fn legacy_references_are_linked_without_rewriting_markdown_links() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let source = format!("See mast-artifact:{id} and [plan](mast-artifact:{id})");
+        let linked = link_legacy_artifacts(&source);
+        assert!(linked.contains(&format!("[mast-artifact:{id}](mast-artifact:{id})")));
+        assert!(linked.contains(&format!("[plan](mast-artifact:{id})")));
+        assert_eq!(
+            legacy_pr_links("Review https://github.com/acme/repo/pull/123."),
+            ["https://github.com/acme/repo/pull/123"]
+        );
+        let tree = crate::markdown::parser::parse_full(&format!("**Review** {linked}"));
+        assert!(!tree.blocks.is_empty());
     }
 }
