@@ -1766,6 +1766,12 @@ pub struct Shell {
     command_palette: Option<command_palette::CommandPalette>,
     workspace_search: Option<workspace_search::WorkspaceSearch>,
     workspace_file_recents: std::collections::HashMap<String, Vec<String>>,
+    workspace_search_indexes:
+        std::collections::HashMap<String, std::sync::Arc<Vec<workspace_search::IndexedPath>>>,
+    workspace_search_index_key: Option<String>,
+    workspace_search_index_engine: Option<crate::state::EngineHandle>,
+    workspace_search_index_error: Option<(String, String)>,
+    workspace_search_index_task: Option<Task<()>>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
@@ -2252,6 +2258,11 @@ impl Shell {
             command_palette: None,
             workspace_search: None,
             workspace_file_recents: std::collections::HashMap::new(),
+            workspace_search_indexes: std::collections::HashMap::new(),
+            workspace_search_index_key: None,
+            workspace_search_index_engine: None,
+            workspace_search_index_error: None,
+            workspace_search_index_task: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
@@ -2739,6 +2750,7 @@ impl Shell {
                 changes.update(cx, |changes, cx| changes.ensure_content(cx));
             }
         }
+        self.prewarm_workspace_search(cx);
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
                 if self.splash == SplashPhase::Visible {

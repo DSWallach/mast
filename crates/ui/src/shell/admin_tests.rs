@@ -14,6 +14,13 @@ use crate::work_outline::outline_view::context_menu::{
 };
 use crate::work_outline::store::fixture_ids::*;
 
+fn admin_requests(wire: &mut Wire) -> Vec<(String, serde_json::Value)> {
+    wire.sent()
+        .into_iter()
+        .filter(|(method, _)| method != methods::WATCH_WORKSPACE_SEARCH_FILES)
+        .collect()
+}
+
 fn grant_for(chat: &str, expires_at_ms: Option<i64>) -> AdminGrant {
     AdminGrant {
         chat_id: chat.into(),
@@ -98,7 +105,7 @@ fn the_grant_dialog_sends_the_picked_duration(cx: &mut TestAppContext) {
             click(vcx, selector);
         }
         click(vcx, "admin-dialog-grant");
-        let sent = wire.sent();
+        let sent = admin_requests(&mut wire);
         assert_eq!(sent.len(), 1, "{choice:?}: {sent:?}");
         assert_eq!(sent[0].0, methods::GRANT_ADMIN);
         assert_eq!(sent[0].1["chatId"], CHAT_API);
@@ -116,7 +123,7 @@ fn the_grant_dialog_sends_the_picked_duration(cx: &mut TestAppContext) {
     draw(vcx);
     click(vcx, "admin-dialog-skip-bulk");
     click(vcx, "admin-dialog-grant");
-    let sent = wire.sent();
+    let sent = admin_requests(&mut wire);
     assert_eq!(sent[0].1["skipBulkConfirmation"], true);
 
     // Cancel sends nothing.
@@ -124,7 +131,7 @@ fn the_grant_dialog_sends_the_picked_duration(cx: &mut TestAppContext) {
     draw(vcx);
     click(vcx, "admin-dialog-cancel");
     assert!(!has(vcx, "admin-dialog-grant"));
-    assert!(wire.sent().is_empty());
+    assert!(admin_requests(&mut wire).is_empty());
 }
 
 #[gpui::test]
@@ -165,10 +172,10 @@ fn the_badge_shows_for_live_grants_only_and_revoke_sends_revoke_admin(cx: &mut T
     set_grants(&shell, vcx, vec![grant_for(CHAT_API, Some(now_ms() + 3 * 3_600_000))]);
     assert!(has(vcx, "chat-header-admin-badge") && has(vcx, "chat-item-admin-badge"));
     assert!(has(vcx, "chat-header-admin-revoke") && has(vcx, "chat-item-admin-revoke"));
-    assert!(wire.sent().is_empty());
+    assert!(admin_requests(&mut wire).is_empty());
 
     click(vcx, "chat-header-admin-revoke");
-    let sent = wire.sent();
+    let sent = admin_requests(&mut wire);
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].0, methods::REVOKE_ADMIN);
     assert_eq!(sent[0].1, serde_json::json!({ "chatId": CHAT_API }));
@@ -179,7 +186,7 @@ fn the_badge_shows_for_live_grants_only_and_revoke_sends_revoke_admin(cx: &mut T
     set_grants(&shell, vcx, vec![grant_for(CHAT_API, None)]);
     assert!(has(vcx, "chat-header-admin-badge"));
     click(vcx, "chat-item-admin-revoke");
-    assert_eq!(wire.sent()[0].0, methods::REVOKE_ADMIN);
+    assert_eq!(admin_requests(&mut wire)[0].0, methods::REVOKE_ADMIN);
     assert!(!has(vcx, "chat-header-admin-badge"));
 }
 

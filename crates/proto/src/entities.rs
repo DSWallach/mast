@@ -723,6 +723,9 @@ pub struct SearchWorkspaceContentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum WorkspaceContentSearchFrame {
+    Progress {
+        files: usize,
+    },
     Match {
         path: String,
         line: u64,

@@ -494,9 +494,10 @@ pub mod methods {
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
     pub const SEARCH_FILES: &str = "SearchFiles";
     // Device-local workspace filesystem operations. All are relay-forwardable;
-    // WatchWorkspaceFiles is the only streaming method in this group.
+    // Workspace watches and content search stream their results.
     pub const LIST_WORKSPACE_DIRECTORY: &str = "ListWorkspaceDirectory";
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
+    pub const WATCH_WORKSPACE_SEARCH_FILES: &str = "WatchWorkspaceSearchFiles";
     pub const SEARCH_WORKSPACE_CONTENT: &str = "SearchWorkspaceContent";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
