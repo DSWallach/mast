@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Typed Needs-you, phase 2** (2026-11-04 overnight, `needs-outcomes`): persisted `resolution.outcome`
+  (approved, declined, changes_requested, chosen, answered, dismissed) + `values` + `via`; per-kind card
+  buttons (approve → Approve/Decline, review/handoff → Approve/Request changes, Dismiss everywhere, note
+  prompt); a fixed-format user-attributed relay to the requesting chat; admin bulk changes apply only on
+  outcome `approved` (fixes "resolve with 'no' still approved"); `get_user_action_request`; outcomes in
+  read_current. Release run: nextest 2253/2253, UI 2415/0.
 - **Typed Needs-you, phase 1** (2026-11-03 night, `needs-kind-field`; design option C hybrid, plan
   mast-artifact:e0a05a3d0248e2e8d8d0fda6bb6214c4): Required Actions have `kind` (ask, review, approve, choose,
   handoff, notice) and `priority`; legacy text-only rows are classified on read; "Ready to merge" text
