@@ -514,6 +514,11 @@ impl SessionsEngine {
         }
     }
 
+    /// Harness for the authenticated live run, when it is still active.
+    pub fn run_harness(&self, chat_id: &str, run_id: &str) -> Option<HarnessId> {
+        lock(&self.inner.runs).get(chat_id).filter(|run| run.run_id == run_id).map(|run| run.runtime_config.harness_id)
+    }
+
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }

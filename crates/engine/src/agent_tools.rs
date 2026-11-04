@@ -407,6 +407,29 @@ struct KeyArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ReportFrictionArgs {
+    kind: mast_proto::FrictionKind,
+    summary: String,
+    what_happened: String,
+    workaround: Option<String>,
+    suggestion: Option<String>,
+    approval: Option<mast_proto::FrictionApproval>,
+    severity: Option<mast_proto::FrictionSeverity>,
+    #[serde(default)]
+    links: Vec<mast_proto::RequestLink>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListFrictionArgs {
+    kind: Option<mast_proto::FrictionKind>,
+    status: Option<mast_proto::FrictionStatus>,
+    since: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BindWorktreeArgs {
     #[serde(default)]
     path: Option<String>,
@@ -1042,6 +1065,8 @@ impl AgentToolsService {
                 Ok(service.agent_render_check(&caller, arguments)?)
             }
             tools::BIND_CHAT_WORKTREE => self.bind_chat_worktree(context, arguments),
+            tools::REPORT_FRICTION => self.report_friction(context, arguments),
+            tools::LIST_FRICTION => self.list_friction(context, arguments),
             other => Err(AgentToolError::refused(
                 AgentToolErrorCode::Unsupported,
                 format!("unknown agent tool: {other}"),
@@ -1064,6 +1089,79 @@ impl AgentToolsService {
     }
 
     // ---- tools ---------------------------------------------------------------
+
+    fn report_friction(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ReportFrictionArgs = parse_args(arguments)?;
+        let chat = self
+            .workspace
+            .chat(&context.grant.chat_id)
+            .map_err(|e| AgentToolError::invalid(e.to_string()))?
+            .ok_or_else(|| AgentToolError::invalid("calling chat not found"))?;
+        let harness_id = lock(&self.sessions)
+            .as_ref()
+            .and_then(|sessions| {
+                sessions.run_harness(&context.grant.chat_id, &context.grant.run_id)
+            })
+            .or_else(|| chat.config.as_ref().map(|config| config.harness));
+        let harness = harness_id
+            .and_then(|id| serde_json::to_value(id).ok())
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into());
+        let now = chrono::Utc::now().timestamp_millis();
+        let report = mast_proto::FrictionReport {
+            id: String::new(),
+            kind: args.kind,
+            summary: args.summary,
+            what_happened: args.what_happened,
+            workaround: args.workaround,
+            suggestion: args.suggestion,
+            approval: args.approval,
+            severity: args.severity,
+            links: args.links,
+            provenance: mast_proto::FrictionProvenance {
+                chat_id: context.grant.chat_id.clone(),
+                harness,
+                model: chat
+                    .actual_model
+                    .or_else(|| chat.config.and_then(|c| c.model)),
+                space_id: context.grant.space_id.clone(),
+                work_item_id: context.current_item_id(),
+                branch: chat.branch,
+                created_at: now,
+                source: mast_proto::FrictionSource::Agent,
+            },
+            fingerprint: String::new(),
+            occurrences: 0,
+            last_seen: now,
+            status: mast_proto::FrictionStatus::Open,
+        };
+        let report = self
+            .workspace
+            .record_friction(report)
+            .map_err(|e| AgentToolError::invalid(e.to_string()))?;
+        Ok(json!({ "report": report }))
+    }
+
+    fn list_friction(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ListFrictionArgs = parse_args(arguments)?;
+        let mut reports = self.workspace.friction_reports(&context.grant.space_id);
+        reports.retain(|report| {
+            args.kind.is_none_or(|kind| report.kind == kind)
+                && args.status.is_none_or(|status| report.status == status)
+                && args.since.is_none_or(|since| report.last_seen >= since)
+        });
+        reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
+        reports.truncate(args.limit.unwrap_or(100).min(500));
+        Ok(json!({ "reports": reports }))
+    }
 
     /// `bind_chat_worktree`: record a worktree as the calling Chat's diff
     /// target. Blocking git runs inline (this is already on a blocking thread).

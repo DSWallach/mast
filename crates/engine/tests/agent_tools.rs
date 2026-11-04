@@ -3709,3 +3709,39 @@ async fn typed_request_outcomes_are_readable_by_request_and_current() {
         .unwrap();
     assert_eq!(current["userActionRequests"].as_array().unwrap().len(), 9);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_provenance_deduplication_and_filters() {
+    let rig = rig().await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let first = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let second = tokens.mint(OTHER_CHAT, "run-2", SPACE, &rig.core.device_id);
+    rig.core.workspace.set_chat_actual_model(CHAT, "model-actual");
+    let input = json!({"kind":"bug", "summary":"Tool failed", "whatHappened":"It failed"});
+    let row = tool(&rig, first.token(), "report_friction", input.clone()).await.unwrap();
+    assert_eq!(row["report"]["provenance"]["chatId"], CHAT);
+    assert_eq!(row["report"]["provenance"]["spaceId"], SPACE);
+    assert_eq!(row["report"]["provenance"]["source"], "agent");
+    assert_eq!(row["report"]["provenance"]["model"], "model-actual");
+    let next = tool(&rig, second.token(), "report_friction", input).await.unwrap();
+    assert_eq!(next["report"]["id"], row["report"]["id"]);
+    assert_eq!(next["report"]["occurrences"], 2);
+    let list = tool(&rig, first.token(), "list_friction", json!({"kind":"bug", "status":"open", "since":0, "limit":1})).await.unwrap();
+    assert_eq!(list["reports"].as_array().unwrap().len(), 1);
+    assert_eq!(list["reports"][0]["occurrences"], 2);
+    for filter in [json!({"kind":"docs"}), json!({"status":"dismissed"}), json!({"since":i64::MAX})] {
+        let list = tool(&rig, first.token(), "list_friction", filter).await.unwrap();
+        assert!(list["reports"].as_array().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_captures_live_run_harness() {
+    let rig = rig().await;
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "live run").await;
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[0].clone() else { panic!("missing tools") };
+    let row = tool(&rig, &tools.env["MAST_AGENT_TOKEN"], "report_friction", json!({"kind":"bug", "summary":"Failure", "whatHappened":"Failed"})).await.unwrap();
+    assert_eq!(row["report"]["provenance"]["harness"], "mock");
+    rig.harness.release.notify_one();
+}
