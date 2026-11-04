@@ -607,9 +607,18 @@ impl WindowGeometry {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ProfileAtMigration {
+    Existing,
+    Fresh,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_at_migration: Option<ProfileAtMigration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
@@ -778,6 +787,7 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            profile_at_migration: None,
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
@@ -1643,6 +1653,29 @@ impl UiSettings {
         self
     }
 
+    /// Load and persist the one-time profile migration before other startup code
+    /// creates the data directory.
+    pub fn load_for_startup(data_dir: &Path) -> Self {
+        let profile = if data_dir.exists() || Self::path(data_dir).exists() {
+            ProfileAtMigration::Existing
+        } else {
+            ProfileAtMigration::Fresh
+        };
+        let mut settings = Self::load(data_dir);
+        if settings.profile_at_migration.is_none() {
+            settings.migrate_profile_settings(profile);
+            settings.profile_at_migration = Some(profile);
+            if let Err(error) = settings.save(data_dir) {
+                tracing::warn!(%error, "failed to save ui settings migration");
+            }
+        }
+        settings
+    }
+
+    fn migrate_profile_settings(&mut self, _profile: ProfileAtMigration) {
+        // Per-setting migrations are added here.
+    }
+
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
@@ -1826,6 +1859,29 @@ pub use mast_proto::SidebarSection;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_migration_records_fresh_and_existing_profiles_once() {
+        for existing in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let data_dir = parent.path().join("profile");
+            if existing {
+                std::fs::create_dir(&data_dir).unwrap();
+            }
+            let expected = if existing {
+                ProfileAtMigration::Existing
+            } else {
+                ProfileAtMigration::Fresh
+            };
+            let mut settings = UiSettings::load_for_startup(&data_dir);
+            assert_eq!(settings.profile_at_migration, Some(expected));
+            settings.sidebar_width = 345.0;
+            settings.save(&data_dir).unwrap();
+            let reloaded = UiSettings::load_for_startup(&data_dir);
+            assert_eq!(reloaded.profile_at_migration, Some(expected));
+            assert_eq!(reloaded.sidebar_width, 345.0);
+        }
+    }
 
     #[test]
     fn settings_saved_before_the_rename_still_load() {
@@ -2324,6 +2380,7 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
+            profile_at_migration: None,
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
@@ -3073,11 +3130,15 @@ mod tests {
     fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
         let mut keymap = KeymapConfig::default();
         assert_eq!(keymap.get(ShortcutId::QuickOpen), "mod-o");
-        assert_eq!(keymap.get(ShortcutId::SearchWorkspaceContent), "mod-shift-f");
+        assert_eq!(
+            keymap.get(ShortcutId::SearchWorkspaceContent),
+            "mod-shift-f"
+        );
         assert_eq!(keymap.get(ShortcutId::GoToLine), "mod-g");
         assert_eq!(keymap.get(ShortcutId::ReplaceFile), "mod-alt-f");
         keymap.set(ShortcutId::QuickOpen, "mod-alt-o".into());
-        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        let restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
         assert_eq!(restored.get(ShortcutId::QuickOpen), "mod-alt-o");
         keymap.set(ShortcutId::QuickOpen, "mod-p".into());
         assert!(!conflicted_shortcuts(&keymap).is_empty());

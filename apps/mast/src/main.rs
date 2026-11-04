@@ -133,6 +133,10 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
+    // Logging creates the data directory, so classify a headed profile first.
+    if cli.command.is_none() {
+        mast_ui::settings::UiSettings::load_for_startup(&paths::data_dir());
+    }
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         mast_update::windows::wait_for_exit(pid)?;
