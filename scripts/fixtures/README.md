@@ -9,12 +9,12 @@ Reasoning contributes another 853 bytes. The production transcript's part
 separators bring the combined short reply to 52,624 bytes.
 
 Use `MAST_REPLAY_REPEAT=10 MAST_REPLAY_DELAY_MS=8` for the synthetic long
-workload. See [the profiling report](../../docs/performance-resource-usage.md)
+workload. See [the profiling report](../../docs/internal/performance-resource-usage.md)
 for build settings, commands and measured results.
 
 `runway-short-stream.jsonl` is a synthetic short reply in 24-character chunks.
 It keeps the own-send runway active through completion. Use a 400 ms replay
-delay for the [runway performance comparison](../../docs/performance-runway-scroll.md).
+delay for the [runway performance comparison](../../docs/internal/performance-runway-scroll.md).
 
 `transcript-selection-stream.jsonl` is a synthetic short reply in six-character
 chunks. A 1200 ms replay delay leaves time to expand/collapse a long prompt and

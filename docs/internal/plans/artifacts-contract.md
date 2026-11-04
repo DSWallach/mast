@@ -92,7 +92,7 @@ Wire contract commit: `8e3bd0f1` (branch `artifacts-engine`). Code:
   `overlappingSiblings`, `narrowTextColumn`, `widerThanParent`, `fixedWidth`); at most 50 per
   call, identical errors across renders reported once.
 - Helpers: `artifact_id`, `publish_operation_id` (`artifact-<32 hex>`, ≤ 64 chars),
-  `artifact_links` (Markdown `[label](zeron-artifact:…)` links), `work_item_folder`,
+  `artifact_links` (Markdown `[label](../../plans/zeron-artifact:…)` links), `work_item_folder`,
   `chat_folder`, `OptionsManifest::parse`, `count_open_questions`, `count_unverified_claims`.
 
 ## Agent tools (`zeron-agent` MCP, token-scoped)
@@ -138,7 +138,7 @@ scoped to the token's Chat (and its work item).
 ## Engine behavior
 
 - **Marker fallback.** Every completed assistant segment is scanned (the same choke point that
-  mines PR links): `[t](zeron-artifact:<path>)` imports the file once per (chat, path) into the
+  mines PR links): `[t](../../plans/zeron-artifact:<path>)` imports the file once per (chat, path) into the
   chat's scope with title `t`; `zeron-artifact:<id>` links are left alone (they resolve to the
   existing artifact); Codex `visualize` references register as `htmlFragment` artifacts once per
   (chat, path). Best effort; failures are logged.

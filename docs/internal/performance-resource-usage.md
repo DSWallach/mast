@@ -181,7 +181,7 @@ Script checks and diff checks passed. This is not a claim that every workspace
 integration target ran, or that native Metal performance was measured.
 
 Requires Node 22+, Rust, Python 3 and Xvfb/xdotool for Linux desktop profiling.
-The [sanitized fixture](../scripts/fixtures/README.md) reproduces the measured
+The [sanitized fixture](../../scripts/fixtures/README.md) reproduces the measured
 replay without an API call. Use a dedicated display and fresh output directories;
 the driver requires exactly one Mast window.
 

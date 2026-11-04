@@ -73,7 +73,7 @@ success**, proving accepted-but-unacknowledged replay against actual server dedu
 The live test uses persistent SQLite storage but does not restart the process;
 a separate regression reopens the SQLite outbox before replay.
 
-[Raw run outputs and metadata](transport-results/2026-09-15/) are committed beside
+[Raw run outputs and metadata](../transport-results/2026-09-15) are committed beside
 this report. The proxy forces HTTP connection close, so its connection counter
 is not a production connection-pooling benchmark. Arrival-percentile recording
 was refined during testing; p95 fields in raw output are not used for comparisons.

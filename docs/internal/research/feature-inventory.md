@@ -202,7 +202,7 @@ display EXCLUDED. File paths refer to the reference repo.
   Readers use the message owner, then chat host/local fallbacks over attachment RPC.
   Missing/offline media shows an unavailable placeholder with the existing retry ladder.
   Inline `result`, SVG, workspace export, and regeneration are outside this feature.
-  Validation: [generated image checks](../generated-images-validation.md).
+  Validation: [generated image checks](../../generated-images-validation.md).
 - Cursor: turn-boundary steering. Mock for tests.
 
 ## 5. Session doc schema (MUST stay shape-compatible with TS packages/session-doc)

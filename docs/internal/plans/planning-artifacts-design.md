@@ -36,7 +36,7 @@ pinAsPlan?, idempotencyKey}`:
 - It returns `{artifactId, revision, url: "zeron-artifact:<artifactId>"}`. The agent puts that URL in
   its message; clicking it opens the rendered artifact.
 
-Fallback for harnesses without tools: a markdown link `[title](zeron-artifact:path/to/file.md)`
+Fallback for harnesses without tools: a markdown link `[title](../../plans/zeron-artifact:path/to/file.md)`
 anywhere in an assistant message registers that file on first sight.
 
 **Storage.** Registry row kind `artifacts` (id derived from chat + path):

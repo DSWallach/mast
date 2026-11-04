@@ -50,7 +50,7 @@ builds, immutable executable copies, fresh UI data directories, the same isolate
 mock-engine fixture, a dedicated 1280×900 Xvfb window, and `LP_NUM_THREADS=4`.
 Compilation was finished before each measurement. Linux x86_64, Rust 1.97.1.
 
-[The profiler](../scripts/dev/profile-composer.py) drives real key, clipboard, and
+[The profiler](../../scripts/dev/profile-composer.py) drives real key, clipboard, and
 wheel events without submitting a turn. It samples RSS every 100ms and reads
 process and main-thread CPU counters at phase boundaries. The fixture has two
 seeded chats in its sidebar and no streaming activity. For each binary, use a

@@ -40,11 +40,11 @@ The closeout flow now exposes the state that can block or make deletion risky be
 
 Primary files:
 
-- [`crates/engine/src/chat_workspace_plan.rs`](../../crates/engine/src/chat_workspace_plan.rs)
-- [`crates/engine/src/rpc.rs`](../../crates/engine/src/rpc.rs)
-- [`crates/ui/src/chat_closeout.rs`](../../crates/ui/src/chat_closeout.rs)
-- [`crates/ui/src/shell/closeout_ui.rs`](../../crates/ui/src/shell/closeout_ui.rs)
-- [`crates/ui/src/repository_topology.rs`](../../crates/ui/src/repository_topology.rs)
+- [`crates/engine/src/chat_workspace_plan.rs`](../../../crates/engine/src/chat_workspace_plan.rs)
+- [`crates/engine/src/rpc.rs`](../../../crates/engine/src/rpc.rs)
+- [`crates/ui/src/chat_closeout.rs`](../../../crates/ui/src/chat_closeout.rs)
+- [`crates/ui/src/shell/closeout_ui.rs`](../../../crates/ui/src/shell/closeout_ui.rs)
+- [`crates/ui/src/repository_topology.rs`](../../../crates/ui/src/repository_topology.rs)
 
 ### 2. Repo Map chat matching and exact-worktree chat creation
 
@@ -58,11 +58,11 @@ The topology join was revised because real worktrees were incorrectly shown with
 
 Primary files:
 
-- [`crates/engine/src/repository_topology.rs`](../../crates/engine/src/repository_topology.rs)
-- [`crates/engine/src/rpc.rs`](../../crates/engine/src/rpc.rs)
-- [`crates/ui/src/repository_topology.rs`](../../crates/ui/src/repository_topology.rs)
-- [`crates/ui/src/shell.rs`](../../crates/ui/src/shell.rs)
-- [`crates/ui/src/pickers.rs`](../../crates/ui/src/pickers.rs)
+- [`crates/engine/src/repository_topology.rs`](../../../crates/engine/src/repository_topology.rs)
+- [`crates/engine/src/rpc.rs`](../../../crates/engine/src/rpc.rs)
+- [`crates/ui/src/repository_topology.rs`](../../../crates/ui/src/repository_topology.rs)
+- [`crates/ui/src/shell.rs`](../../../crates/ui/src/shell.rs)
+- [`crates/ui/src/pickers.rs`](../../../crates/ui/src/pickers.rs)
 
 ### 3. Committed submodule diffs
 
@@ -78,10 +78,10 @@ The previously SHA-only submodule gap now has a first implementation:
 
 Primary files:
 
-- [`crates/engine/src/diff_sync.rs`](../../crates/engine/src/diff_sync.rs)
-- [`crates/engine/src/rpc.rs`](../../crates/engine/src/rpc.rs)
-- [`crates/proto/src/entities.rs`](../../crates/proto/src/entities.rs)
-- [`crates/ui/src/changes.rs`](../../crates/ui/src/changes.rs)
+- [`crates/engine/src/diff_sync.rs`](../../../crates/engine/src/diff_sync.rs)
+- [`crates/engine/src/rpc.rs`](../../../crates/engine/src/rpc.rs)
+- [`crates/proto/src/entities.rs`](../../../crates/proto/src/entities.rs)
+- [`crates/ui/src/changes.rs`](../../../crates/ui/src/changes.rs)
 
 ### 4. Full tool output/diff recovery and edit introspection
 
@@ -96,12 +96,12 @@ The transcript-side **Couldn't load full diff — retry** path is no longer edge
 
 Primary files:
 
-- [`crates/doc/src/parts.rs`](../../crates/doc/src/parts.rs)
-- [`crates/engine/src/doc_host.rs`](../../crates/engine/src/doc_host.rs)
-- [`crates/engine/src/sessions.rs`](../../crates/engine/src/sessions.rs)
-- [`crates/harness/src/codex/normalize.rs`](../../crates/harness/src/codex/normalize.rs)
-- [`crates/proto/src/agent.rs`](../../crates/proto/src/agent.rs)
-- [`crates/ui/src/transcript.rs`](../../crates/ui/src/transcript.rs)
+- [`crates/doc/src/parts.rs`](../../../crates/doc/src/parts.rs)
+- [`crates/engine/src/doc_host.rs`](../../../crates/engine/src/doc_host.rs)
+- [`crates/engine/src/sessions.rs`](../../../crates/engine/src/sessions.rs)
+- [`crates/harness/src/codex/normalize.rs`](../../../crates/harness/src/codex/normalize.rs)
+- [`crates/proto/src/agent.rs`](../../../crates/proto/src/agent.rs)
+- [`crates/ui/src/transcript.rs`](../../../crates/ui/src/transcript.rs)
 
 ### 5. Codex visualization envelopes
 
@@ -114,7 +114,7 @@ Zeron now recognizes the Codex control envelope that previously appeared as raw 
 
 This is display/link support, not an embedded HTML renderer. Native acceptance should confirm that opening the artifact is the desired product behavior.
 
-Primary file: [`crates/ui/src/transcript.rs`](../../crates/ui/src/transcript.rs).
+Primary file: [`crates/ui/src/transcript.rs`](../../../crates/ui/src/transcript.rs).
 
 ### 6. Canvas and Repo Map layout/navigation
 
@@ -130,10 +130,10 @@ The Canvas keeps the existing information density while changing the visual geom
 
 Primary files:
 
-- [`crates/ui/src/overview.rs`](../../crates/ui/src/overview.rs)
-- [`crates/ui/src/overview_layout.rs`](../../crates/ui/src/overview_layout.rs)
-- [`crates/ui/src/repository_topology.rs`](../../crates/ui/src/repository_topology.rs)
-- [`crates/ui/src/shell.rs`](../../crates/ui/src/shell.rs)
+- [`crates/ui/src/overview.rs`](../../../crates/ui/src/overview.rs)
+- [`crates/ui/src/overview_layout.rs`](../../../crates/ui/src/overview_layout.rs)
+- [`crates/ui/src/repository_topology.rs`](../../../crates/ui/src/repository_topology.rs)
+- [`crates/ui/src/shell.rs`](../../../crates/ui/src/shell.rs)
 
 ### 7. Full-chat metadata
 
@@ -146,8 +146,8 @@ The open full-chat header now reuses the compact metadata strip rather than leav
 
 Primary files:
 
-- [`crates/ui/src/chat_metadata.rs`](../../crates/ui/src/chat_metadata.rs)
-- [`crates/ui/src/shell.rs`](../../crates/ui/src/shell.rs)
+- [`crates/ui/src/chat_metadata.rs`](../../../crates/ui/src/chat_metadata.rs)
+- [`crates/ui/src/shell.rs`](../../../crates/ui/src/shell.rs)
 
 ### 8. PR sidebar loading
 
@@ -160,11 +160,11 @@ The empty PR sidebar race and GUI environment mismatch have source fixes:
 
 Primary files:
 
-- [`crates/engine/src/pr_ticket_cache.rs`](../../crates/engine/src/pr_ticket_cache.rs)
-- [`crates/engine/src/rpc.rs`](../../crates/engine/src/rpc.rs)
-- [`crates/harness/src/lib.rs`](../../crates/harness/src/lib.rs)
-- [`crates/ui/src/overview.rs`](../../crates/ui/src/overview.rs)
-- [`crates/engine/tests/pr_ticket_cache_login_shell.rs`](../../crates/engine/tests/pr_ticket_cache_login_shell.rs)
+- [`crates/engine/src/pr_ticket_cache.rs`](../../../crates/engine/src/pr_ticket_cache.rs)
+- [`crates/engine/src/rpc.rs`](../../../crates/engine/src/rpc.rs)
+- [`crates/harness/src/lib.rs`](../../../crates/harness/src/lib.rs)
+- [`crates/ui/src/overview.rs`](../../../crates/ui/src/overview.rs)
+- [`crates/engine/tests/pr_ticket_cache_login_shell.rs`](../../../crates/engine/tests/pr_ticket_cache_login_shell.rs)
 
 ### 9. Privacy-sensitive automatic access
 

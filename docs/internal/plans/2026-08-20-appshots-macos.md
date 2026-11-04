@@ -1,7 +1,7 @@
 # macOS Appshots implementation plan
 
 > Historical design notes. The implemented behavior and current validation are
-> documented in [Appshots](../appshots.md); proposals below may be superseded.
+> documented in [Appshots](../../appshots.md); proposals below may be superseded.
 
 ## Behavior
 

@@ -56,10 +56,7 @@ layout and edge-fade corrections.
 
 ## Verification
 
-[Windows CI](../../.github/workflows/windows.yml) builds the release application
-and tests application startup, agent discovery/protocols, process cleanup,
-ConPTY, locking, UI behavior, and shader layouts. Shared Rust regressions run
-on Linux and macOS. To run the engine and harness checks locally:
+The upstream Windows CI workflow is not included in Mast. These historical commands describe the upstream checks; Windows is outside the current macOS-only scope:
 
 ```powershell
 cargo test --locked -p mast-engine -p mast-harness --lib

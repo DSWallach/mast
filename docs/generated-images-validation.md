@@ -125,20 +125,7 @@ These XCTest cases were added on Linux; they have **not** been run in Xcode or o
 an iPhone. Changed Swift files passed a tree-sitter syntax parse and `git diff
 --check`; this does not replace Swift type checking or simulator validation.
 
-On a Mac with the project dependencies installed and `SIMULATOR_UDID` set:
-
-```sh
-xcodebuild test -project apps/ios/Zeron.xcodeproj -scheme Zeron \
-  -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
-  -only-testing:ZeronTests/GeneratedImageTests \
-  -only-testing:ZeronTests/TranscriptLayoutTests
-```
-
-For the device check, generate an image on a desktop host and open its chat on
-an iPhone. Verify inline display, tap-to-preview, returning to the chat, and scroll
-position during loading. Reopen on a client without cached bytes while the host
-is offline, then reconnect the host and verify retry recovery. Also check light
-and dark appearances and a portrait image whose displayed height reaches the cap.
+The iOS implementation and its tests are preserved on the `archive/ios` branch.
 
 ## Desktop security regressions
 

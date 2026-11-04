@@ -42,7 +42,7 @@ still submit GPU work; this change does not promise a flat low footprint while
 rendering. The driver observation alone does not identify every smaller change
 in the app's memory.
 
-The reusable [standalone probe](../scripts/dev/macos-metal-memory-probe.m) supports
+The reusable [standalone probe](../../scripts/dev/macos-metal-memory-probe.m) supports
 `blit`, `render`, `mixed`, and `blur` workloads:
 
 ```sh

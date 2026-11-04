@@ -1,5 +1,7 @@
 # Work Outline M0 audit: UI integration points
 
+> Historical audit: Canvas has since been removed. See the [binding contract](m0-contract.md) and [current Work Outline guide](../../../work-outline.md) for current behavior.
+
 Scope: `crates/ui` on branch `work-outline-implementation` (read-only audit, nothing edited except this file).
 Spec: `docs/plans/work-outline-implementation-specification.md` (UX requirements lines 116-219, acceptance 24-31 at 617-624, M1 scope 639-650).
 All paths are relative to `crates/ui/src/` unless prefixed. Line numbers are from the audited tree and will drift.

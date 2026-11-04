@@ -273,4 +273,4 @@ NOT counted: `comments`, `no-reviewer`, `commented-by-you`. (The CLI `--needs` f
 
 ## 9. Tab 3 and the person picker (5 lines)
 - Review leaderboard: always `org:Cofactr`, 13 weeks (Mon start, local time), searches `org:Cofactr is:pr updated:{lo}..{hi}` week by week, per PR `reviews(last:100){author{__typename login} state submittedAt}`; a PR counts once per person per week per repo; excludes bots, the PR author, PENDING and unsubmitted reviews; `--repo` substring filter; rows ranked by total then name (L507-591, L3253-3322).
-- Picker: `GET /api/prs?author=<login>` (op `prs` with `author`) re-runs both tabs for that login (`me` in normalize = that login); options = viewer first ("(you)"), then leaderboard people sorted by display name; login must match `[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})`.
+- Picker: `GET /api/prs?author=<login>` (op `prs` with `author`) re-runs both tabs for that login (`me` in normalize = that login); options = viewer first ("(you)"), then leaderboard people sorted by display name; login must match `[A-Za-z0-9](../../../plans/work-outline/?:[A-Za-z0-9-]{0,38})`.

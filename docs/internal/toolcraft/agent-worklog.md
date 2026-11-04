@@ -59,7 +59,7 @@ Tier 2: compile and test the affected Rust UI crate, then visually inspect the s
 
 ## 2026-08-20 — Appshots exploration
 
-> The Appshots entries below are historical. See [the current implementation](../appshots.md)
+> The Appshots entries below are historical. See [the current implementation](../../appshots.md)
 > for supported platforms, settings, and validation limits.
 
 - Product goal: capture the frontmost application from a global shortcut and
