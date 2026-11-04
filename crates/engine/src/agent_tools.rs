@@ -1138,6 +1138,8 @@ impl AgentToolsService {
             occurrences: 0,
             last_seen: now,
             status: mast_proto::FrictionStatus::Open,
+            promoted_item_id: None,
+            promoted_at: None,
         };
         let report = self
             .workspace

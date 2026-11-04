@@ -77,4 +77,8 @@ pub struct FrictionReport {
     pub occurrences: u64,
     pub last_seen: i64,
     pub status: FrictionStatus,
+    #[serde(default)]
+    pub promoted_item_id: Option<String>,
+    #[serde(default)]
+    pub promoted_at: Option<i64>,
 }

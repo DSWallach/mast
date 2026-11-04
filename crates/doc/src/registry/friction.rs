@@ -59,14 +59,27 @@ impl RegistryDoc {
 
     /// Update the answer without recording another occurrence.
     pub fn answer_friction_approval(&mut self, id: &str, answer: bool) -> Result<(), DocError> {
-        let row = self.overlay_row(KIND_FRICTION_REPORTS, id).ok_or_else(|| DocError::Schema("friction report not found".into()))?;
-        let mut report = decode(&row).ok_or_else(|| DocError::Schema("invalid friction report".into()))?;
-        let approval = report.approval.as_mut().ok_or_else(|| DocError::Schema("friction report has no approval".into()))?;
+        let row = self
+            .overlay_row(KIND_FRICTION_REPORTS, id)
+            .ok_or_else(|| DocError::Schema("friction report not found".into()))?;
+        let mut report =
+            decode(&row).ok_or_else(|| DocError::Schema("invalid friction report".into()))?;
+        let approval = report
+            .approval
+            .as_mut()
+            .ok_or_else(|| DocError::Schema("friction report has no approval".into()))?;
         approval.answer = Some(answer);
         let mut fields = BTreeMap::new();
         fields.insert("approval".into(), serde_json::to_value(approval)?);
         self.observe_row(KIND_FRICTION_REPORTS, id);
-        let op = RowOp { kind: KIND_FRICTION_REPORTS.into(), id: id.into(), op: OpKind::Update, set: Some(fields), hlc: self.next_hlc(), clocks: None };
+        let op = RowOp {
+            kind: KIND_FRICTION_REPORTS.into(),
+            id: id.into(),
+            op: OpKind::Update,
+            set: Some(fields),
+            hlc: self.next_hlc(),
+            clocks: None,
+        };
         check_op_size(&op)?;
         self.write_ops(vec![op])?;
         Ok(())
@@ -178,6 +191,8 @@ mod tests {
             occurrences: 0,
             last_seen: 0,
             status: FrictionStatus::Open,
+            promoted_item_id: None,
+            promoted_at: None,
         }
     }
 
@@ -188,6 +203,20 @@ mod tests {
             .record_friction(report("space", "chat-1", "Test  failure", 1))
             .unwrap();
         assert_eq!(doc.friction_reports("space"), vec![first.clone()]);
+        let mut value = serde_json::to_value(&first).unwrap();
+        value.as_object_mut().unwrap().remove("promotedItemId");
+        value.as_object_mut().unwrap().remove("promotedAt");
+        let legacy: FrictionReport = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.promoted_item_id, None);
+        assert_eq!(legacy.promoted_at, None);
+        let mut promoted = first.clone();
+        promoted.promoted_item_id = Some("item".into());
+        promoted.promoted_at = Some(42);
+        assert_eq!(
+            serde_json::from_value::<FrictionReport>(serde_json::to_value(&promoted).unwrap())
+                .unwrap(),
+            promoted
+        );
         let second = doc
             .record_friction(report("space", "chat-2", " test failure ", 2))
             .unwrap();
