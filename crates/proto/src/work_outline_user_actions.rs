@@ -224,10 +224,57 @@ pub fn user_reply_message(request_text: &str, note: &str) -> String {
     format!("Re: \"{quote}\": {}", note.trim())
 }
 
+/// A labeled reference attached to a user action request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLink {
+    pub label: String,
+    pub target: RequestLinkTarget,
+}
+
+/// The destination of a request link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RequestLinkTarget {
+    Artifact {
+        id: String,
+    },
+    File {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line: Option<u32>,
+    },
+    Diff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    Pr {
+        url: String,
+    },
+    Chat {
+        id: String,
+    },
+    Url {
+        url: String,
+    },
+}
+
+/// A labeled fact attached to a user action request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestFact {
+    pub label: String,
+    pub value: String,
+}
+
 /// One materialized `userActionRequests` row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserActionRequestView {
+    #[serde(default)]
+    pub links: Vec<RequestLink>,
+    #[serde(default)]
+    pub facts: Vec<RequestFact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UserActionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,7 +323,8 @@ pub struct UserActionRequestView {
 
 impl UserActionRequestView {
     pub fn effective_kind(&self) -> UserActionKind {
-        self.kind.unwrap_or_else(|| classify_legacy_request(&self.text, self.dedupe_key.as_deref()))
+        self.kind
+            .unwrap_or_else(|| classify_legacy_request(&self.text, self.dedupe_key.as_deref()))
     }
 
     pub fn is_open(&self) -> bool {
@@ -297,6 +345,10 @@ impl UserActionRequestView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateUserActionRequestParams {
+    #[serde(default)]
+    pub links: Vec<RequestLink>,
+    #[serde(default)]
+    pub facts: Vec<RequestFact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UserActionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
