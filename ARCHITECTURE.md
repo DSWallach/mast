@@ -5,13 +5,13 @@ A ground-up native rewrite of [zeron](../zeron) — a multi-device controller fo
 
 **Pillars (from the goal):**
 - Optional sync uses Loro CRDT docs (loro-mirror model) through Cloudflare Durable Objects; the same docs persist locally when sync is disabled.
-- Durable Objects stay **TypeScript** (decision + evidence: `docs/research/durable-objects-language.md`).
+- Durable Objects stay **TypeScript** (decision + evidence: `docs/internal/research/durable-objects-language.md`).
   Everything device-side is Rust.
 - Feature parity with zeron **except token-usage display** (poor fit for CRDTs; excluded).
 - Frontend is **gpui** (pinned Zed rev). Virtualization + markdown techniques ported from
-  **mugen + pretext** (`docs/research/mugen-pretext.md`).
+  **mugen + pretext** (`docs/internal/research/mugen-pretext.md`).
 - One binary, **headed or headless**. Smooth transitions/animations matching the original
-  (catalog in `docs/research/feature-inventory.md` §1.12).
+  (catalog in `docs/internal/research/feature-inventory.md` §1.12).
 
 ## 1. Topology (unchanged shape, new materials)
 
@@ -155,9 +155,7 @@ zeron/
     ui/           mast-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
   apps/
-    zeron/                       # the binary (headed default, `headless` subcommand)
-  edge/                          # TypeScript Worker + DOs (ported from zeron/apps/edge,
-                                 # + auth-exchange routes absorbed from apps/server)
+    mast/                        # the binary (headed default, `headless` subcommand)
   docs/                          # this file + research reports
 ```
 
@@ -167,8 +165,8 @@ thread; the UI never blocks on it.
 
 ## 4. UI plan (gpui) — parity + smoothness
 
-Reference: `docs/research/gpui.md`, `docs/research/mugen-pretext.md`,
-feature spec `docs/research/feature-inventory.md` §1.
+Reference: `docs/internal/research/gpui.md`, `docs/internal/research/mugen-pretext.md`,
+feature spec `docs/internal/research/feature-inventory.md` §1.
 
 - **Deps**: `gpui` + `gpui_platform` pinned to one Zed rev (Apache-2.0). **We do not use Zed's
   GPL crates** (`markdown`, `ui`, `theme`, `editor`) — markdown, components, and theme are ours.
@@ -227,7 +225,7 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
-- **Harness** (research pending — `docs/research/harness.md`): trait mirroring zeron's
+- **Harness** (research pending — `docs/internal/research/harness.md`): trait mirroring zeron's
   `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
   permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or
   `codex exec --json`; model/reasoning/option catalogs ported from `packages/harness`.
@@ -240,16 +238,9 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
 - **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
   callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
 
-## 6. Edge plan (TypeScript, `edge/`)
+## 6. Sync
 
-Port `zeron/apps/edge` nearly verbatim (it is already Loro-native and smoke-tested: session room
-w/ hibernation + two-level compaction + daily alarm backups, device room byte relay + nudges +
-sidecar slots, R2 attachments, JWKS auth). Additions:
-1. Private per-user registry rooms (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral device presence.
-2. `/auth/*` routes absorbed from `apps/server` (WorkOS API key in Worker secret).
-3. Drop `/seed` migration path and legacy sync anything (fresh app).
-Hibernation hygiene: no idle timers (flush timer only while dirty), auto-response ping/pong —
-per `docs/research/durable-objects-language.md`.
+Sync is disabled by default. The Rust protocol remains in the workspace; the upstream hosted worker is not included in this repository.
 
 ## 7. Parity exclusions & deliberate changes
 
@@ -264,7 +255,7 @@ per `docs/research/durable-objects-language.md`.
 
 ## 8. Milestones
 
-Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`).
+Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/internal/PARITY.md`).
 
 - ✅ **M0 Scaffold** — workspace builds; `proto`/`doc` crates with ledger + parts + continuation
   unit tests; gpui hello-window runs.
@@ -283,8 +274,7 @@ Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`
   agent accounts UI, settings (devices/shortcuts/archived), Codex harness. Gaps: composer
   attachment UI (engine upload RPCs exist), Cursor harness.
 - 🟡 **M6 Polish** — wire reconciliation (proto AuthState on the wire, `LocalDevice`),
-  two-device e2e smoke, keyboard map, clippy/fmt sweep, Linux packaging
-  (`scripts/package-linux.sh` + release profile), macOS bundling config (`dist/macos/`,
+  two-device e2e smoke, keyboard map, clippy/fmt sweep, macOS bundling config (`dist/macos/`,
   not executed — needs a Mac). Gaps: prefers-reduced-motion, engine hardening
   (instance lock, watchdogs), edge production deploy.
 

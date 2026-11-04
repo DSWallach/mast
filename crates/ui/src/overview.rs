@@ -7537,7 +7537,7 @@ mod logic_tests {
         let space = Space {
             id: "workspace-space".into(),
             device_id: "device".into(),
-            path: "/Users/mikey/Projects/cofactr/workspace".into(),
+            path: "/Users/example/Projects/cofactr/workspace".into(),
             name: None,
             git_detected: true,
             git_checked_at: None,
@@ -7546,7 +7546,7 @@ mod logic_tests {
         };
         let mut chat = row(
             "chat",
-            "/Users/mikey/.zeron/worktrees/workspace/swift-otter",
+            "/Users/example/.zeron/worktrees/workspace/swift-otter",
             None,
         )
         .chat;
@@ -7562,14 +7562,14 @@ mod logic_tests {
         let space = Space {
             id: "workspace-space".into(),
             device_id: "device".into(),
-            path: "/Users/mikey/Projects/cofactr/workspace/".into(),
+            path: "/Users/example/Projects/cofactr/workspace/".into(),
             name: Some("Custom project name".into()),
             git_detected: true,
             git_checked_at: None,
             checkout_id: Some("main-checkout".into()),
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
         };
-        let chat = row("chat", "/Users/mikey/Projects/cofactr/workspace", None).chat;
+        let chat = row("chat", "/Users/example/Projects/cofactr/workspace", None).chat;
 
         assert_eq!(repo_key_for_chat(&chat, Some(&space)), "workspace");
         assert_eq!(repo_key_for_chat(&chat, None), "workspace");

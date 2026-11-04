@@ -10,7 +10,7 @@ way the Cofactr workspace's `tools/cursor-claude-launcher/launch.sh` does
   Shortcuts, default `mod-p`, "Open PR page"); ⇧⌘P is a fixed alias; the
   palette's **My PRs** opens it too. The page is a port of pr-dash with three
   tabs: **Authored by me** (default) and **Review requested**, both fed by
-  `PrDashboard` (see [pr-dash spec](plans/work-outline/pr-dash-spec.md)), and
+  `PrDashboard` (see [pr-dash spec](internal/plans/work-outline/pr-dash-spec.md)), and
   **Review chats** (the destination list below, or the launcher review Chats). Each dash tab title carries its needs-you count (`urgent / total`,
   red when anything needs you, over rows that pass **hide drafts**); the page
   refetches the visible tab every minute and **Refresh** forces. A tab has

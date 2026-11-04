@@ -2287,7 +2287,7 @@ mod tests {
             home
         ));
         assert!(!is_broad_workspace_root_with_home(
-            Path::new("/Users/mikey/Projects/app"),
+            Path::new("/Users/example/Projects/app"),
             home
         ));
         assert!(!is_broad_workspace_root_with_home(
@@ -2300,18 +2300,18 @@ mod tests {
     fn automatic_access_blocks_privacy_managed_home_subtrees_only() {
         let home = Path::new("/Users/mikey");
         for path in [
-            "/Users/mikey/Desktop",
-            "/Users/mikey/Documents/project",
-            "/Users/mikey/Downloads/repo",
-            "/Users/mikey/Movies/clips",
-            "/Users/mikey/Music/library",
-            "/Users/mikey/Pictures/Photos Library.photoslibrary",
-            "/Users/mikey/Library/Application Support/app",
+            "/Users/example/Desktop",
+            "/Users/example/Documents/project",
+            "/Users/example/Downloads/repo",
+            "/Users/example/Movies/clips",
+            "/Users/example/Music/library",
+            "/Users/example/Pictures/Photos Library.photoslibrary",
+            "/Users/example/Library/Application Support/app",
         ] {
             assert!(is_automatic_access_blocked_with_home(Path::new(path), home));
         }
         assert!(!is_automatic_access_blocked_with_home(
-            Path::new("/Users/mikey/Projects/app"),
+            Path::new("/Users/example/Projects/app"),
             home
         ));
         assert!(!is_automatic_access_blocked_with_home(
@@ -2342,7 +2342,7 @@ mod tests {
         }
         assert!(!is_protected_home_child_with_home(home, "Projects", home));
         assert!(!is_protected_home_child_with_home(
-            Path::new("/Users/mikey/Projects"),
+            Path::new("/Users/example/Projects"),
             "Documents",
             home
         ));

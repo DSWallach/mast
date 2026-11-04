@@ -32,7 +32,7 @@ You already run several agent chats at once. Mast gives them a place to live, so
 
 ## Install
 
-Mast runs on macOS. It is built from source. Linux and Windows scripts are left over from upstream and are not tested.
+Mast runs on macOS and is built and updated from source. Device sync is disabled by default.
 
 You need:
 

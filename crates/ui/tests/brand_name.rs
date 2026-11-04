@@ -146,3 +146,31 @@ fn macos_bundle_templates_are_named_mast() {
         assert!(plist.contains("<key>CFBundleExecutable</key>\n    <string>zeron</string>"));
     }
 }
+
+#[test]
+fn onboarding_documents_use_the_current_name() {
+    let root = workspace_root();
+    let mut files = vec![root.join("README.md")];
+    files.extend(
+        fs::read_dir(root.join("docs/guide"))
+            .expect("guide directory")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md")),
+    );
+    for path in files {
+        let text = fs::read_to_string(&path).expect("read onboarding document");
+        for (index, line) in text.lines().enumerate() {
+            // Preserve the project's explicit historical attribution.
+            if path.ends_with("README.md") && line.contains("fork of [zeronsh/zeron]") {
+                continue;
+            }
+            assert!(
+                !OLD_NAMES.iter().any(|word| has_whole_word(line, word)),
+                "{}:{}: {line}",
+                path.display(),
+                index + 1
+            );
+        }
+    }
+}

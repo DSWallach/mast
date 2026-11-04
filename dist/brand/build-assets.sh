@@ -10,7 +10,6 @@ python3 "$HERE/generate.py"
 
 cp "$HERE/mast-icon.svg" "$DIST/mast.svg"
 "$RSVG" -w 1024 -h 1024 "$HERE/mast-icon.svg" -o "$DIST/macos/icon-1024.png"
-"$RSVG" -w 1024 -h 1024 "$HERE/mast-icon.svg" -o "$DIST/zeron.png"  # Linux icon (dist/zeron.desktop)
 
 # Icon PNGs: the simplified icon is used at 32 px and below.
 for n in 1024 512 256 128 64; do "$RSVG" -w "$n" -h "$n" "$HERE/mast-icon.svg" -o "$HERE/mast-icon-$n.png"; done

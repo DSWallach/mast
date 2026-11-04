@@ -11,3 +11,9 @@ node_modules
 build/
 edge/dist/
 .agents
+
+.workspace-root
+.mast/
+.zeron/
+target-*/
+.worktrees/

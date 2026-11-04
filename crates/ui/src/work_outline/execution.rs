@@ -1084,12 +1084,12 @@ mod tests {
     fn home_directory_detection_for_the_root_picker() {
         use super::is_device_home;
         assert!(is_device_home("/Users/mikey", None));
-        assert!(is_device_home("/Users/mikey/", None));
+        assert!(is_device_home("/Users/example/", None));
         assert!(is_device_home("/home/dev", None));
         assert!(is_device_home("/root", None));
         assert!(is_device_home("~", None));
         assert!(is_device_home("/srv/me", Some("/srv/me")));
-        assert!(!is_device_home("/Users/mikey/Projects", None));
+        assert!(!is_device_home("/Users/example/Projects", None));
         assert!(!is_device_home("/Users", None));
         assert!(!is_device_home("/srv/me/app", Some("/srv/me")));
         assert!(!is_device_home("/srv/work", None));

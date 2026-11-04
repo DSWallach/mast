@@ -23,14 +23,9 @@ The fixture uses synthetic chat data, temporary app storage, and a local HTTP se
 cargo test -p mast-ui
 cargo build -p mast
 cargo build -p mast-ui --example browser-fixture --features browser-fixture
-MAST_TRANSCRIPT_LINK_FIXTURE_ONLY=1 \
-  BROWSER_FIXTURE_BINARY=target/debug/examples/browser-fixture \
-  scripts/test-linux-browser.sh /tmp/zeron-transcript-links
 ```
 
-If FFmpeg lacks `libx264`, add `BROWSER_FIXTURE_VIDEO_CODEC=mpeg4` to the runner environment.
-
-The Linux runner exercises X11 and nested Wayland with native pointer input. It captures hover disclosure, focus disclosure over a live Browser, the context menu, and successful navigation; it also checks complete clipboard content, independent tabs, and native visibility after closing. Unit and rendered tests cover external routing without launching the system browser, stale sessions, rejected destinations, keyboard navigation, selection drags, Unicode, resizing, tables, and streaming offset maps.
+Unit and rendered tests cover external routing, stale sessions, rejected destinations, keyboard navigation, selection drags, Unicode, resizing, tables, and streaming offset maps.
 
 On macOS, build the same example and run it with the release application's Info.plist:
 
