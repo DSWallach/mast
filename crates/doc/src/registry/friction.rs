@@ -85,6 +85,43 @@ impl RegistryDoc {
         Ok(())
     }
 
+    pub fn set_friction_status(
+        &mut self,
+        space_id: &str,
+        fingerprint: &str,
+        status: FrictionStatus,
+        promoted_item_id: Option<String>,
+        promoted_at: Option<i64>,
+    ) -> Result<FrictionReport, DocError> {
+        let report = self
+            .friction_reports(space_id)
+            .into_iter()
+            .find(|r| r.fingerprint == fingerprint)
+            .ok_or_else(|| DocError::Schema("friction report not found".into()))?;
+        let mut fields = BTreeMap::new();
+        fields.insert("status".into(), serde_json::to_value(status)?);
+        fields.insert(
+            "promotedItemId".into(),
+            serde_json::to_value(promoted_item_id)?,
+        );
+        fields.insert("promotedAt".into(), serde_json::to_value(promoted_at)?);
+        self.observe_row(KIND_FRICTION_REPORTS, &report.id);
+        let op = RowOp {
+            kind: KIND_FRICTION_REPORTS.into(),
+            id: report.id.clone(),
+            op: OpKind::Update,
+            set: Some(fields),
+            hlc: self.next_hlc(),
+            clocks: None,
+        };
+        check_op_size(&op)?;
+        self.write_ops(vec![op])?;
+        self.overlay_row(KIND_FRICTION_REPORTS, &report.id)
+            .as_ref()
+            .and_then(decode)
+            .ok_or_else(|| DocError::Schema("friction report could not be read".into()))
+    }
+
     /// Record an occurrence with a per-device counter, so concurrent devices merge.
     pub fn record_friction(
         &mut self,

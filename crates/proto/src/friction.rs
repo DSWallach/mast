@@ -82,3 +82,38 @@ pub struct FrictionReport {
     #[serde(default)]
     pub promoted_at: Option<i64>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFrictionReportsParams {
+    pub space_id: String,
+    pub kind: Option<FrictionKind>,
+    pub status: Option<FrictionStatus>,
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub since: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetFrictionStatusParams {
+    pub space_id: String,
+    pub fingerprint: String,
+    pub status: FrictionStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromoteFrictionToItemParams {
+    pub space_id: String,
+    pub fingerprint: String,
+    pub parent_item_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposeFrictionInstructionParams {
+    pub space_id: String,
+    pub fingerprint: String,
+}

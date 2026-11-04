@@ -372,6 +372,22 @@ impl WorkOutlineActions {
         })
     }
 
+    pub(crate) fn list_friction_reports(&self, params: mast_proto::ListFrictionReportsParams) -> Task<Result<Vec<mast_proto::FrictionReport>, WorkOutlineError>> {
+        self.call(methods::LIST_FRICTION_REPORTS, serde_json::to_value(params).unwrap(), decode_json::<Vec<mast_proto::FrictionReport>>)
+    }
+
+    pub(crate) fn set_friction_status(&self, params: mast_proto::SetFrictionStatusParams) -> Task<Result<mast_proto::FrictionReport, WorkOutlineError>> {
+        self.call(methods::SET_FRICTION_STATUS, serde_json::to_value(params).unwrap(), decode_json::<mast_proto::FrictionReport>)
+    }
+
+    pub(crate) fn promote_friction_to_item(&self, params: mast_proto::PromoteFrictionToItemParams) -> Task<Result<mast_proto::CreateWorkItemResult, WorkOutlineError>> {
+        self.call(methods::PROMOTE_FRICTION_TO_ITEM, serde_json::to_value(params).unwrap(), decode_json::<mast_proto::CreateWorkItemResult>)
+    }
+
+    pub(crate) fn propose_friction_instruction(&self, params: mast_proto::ProposeFrictionInstructionParams) -> ActionTask {
+        self.call(methods::PROPOSE_FRICTION_INSTRUCTION, serde_json::to_value(params).unwrap(), decode_reply)
+    }
+
     /// Send one mutation and decode the reply. The mutation is serialized
     /// once, so every transport retry carries the same `operationId`.
     pub(crate) fn mutate(&self, mutation: WorkOutlineMutation) -> ActionTask {
