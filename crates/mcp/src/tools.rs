@@ -310,11 +310,13 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::CREATE_USER_ACTION_REQUEST,
-            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Optional: detail, dedupeKey, toolCallId.",
+            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Use kind to distinguish ask, review, approve, choose, handoff (finished work), and notice (FYI); optional priority is blocking, normal, or fyi. Optional: kind, priority, detail, dedupeKey, toolCallId.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "request": { "type": "string", "description": "The concise question or requested action." },
+                    "kind": { "type": "string", "enum": ["ask", "review", "approve", "choose", "handoff", "notice"], "description": "What the user should do; defaults to ask. Use handoff for finished work and notice for FYI." },
+                    "priority": { "type": "string", "enum": ["blocking", "normal", "fyi"], "description": "Optional grouping override." },
                     "detail": { "type": "string" },
                     "dedupeKey": { "type": "string", "description": "Equivalent open requests with the same key are not repeated. With a dedupeKey, idempotencyKey is optional." },
                     "toolCallId": { "type": "string" },

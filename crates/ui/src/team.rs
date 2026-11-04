@@ -16,7 +16,7 @@ use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, PrStatus};
 use mast_proto::{Chat, ChatIndicator, WorkItemEffectiveStatus, WorkOutlineSnapshot};
 
 use crate::chat_metadata::HeaderTicket;
-use crate::status_light::is_ready_to_merge;
+use mast_proto::work_outline_user_actions::UserActionKind;
 
 /// Longest activity line, in characters.
 pub(crate) const ACTIVITY_MAX_CHARS: usize = 110;
@@ -294,7 +294,12 @@ fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFa
             .iter()
             .filter(|r| r.is_open() && !r.deduped && r.chat_id == chat.id)
         {
-            if is_ready_to_merge(&request.text) {
+            if request.effective_kind() == UserActionKind::Notice
+                || request.priority == Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)
+            {
+                continue;
+            }
+            if request.effective_kind() == UserActionKind::Handoff {
                 ready.get_or_insert_with(|| ReadyAction {
                     space_id: snapshot.space_id.clone(),
                     item_id: request.work_item_id.clone(),

@@ -1086,12 +1086,16 @@ impl RequiredActionsList {
                     .items_start()
                     .gap(px(6.0))
                     .child(
-                        div()
-                            .flex_none()
-                            .mt(px(5.0))
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(if open { attention } else { theme.text_faint }),
+                        crate::icons::icon(match row.kind {
+                            mast_proto::work_outline_user_actions::UserActionKind::Ask => crate::icons::CHAT_ROUND_LINE,
+                            mast_proto::work_outline_user_actions::UserActionKind::Review => crate::icons::EYE,
+                            mast_proto::work_outline_user_actions::UserActionKind::Approve => crate::icons::CHECK,
+                            mast_proto::work_outline_user_actions::UserActionKind::Choose => crate::icons::CHECKLIST,
+                            mast_proto::work_outline_user_actions::UserActionKind::Handoff => crate::icons::GIT_BRANCH,
+                            mast_proto::work_outline_user_actions::UserActionKind::Notice => crate::icons::INFO_CIRCLE,
+                        })
+                            .size(px(12.0))
+                            .text_color(if open { attention } else { theme.text_faint }),
                     )
                     .child(
                         div()

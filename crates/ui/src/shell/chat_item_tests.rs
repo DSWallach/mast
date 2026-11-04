@@ -951,6 +951,7 @@ fn mixed_needs(snapshot: &mut WorkOutlineSnapshot) {
     ]);
     if let Some(r) = snapshot.user_action_requests.iter_mut().find(|r| r.id == "r-fyi") {
         r.dedupe_key = Some("artq:art1:rollup".into());
+        r.priority = Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi);
     }
 }
 

@@ -9,11 +9,10 @@
 use std::time::{Duration, Instant};
 
 use mast_proto::view::Indicator;
+use mast_proto::work_outline_user_actions::{UserActionKind, UserActionPriority};
 
 use crate::theme::Appearance;
 
-/// Required Actions raised by "Ready to merge" start with this text.
-pub const READY_TO_MERGE_PREFIX: &str = "Ready to merge";
 
 /// How long a new target must hold before the Dock is touched.
 pub const DEBOUNCE: Duration = Duration::from_millis(1000);
@@ -74,11 +73,6 @@ pub struct LightSummary {
     pub badge: u32,
 }
 
-/// True for a Required Action raised as "Ready to merge: <branch>".
-pub fn is_ready_to_merge(text: &str) -> bool {
-    text.trim_start().starts_with(READY_TO_MERGE_PREFIX)
-}
-
 /// Most urgent state across all chats and open Required Actions.
 ///
 /// `indicators` are the staleness-checked indicators of the live chats;
@@ -87,9 +81,9 @@ pub fn is_ready_to_merge(text: &str) -> bool {
 /// request that is not "Ready to merge") > Ready (any open "Ready to merge")
 /// > Working > Idle. The badge counts awaiting-input chats, errored chats and
 /// every open request.
-pub fn app_light<S: AsRef<str>>(
+pub fn app_light(
     indicators: impl IntoIterator<Item = Indicator>,
-    open_requests: impl IntoIterator<Item = S>,
+    open_requests: impl IntoIterator<Item = (UserActionKind, Option<UserActionPriority>)>,
 ) -> LightSummary {
     let (mut working, mut awaiting, mut errored) = (0u32, 0u32, 0u32);
     for indicator in indicators {
@@ -101,8 +95,11 @@ pub fn app_light<S: AsRef<str>>(
         }
     }
     let (mut ready, mut other) = (0u32, 0u32);
-    for text in open_requests {
-        if is_ready_to_merge(text.as_ref()) {
+    for (kind, priority) in open_requests {
+        if kind == UserActionKind::Notice || priority == Some(UserActionPriority::Fyi) {
+            continue;
+        }
+        if kind == UserActionKind::Handoff && priority != Some(UserActionPriority::Blocking) {
             ready += 1;
         } else {
             other += 1;
@@ -134,7 +131,7 @@ pub(crate) fn summarize_state(
     state: &crate::state::AppState,
     now: chrono::DateTime<chrono::Utc>,
 ) -> LightSummary {
-    let requests: Vec<String> = state
+    let requests: Vec<_> = state
         .spaces
         .iter()
         .filter_map(|space| state.work_outline(&space.id).snapshot().cloned())
@@ -143,7 +140,7 @@ pub(crate) fn summarize_state(
                 .user_action_requests
                 .iter()
                 .filter(|request| request.is_unresolved())
-                .map(|request| request.text.clone())
+                .map(|request| (request.effective_kind(), request.priority))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -335,7 +332,7 @@ mod tests {
     use Indicator::{AwaitingInput, Errored, None as Quiet, Working};
 
     fn light(indicators: &[Indicator], requests: &[&str]) -> LightSummary {
-        app_light(indicators.iter().copied(), requests.iter().copied())
+        app_light(indicators.iter().copied(), requests.iter().map(|text| (mast_proto::work_outline_user_actions::classify_legacy_request(text, None), None)))
     }
 
     #[test]
@@ -362,6 +359,12 @@ mod tests {
     }
 
     #[test]
+    fn typed_handoff_and_fyi_control_light_and_badge() {
+        assert_eq!(app_light([], [(UserActionKind::Handoff, None)]), LightSummary { light: AppLight::Ready, badge: 1 });
+        assert_eq!(app_light([], [(UserActionKind::Notice, None), (UserActionKind::Review, Some(UserActionPriority::Fyi))]), LightSummary { light: AppLight::Idle, badge: 0 });
+    }
+
+    #[test]
     fn a_ready_to_merge_request_is_ready_and_beats_working() {
         let summary = light(&[Working], &["Ready to merge: status-light"]);
         assert_eq!(
@@ -371,8 +374,8 @@ mod tests {
                 badge: 1
             }
         );
-        assert!(is_ready_to_merge("  Ready to merge: x"));
-        assert!(!is_ready_to_merge("Is this Ready to merge?"));
+        assert_eq!(mast_proto::work_outline_user_actions::classify_legacy_request("  Ready to merge: x", None), UserActionKind::Handoff);
+        assert_eq!(mast_proto::work_outline_user_actions::classify_legacy_request("Is this Ready to merge?", None), UserActionKind::Ask);
     }
 
     #[test]

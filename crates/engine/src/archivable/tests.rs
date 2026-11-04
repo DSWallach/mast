@@ -98,6 +98,11 @@ fn a_resolved_ready_to_merge_finishes_the_chat() {
     // A resolved ordinary question does not.
     c.requests = vec![request("Which colour?", "resolved")];
     assert!(!c.verdict().archivable);
+    c.requests[0].kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff);
+    assert!(c.verdict().archivable);
+    c.requests[0].text = "Ready to merge: feature".into();
+    c.requests[0].kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Ask);
+    assert!(!c.verdict().archivable);
 }
 
 #[test]

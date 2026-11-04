@@ -468,6 +468,8 @@ impl ArtifactQuestionSync {
         );
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            kind: Some(if dedupe_key.starts_with("artopt:") { mast_proto::work_outline_user_actions::UserActionKind::Choose } else { mast_proto::work_outline_user_actions::UserActionKind::Ask }),
+            priority: None,
                 work_item_id: item.to_owned(),
                 origin: origin.clone(),
                 text,

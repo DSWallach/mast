@@ -58,6 +58,48 @@ pub const COMPLETION_RESOLUTION_NOTE: &str = "Resolved by completing the work it
 // User action requests
 // --------------------------------------------------------------------------
 
+/// What the user is being asked to do. Unknown values decode as `ask`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UserActionKind {
+    Review,
+    Approve,
+    Choose,
+    Handoff,
+    Notice,
+    #[default]
+    #[serde(other)]
+    Ask,
+}
+
+/// Optional grouping override for a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UserActionPriority {
+    Blocking,
+    Fyi,
+    #[serde(other)]
+    Normal,
+}
+
+/// Classify rows written before request kinds existed.
+pub fn classify_legacy_request(text: &str, dedupe_key: Option<&str>) -> UserActionKind {
+    let key = dedupe_key.unwrap_or_default();
+    if key.starts_with("admin-bulk:") {
+        UserActionKind::Approve
+    } else if key.starts_with("pr-review:") {
+        UserActionKind::Review
+    } else if key.starts_with("artopt:") {
+        UserActionKind::Choose
+    } else if key.starts_with("artq:") {
+        UserActionKind::Ask
+    } else if text.trim_start().starts_with("Ready to merge") {
+        UserActionKind::Handoff
+    } else {
+        UserActionKind::Ask
+    }
+}
+
 /// What raised a request. Lenient: unknown reads as `chat`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -180,6 +222,10 @@ pub fn user_reply_message(request_text: &str, note: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserActionRequestView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<UserActionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<UserActionPriority>,
     pub id: String,
     #[serde(default)]
     pub space_id: String,
@@ -223,6 +269,10 @@ pub struct UserActionRequestView {
 }
 
 impl UserActionRequestView {
+    pub fn effective_kind(&self) -> UserActionKind {
+        self.kind.unwrap_or_else(|| classify_legacy_request(&self.text, self.dedupe_key.as_deref()))
+    }
+
     pub fn is_open(&self) -> bool {
         self.state == UserActionRequestState::Open
     }
@@ -241,6 +291,10 @@ impl UserActionRequestView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateUserActionRequestParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<UserActionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<UserActionPriority>,
     pub work_item_id: String,
     pub origin: UserActionRequestOrigin,
     pub text: String,

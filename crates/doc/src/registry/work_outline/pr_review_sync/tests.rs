@@ -221,6 +221,8 @@ fn only_the_system_writes_the_sync_record() {
 
 fn system_request(item: &str, op: &str, dedupe: &str) -> WorkOutlineMutation {
     WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            kind: None,
+            priority: None,
         work_item_id: item.into(),
         origin: UserActionRequestOrigin {
             kind: UserActionOriginKind::System,

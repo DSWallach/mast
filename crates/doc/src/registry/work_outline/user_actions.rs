@@ -96,6 +96,8 @@ pub(crate) fn decode_request(row: &RegistryRow) -> Result<DecodedRequest, WorkOu
         resolution.is_some() || row.fields.get("state").and_then(Value::as_str) == Some("resolved");
     Ok(DecodedRequest {
         view: UserActionRequestView {
+            kind: row.fields.get("kind").and_then(|v| serde_json::from_value(v.clone()).ok()),
+            priority: row.fields.get("priority").and_then(|v| serde_json::from_value(v.clone()).ok()),
             id: row.id.clone(),
             space_id,
             work_item_id: str_field(row, "workItemId").unwrap_or_default(),
@@ -591,6 +593,10 @@ impl RegistryDoc {
             ("inputsHash".to_owned(), json!(hash)),
             ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
         ]);
+        set.insert("kind".to_owned(), json!(p.kind.unwrap_or_default()));
+        if let Some(priority) = p.priority {
+            set.insert("priority".to_owned(), json!(priority));
+        }
         if system_origin {
             set.insert("originKind".to_owned(), json!("system"));
         }

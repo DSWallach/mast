@@ -1076,6 +1076,8 @@ impl PrReviewSyncService {
         info.push(pr.url.clone());
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Review),
+            priority: None,
                 work_item_id: work_item_id.to_owned(),
                 origin: UserActionRequestOrigin {
                     kind: UserActionOriginKind::System,
