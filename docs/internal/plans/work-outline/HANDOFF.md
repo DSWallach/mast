@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Cleanup sweep 2** (2026-11-05 overnight, `cleanup-sweep-2`, Terra): mechanical clippy fixes, no API/serde/
+  protocol/behavior change. Clippy warnings: harness 14→1, doc 29→19, proto 18→10, sync 12→6 (with
+  `mock-server`); rpc and update had none. Note: `mast-sync --all-targets` needs `--features mock-server` to build
+  its integration tests. Merge conflict with phase 5 in user_actions.rs resolved (let-chain + `prMerged` rule).
+  Release run: nextest 2355/2355, UI 2473/0.
 - **Needs-you phase 5 subset: handoffs land** (2026-11-05 overnight, `needs-you-phase-5-land`, Terra): `kind: handoff`
   cards show a PR lifecycle chip from the PR cache (Ready / Waiting to land / Landed / Closed, including PRs linked
   from other chats); on a PR-merged event the matching open handoff resolves once ("Landed: repo#n merged …",
@@ -898,7 +903,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
