@@ -2,7 +2,7 @@
 //!
 //! - the user action notification detector, run from `on_state_changed`
 //!   next to the session detector: every watched Space's snapshot goes
-//!   through `UserActionNotifier` (zero-to-nonzero per work item, coalesced,
+//!   through `UserActionNotifier` (one notice per new request,
 //!   retries deduplicated), and each notice plays the existing `Request`
 //!   chime and posts the existing banner under the existing sound,
 //!   notification, and background-only settings. No new sound or color.
@@ -16,7 +16,7 @@ use crate::work_outline::required_actions::{self, notice_outputs};
 
 impl Shell {
     /// Diff every watched Space's outline against the last frame and notify
-    /// on each work item's zero-to-nonzero transition.
+    /// for each newly observed request.
     pub(super) fn notify_user_actions(
         &mut self,
         state: &Entity<AppState>,

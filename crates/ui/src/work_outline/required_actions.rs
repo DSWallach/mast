@@ -8,11 +8,9 @@
 //!   and the resolved history the snapshot carries.
 //! - [`status_totals`] renders the compact descendant totals ("3 active · 1
 //!   user action required") from a rollup.
-//! - [`UserActionNotifier`] diffs consecutive snapshots per work item and
-//!   reports the zero-to-nonzero transition of its unresolved requests, once
-//!   per transition (a batch of requests on one item is one event), never for
-//!   a request id it already reported.
-use std::collections::{BTreeSet, HashMap, HashSet};
+//! - [`UserActionNotifier`] reports each newly observed open request once,
+//!   while seeding existing requests silently on startup.
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use mast_proto::{
@@ -582,14 +580,13 @@ pub(crate) fn proposals_label(count: usize) -> String {
 // Notification detector
 // --------------------------------------------------------------------------
 
-/// One notification event: an item went from zero to at least one
-/// unresolved request. Several requests arriving together are one event.
+/// One newly observed open request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UserActionNotice {
     pub space_id: String,
     pub work_item_id: String,
     pub item_title: String,
-    pub count: usize,
+    pub request_id: String,
     pub kind: mast_proto::work_outline_user_actions::UserActionKind,
     pub group: NeedsGroup,
     /// The newest request's text (the banner body when `count == 1`).
@@ -627,16 +624,8 @@ impl UserActionNotice {
 }
 
 #[derive(Debug, Default)]
-struct ItemSeen {
-    open: BTreeSet<String>,
-}
-
-#[derive(Debug, Default)]
 struct SpaceSeen {
-    /// The last observed snapshot allocation (identical frames are skipped).
     last: Option<Arc<WorkOutlineSnapshot>>,
-    items: HashMap<String, ItemSeen>,
-    /// Request ids already reported (or seeded); never reported again.
     notified: HashSet<String>,
 }
 
@@ -644,19 +633,9 @@ struct SpaceSeen {
 /// longer lists are forgotten.
 const MAX_REMEMBERED_REQUEST_IDS: usize = 4_096;
 
-/// Per-work-item zero-to-nonzero detector over consecutive snapshots.
-///
-/// - The first snapshot of a Space seeds silently (boot and reconnect stay
-///   quiet, like the session detector's first appearance).
-/// - An item fires when it had no unresolved request and now has some, at
-///   least one of which was never reported (retries and flapping frames of
-///   the same ids never re-notify). All of its new requests are one event.
-/// - A resolve that brings the item to zero re-arms it: a later new request
-///   fires again.
-/// - Requests on archived (or deleted) items are seeded as they are seen, so
-///   restoring an item with old open requests stays quiet: only requests the
-///   detector never saw can fire (an archived item cannot gain new ones).
-/// - Unavailable snapshots are ignored (no observation).
+/// Detect newly observed open requests. The first snapshot seeds silently;
+/// remembered ids prevent repeated notifications after retries or flapping.
+/// Requests on archived or deleted items are seeded without notification.
 #[derive(Debug, Default)]
 pub(crate) struct UserActionNotifier {
     spaces: HashMap<String, SpaceSeen>,
@@ -682,71 +661,28 @@ impl UserActionNotifier {
             return Vec::new();
         }
         seen.last = Some(snapshot.clone());
-        // Unresolved requests per live item.
-        let mut open: HashMap<&str, Vec<&UserActionRequestView>> = HashMap::new();
-        for request in snapshot
-            .user_action_requests
-            .iter()
-            .filter(|request| request.is_unresolved())
-        {
-            if snapshot
-                .item(&request.work_item_id)
-                .is_some_and(|item| item.archived_at.is_none())
-            {
-                open.entry(request.work_item_id.as_str())
-                    .or_default()
-                    .push(request);
-            }
-        }
         let mut notices = Vec::new();
-        for (item_id, requests) in &open {
-            let previous = seen.items.get(*item_id).map_or(0, |item| item.open.len());
-            let fresh = requests
-                .iter()
-                .any(|request| !seen.notified.contains(&request.id));
-            if !first && previous == 0 && fresh {
-                let newest = requests
-                    .iter()
-                    .max_by(|a, b| {
-                        let eligible = |r: &&UserActionRequestView| {
-                            NeedsGroup::of(r.effective_kind(), r.priority) != NeedsGroup::Fyi
-                        };
-                        (eligible(a), a.created_at, &a.id).cmp(&(eligible(b), b.created_at, &b.id))
-                    })
-                    .expect("non-empty");
+        if !first {
+            for request in snapshot.user_action_requests.iter().filter(|request| {
+                request.is_unresolved()
+                    && !seen.notified.contains(&request.id)
+                    && snapshot.item(&request.work_item_id)
+                        .is_some_and(|item| item.archived_at.is_none())
+            }) {
                 notices.push(UserActionNotice {
                     space_id: space_id.to_owned(),
-                    work_item_id: (*item_id).to_owned(),
-                    item_title: snapshot
-                        .item(item_id)
-                        .map(|item| item.title.clone())
-                        .unwrap_or_default(),
-                    count: requests.len(),
-                    kind: newest.effective_kind(),
-                    group: NeedsGroup::of(newest.effective_kind(), newest.priority),
-                    text: newest.text.clone(),
-                    chat_id: newest
-                        .origin_chat_available
-                        .then(|| newest.chat_id.clone())
+                    work_item_id: request.work_item_id.clone(),
+                    request_id: request.id.clone(),
+                    item_title: snapshot.item(&request.work_item_id)
+                        .map(|item| item.title.clone()).unwrap_or_default(),
+                    kind: request.effective_kind(),
+                    group: NeedsGroup::of(request.effective_kind(), request.priority),
+                    text: request.text.clone(),
+                    chat_id: request.origin_chat_available.then(|| request.chat_id.clone())
                         .filter(|id| !id.is_empty()),
                 });
             }
         }
-        // Remember the open sets and every reported id. Ids are kept across
-        // frames that drop them (a flapping frame must not re-notify); only
-        // past a generous bound are ids the snapshot no longer lists forgotten
-        // (resolution is monotone, so they can never reopen).
-        seen.items = open
-            .iter()
-            .map(|(item_id, requests)| {
-                (
-                    (*item_id).to_owned(),
-                    ItemSeen {
-                        open: requests.iter().map(|r| r.id.clone()).collect(),
-                    },
-                )
-            })
-            .collect();
         if seen.notified.len() > MAX_REMEMBERED_REQUEST_IDS {
             let listed: HashSet<&str> = snapshot
                 .user_action_requests
@@ -1273,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn notification_suppresses_explicit_fyi_and_prefers_actionable_request() {
+    fn notification_suppresses_explicit_fyi() {
         use mast_proto::work_outline_user_actions::UserActionPriority;
         let mut notifier = UserActionNotifier::default();
         notifier.observe("s1", &with(vec![]));
@@ -1286,13 +1222,13 @@ mod tests {
         notifier.observe("s1", &with(vec![]));
         fyi.created_at = NOW + 1;
         let action = request("action", "s1", UI, CHAT_UI, "Review this");
-        let notice = notifier.observe("s1", &with(vec![action, fyi])).remove(0);
-        assert!(notice.allows_banner());
-        assert_eq!(notice.body(), "Review this");
+        let notices = notifier.observe("s1", &with(vec![action, fyi]));
+        assert_eq!(notices.iter().filter(|notice| notice.allows_banner()).count(), 1);
+        assert!(notices.iter().any(|notice| notice.allows_banner() && notice.body() == "Review this"));
     }
 
     #[test]
-    fn notifier_fires_once_on_zero_to_one_and_seeds_silently() {
+    fn notifier_reports_new_requests_and_seeds_silently() {
         let mut notifier = UserActionNotifier::default();
         // First observation seeds silently, even with open requests.
         let boot = with(vec![request("a", "s1", API, CHAT_API, "Boot")]);
@@ -1303,7 +1239,7 @@ mod tests {
         let notices = notifier.observe("s1", &one);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].work_item_id, UI);
-        assert_eq!(notices[0].count, 1);
+        assert_eq!(notices[0].request_id, "r1");
         assert_eq!(notices[0].title(), "Ask · UI");
         assert_eq!(notices[0].body(), "Approve it");
         assert_eq!(notices[0].chat_id.as_deref(), Some(CHAT_UI));
@@ -1311,16 +1247,16 @@ mod tests {
         assert!(notifier.observe("s1", &one).is_empty());
         let same = with(vec![request("r1", "s1", UI, CHAT_UI, "Approve it")]);
         assert!(notifier.observe("s1", &same).is_empty());
-        // A second request while one is open: still nonzero, quiet.
+        // A second request while one is open is reported once.
         let two = with(vec![
             request("r1", "s1", UI, CHAT_UI, "Approve it"),
             request("r2", "s1", UI, CHAT_UI, "And this"),
         ]);
-        assert!(notifier.observe("s1", &two).is_empty());
+        assert_eq!(notifier.observe("s1", &two)[0].request_id, "r2");
     }
 
     #[test]
-    fn notifier_coalesces_a_batch_per_item() {
+    fn notifier_reports_each_request_in_a_batch() {
         let mut notifier = UserActionNotifier::default();
         notifier.observe("s1", &with(vec![]));
         let mut later = request("r2", "s1", UI, CHAT_UI, "Second");
@@ -1331,11 +1267,8 @@ mod tests {
             request("r3", "s1", API, CHAT_API, "Other item"),
         ]);
         let notices = notifier.observe("s1", &batch);
-        assert_eq!(notices.len(), 2, "one event per item");
-        let ui = notices.iter().find(|n| n.work_item_id == UI).unwrap();
-        assert_eq!(ui.count, 2);
-        assert_eq!(ui.body(), "Second");
-        assert_eq!(ui.text, "Second");
+        assert_eq!(notices.len(), 3, "one event per request");
+        assert!(notices.iter().any(|notice| notice.body() == "Second"));
     }
 
     #[test]
