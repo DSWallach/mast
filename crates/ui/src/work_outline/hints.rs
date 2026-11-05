@@ -450,7 +450,7 @@ fn linear_group(mac: bool) -> ShortcutGroup {
                 keys: Some(format!("{} / Double-click", key_label_on(mac, "enter"))),
             },
             ShortcutRow {
-                label: "Add issues from Space (Space-linked item)",
+                label: "Add issues from project (project-linked item)",
                 keys: Some(
                     if mac {
                         "Right-click / \u{2303}-click"

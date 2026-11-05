@@ -13324,12 +13324,12 @@ mod tests {
         assert_eq!(local_work_phrase(2, 0).as_deref(), Some("the 2 sessions"));
         assert_eq!(
             local_work_phrase(0, 1).as_deref(),
-            Some("the 1 Space"),
+            Some("the 1 project"),
             "a Spaces-only profile must be offered the import, not a bare switch"
         );
         assert_eq!(
             local_work_phrase(1, 2).as_deref(),
-            Some("the 1 session and 2 Spaces")
+            Some("the 1 session and 2 projects")
         );
     }
 

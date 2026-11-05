@@ -433,7 +433,7 @@ automatically: items and links come only from the actions below.
   Mac's Keychain, then shows **Connected as \<name\>**. The key is never shown
   again or given to agents. **Disconnect** removes the stored key. If Linear
   rejects the key later, Mast deletes it and asks you to reconnect.
-- **Turn it on.** Open the Space's Space-root details (**Instructions** on the
+- **Turn it on.** Open the Space-root details (**Instructions** on the
   Space row) and switch on **Linear**. Without a key, **Connect Linear…** opens
   Settings → Linear. The first time you paste a Linear URL in a Space with
   Linear off, Mast offers **Enable** once.
@@ -465,8 +465,8 @@ automatically: items and links come only from the actions below.
   open issues. Folded sections and expanded projects are remembered on this
   device. Search filters both lists. Lists load when the panel opens and when
   you click ↻. Rows that an item in this Space already links show
-  **Linked · Reveal**, which selects that item in the Outline. With several
-  Linear Spaces on, click the Space name in the panel header to switch.
+  **Linked · Reveal**, which selects that item in the Outline. With Linear enabled in several
+  Spaces, click the Space name in the panel header to switch.
 - **Create work item** (**Create** on an issue, or double-click the issue, or
   focus its row and press `↩`) adds `ENG-123 · title` as the last child of:
   - the work item linked to the issue's Linear project, whatever is selected

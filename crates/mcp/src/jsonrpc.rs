@@ -25,7 +25,7 @@ const LATEST_PROTOCOL: &str = "2025-11-25";
 /// guidance every agent needs first. Detail that does not fit belongs in the
 /// tool descriptions (`tools.rs`).
 const INSTRUCTIONS: &str = "\
-Mast runs coding agents in project chats.\n\
+Mast runs coding agents in Space chats.\n\
 If you hit a bug, a failed tool call, or need a workaround, report it with `report_friction`.\n\
 \n\
 Worktrees: after `git worktree add` or resuming a worktree for \

@@ -371,7 +371,7 @@ impl OutlineView {
                     None => {
                         this.confirm_change(&first_op, cx);
                         let mut text = format!(
-                            "Created item \u{2018}{title}\u{2019} from blueprint \u{2018}{blueprint_name}\u{2019}"
+                            "Created item \u{2018}{title}\u{2019} from blueprint \u{2018}{template_name}\u{2019}"
                         );
                         text.push_str(&link_note.unwrap_or_default());
                         this.show_template_toast(text, cx);
