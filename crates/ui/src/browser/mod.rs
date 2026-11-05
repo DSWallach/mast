@@ -33,6 +33,7 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
         !combo.is_empty()
             && !ShortcutId::ALL.iter().any(|id| {
                 Some(*id) != own
+                    && !matches!(id, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)
                     && gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
                         == gpui::Keystroke::parse(&platform_combo(combo)).ok()
             })

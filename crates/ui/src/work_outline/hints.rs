@@ -2,8 +2,7 @@
 //! and carry its CURRENT key binding.
 //!
 //! Bindings are read when the tooltip is built, from the live settings
-//! keymap (rebindable [`WorkOutlineCommand`] shortcuts) or the fixed
-//! Outline-context table (`shell::work_outline_ui::OUTLINE_NAVIGATION_KEYS`),
+//! keymap (including Outline-context shortcuts),
 //! so a rebind shows up on the next hover without re-rendering anything. An
 //! unbound command shows its label alone. Keys are spelled per platform:
 //! modifier glyphs on macOS (`⌃⌥⇧⌘`), `Ctrl+Alt+Shift+` elsewhere.
@@ -17,7 +16,6 @@ use gpui::{
 };
 
 use super::command::WorkOutlineCommand;
-use super::outline_view::context_menu::OPEN_MENU_KEYS;
 use crate::settings::{KeymapConfig, ShortcutId, platform_combo};
 use crate::shell::work_outline_ui::{OUTLINE_NAVIGATION_KEYS, OutlineKeyGroup, OutlineNavKey};
 use crate::theme::Theme;
@@ -33,7 +31,7 @@ pub(crate) enum HintKey {
     None,
     /// A rebindable Work Outline command (empty combo = unbound = no key).
     Command(WorkOutlineCommand),
-    /// A fixed Outline-context key.
+    /// A rebindable Outline-context key.
     Outline(OutlineNavKey),
     /// An app-wide rebindable shortcut that also acts on the selected
     /// Outline row ([`OUTLINE_APP_KEYS`]).
@@ -60,9 +58,12 @@ pub(crate) fn shortcut_combo(keymap: &KeymapConfig, id: ShortcutId) -> Option<St
     if combo.is_empty() {
         return None;
     }
-    if Keystroke::parse(&platform_combo(combo)).is_ok() {
-        return Some(combo.to_string());
-    }
+    validated_combo(combo, id)
+}
+
+pub(crate) fn validated_combo(combo: &str, id: ShortcutId) -> Option<String> {
+    if combo.is_empty() { return None; }
+    if Keystroke::parse(&platform_combo(combo)).is_ok() { return Some(combo.to_string()); }
     let fallback = id.default_combo();
     (!fallback.is_empty()).then(|| fallback.to_string())
 }
@@ -87,7 +88,7 @@ pub(crate) fn hint_keys_on(mac: bool, keymap: &KeymapConfig, hint: HintKey) -> O
         HintKey::Command(command) => {
             command_combo(keymap, command).map(|combo| key_label_on(mac, &combo))
         }
-        HintKey::Outline(key) => outline_key_combo(key).map(|combo| key_label_on(mac, combo)),
+        HintKey::Outline(key) => shortcut_combo(keymap, key.shortcut_id()).map(|combo| key_label_on(mac, &combo)),
         HintKey::App(id) => shortcut_combo(keymap, id).map(|combo| key_label_on(mac, &combo)),
         HintKey::Find => Some(key_label_on(mac, crate::shell::FOCUS_OVERVIEW_SEARCH_COMBO)),
     }
@@ -266,10 +267,9 @@ pub(crate) fn shortcut_reference(keymap: &KeymapConfig) -> Vec<ShortcutGroup> {
 pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<ShortcutGroup> {
     // Every key of `key`, primary first.
     let all_keys = |key: OutlineNavKey| {
-        OUTLINE_NAVIGATION_KEYS
-            .iter()
-            .filter(|(_, other)| *other == key)
-            .map(|(combo, _)| key_label_on(mac, combo))
+        keymap.combos(key.shortcut_id())
+            .into_iter()
+            .map(|combo| key_label_on(mac, combo))
             .collect::<Vec<_>>()
             .join(" / ")
     };
@@ -288,7 +288,7 @@ pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<Sho
             })
             .map(|(_, (_, key))| ShortcutRow {
                 label: key.label(),
-                keys: Some(all_keys(*key)),
+                keys: { let keys = all_keys(*key); (!keys.is_empty()).then_some(keys) },
             })
             .collect(),
     };
@@ -309,7 +309,7 @@ pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<Sho
                 .chain(SPACE_MOVE_KEYS)
                 .map(|(label, key)| ShortcutRow {
                     label,
-                    keys: Some(all_keys(key)),
+                    keys: { let keys = all_keys(key); (!keys.is_empty()).then_some(keys) },
                 }),
         );
     let mut navigate = outline_group("Navigate", OutlineKeyGroup::Navigate);
@@ -334,15 +334,15 @@ pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<Sho
         },
         linear_group(mac),
         github_group(mac, keymap),
-        chat_item_group(mac),
+        chat_item_group(mac, keymap),
         plan_group(mac),
     ]
 }
 
 /// The chat header's keys: the side panel's Item tab and the pinned context
 /// card (fixed combos, defined in the Shell).
-fn chat_item_group(mac: bool) -> ShortcutGroup {
-    use crate::shell::{OPEN_ITEM_TAB_COMBO, OPEN_TEAM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO};
+fn chat_item_group(mac: bool, keymap: &KeymapConfig) -> ShortcutGroup {
+    use crate::shell::{OPEN_ITEM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO};
     ShortcutGroup {
         title: "Chat header",
         rows: vec![
@@ -352,11 +352,12 @@ fn chat_item_group(mac: bool) -> ShortcutGroup {
             },
             ShortcutRow {
                 label: "Open the Team tab (chats with workers)",
-                keys: Some(key_label_on(mac, OPEN_TEAM_TAB_COMBO)),
+                keys: shortcut_combo(keymap, ShortcutId::OpenTeamTab)
+                    .map(|combo| key_label_on(mac, &combo)),
             },
             ShortcutRow {
                 label: "Open the Team tab from the side panel (not in a text field)",
-                keys: Some("T".to_owned()),
+                keys: shortcut_combo(keymap, ShortcutId::OpenTeamTabFromPanel).map(|combo| key_label_on(mac, &combo)),
             },
             ShortcutRow {
                 label: "Pin or release the context card",
@@ -467,20 +468,22 @@ fn linear_group(mac: bool) -> ShortcutGroup {
 /// The shortcut reference's footer: where Outline keys work, how to reach a
 /// row's context menu (right-click, Control-click on macOS, or the
 /// keyboard), and where to rebind.
-pub(crate) fn shortcuts_footer() -> String {
-    shortcuts_footer_on(cfg!(target_os = "macos"))
+pub(crate) fn shortcuts_footer(keymap: &KeymapConfig) -> String {
+    shortcuts_footer_on(cfg!(target_os = "macos"), keymap)
 }
 
 /// [`shortcuts_footer`] for an explicit platform.
-pub(crate) fn shortcuts_footer_on(mac: bool) -> String {
-    let menu_key = key_label_on(mac, OPEN_MENU_KEYS[0]);
+pub(crate) fn shortcuts_footer_on(mac: bool, keymap: &KeymapConfig) -> String {
+    let menu_key = shortcut_combo(keymap, OutlineNavKey::OpenContextMenu.shortcut_id())
+        .map(|combo| format!(" (or press {})", key_label_on(mac, &combo)))
+        .unwrap_or_default();
     let click = if mac {
         "Right-click or Control-click a row"
     } else {
         "Right-click a row"
     };
     format!(
-        "Outline keys work while the Outline has focus. {click} (or press {menu_key}) for its \
+        "Outline keys work while the Outline has focus. {click}{menu_key} for its \
          actions. Rebind commands in Settings \u{203a} Shortcuts."
     )
 }
@@ -618,10 +621,10 @@ mod tests {
 
     #[test]
     fn shortcuts_footer_mentions_right_click_and_the_menu_key() {
-        let mac = shortcuts_footer_on(true);
+        let mac = shortcuts_footer_on(true, &KeymapConfig::default());
         assert!(mac.contains("Right-click or Control-click a row"), "{mac}");
         assert!(mac.contains("\u{21e7}F10"), "{mac}");
-        let other = shortcuts_footer_on(false);
+        let other = shortcuts_footer_on(false, &KeymapConfig::default());
         assert!(other.contains("Right-click a row"), "{other}");
         assert!(!other.contains("Control-click"), "{other}");
         assert!(other.contains("Shift+F10"), "{other}");
@@ -684,7 +687,7 @@ mod tests {
         // the Chat-row moves add their own rows.
         assert_eq!(
             outline_rows,
-            OUTLINE_NAVIGATION_KEYS.len() - 5
+            OUTLINE_NAVIGATION_KEYS.len() - 6
                 + CHAT_MOVE_KEYS.len()
                 + SPACE_MOVE_KEYS.len()
                 + OUTLINE_APP_KEYS.len()

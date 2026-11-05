@@ -88,6 +88,7 @@ pub(super) fn mount<'a>(
             cx,
         );
         crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default(), Default::default());
     });
     let (host, vcx) = cx.add_window_view(move |_, cx| {
         let shell = cx.new(|cx| {
@@ -538,7 +539,7 @@ fn the_keys_are_registered_and_listed_in_the_reference(_cx: &mut TestAppContext)
         "{keys:?}"
     );
     // Both parse and neither shadows a customizable default.
-    for combo in [OPEN_ITEM_TAB_COMBO, OPEN_TEAM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO] {
+    for combo in [OPEN_ITEM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO] {
         assert!(gpui::Keystroke::parse(&crate::settings::platform_combo(combo)).is_ok());
         assert!(
             crate::settings::ShortcutId::ALL
@@ -1202,6 +1203,22 @@ fn plain_t_opens_the_team_tab_only_when_the_panel_itself_is_focused(cx: &mut Tes
 }
 
 #[gpui::test]
+fn team_panel_rebind_replaces_the_default(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 3);
+    let mut keymap = crate::settings::KeymapConfig::default();
+    keymap.set(crate::settings::ShortcutId::OpenTeamTabFromPanel, "y".into());
+    vcx.update(|_, cx| crate::shell::apply_keymap(cx, &keymap, Default::default()));
+    let panel = shell.update(vcx, |shell, cx| shell.team_panel_focus(cx));
+    vcx.update(|window, cx| window.focus(&panel, cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("t");
+    shell.read_with(vcx, |shell, cx| assert_ne!(shell.resolved_right_active(cx), RightSurface::Team));
+    vcx.simulate_keystrokes("y");
+    shell.read_with(vcx, |shell, cx| assert_eq!(shell.resolved_right_active(cx), RightSurface::Team));
+}
+
+#[gpui::test]
 fn plain_t_does_nothing_on_a_chat_without_workers(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_LOOSE_A, true, |_| {});
     let panel = shell.update(vcx, |shell, cx| shell.team_panel_focus(cx));
@@ -1219,7 +1236,7 @@ fn the_team_hotkey_avoids_the_browsers_new_tab(_cx: &mut TestAppContext) {
     assert!(
         crate::settings::ShortcutId::ALL
             .into_iter()
-            .all(|id| id.default_combo() != "mod-t" && id.default_combo() != OPEN_TEAM_TAB_COMBO)
+            .all(|id| id.default_combo() != "mod-t" && (id == crate::settings::ShortcutId::OpenTeamTab || id.default_combo() != OPEN_TEAM_TAB_COMBO))
     );
 }
 

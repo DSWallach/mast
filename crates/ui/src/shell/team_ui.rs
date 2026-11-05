@@ -188,17 +188,12 @@ impl Shell {
             .size_full()
             .overflow_y_scroll()
             .p(px(14.0))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                let key = &event.keystroke;
-                // Plain `t` only while the panel itself is focused: a text
-                // field inside it owns its own focus handle.
-                if key.key == "t"
-                    && !key.modifiers.modified()
-                    && tracked.is_focused(window)
-                    && this.resolved_right_active(cx) != RightSurface::Team
-                {
+            .key_context("TeamPanel")
+            .on_action(cx.listener(move |this, _: &OpenTeamTabFromPanel, window, cx| {
+                if tracked.is_focused(window) && this.resolved_right_active(cx) != RightSurface::Team {
                     this.open_team_tab(cx);
-                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
                 }
             }))
             .child(body)

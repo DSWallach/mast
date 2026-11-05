@@ -964,11 +964,14 @@ pub enum ShortcutId {
     OutdentWorkItem,
     ShowOutlineShortcuts,
     OpenLinear,
+    OpenTeamTab,
+    OpenTeamTabFromPanel,
+    Outline(usize),
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 18 + WORK_OUTLINE_SHORTCUTS + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 20 + WORK_OUTLINE_SHORTCUTS + 23 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -1005,6 +1008,31 @@ impl ShortcutId {
         ShortcutId::OutdentWorkItem,
         ShortcutId::ShowOutlineShortcuts,
         ShortcutId::OpenLinear,
+        ShortcutId::OpenTeamTab,
+        ShortcutId::OpenTeamTabFromPanel,
+        ShortcutId::Outline(0),
+        ShortcutId::Outline(1),
+        ShortcutId::Outline(2),
+        ShortcutId::Outline(3),
+        ShortcutId::Outline(4),
+        ShortcutId::Outline(5),
+        ShortcutId::Outline(6),
+        ShortcutId::Outline(7),
+        ShortcutId::Outline(8),
+        ShortcutId::Outline(9),
+        ShortcutId::Outline(10),
+        ShortcutId::Outline(11),
+        ShortcutId::Outline(12),
+        ShortcutId::Outline(13),
+        ShortcutId::Outline(14),
+        ShortcutId::Outline(15),
+        ShortcutId::Outline(16),
+        ShortcutId::Outline(17),
+        ShortcutId::Outline(18),
+        ShortcutId::Outline(19),
+        ShortcutId::Outline(20),
+        ShortcutId::Outline(21),
+        ShortcutId::Outline(22),
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -1059,6 +1087,9 @@ impl ShortcutId {
             ShortcutId::OutdentWorkItem => "Outdent work item",
             ShortcutId::ShowOutlineShortcuts => "Show Outline shortcuts",
             ShortcutId::OpenLinear => "Toggle Inbox column (Linear, GitHub)",
+            ShortcutId::OpenTeamTab => "Open Team tab",
+            ShortcutId::OpenTeamTabFromPanel => "Open Team tab from side panel",
+            ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index).map_or("", |key| key.label()),
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1158,6 +1189,9 @@ impl ShortcutId {
             // Linear on.
             ShortcutId::OpenLinear if mac => "mod-alt-l",
             ShortcutId::OpenLinear => "mod-shift-e",
+            ShortcutId::OpenTeamTab => "mod-alt-t",
+            ShortcutId::OpenTeamTabFromPanel => "t",
+            ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index).and_then(|key| crate::shell::work_outline_ui::OUTLINE_NAVIGATION_KEYS.iter().find(|(_, candidate)| candidate == key).map(|(combo, _)| *combo)).unwrap_or(""),
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1213,6 +1247,10 @@ pub struct KeymapConfig {
     pub outdent_work_item: String,
     pub show_outline_shortcuts: String,
     pub open_linear: String,
+    pub open_team_tab: String,
+    pub open_team_tab_from_panel: String,
+    /// Overrides for outline actions; absent entries retain all default aliases.
+    pub outline_shortcuts: HashMap<String, Vec<String>>,
     /// One combo per jump slot, in slot order. A list rather than nine fields:
     /// [`UiSettings::load`] discards the WHOLE file on a parse error, so a
     /// fixed-length array would let one malformed entry reset every unrelated
@@ -1306,6 +1344,9 @@ impl Default for KeymapConfig {
             outdent_work_item: ShortcutId::OutdentWorkItem.default_combo().into(),
             show_outline_shortcuts: ShortcutId::ShowOutlineShortcuts.default_combo().into(),
             open_linear: ShortcutId::OpenLinear.default_combo().into(),
+            open_team_tab: ShortcutId::OpenTeamTab.default_combo().into(),
+            open_team_tab_from_panel: ShortcutId::OpenTeamTabFromPanel.default_combo().into(),
+            outline_shortcuts: HashMap::new(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -1350,6 +1391,9 @@ impl KeymapConfig {
             ShortcutId::OutdentWorkItem => &self.outdent_work_item,
             ShortcutId::ShowOutlineShortcuts => &self.show_outline_shortcuts,
             ShortcutId::OpenLinear => &self.open_linear,
+            ShortcutId::OpenTeamTab => &self.open_team_tab,
+            ShortcutId::OpenTeamTabFromPanel => &self.open_team_tab_from_panel,
+            ShortcutId::Outline(index) => self.outline_combos(index).into_iter().next().unwrap_or(""),
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -1396,6 +1440,13 @@ impl KeymapConfig {
             ShortcutId::OutdentWorkItem => self.outdent_work_item = combo,
             ShortcutId::ShowOutlineShortcuts => self.show_outline_shortcuts = combo,
             ShortcutId::OpenLinear => self.open_linear = combo,
+            ShortcutId::OpenTeamTab => self.open_team_tab = combo,
+            ShortcutId::OpenTeamTabFromPanel => self.open_team_tab_from_panel = combo,
+            ShortcutId::Outline(index) => {
+                if let Some(key) = crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index) {
+                    self.outline_shortcuts.insert(key.storage_key().to_string(), if combo.is_empty() { Vec::new() } else { vec![combo] });
+                }
+            }
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -1407,8 +1458,28 @@ impl KeymapConfig {
         }
     }
 
+    fn outline_combos(&self, index: usize) -> Vec<&str> {
+        use crate::shell::work_outline_ui::{OutlineNavKey, OUTLINE_NAVIGATION_KEYS};
+        let Some(key) = OutlineNavKey::ALL.get(index) else { return Vec::new() };
+        if let Some(combos) = self.outline_shortcuts.get(key.storage_key()) {
+            return combos.iter().map(String::as_str).collect();
+        }
+        OUTLINE_NAVIGATION_KEYS.iter().filter_map(|(combo, candidate)| (candidate == key).then_some(*combo)).collect()
+    }
+
+    pub fn combos(&self, id: ShortcutId) -> Vec<&str> {
+        match id {
+            ShortcutId::Outline(index) => self.outline_combos(index),
+            _ => { let combo = self.get(id); if combo.is_empty() { Vec::new() } else { vec![combo] } }
+        }
+    }
+
     pub fn reset(&mut self, id: ShortcutId) {
-        self.set(id, id.default_combo().to_string());
+        if let ShortcutId::Outline(index) = id {
+            if let Some(key) = crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index) { self.outline_shortcuts.remove(key.storage_key()); }
+        } else {
+            self.set(id, id.default_combo().to_string());
+        }
     }
 
     /// Restore the jump list to exactly [`JUMP_SLOTS`] entries: a hand-edited
@@ -1428,7 +1499,7 @@ impl KeymapConfig {
     /// defaults and preserve every unrelated customization.
     fn heal_reserved_composer_shortcuts(&mut self) {
         for id in ShortcutId::ALL {
-            if self.get(id) == "mod-enter" {
+            if !matches!(id, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel) && self.get(id) == "mod-enter" {
                 self.reset(id);
             }
         }
@@ -1488,19 +1559,31 @@ pub fn combo_from_keystroke_on(
     Some(parts.join("-"))
 }
 
+/// Outline and side-panel shortcuts cannot be active at the same time.
+pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
+    !matches!((left, right),
+        (ShortcutId::Outline(_), ShortcutId::OpenTeamTabFromPanel)
+        | (ShortcutId::OpenTeamTabFromPanel, ShortcutId::Outline(_)))
+}
+
+/// Compare physical keystrokes so aliases such as ctrl and mod conflict off macOS.
+pub fn shortcut_combos_conflict(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() { return false; }
+    match (gpui::Keystroke::parse(&platform_combo(left)), gpui::Keystroke::parse(&platform_combo(right))) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 /// Shortcut ids whose combos collide with another shortcut (conflict detection).
 pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
-    ShortcutId::ALL
-        .into_iter()
-        .filter(|&id| {
-            let combo = keymap.get(id);
-            id.available()
-                && !combo.is_empty()
-                && ShortcutId::ALL
-                    .into_iter()
-                    .any(|other| other.available() && other != id && keymap.get(other) == combo)
+    ShortcutId::ALL.into_iter().filter(|&id| {
+        id.available() && keymap.combos(id).into_iter().any(|combo| {
+            ShortcutId::ALL.into_iter().any(|other| {
+                other.available() && other != id && shortcut_contexts_overlap(id, other) && keymap.combos(other).into_iter().any(|other_combo| shortcut_combos_conflict(combo, other_combo))
+            })
         })
-        .collect()
+    }).collect()
 }
 
 /// The modifiers a stored combo carries, as `(mod, alt, shift)`. Everything
@@ -3428,6 +3511,18 @@ mod tests {
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-alt-p");
         restored.reset(ShortcutId::NewProject);
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-shift-n");
+    }
+
+    #[test]
+    fn team_tab_shortcut_persists_and_detects_conflicts() {
+        let mut keymap: KeymapConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(keymap.get(ShortcutId::OpenTeamTab), "mod-alt-t");
+        keymap.set(ShortcutId::OpenTeamTab, "mod-alt-o".into());
+        let restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.get(ShortcutId::OpenTeamTab), "mod-alt-o");
+        keymap.set(ShortcutId::OpenTeamTab, "mod-o".into());
+        assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::OpenTeamTab));
     }
 
     #[test]

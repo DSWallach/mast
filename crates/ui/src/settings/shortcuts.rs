@@ -231,7 +231,7 @@ impl ShortcutsPage {
                     cx.stop_propagation();
                     return;
                 }
-                if send_combo_is_reserved(self.composer_send_behavior, &combo) {
+                if !matches!(recording, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel) && send_combo_is_reserved(self.composer_send_behavior, &combo) {
                     self.conflict_notice = Some(
                         format!("{} is reserved for the composer.", display_combo(&combo)).into(),
                     );
@@ -322,11 +322,18 @@ impl ShortcutsPage {
         let accent = theme.accent;
         let combo = self.keymap.get(id).to_string();
         let is_recording = recording == Some(id);
-        let non_default = combo != id.default_combo();
+        let non_default = match id {
+            ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index).is_some_and(|key| self.keymap.outline_shortcuts.contains_key(key.storage_key())),
+            _ => combo != id.default_combo(),
+        };
         let chip_text: SharedString = if is_recording {
             "Press keys…".into()
         } else {
-            display_combo(&combo).into()
+            if self.keymap.combos(id).is_empty() {
+                display_combo("").into()
+            } else {
+                self.keymap.combos(id).into_iter().map(display_combo).collect::<Vec<_>>().join(" / ").into()
+            }
         };
         div()
             .flex()
@@ -448,7 +455,7 @@ impl popover::ScrollRailHost for ShortcutsPage {
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
     ShortcutId::ALL
         .into_iter()
-        .find(|&other| other.available() && other != id && keymap.get(other) == combo)
+        .find(|&other| other.available() && other != id && crate::settings::shortcut_contexts_overlap(id, other) && keymap.combos(other).into_iter().any(|other_combo| crate::settings::shortcut_combos_conflict(combo, other_combo)))
 }
 
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
@@ -464,13 +471,15 @@ pub fn modifier_send_label(is_macos: bool) -> &'static str {
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 8] = [
+const GROUP_ORDER: [&str; 10] = [
     "Files",
     "Browser",
     "Panels",
     "Sessions",
     "Spaces",
     "Work Outline",
+    "Outline",
+    "Team",
     "Jump to session",
     "Appshots",
 ];
@@ -479,7 +488,11 @@ const GROUP_ORDER: [&str; 8] = [
 fn group(id: ShortcutId) -> &'static str {
     match id {
         ShortcutId::CaptureAppshot => "Appshots",
-        ShortcutId::SaveFile | ShortcutId::QuickOpen | ShortcutId::SearchWorkspaceContent | ShortcutId::GoToLine | ShortcutId::ReplaceFile => "Files",
+        ShortcutId::SaveFile
+        | ShortcutId::QuickOpen
+        | ShortcutId::SearchWorkspaceContent
+        | ShortcutId::GoToLine
+        | ShortcutId::ReplaceFile => "Files",
         ShortcutId::BrowserReload => "Browser",
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
@@ -510,6 +523,8 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::OutdentWorkItem
         | ShortcutId::ShowOutlineShortcuts
         | ShortcutId::OpenLinear => "Work Outline",
+        ShortcutId::OpenTeamTab | ShortcutId::OpenTeamTabFromPanel => "Team",
+        ShortcutId::Outline(_) => "Outline",
         ShortcutId::JumpSession(_) => "Jump to session",
     }
 }
@@ -567,24 +582,27 @@ fn description(id: ShortcutId) -> &'static str {
             "Show the actions waiting on you for the selected work item."
         }
         ShortcutId::MoveWorkItemUp => {
-            "Move the selected work item above its previous sibling (Outline: Option+Shift+Up)."
+            "Move the selected work item above its previous sibling."
         }
         ShortcutId::MoveWorkItemDown => {
-            "Move the selected work item below its next sibling (Outline: Option+Shift+Down)."
+            "Move the selected work item below its next sibling."
         }
         ShortcutId::IndentWorkItem => {
-            "Make the selected work item the last child of its previous sibling (Outline: Tab)."
+            "Make the selected work item the last child of its previous sibling."
         }
         ShortcutId::OutdentWorkItem => {
-            "Move the selected work item out of its parent, right after it (Outline: Shift+Tab)."
+            "Move the selected work item out of its parent, right after it."
         }
         ShortcutId::ShowOutlineShortcuts => {
-            "List the Outline keys and Work Outline commands (Outline: ?)."
+            "List the Outline keys and Work Outline commands."
         }
         ShortcutId::OpenLinear => {
             "Show or hide the Linear panel beside the Overview body; from anywhere else in the \
              Overview (including the chat panel) it focuses the panel's search."
         }
+        ShortcutId::OpenTeamTab => "Open the Team tab for a chat with workers.",
+        ShortcutId::OpenTeamTabFromPanel => "Open the Team tab while the side panel has focus.",
+        ShortcutId::Outline(_) => "Available when the Outline has focus.",
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.
         ShortcutId::JumpSession(_) => "Open the session at this place in the sidebar list.",
@@ -764,6 +782,7 @@ impl Render for ShortcutsPage {
             }
             groups.push(
                 div()
+                    .debug_selector(move || format!("shortcuts-group-{name}").into())
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -1069,6 +1088,36 @@ mod tests {
             record_key("ctrl", true, false, false, false),
             RecordOutcome::Ignored
         );
+    }
+
+    #[gpui::test]
+    fn settings_render_outline_and_team_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::default()); });
+        let (_, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            ShortcutsPage::new(state, KeymapConfig::default(), false, ComposerSendBehavior::default(), false, false, AppshotDestination::Automatic, cx)
+        });
+        vcx.update(|window, cx| { window.draw(cx).clear(); });
+        assert!(vcx.debug_bounds("shortcuts-group-Outline").is_some());
+        assert!(vcx.debug_bounds("shortcuts-group-Team").is_some());
+    }
+
+    #[test]
+    fn outline_and_team_groups_include_their_shortcuts_and_aliases_conflict() {
+        use crate::shell::work_outline_ui::OutlineNavKey;
+        assert!(GROUP_ORDER.contains(&"Outline"));
+        assert!(GROUP_ORDER.contains(&"Team"));
+        for key in OutlineNavKey::ALL { assert_eq!(group(key.shortcut_id()), "Outline"); }
+        assert_eq!(group(ShortcutId::OpenTeamTab), "Team");
+        assert_eq!(group(ShortcutId::OpenTeamTabFromPanel), "Team");
+        let mut keymap = KeymapConfig::default();
+        let indent = OutlineNavKey::IndentItem.shortcut_id();
+        assert!(keymap.combos(indent).contains(&"tab"));
+        assert_eq!(conflict_owner(&keymap, OutlineNavKey::SelectNext.shortcut_id(), "tab"), Some(indent));
+        keymap.set(indent, "x".into());
+        assert_eq!(keymap.combos(indent), vec!["x"]);
+        keymap.reset(indent);
+        assert!(keymap.combos(indent).contains(&"tab"));
     }
 
     #[test]

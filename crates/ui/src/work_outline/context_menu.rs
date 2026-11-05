@@ -193,6 +193,7 @@ pub(crate) fn outline_action(key: OutlineNavKey) -> Box<dyn Action> {
         OutlineNavKey::GroupInto => Box::new(GroupSelected),
         OutlineNavKey::Undo => Box::new(UndoChange),
         OutlineNavKey::Redo => Box::new(RedoChange),
+        OutlineNavKey::OpenContextMenu => Box::new(OpenContextMenu),
         OutlineNavKey::ShowShortcuts => Box::new(RunWorkOutlineCommand(
             WorkOutlineCommand::ShowOutlineShortcuts,
         )),
