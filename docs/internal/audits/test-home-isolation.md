@@ -1,16 +1,16 @@
 # Test home isolation audit
 
-Initial inventory at integration head f566310ac. Matches include production paths, comments, and isolated fixtures; inclusion does not establish an unsafe access. Further classification is required.
+Initial inventory at integration head f566310ac. Matches include production paths, comments, and isolated fixtures; inclusion does not establish an unsafe access. The check allowlist records existing test and shared-source references. The raw inventory remains broader than confirmed exposures and includes matches requiring further classification.
 
 Confirmed exposures:
 
 - `crates/harness/src/acp/mod.rs:4270`: test created a directory in the passwd home; changed to verify expansion without creating a directory.
 - `crates/engine/src/subagent_scan.rs:404`: unignored unit test inspected a live Claude transcript; replaced with a synthetic fixture.
-- `crates/engine/tests/subagent_scan_real_smoke.rs:8`: ignored test explicitly reads a live Claude transcript.
-- `crates/engine/tests/external_import_real_smoke.rs:52` and `:65`: ignored tests explicitly read live Claude transcripts.
-- `crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27`: ignored test explicitly reads a live Claude transcript.
-- `crates/engine/src/external_import.rs:1002`: background scan derives the Claude projects directory from HOME, including when an engine has an isolated data directory.
-- `crates/engine/src/repos.rs:175` and `:215`: default repository worktree root derives from HOME even when the engine data directory is explicit.
+- `crates/engine/tests/subagent_scan_real_smoke.rs:8`: ignored test read a live Claude transcript; replaced with a synthetic fixture.
+- `crates/engine/tests/external_import_real_smoke.rs:52` and `:65`: ignored tests read live Claude transcripts; replaced with synthetic fixtures.
+- `crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27`: ignored test read a live Claude transcript; replaced with a synthetic fixture.
+- `crates/engine/src/external_import.rs:1002`: background scan derives the Claude projects directory from HOME, including when an engine has an isolated data directory; test initialization isolates HOME and a debug guard rejects the original home.
+- `crates/engine/src/repos.rs:175` and `:215`: default repository worktree root derives from HOME even when the engine data directory is explicit; test initialization isolates HOME and a debug guard rejects the original home.
 
 ## Search inventory
 
