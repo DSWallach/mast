@@ -186,31 +186,74 @@ async fn friction_import_deduplicates_and_redacts() {
     .unwrap();
     let client = mast_rpc::memory_client(core.rpc_service());
     client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp"})).await.unwrap();
+    let existing = FrictionReport {
+        id: String::new(),
+        kind: FrictionKind::Workflow,
+        summary: "Build approval".into(),
+        what_happened: "Existing report".into(),
+        workaround: None,
+        suggestion: None,
+        approval: Some(mast_proto::FrictionApproval {
+            command: "cargo build".into(),
+            why: "Network access".into(),
+            answer: None,
+        }),
+        severity: None,
+        links: vec![],
+        provenance: FrictionProvenance {
+            chat_id: "chat".into(),
+            harness: "codex".into(),
+            model: None,
+            space_id: "space".into(),
+            work_item_id: None,
+            branch: None,
+            created_at: 1,
+            source: FrictionSource::Agent,
+            file_name: None,
+        },
+        fingerprint: String::new(),
+        occurrences: 0,
+        last_seen: 0,
+        status: FrictionStatus::Open,
+        promoted_item_id: None,
+        promoted_at: None,
+    };
+    core.workspace.record_friction(existing).unwrap();
     let markdown = include_str!("fixtures/friction-log.md");
     let params = json!({"spaceId":"space", "fileName":"friction.md", "markdown":markdown});
     let first = client
         .call(methods::IMPORT_FRICTION, params.clone())
         .await
         .unwrap();
-    assert_eq!(first["added"], 2);
-    assert_eq!(first["merged"], 0);
+    assert_eq!(first["added"], 1);
+    assert_eq!(first["merged"], 1);
     assert_eq!(first["skipped"].as_array().unwrap().len(), 2);
+    drop(client);
+    drop(core);
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
     let second = client.call(methods::IMPORT_FRICTION, params).await.unwrap();
     assert_eq!(second["added"], 0);
     assert_eq!(second["merged"], 0);
     assert_eq!(second["skipped"].as_array().unwrap().len(), 4);
     let reports = core.workspace.friction_reports("space");
     assert_eq!(reports.len(), 2);
-    assert!(reports.iter().all(|r| r.occurrences == 1));
+    assert_eq!(reports.iter().map(|r| r.occurrences).sum::<u64>(), 3);
     assert!(
         reports
             .iter()
-            .all(|r| r.provenance.source == FrictionSource::Import)
+            .any(|r| r.provenance.source == FrictionSource::Import)
     );
     assert!(
         reports
             .iter()
-            .all(|r| r.provenance.file_name.as_deref() == Some("friction.md"))
+            .any(|r| r.provenance.file_name.as_deref() == Some("friction.md"))
     );
     assert!(!format!("{reports:?}").contains("synthetic-secret"));
 }

@@ -605,17 +605,21 @@ impl WorkItemDetails {
                         .child(propose)
                         .child(dismiss),
                 );
-                let chat_id = report.provenance.chat_id.clone();
-                details = details.child(
-                    div()
-                        .id(("friction-chat", index))
-                        .cursor_pointer()
-                        .text_color(theme.text)
-                        .child("Open provenance chat")
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(DetailsEvent::OpenChat(chat_id.clone()))
-                        })),
-                );
+                if let Some(file_name) = &report.provenance.file_name {
+                    details = details.child(SharedString::from(format!("Imported from {file_name}")));
+                } else {
+                    let chat_id = report.provenance.chat_id.clone();
+                    details = details.child(
+                        div()
+                            .id(("friction-chat", index))
+                            .cursor_pointer()
+                            .text_color(theme.text)
+                            .child("Open provenance chat")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenChat(chat_id.clone()))
+                            })),
+                    );
+                }
                 row = row.child(details);
             }
             section = section.child(row);
