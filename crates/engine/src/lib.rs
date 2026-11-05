@@ -320,6 +320,11 @@ impl EngineCore {
         // as configInvalid and its resume attempt consumed.
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
+        let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::new(
+            sessions.clone(), doc_host.clone(), workspace.clone(),
+            Some(data_dir.join("orchestrator-wakes.json")),
+            orchestrator_wakes::system_clock(),
+        );
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
         match sessions.recover_stale() {
@@ -597,12 +602,7 @@ impl EngineCore {
             .agent_tokens()
             .admin()
             .set_store(data_dir.join("admin-grants.json"));
-        let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::start(
-            sessions.clone(),
-            doc_host.clone(),
-            workspace.clone(),
-            Some(data_dir.join("orchestrator-wakes.json")),
-        );
+        orchestrator_wakes.spawn_watchers();
         Ok(Self {
             sessions,
             doc_host,

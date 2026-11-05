@@ -21,6 +21,27 @@ use mast_proto::{
 const ORCH: &str = "orch";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_report_survives_service_restart_and_respects_draft() {
+    let rig = Rig::new().await;
+    rig.wakes.note_user_activity(ORCH, Some(true)).await;
+    rig.wakes.report_to_parent("w1", "restart report").await.unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    restarted.note_user_activity(ORCH, Some(true)).await;
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, false).await;
+    assert!(rig.wake_prompts().is_empty());
+    assert_eq!(restarted.status(ORCH).held.len(), 1);
+    restarted.note_user_activity(ORCH, Some(false)).await;
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, false).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|prompt| prompt.contains("restart report")), "restored report").await;
+    assert_eq!(rig.wake_prompts().iter().filter(|prompt| prompt.contains("restart report")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hand_off_reparents_workers_and_moves_held_reports() {
     let rig = Rig::new().await;
     rig.core.workspace.create_space("handoff-space", &rig.core.device_id, "/tmp", None, false).unwrap();

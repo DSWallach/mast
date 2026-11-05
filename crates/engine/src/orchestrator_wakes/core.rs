@@ -101,6 +101,7 @@ struct Orch {
     draft_non_empty: bool,
     last_user_ms: Option<i64>,
     delivered_keys: HashMap<String, i64>,
+    delivered_ids: HashMap<String, i64>,
     log: VecDeque<LogEntry>,
 }
 
@@ -200,7 +201,9 @@ impl WakeCore {
     pub fn record(&mut self, orch: &str, event: WakeEvent, now: i64) -> bool {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         o.delivered_keys.retain(|_, at| now - *at < DEDUPE_TTL_MS);
-        if o.held.iter().any(|e| e.key == event.key) || o.delivered_keys.contains_key(&event.key) {
+        o.delivered_ids.retain(|_, at| now - *at < DEDUPE_TTL_MS);
+        if o.held.iter().any(|e| e.id == event.id || e.key == event.key)
+            || o.delivered_ids.contains_key(&event.id) || o.delivered_keys.contains_key(&event.key) {
             return false;
         }
         // Raised then resolved before the orchestrator heard of it: neither
@@ -262,6 +265,7 @@ impl WakeCore {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         for event in events {
             o.delivered_keys.remove(&event.key);
+            o.delivered_ids.remove(&event.id);
             if let Some(entry) = o.log.iter_mut().find(|l| l.event.id == event.id) {
                 entry.delivered = false;
             }
@@ -329,6 +333,7 @@ impl WakeCore {
         o.held.retain(|e| !ids.contains(&e.id.as_str()));
         for event in &batch.events {
             o.delivered_keys.insert(event.key.clone(), now);
+            o.delivered_ids.insert(event.id.clone(), now);
             if let Some(entry) = o.log.iter_mut().find(|l| l.event.id == event.id) {
                 entry.delivered = true;
             }

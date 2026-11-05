@@ -27,6 +27,7 @@ mod tests {
                 report: Some("report".into()), at_ms,
             },
             message_id: None,
+            delivered: false,
         }
     }
 
@@ -99,6 +100,23 @@ mod tests {
         store.synchronize_held(&held);
         assert!(store.orchestrators["chat"][0].message_id.is_none());
     }
+
+    #[test]
+    fn measure_full_store_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wakes.json");
+        let mut store = WakeStore::default();
+        let entries = (0..500).map(|number| {
+            let mut entry = event(number);
+            entry.event.report = Some("x".repeat(4096));
+            entry
+        }).collect();
+        store.orchestrators.insert("chat".into(), entries);
+        let started = std::time::Instant::now();
+        store.write(&path).unwrap();
+        eprintln!("500 wake records: {:?}", started.elapsed());
+        assert_eq!(WakeStore::read(&path).orchestrators["chat"].len(), 500);
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,6 +124,8 @@ pub(super) struct StoredEvent {
     pub event: WakeEvent,
     /// Queue and transcript messages retain the same id.
     pub message_id: Option<String>,
+    #[serde(default)]
+    pub delivered: bool,
 }
 
 impl WakeStore {
@@ -120,8 +140,9 @@ impl WakeStore {
             for event in events {
                 if let Some(entry) = entries.iter_mut().find(|entry| entry.event.id == event.id) {
                     entry.message_id = None;
+                    entry.delivered = false;
                 } else {
-                    entries.push(StoredEvent { event: event.clone(), message_id: None });
+                    entries.push(StoredEvent { event: event.clone(), message_id: None, delivered: false });
                 }
             }
         }
@@ -132,6 +153,15 @@ impl WakeStore {
         if let Some(entries) = self.orchestrators.get_mut(chat) {
             for entry in entries.iter_mut().filter(|entry| event_ids.contains(&entry.event.id)) {
                 entry.message_id = Some(message_id.to_owned());
+                entry.delivered = false;
+            }
+        }
+    }
+
+    pub fn mark_delivered(&mut self, chat: &str, message_id: &str) {
+        if let Some(entries) = self.orchestrators.get_mut(chat) {
+            for entry in entries.iter_mut().filter(|entry| entry.message_id.as_deref() == Some(message_id)) {
+                entry.delivered = true;
             }
         }
     }
@@ -145,6 +175,7 @@ impl WakeStore {
         for entry in events {
             if entry.message_id.as_ref().is_none_or(|id| !queue.contains(id)) {
                 entry.message_id = None;
+                entry.delivered = false;
                 held.push(entry.event.clone());
             }
         }
@@ -154,10 +185,13 @@ impl WakeStore {
     pub fn transfer(&mut self, from: &str, to: &str) {
         if from == to { return; }
         let Some(entries) = self.orchestrators.remove(from) else { return };
+        let (delivered, entries): (Vec<_>, Vec<_>) = entries.into_iter().partition(|entry| entry.delivered);
+        if !delivered.is_empty() { self.orchestrators.insert(from.to_owned(), delivered); }
         let destination = self.orchestrators.entry(to.to_owned()).or_default();
         for mut entry in entries {
             if !destination.iter().any(|existing| existing.event.id == entry.event.id) {
                 entry.message_id = None;
+                entry.delivered = false;
                 destination.push(entry);
             }
         }

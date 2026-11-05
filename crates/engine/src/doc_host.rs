@@ -3072,8 +3072,9 @@ impl DocHost {
         &self,
         chat_id: &str,
         text: &str,
+        message_id: &str,
     ) -> Result<String, EngineError> {
-        self.queue_message_inner(chat_id, text, Vec::new(), false, false, None)
+        self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))
     }
 
     /// Reconcile and enqueue while excluding the queue drain, which removes
@@ -3087,7 +3088,7 @@ impl DocHost {
     ) -> Result<Option<String>, EngineError> {
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
-        if handle.doc.read_entries()?.iter().any(|entry| entry.id == message_id) {
+        if handle.doc.read_opening_tail(50)?.iter().any(|entry| entry.id == message_id) {
             return Ok(None);
         }
         if !handle.doc.read_queue()?.iter().any(|item| item.id == message_id) {
@@ -3878,7 +3879,10 @@ impl DocHost {
                 .steer(chat_id, &prompt, Some(message_id.clone()))
                 .await?
             {
-                SteerOutcome::Accepted => return Ok(()),
+                SteerOutcome::Accepted => {
+                    self.inner.event_turns.mark_delivered(chat_id, &message_id, handle.persistence.as_ref());
+                    return Ok(());
+                },
                 // The run died under us between the status read and the send;
                 // fall through and start a fresh turn with it.
                 SteerOutcome::NotSteerable => {}
@@ -3935,8 +3939,9 @@ impl DocHost {
             sessions.confirm_context_reset(&message_id);
         }
         // Validated above; skip the chokepoint's second validation.
-        self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id))
+        self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id.clone()))
             .await?;
+        self.inner.event_turns.mark_delivered(chat_id, &message_id, handle.persistence.as_ref());
         Ok(())
     }
 

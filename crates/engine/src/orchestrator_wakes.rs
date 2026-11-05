@@ -94,9 +94,65 @@ struct EventTurn {
 pub struct EventTurns {
     turns: Mutex<HashMap<String, EventTurn>>,
     cancelled: Mutex<HashMap<String, Vec<WakeEvent>>>,
+    persistence: Mutex<Option<WakePersistence>>,
+}
+
+#[derive(Debug)]
+struct WakePersistence {
+    path: PathBuf,
+    store: store::WakeStore,
+    generations: HashMap<(String, String), (std::sync::Weak<crate::chat_persistence::ChatPersistence>, u64)>,
+}
+
+impl WakePersistence {
+    fn prune(&mut self) {
+        let saved: Vec<_> = self.generations.iter().filter_map(|(key, (snapshot, generation))| {
+            snapshot.upgrade().filter(|snapshot| snapshot.has_saved(*generation)).map(|_| key.clone())
+        }).collect();
+        for (chat, message) in saved {
+            if let Some(entries) = self.store.orchestrators.get_mut(&chat) {
+                entries.retain(|entry| !(entry.delivered && entry.message_id.as_deref() == Some(&message)));
+            }
+            self.generations.remove(&(chat, message));
+        }
+    }
+    fn write(&self) -> Result<(), String> {
+        self.store.write(&self.path).map_err(|error| error.to_string())
+    }
 }
 
 impl EventTurns {
+    fn synchronize_held(&self, held: &HashMap<String, Vec<WakeEvent>>) -> Result<(), String> {
+        if let Some(persistence) = lock(&self.persistence).as_mut() {
+            persistence.prune();
+            persistence.store.synchronize_held(held);
+            persistence.write()?;
+        }
+        Ok(())
+    }
+
+    fn mark_queued(&self, chat_id: &str, events: &[WakeEvent], message_id: &str) -> Result<(), String> {
+        if let Some(persistence) = lock(&self.persistence).as_mut() {
+            persistence.prune();
+            persistence.store.mark_queued(chat_id, &events.iter().map(|event| event.id.clone()).collect(), message_id);
+            persistence.write()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_delivered(&self, chat_id: &str, message_id: &str, snapshot: Option<&Arc<crate::chat_persistence::ChatPersistence>>) {
+        if let Some(persistence) = lock(&self.persistence).as_mut() {
+            let exists = persistence.store.orchestrators.get(chat_id).is_some_and(|events| events.iter().any(|entry| entry.message_id.as_deref() == Some(message_id)));
+            if !exists { return; }
+            persistence.store.mark_delivered(chat_id, message_id);
+            if let Some(snapshot) = snapshot {
+                persistence.generations.insert((chat_id.to_owned(), message_id.to_owned()), (Arc::downgrade(snapshot), snapshot.generation()));
+            }
+            if let Err(error) = persistence.write() {
+                tracing::warn!(%error, chat = %chat_id, "could not save wake delivery receipt");
+            }
+        }
+    }
     pub fn register(&self, chat_id: &str, message_id: String, events: Vec<WakeEvent>) {
         lock(&self.turns).insert(
             chat_id.to_owned(),
@@ -256,6 +312,30 @@ impl OrchestratorWakes {
                 state.settings_overrides.insert(chat, settings);
             }
         }
+        if let Some(settings_path) = &store {
+            let path = settings_path.with_file_name("orchestrator-wake-events.json");
+            let mut saved = store::WakeStore::read(&path);
+            for chat in saved.orchestrators.keys().cloned().collect::<Vec<_>>() {
+                let Ok(handle) = doc_host.open(&chat) else { continue };
+                let queue: HashSet<String> = handle.doc().read_queue().unwrap_or_default()
+                    .into_iter().map(|item| item.id).collect();
+                let transcript: HashSet<String> = handle.doc().read_opening_tail(50).unwrap_or_default()
+                    .into_iter().map(|entry| entry.id).collect();
+                let held = saved.reconcile(&chat, &queue, &transcript);
+                state.core.restore_for_hand_off(&chat, held, clock());
+                if let Some(events) = saved.orchestrators.get(&chat) {
+                    for message in &queue {
+                        let queued: Vec<_> = events.iter().filter(|entry| entry.message_id.as_deref() == Some(message))
+                            .map(|entry| entry.event.clone()).collect();
+                        if !queued.is_empty() { event_turns.register(&chat, message.clone(), queued); }
+                    }
+                }
+            }
+            if let Err(error) = saved.write(&path) {
+                tracing::warn!(%error, "could not save restored wakes");
+            }
+            *lock(&event_turns.persistence) = Some(WakePersistence { path, store: saved, generations: HashMap::new() });
+        }
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(state),
@@ -291,7 +371,7 @@ impl OrchestratorWakes {
         (self.inner.clock)()
     }
 
-    fn spawn_watchers(&self) {
+    pub(crate) fn spawn_watchers(&self) {
         let mut signals = self.inner.sessions.watch_worker_signals();
         let this = self.clone();
         tokio::spawn(async move {
@@ -406,6 +486,9 @@ impl OrchestratorWakes {
             state
                 .settings_overrides
                 .insert(chat_id.to_owned(), settings);
+            if let Err(error) = self.inner.event_turns.synchronize_held(&state.core.held_events()) {
+                tracing::warn!(%error, "could not save held wake events");
+            }
             self.persist(&state);
         }
         self.evaluate(chat_id, false).await;
@@ -425,6 +508,9 @@ impl OrchestratorWakes {
         state.core.set_settings_preserving_held(to, settings);
         state.settings_overrides.insert(to.to_owned(), settings);
         state.core.transfer_held(from, to);
+        if let Some(persistence) = lock(&self.inner.event_turns.persistence).as_mut() {
+            persistence.store.transfer(from, to);
+        }
         state.handed_off_to.insert(from.to_owned(), to.to_owned());
         state.timers.remove(from);
     }
@@ -463,6 +549,9 @@ impl OrchestratorWakes {
                         info.parent = Some(to.to_owned());
                     }
                 }
+            }
+            if let Some(persistence) = lock(&self.inner.event_turns.persistence).as_mut() {
+                persistence.write().map_err(|error| format!("could not save transferred wake events: {error}"))?;
             }
             self.persist_checked(&state).map_err(|error| format!("could not save wake settings: {error}"))?;
             workers
@@ -789,7 +878,7 @@ impl OrchestratorWakes {
                     let text = format!(
                         "[Mast system message, not from the user: auto-continue {count}/3]\nYour work item is still open. Continue the task; if you are done, mark the item completed or raise a Required Action (kind handoff) — if you're blocked, raise one with kind ask."
                     );
-                    match self.inner.doc_host.queue_event_message(worker, &text) {
+                    match self.inner.doc_host.queue_event_message(worker, &text, &crate::new_id()) {
                         Ok(id) => {
                             self.inner.event_turns.register(worker, id, Vec::new());
                             state.auto_continue = next;
@@ -960,6 +1049,7 @@ impl OrchestratorWakes {
             );
             event.report = Some(report);
             state.core.record(&parent_id, event, now);
+            self.inner.event_turns.synchronize_held(&state.core.held_events())?;
         }
         (parent_id, truncated)
         };
@@ -1063,6 +1153,12 @@ impl OrchestratorWakes {
     }
 
     async fn after_ingest(&self, recorded: HashSet<String>) {
+        if !recorded.is_empty() {
+            let state = lock(&self.inner.state);
+            if let Err(error) = self.inner.event_turns.synchronize_held(&state.core.held_events()) {
+                tracing::warn!(%error, "could not save held wake events");
+            }
+        }
         // Orchestrators that recorded something, plus any holding events
         // whose blocker (a running turn) may just have ended.
         let mut targets: HashSet<String> = recorded;
@@ -1112,6 +1208,10 @@ impl OrchestratorWakes {
         let cancelled = self.inner.event_turns.take_cancelled(orch);
         if !cancelled.is_empty() {
             state.core.restore(orch, cancelled, now);
+            if let Err(error) = self.inner.event_turns.synchronize_held(&state.core.held_events()) {
+                tracing::warn!(%error, "could not save restored wake events");
+                return;
+            }
         }
         match state.core.decide(orch, now, ctx, force) {
             Decision::Nothing | Decision::Hold(_) => {}
@@ -1124,14 +1224,26 @@ impl OrchestratorWakes {
                     return;
                 }
                 let text = batch.render();
-                match self.inner.doc_host.queue_event_message(orch, &text) {
+                let message_id = crate::new_id();
+                if let Err(error) = self.inner.event_turns.synchronize_held(&state.core.held_events()) {
+                    tracing::warn!(%error, chat = %orch, "could not save held wake events");
+                    return;
+                }
+                if let Err(error) = self.inner.event_turns.mark_queued(orch, &batch.events, &message_id) {
+                    tracing::warn!(%error, chat = %orch, "could not save wake queue receipt");
+                    return;
+                }
+                self.inner.event_turns.register(orch, message_id.clone(), batch.events.clone());
+                match self.inner.doc_host.queue_event_message(orch, &text, &message_id) {
                     Ok(message_id) => {
-                        self.inner
-                            .event_turns
-                            .register(orch, message_id, batch.events.clone());
+                        let _ = message_id;
                         state.core.delivered(orch, &batch, now);
                     }
                     Err(err) => {
+                        self.inner.event_turns.clear(orch);
+                        if let Err(error) = self.inner.event_turns.synchronize_held(&state.core.held_events()) {
+                            tracing::warn!(%error, "could not save held wake events");
+                        }
                         tracing::warn!(chat = %orch, error = %err, "orchestrator wake delivery failed");
                     }
                 }
