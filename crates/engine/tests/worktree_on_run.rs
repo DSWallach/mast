@@ -326,3 +326,6 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

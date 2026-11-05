@@ -578,3 +578,6 @@ async fn unreadable_http_ack_retries_instead_of_stranding_the_batch() {
 
     client.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

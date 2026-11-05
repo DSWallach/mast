@@ -1101,3 +1101,6 @@ exit 0
         vec![("grace@example.com".to_string(), true)]
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

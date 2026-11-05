@@ -2310,3 +2310,6 @@ async fn request_link_and_fact_limits() {
         );
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

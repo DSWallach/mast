@@ -521,3 +521,6 @@ async fn later_local_work_imports_as_a_delta() {
     assert_eq!(skipped_chats, 2);
     synced.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

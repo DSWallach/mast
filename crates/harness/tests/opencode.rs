@@ -1016,3 +1016,6 @@ async fn repeated_session_create_failure_stops_after_one_retry() {
         })
     ));
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

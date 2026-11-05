@@ -88,3 +88,6 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         })
     ));
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

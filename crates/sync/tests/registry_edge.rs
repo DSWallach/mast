@@ -241,3 +241,6 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
     assert!(doc_b.lock().unwrap().cursor() >= cursor);
     client_b.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

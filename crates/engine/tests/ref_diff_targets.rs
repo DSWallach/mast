@@ -986,3 +986,6 @@ async fn ref_targets_are_refused_for_chats_on_other_devices() {
     assert!(f.targets().list_ref_candidates("remote-chat").is_err());
     f.core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

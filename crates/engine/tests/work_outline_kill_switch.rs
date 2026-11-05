@@ -69,3 +69,6 @@ async fn kill_switch_refuses_writes_and_keeps_reads() {
     assert!(frame.available && frame.items.is_empty());
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

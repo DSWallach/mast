@@ -159,3 +159,6 @@ async fn a_chat_with_neither_a_live_stamp_nor_any_resolvable_transcript_is_none(
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

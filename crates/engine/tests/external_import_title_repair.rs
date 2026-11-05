@@ -340,3 +340,6 @@ async fn repair_never_touches_a_native_chat_with_no_import_cursor() {
 // `external_import_title_repair_no_transcript.rs` — since each mutates the
 // process-global `$HOME` env var and this file already has one such test
 // above; more than one per binary races (see those files' doc comments).
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

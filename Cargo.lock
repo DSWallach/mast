@@ -5074,6 +5074,7 @@ version = "0.2.82"
 dependencies = [
  "anyhow",
  "clap",
+ "ctor",
  "embed-resource",
  "libc",
  "mast-engine",
@@ -5096,6 +5097,7 @@ name = "mast-doc"
 version = "0.2.82"
 dependencies = [
  "chrono",
+ "ctor",
  "loro",
  "mast-proto",
  "serde",
@@ -5114,6 +5116,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "ctor",
  "futures",
  "gethostname",
  "grep-matcher",
@@ -5156,6 +5159,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "ctor",
  "deser-hjson",
  "futures",
  "libc",
@@ -5182,6 +5186,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ctor",
  "futures",
  "mast-doc",
  "mast-engine",
@@ -5204,6 +5209,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "ctor",
  "futures",
  "http-body-util",
  "hyper",
@@ -5229,6 +5235,7 @@ name = "mast-proto"
 version = "0.2.82"
 dependencies = [
  "chrono",
+ "ctor",
  "serde",
  "serde_json",
  "sha2",
@@ -5241,6 +5248,7 @@ version = "0.2.82"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ctor",
  "futures",
  "mast-doc",
  "mast-proto",
@@ -5260,6 +5268,7 @@ version = "0.2.82"
 dependencies = [
  "block2 0.6.2",
  "chrono",
+ "ctor",
  "futures",
  "loro",
  "loro-protocol",
@@ -5281,6 +5290,7 @@ dependencies = [
 name = "mast-syntax"
 version = "0.2.82"
 dependencies = [
+ "ctor",
  "thiserror 2.0.20",
  "tree-sitter",
  "tree-sitter-bash",
@@ -5317,6 +5327,7 @@ version = "0.2.82"
 dependencies = [
  "anyhow",
  "clap",
+ "ctor",
  "json5 0.4.1",
  "plist",
  "serde",
@@ -5342,6 +5353,7 @@ dependencies = [
  "chrono",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
+ "ctor",
  "fontdb",
  "foreign-types",
  "futures",
@@ -5399,6 +5411,7 @@ name = "mast-update"
 version = "0.2.82"
 dependencies = [
  "anyhow",
+ "ctor",
  "futures",
  "mast-proto",
  "reqwest",

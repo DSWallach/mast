@@ -205,3 +205,6 @@ fn each_spec_hashes_its_auth_file_contents() {
         String::from_utf8_lossy(&result.stdout)
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

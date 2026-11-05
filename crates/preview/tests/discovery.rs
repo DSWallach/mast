@@ -157,3 +157,6 @@ async fn a_discovered_server_is_probed_once_not_every_cycle() {
     );
     service.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

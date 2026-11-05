@@ -102,3 +102,6 @@ printf '%s\n' '[{"number":90,"title":"Login shell pull request","url":"https://g
     assert_eq!(pull_request.number, 90);
     assert_eq!(pull_request.title, "Login shell pull request");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

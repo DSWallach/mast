@@ -73,3 +73,6 @@ fn npm_codex_is_offered_by_production_catalog() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

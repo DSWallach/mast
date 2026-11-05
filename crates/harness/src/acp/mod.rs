@@ -4265,12 +4265,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn antigravity_named_home_settings_preserve_business_auth() {
+    fn antigravity_named_home_resolves_from_passwd() {
         let (username, real_home) = antigravity_paths::passwd_entry(None).unwrap();
-        let directory = tempfile::tempdir_in(&real_home).unwrap();
-        write_business_auth(directory.path());
-        let path =
-            PathBuf::from(format!("~{username}")).join(directory.path().file_name().unwrap());
+        let path = PathBuf::from(format!("~{username}")).join("fixture");
         let unrelated_home = tempfile::tempdir().unwrap();
         let resolved = antigravity_paths::resolve_home(
             Some(&path),
@@ -4278,8 +4275,7 @@ mod tests {
             unrelated_home.path(),
         )
         .unwrap();
-        assert_eq!(resolved, directory.path());
-        assert_eq!(selected_auth_in_home(&resolved), "oauth-business");
+        assert_eq!(resolved, real_home.join("fixture"));
     }
 
     #[test]

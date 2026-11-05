@@ -66,3 +66,6 @@ fn main() -> Result<()> {
         .with_context(|| format!("could not write {}", args.report.display()))?;
     Ok(())
 }
+#[cfg(test)]
+#[path = "../../../../test_support/isolation.rs"]
+mod test_isolation;

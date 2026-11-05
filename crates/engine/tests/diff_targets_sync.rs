@@ -597,3 +597,6 @@ async fn agent_tool_bind_on_the_assembled_engine_reaches_the_watch_and_the_diff(
     assert_eq!(frame[0]["targets"][0]["path"], text(&f.sub_wt));
     assert_eq!(frame[0]["targets"][0]["source"], "agent");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

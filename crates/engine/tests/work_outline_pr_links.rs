@@ -450,3 +450,6 @@ async fn a_moved_chat_keeps_its_old_link_and_a_removed_one_stays_removed() {
     assert_eq!(rig.pass().await.linked, 0);
     assert!(rig.prs(&second).is_empty());
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

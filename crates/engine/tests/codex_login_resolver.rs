@@ -36,3 +36,6 @@ async fn codex_login_resolves_override_and_adds_its_directory_to_child_path() {
     assert_eq!(login.url, "https://auth.openai.com/authorize?test=resolver");
     accounts.cancel_login(&login.login_id);
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

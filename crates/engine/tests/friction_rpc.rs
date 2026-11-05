@@ -257,3 +257,6 @@ async fn friction_import_deduplicates_and_redacts() {
     );
     assert!(!format!("{reports:?}").contains("synthetic-secret"));
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

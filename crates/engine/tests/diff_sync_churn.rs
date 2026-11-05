@@ -285,3 +285,6 @@ async fn deleted_checkout_is_evicted_after_grace() {
     );
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

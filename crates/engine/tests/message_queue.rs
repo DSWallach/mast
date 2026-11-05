@@ -1665,3 +1665,6 @@ async fn queue_completion_markers_distinguish_normal_turns_from_interrupts() {
         core.shutdown().await;
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

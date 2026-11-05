@@ -1347,3 +1347,6 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
     }
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

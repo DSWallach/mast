@@ -181,3 +181,6 @@ async fn transcript_content_lands_in_the_doc_with_live_equivalent_shape() {
     ));
     assert_eq!(entries[3].role, MessageRole::Assistant);
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -1332,3 +1332,6 @@ async fn project_detail_is_read_only_cached_and_served_stored() {
         .await;
     assert_eq!(missing.code, LinearErrorCode::NotFound);
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

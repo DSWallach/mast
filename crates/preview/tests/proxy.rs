@@ -340,3 +340,6 @@ async fn streaming_headers_websocket_cancellation_and_restart() {
     .await
     .expect("proxy test stalled");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

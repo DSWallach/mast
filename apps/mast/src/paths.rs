@@ -30,6 +30,7 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
     #[cfg(not(windows))]
     {
         let home = PathBuf::from(env("HOME").expect("HOME not set"));
+        mast_proto::env::assert_test_home_isolated(&home);
         let dir = home.join(".zeron");
         // One-shot 0.2.0 migration: adopt the pre-rename data dir.
         if !dir.exists() {

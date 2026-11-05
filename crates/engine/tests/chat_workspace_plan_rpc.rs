@@ -506,3 +506,6 @@ async fn close_chat_worktree_refuses_while_a_claude_process_sits_in_the_worktree
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

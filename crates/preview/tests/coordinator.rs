@@ -69,3 +69,6 @@ async fn authenticated_coordinator_pairs_devices_for_large_http_preview() {
         server.await.unwrap(); stop.cancel(); host_signal.await.unwrap(); viewer_signal.await.unwrap(); for listener in listeners { listener.await.unwrap(); }
     }).await.expect("coordinated P2P preview did not complete");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

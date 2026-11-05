@@ -99,3 +99,6 @@ fn codex_availability_finds_npm_cmd_shim() {
     std::fs::remove_file(prefix.join("npm").join("codex.cmd")).unwrap();
     probe(&prefix, None, None, false);
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

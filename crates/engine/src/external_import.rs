@@ -999,7 +999,9 @@ impl ExternalSessionImporter {
     /// fatal — matches [`parse_transcript`]'s tolerant stance. Blocking (fs);
     /// run off the async path.
     pub fn scan(&self) -> Result<Vec<ExternalSessionCandidate>, EngineError> {
-        let root = home_dir().join(".claude").join("projects");
+        let home = home_dir();
+        mast_proto::env::assert_test_home_isolated(&home);
+        let root = home.join(".claude").join("projects");
         let Ok(project_dirs) = std::fs::read_dir(&root) else {
             return Ok(Vec::new()); // no ~/.claude/projects at all
         };

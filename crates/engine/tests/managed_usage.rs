@@ -374,3 +374,6 @@ fn a_missing_sign_in_says_where_it_looked() {
     assert!(reason.contains("auth.json"), "{reason}");
     assert_eq!(rig.managed.credentials_or_reason("missing").unwrap_err(), "unknown account");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

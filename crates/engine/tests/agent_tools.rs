@@ -3892,3 +3892,6 @@ async fn friction_captures_errored_turn() {
     assert_eq!(rows[0].what_happened, "password=[REDACTED]");
     rig.core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

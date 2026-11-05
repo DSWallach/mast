@@ -32,6 +32,7 @@ pub struct EngineProfile {
 impl EngineProfile {
     /// Load or create the installation's stable local identity.
     pub fn local(data_dir: &Path) -> Result<Self, EngineError> {
+        mast_proto::env::assert_test_home_isolated(data_dir);
         let profile_id = load_or_create_local_profile_id(data_dir)?;
         let store_root = data_dir.join("profiles").join("local");
         Ok(Self {
@@ -303,6 +304,21 @@ fn sanitize_path_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_home_is_rejected_before_opening_a_profile_or_engine() {
+        let original = std::env::var_os("MAST_TEST_ORIGINAL_HOME").unwrap();
+        let data_dir = PathBuf::from(original).join(".zeron");
+        assert!(std::panic::catch_unwind(|| EngineProfile::local(&data_dir)).is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _ = crate::EngineCore::assemble(
+                &data_dir,
+                std::sync::Arc::new(crate::default_registry()),
+                mast_proto::HarnessId::Mock,
+                None,
+            );
+        }).is_err());
+    }
 
     #[test]
     fn local_profile_id_is_stable_and_not_the_dev_identity() {

@@ -124,3 +124,6 @@ esac
     assert_eq!(items[0].summary.repo.as_deref(), Some("acme/widgets"));
     assert_eq!(items[0].summary.title.as_deref(), Some("Login shell PR"));
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

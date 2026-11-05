@@ -788,3 +788,6 @@ async fn read_only_run_spawns_with_denied_tools_and_no_bypass() {
         "{events:?}"
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

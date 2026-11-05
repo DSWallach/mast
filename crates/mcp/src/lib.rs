@@ -100,3 +100,7 @@ mod env_alias_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

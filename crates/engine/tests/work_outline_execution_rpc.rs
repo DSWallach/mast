@@ -477,3 +477,6 @@ fn engine_advertises_the_multi_repo_capability() {
             .any(|c| c == mast_proto::capabilities::WORK_OUTLINE_MULTI_REPO_V1)
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

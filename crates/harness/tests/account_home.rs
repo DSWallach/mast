@@ -140,3 +140,6 @@ async fn codex_managed_home_reaches_the_app_server_env() {
         vec!["<unset>".to_string(), home.to_string_lossy().into_owned()]
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

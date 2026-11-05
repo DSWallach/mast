@@ -103,3 +103,6 @@ async fn resolves_and_scans_subagents_for_a_harness_session_only_chat() {
         }
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

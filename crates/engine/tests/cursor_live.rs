@@ -374,3 +374,6 @@ async fn startup_steering_burst_retains_all_interrupted_messages() {
     );
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

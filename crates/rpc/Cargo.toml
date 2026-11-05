@@ -23,6 +23,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ctor = "1"
 mast-doc.workspace = true
 
 # Deterministic stalled-transport deadlines.

@@ -598,3 +598,7 @@ fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

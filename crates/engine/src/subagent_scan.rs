@@ -399,19 +399,18 @@ mod tests {
     }
 
     #[test]
-    fn real_on_disk_subagents_for_this_conversations_own_session_parse_cleanly() {
-        let real = Path::new(
-            "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/29fd48ab-0258-4406-b725-26265045e05f.jsonl",
+    fn claude_subagent_metadata_with_additional_fields_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        write(&transcript, "{}\n");
+        write(
+            &dir.path().join("session/subagents/agent-child.meta.json"),
+            r#"{"agentType":"fork","isFork":true,"description":"Inspect changes","toolUseId":"tool-1","spawnDepth":1,"requestShape":"background","requestNonInteractive":false,"model":"inherit"}"#,
         );
-        if !real.is_file() {
-            return; // machine-specific; skip if not present rather than fail CI elsewhere
-        }
-        let found = scan_subagents(real).expect("scan real session");
-        assert!(
-            !found.is_empty(),
-            "this conversation's own session is known to have spawned subagents"
-        );
-        assert!(found.iter().any(|s| s.description.is_some()));
+        let found = scan_subagents(&transcript).expect("scan session");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].description.as_deref(), Some("Inspect changes"));
+        assert_eq!(found[0].agent_type.as_deref(), Some("fork"));
     }
 
     #[test]

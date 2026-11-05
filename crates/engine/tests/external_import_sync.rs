@@ -196,3 +196,6 @@ async fn sync_on_a_never_imported_chat_errors() {
     assert!(err.to_string().contains("no external-import record"));
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

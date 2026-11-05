@@ -838,3 +838,6 @@ async fn detect_probes_edge_dev_mode() {
     assert_eq!(auth.access_token().await.as_deref(), Ok("dev-w"));
     task.abort();
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -41,3 +41,6 @@ fn run_request_attachments_survive_command_round_trip() {
         other => panic!("unexpected payload {other:?}"),
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

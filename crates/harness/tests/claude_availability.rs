@@ -87,3 +87,6 @@ fn claude_availability_reports_not_installed_without_any_cli() {
     let dir = tempfile::tempdir().unwrap();
     probe(dir.path(), None, false);
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

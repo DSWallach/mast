@@ -174,3 +174,6 @@ fn onboarding_documents_use_the_current_name() {
         }
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -1839,3 +1839,6 @@ async fn item_rooted_at_a_nested_repository_runs_its_chat_there() {
     );
     rig.core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -11,3 +11,6 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+ctor = "1"

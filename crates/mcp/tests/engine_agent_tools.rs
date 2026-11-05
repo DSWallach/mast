@@ -227,3 +227,6 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
     }
     let _: Value = current;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

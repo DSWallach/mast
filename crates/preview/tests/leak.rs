@@ -347,3 +347,6 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
     a.clear().await;
     b.clear().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

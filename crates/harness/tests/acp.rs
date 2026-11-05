@@ -1992,3 +1992,6 @@ async fn antigravity_detection_subprocess() {
             .unwrap_or(true)
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -157,3 +157,6 @@ async fn repair_resolves_a_cursor_less_chat_via_its_harness_session() {
         }
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

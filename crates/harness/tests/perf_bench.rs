@@ -46,3 +46,6 @@ fn bench_git_spawn_latency() {
         times[n - 1]
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -256,3 +256,6 @@ async fn repair_junk_imports_hard_deletes_already_imported_throwaways_but_leaves
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
