@@ -408,12 +408,17 @@ impl Changes {
         else {
             return;
         };
+        let mut needs_reflatten = false;
         if let Some(fold) = self.folds.get_mut(&file.path) {
+            needs_reflatten = fold.collapsed || fold.toggled_at.is_some();
             fold.collapsed = false;
             fold.toggled_at = None;
         }
+        needs_reflatten |= self.submodule_folds.values().any(|collapsed| *collapsed);
         self.submodule_folds.clear();
-        self.reflatten(cx);
+        if needs_reflatten {
+            self.reflatten(cx);
+        }
         if let Some(start) = self
             .row_ranges
             .get(index)
@@ -757,7 +762,9 @@ mod navigation_tests {
             let key = |name| gpui::KeyDownEvent { keystroke: gpui::Keystroke::parse(name).unwrap(), is_held: false, prefer_character_input: false };
             changes.diff_key_down(&key("k"), window, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::FileHeader { file: 0 }));
+            let rows = changes.rows.as_ptr();
             changes.diff_key_down(&key("j"), window, cx);
+            assert_eq!(changes.rows.as_ptr(), rows, "an expanded target keeps the row model");
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 0 }));
             changes.diff_key_down(&key("v"), window, cx);
             assert_eq!(changes.review_state.as_ref().unwrap().viewed_hunks.len(), 1);
