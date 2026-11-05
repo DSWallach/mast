@@ -1421,8 +1421,19 @@ impl RegistryDoc {
         if !self.chats_share_project(source.space_id.as_deref().unwrap(), from, to) {
             return Err("chats must belong to the same project".into());
         }
-        if destination.parent_chat_id.as_deref() == Some(from) {
-            return Err("destination cannot be a child of the source".into());
+        let mut ancestor = destination.parent_chat_id.as_deref();
+        let chats = self.read_chats().map_err(|e| e.to_string())?;
+        let mut remaining = chats.len();
+        while let Some(id) = ancestor {
+            if id == from {
+                return Err("destination cannot be a descendant of the source".into());
+            }
+            if remaining == 0 {
+                return Err("destination has a cyclic parent chain".into());
+            }
+            remaining -= 1;
+            ancestor = chats.iter().find(|chat| chat.id == id)
+                .and_then(|chat| chat.parent_chat_id.as_deref());
         }
         if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
             .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
@@ -1436,8 +1447,8 @@ impl RegistryDoc {
                 .map(|workers| (workers, true))
                 .map_err(|e| format!("invalid hand-off provenance: {e}"));
         }
-        let workers: Vec<String> = self.read_chats().map_err(|e| e.to_string())?
-            .into_iter().filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))
+        let workers: Vec<String> = chats.into_iter()
+            .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))
             .map(|chat| chat.id).collect();
         for worker in &workers {
             self.write(KIND_CHATS, worker, OpKind::Update,
