@@ -3271,6 +3271,11 @@ impl Overview {
             .take(visible_count)
             .map(|sub| {
                 let color = sub.status.color(theme.appearance);
+                let indicator = if sub.status == SubagentStatus::Running {
+                    crate::loaders::mini_mono_spinner(format!("overview-subagent-status-{chat_id}-{}", sub.agent_id), 1.5, color, cx.entity_id(), cx).into_any_element()
+                } else {
+                    crate::status_style::indicator(crate::status_style::Status::Done, theme.appearance).into_any_element()
+                };
                 let name = sub.display_name();
                 let peeking = self
                     .subagent_peek
@@ -3311,10 +3316,7 @@ impl Overview {
                         this.open_subagent_peek(click_chat.clone(), &click_sub, window, cx);
                     }))
                     .tooltip(move |_, cx| cx.new(|_| LinkSourceTooltip(tooltip.clone())).into())
-                    .child(crate::status_style::indicator(
-                        match sub.status { SubagentStatus::Running => crate::status_style::Status::Working, SubagentStatus::Done => crate::status_style::Status::Done },
-                        theme.appearance,
-                    ))
+                    .child(indicator)
                     .child(
                         div()
                             .flex_1()
@@ -5654,6 +5656,11 @@ impl Overview {
             .unwrap_or_else(|| format_time_ago(row.chat.created_at, now))
             .into();
         let dot = crate::status_style::status_style(row.status.into(), theme.appearance).color;
+        let indicator = if row.status == ChatIndicator::Working {
+            crate::loaders::mini_mono_spinner(format!("overview-status-{chat_id}"), 1.5, dot, cx.entity_id(), cx).into_any_element()
+        } else {
+            crate::status_style::indicator(row.status.into(), theme.appearance).into_any_element()
+        };
         let (icon, label) = status_style(row.status);
         let unread = is_unread_done(
             &self.acknowledged_done,
@@ -5765,7 +5772,7 @@ impl Overview {
                         this.toggle_expanded(&toggle_id, cx);
                         cx.notify();
                     }))
-                    .child(crate::status_style::indicator(row.status.into(), theme.appearance))
+                    .child(indicator)
                     .child(
                         div()
                             .flex_1()

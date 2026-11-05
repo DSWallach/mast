@@ -60,23 +60,33 @@ pub(crate) struct StatusStyle {
 
 pub(crate) fn status_style(status: Status, appearance: Appearance) -> StatusStyle {
     let dark = appearance.is_dark();
-    let (color, glyph) = match (status, dark) {
-        (Status::Working, true) => (0x38d059, "◌"),
-        (Status::Working, false) => (0x245f31, "◌"),
-        (Status::Waiting, true) => (0xdfbe1b, "!"),
-        (Status::Waiting, false) => (0xa68a00, "!"),
-        (Status::Errored, true) => (0xfe4b25, "✕"),
-        (Status::Errored, false) => (0xd93a15, "✕"),
-        (Status::Ready, _) => (0x3f69cc, "→"),
-        (Status::Done, true) => (0x619c82, "✓"),
-        (Status::Done, false) => (0x619c82, "✓"),
-        (Status::Idle, true) => (0xb5b5b5, "○"),
-        (Status::Idle, false) => (0x183028, "○"),
+    let color = match (status, dark) {
+        (Status::Working, true) => 0x38d059,
+        (Status::Working, false) => 0x245f31,
+        (Status::Waiting, true) => 0xdfbe1b,
+        (Status::Waiting, false) => 0xa68a00,
+        (Status::Errored, true) => 0xfe4b25,
+        (Status::Errored, false) => 0xd93a15,
+        (Status::Ready, _) => 0x3f69cc,
+        (Status::Done, _) => 0x619c82,
+        (Status::Idle, true) => 0xb5b5b5,
+        (Status::Idle, false) => 0x183028,
     };
     StatusStyle {
         color: gpui::rgb(color).into(),
         rgb: [(color >> 16) as u8, (color >> 8) as u8, color as u8],
-        glyph,
+        glyph: glyph(status),
+    }
+}
+
+pub(crate) fn glyph(status: Status) -> &'static str {
+    match status {
+        Status::Working => "◌",
+        Status::Waiting => "!",
+        Status::Errored => "✕",
+        Status::Ready => "→",
+        Status::Done => "✓",
+        Status::Idle => "○",
     }
 }
 

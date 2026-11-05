@@ -186,30 +186,30 @@ impl TeamFacts {
         self.count(|w| w.ready.is_some() && w.state != WorkerState::Done)
     }
 
-    /// "4 working · 1 waiting on you · 2 ready to merge" (parts at zero are
+    /// "◌ 4 working · ! 1 waiting on you · → 2 ready to merge" (parts at zero are
     /// left out; "No active workers" when none shows).
     pub(crate) fn roll_up(&self) -> String {
         let mut parts = Vec::new();
         let working = self.working();
         if working > 0 {
-            parts.push(format!("{working} working"));
+            parts.push(format!("{} {working} working", crate::status_style::glyph(crate::status_style::Status::Working)));
         }
         let waiting = self.waiting();
         if waiting > 0 {
-            parts.push(format!("{waiting} waiting on you"));
+            parts.push(format!("{} {waiting} waiting on you", crate::status_style::glyph(crate::status_style::Status::Waiting)));
         }
         let ready = self.ready();
         if ready > 0 {
-            parts.push(format!("{ready} ready to merge"));
+            parts.push(format!("{} {ready} ready to merge", crate::status_style::glyph(crate::status_style::Status::Ready)));
         }
         let errored = self.count(|w| w.state == WorkerState::Errored);
         if errored > 0 {
-            parts.push(format!("{errored} errored"));
+            parts.push(format!("{} {errored} errored", crate::status_style::glyph(crate::status_style::Status::Errored)));
         }
         if parts.is_empty() {
             let done = self.count(|w| w.state == WorkerState::Done);
             return if done > 0 && done == self.live().count() {
-                format!("{done} done")
+                format!("{} {done} done", crate::status_style::glyph(crate::status_style::Status::Done))
             } else {
                 "No active workers".to_owned()
             };
@@ -461,8 +461,8 @@ mod tests {
             (Idle, true),
             (Done, true),
         ]);
-        assert_eq!(team.roll_up(), "4 working \u{b7} 1 waiting on you \u{b7} 2 ready to merge");
-        assert_eq!(facts_of(&[(Done, false)]).roll_up(), "1 done");
+        assert_eq!(team.roll_up(), "◌ 4 working \u{b7} ! 1 waiting on you \u{b7} → 2 ready to merge");
+        assert_eq!(facts_of(&[(Done, false)]).roll_up(), "✓ 1 done");
         assert_eq!(facts_of(&[(Idle, false)]).roll_up(), "No active workers");
     }
 
