@@ -1142,13 +1142,18 @@ async fn respond_input_resolves_pending_question() {
             })
         })
         .unwrap();
+    let invalid = core.sessions.respond_input(CHAT, &request_id, vec![mast_proto::UserInputAnswer {
+        question_id: "q1".into(), labels: vec!["invalid".into()],
+    }]);
+    assert!(invalid.is_err());
+    assert_eq!(core.sessions.session_status(CHAT).unwrap().status, SessionStatus::AwaitingInput);
     queue_as_viewer(
         handle.doc(),
         "cmd-answer-1",
         SessionCommandPayload::RespondInput {
             request_id,
             answers: vec![mast_proto::UserInputAnswer {
-                question_id: "q1".into(),
+                question_id: "unknown".into(),
                 labels: vec!["b".into()],
             }],
         },

@@ -5171,6 +5171,10 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                let mut validated_answers = answers.clone();
+                if let Err(error) = mast_proto::validate_input_answers(&questions, &mut validated_answers) {
+                    return Ok((SessionCommandStatus::Rejected, Some(error)));
+                }
                 // The run died under the question (engine restart, crash).
                 // The question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
@@ -5187,7 +5191,7 @@ impl DocHost {
                         Some("no pending input request and no prior run config".into()),
                     ));
                 };
-                request.prompt = respond_input_prompt(&questions, answers);
+                request.prompt = respond_input_prompt(&questions, &validated_answers);
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
                 self.apply_chat_approval(chat_id, &mut request);

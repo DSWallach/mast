@@ -211,7 +211,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "respond_to_input",
-            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Labels are the option strings, or free text for open questions.",
+            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput.",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
                 "answers": {
@@ -222,7 +222,7 @@ fn catalog() -> Vec<ToolDef> {
                             "question_id": { "type": "string" },
                             "labels": { "type": "array", "items": { "type": "string" } }
                         },
-                        "required": ["question_id", "labels"]
+                        "required": ["labels"]
                     }
                 }
             })),
@@ -726,7 +726,7 @@ struct RespondArgs {
 
 #[derive(Deserialize)]
 struct AnswerArg {
-    question_id: String,
+    question_id: Option<String>,
     labels: Vec<String>,
 }
 
@@ -900,7 +900,7 @@ impl Tools {
         self.call_normalized(name, args).await.map_err(|error| {
             let argument_error = error.starts_with("invalid arguments")
                 || error.contains("idempotencyKey is required");
-            if name == "create_chat" && argument_error {
+            if matches!(name, "create_chat" | "respond_to_input") && argument_error {
                 agent_tools::with_usage(name, &error)
             } else {
                 error
@@ -1816,33 +1816,22 @@ impl Tools {
         args: RespondArgs,
     ) -> anyhow::Result<Value> {
         let chat = self.reach_chat(origin, &args.chat, Reach::Child).await?;
-        let request_id = match args.request_id {
-            Some(id) => id,
-            None => {
-                let entries = self.zeron.transcript(&chat.id).await?;
-                let rendered = render_entries(&entries, RenderOptions::default());
-                last_pending_input(&rendered)
-                    .and_then(|p| {
-                        p.get("requestId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("chat {} has no pending question", short(&chat.id))
-                    })?
-            }
-        };
-        if args.answers.is_empty() {
-            anyhow::bail!("answers is empty");
+        let entries = self.zeron.transcript(&chat.id).await?;
+        let rendered = render_entries(&entries, RenderOptions::default());
+        let pending = last_pending_input(&rendered)
+            .ok_or_else(|| anyhow::anyhow!("chat {} has no pending question", short(&chat.id)))?;
+        let request_id = pending.get("requestId").and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("pending input has no request id"))?.to_owned();
+        if args.request_id.as_ref().is_some_and(|id| id != &request_id) {
+            anyhow::bail!("request id does not match pending request {request_id}");
         }
-        let answers = args
-            .answers
-            .into_iter()
-            .map(|a| UserInputAnswer {
-                question_id: a.question_id,
-                labels: a.labels,
-            })
-            .collect();
+        let questions: Vec<mast_proto::UserInputQuestion> = serde_json::from_value(
+            pending.get("questions").cloned().ok_or_else(|| anyhow::anyhow!("pending input has no questions"))?
+        )?;
+        let mut answers: Vec<UserInputAnswer> = args.answers.into_iter().map(|a| UserInputAnswer {
+            question_id: a.question_id.unwrap_or_default(), labels: a.labels,
+        }).collect();
+        mast_proto::validate_input_answers(&questions, &mut answers).map_err(anyhow::Error::msg)?;
         let command_id = self
             .zeron
             .queue_command(
@@ -2301,6 +2290,7 @@ mod tests {
         project_chats: Vec<&'static str>,
         /// The engine's finished-worker verdicts for the agent's archive scope.
         archive_info: Vec<(&'static str, Value)>,
+        pending_questions: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2390,6 +2380,10 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
+                methods::WATCH_DOC_MESSAGES if self.pending_questions.is_some() => stream(json!({ "reset": [
+                    { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local", "status": "streaming",
+                      "parts": [{ "kind": "input", "id": "i", "requestId": "r1", "questions": self.pending_questions, "resolved": false }] }
+                ]})),
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
@@ -3057,6 +3051,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn input_answers_are_validated_before_queueing() {
+        let question = |id: &str| json!({"id": id, "header": "Approval", "question": "Continue?", "options": ["Yes", "No"], "multiSelect": false});
+        for questions in [json!([question("uuid")]), json!([question("claude-id")])] {
+            let expected_id = questions[0]["id"].as_str().unwrap().to_owned();
+            let world = Arc::new(World { pending_questions: Some(questions), ..World::default() });
+            let tools = tools(world.clone(), None);
+            tools.call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"_", "labels":["yes"]}]})).await.unwrap();
+            let writes = world.writes_of(methods::QUEUE_COMMAND);
+            assert_eq!(writes.len(), 1);
+            assert!(writes[0].to_string().contains("Yes"));
+            assert!(writes[0].to_string().contains(&expected_id));
+            let before = writes.len();
+            let error = tools.call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"labels":["invalid"]}]})).await.unwrap_err();
+            assert!(error.contains("Yes") && error.contains("No"), "{error}");
+            assert_eq!(world.writes_of(methods::QUEUE_COMMAND).len(), before);
+        }
+        let world = Arc::new(World { pending_questions: Some(json!([question("q1"), question("q2")])), ..World::default() });
+        let tools = tools(world.clone(), None);
+        let error = tools.call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"_", "labels":["Yes"]}]})).await.unwrap_err();
+        assert!(error.contains("q1") && error.contains("q2") && error.contains("Approval"), "{error}");
+        assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
+        tools.call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"q1", "labels":["Yes"]}, {"question_id":"q2", "labels":["No"]}]})).await.unwrap();
+        assert_eq!(world.writes_of(methods::QUEUE_COMMAND).len(), 1);
+    }
+
+    #[tokio::test]
     async fn agent_calls_reach_only_their_own_chat_space_and_device() {
         let world = Arc::new(World::default());
         let tools = tools(world.clone(), Some(BETA_TOKEN));
@@ -3088,7 +3108,7 @@ mod tests {
                 "respond_to_input",
                 json!({ "request_id": "r1",
                         "answers": [{ "question_id": "q", "labels": ["Yes"] }] }),
-                [false, false, true],
+                [false, false, false],
             ),
             (
                 "send_message",
