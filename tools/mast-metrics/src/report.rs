@@ -64,3 +64,58 @@ pub fn markdown(report: &Report) -> String {
 pub fn request_count(a: &Aggregate) -> u64 {
     a.requests_by_kind.values().sum()
 }
+
+pub fn comparison(previous: &Report, current: &Report) -> String {
+    let mut out = format!(
+        "# Mast metrics comparison\n\nPrevious: {} to {}. Current: {} to {}. Deltas are current minus previous; check window lengths and coverage before comparing.\n\n",
+        previous.since, previous.until, current.since, current.until
+    );
+    out.push_str("| Metric | Previous | Current | Delta |\n| --- | ---: | ---: | ---: |\n");
+    let mut row = |label: &str, old: Option<i64>, new: Option<i64>| {
+        let delta = old
+            .zip(new)
+            .map(|(a, b)| format!("{:+}", b - a))
+            .unwrap_or_else(|| "—".into());
+        writeln!(
+            out,
+            "| {label} | {} | {} | {delta} |",
+            value(old),
+            value(new)
+        )
+        .unwrap();
+    };
+    let a = &previous.totals;
+    let b = &current.totals;
+    row(
+        "Required Actions",
+        Some(request_count(a) as i64),
+        Some(request_count(b) as i64),
+    );
+    row(
+        "Prose questions without card",
+        Some(a.prose_questions_without_card as i64),
+        Some(b.prose_questions_without_card as i64),
+    );
+    row(
+        "Status checks",
+        Some(a.status_questions_by_day.values().sum::<u64>() as i64),
+        Some(b.status_questions_by_day.values().sum::<u64>() as i64),
+    );
+    row(
+        "Auto-continue messages",
+        Some(a.auto_continue_messages as i64),
+        Some(b.auto_continue_messages as i64),
+    );
+    row(
+        "Worker-stopped wakes",
+        Some(a.worker_stopped_wakes as i64),
+        Some(b.worker_stopped_wakes as i64),
+    );
+    for role in ["coordinator", "worker", "plain"] {
+        let key = format!("role:{role}");
+        let old = previous.groups.get(&key).and_then(|g| g.reply_words.median);
+        let new = current.groups.get(&key).and_then(|g| g.reply_words.median);
+        row(&format!("{role} reply median words"), old, new);
+    }
+    out
+}

@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::{Parser, ValueEnum};
-use mast_metrics::{metrics::measure, report::markdown, snapshot::read_snapshot};
+use mast_metrics::{
+    metrics::{Report, measure},
+    report::{comparison, markdown},
+    snapshot::read_snapshot,
+};
 
 #[derive(Parser)]
 #[command(about = "Aggregate metrics from an offline Mast snapshot")]
@@ -19,6 +23,9 @@ struct Arguments {
     until: Option<String>,
     #[arg(long, value_enum, default_value_t = Format::Markdown)]
     format: Format,
+    /// Compare against a prior JSON report; prints aggregate deltas.
+    #[arg(long)]
+    compare: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -55,6 +62,15 @@ fn main() -> Result<()> {
     }
     let snapshot = read_snapshot(&args.from)?;
     let report = measure(&snapshot, since, until)?;
+    if let Some(path) = args.compare {
+        let previous: Report = serde_json::from_reader(std::fs::File::open(path)?)?;
+        anyhow::ensure!(
+            previous.schema_version == report.schema_version,
+            "incompatible report schema"
+        );
+        print!("{}", comparison(&previous, &report));
+        return Ok(());
+    }
     match args.format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         Format::Markdown => print!("{}", markdown(&report)),
