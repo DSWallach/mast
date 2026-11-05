@@ -124,9 +124,9 @@ impl Shell {
                         div()
                             .debug_selector(|| "right-surface-team-dot".into())
                             .flex_none()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme.warning),
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .text_color(crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color)
+                            .child("!"),
                     )
                 })
                 .into_any_element(),
@@ -313,6 +313,11 @@ impl Shell {
             .map(|at| mast_proto::view::format_time_ago(at, now))
             .unwrap_or_default();
         let status = crate::status_style::status_style(worker.state.into(), theme.appearance);
+        let indicator = if worker.state == WorkerState::Working {
+            crate::loaders::mini_mono_spinner(format!("{prefix}-status-{id}"), 1.5, status.color, cx.entity_id(), cx).into_any_element()
+        } else {
+            div().text_size(crate::typography::ui_rems(11.0)).text_color(status.color).child(status.glyph).into_any_element()
+        };
         let open_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
         let stalled = self.state.read(cx).session_for(&id).and_then(|session| {
@@ -344,13 +349,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(status.color)
-                            .child(status.glyph),
-                    )
+                    .child(div().flex_none().child(indicator))
                     .child(
                         div()
                             .flex_1()
@@ -399,7 +398,7 @@ impl Shell {
                         div()
                             .flex_none()
                             .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(color)
+                            .text_color(status.color)
                             .child(SharedString::from(worker.state.label())),
                     )
                     .child(

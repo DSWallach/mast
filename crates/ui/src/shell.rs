@@ -7311,10 +7311,10 @@ impl Shell {
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
             let glyph = if working {
-                loaders::mini_glyph_spinner(
+                loaders::mini_mono_spinner(
                     format!("{row_id}-working"),
                     2.0,
-                    theme.glyph,
+                    status_color,
                     self.sidebar_pane.entity_id(),
                     cx,
                 )
@@ -7326,9 +7326,9 @@ impl Shell {
                     .into_any_element()
             } else {
                 div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(status_color)
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(status_color)
+                    .child(if queued || undelivered { "!" } else { crate::status_style::status_style(status.into(), theme.appearance).glyph })
                     .into_any_element()
             };
             div()

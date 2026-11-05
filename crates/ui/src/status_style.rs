@@ -63,3 +63,36 @@ pub(crate) fn status_style(status: Status, appearance: Appearance) -> StatusStyl
         glyph,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::{AccentColor, Theme};
+
+    #[test]
+    fn status_pairs_are_distinct_for_every_accent_and_appearance() {
+        let states = [
+            Status::Working,
+            Status::Waiting,
+            Status::Errored,
+            Status::Ready,
+            Status::Done,
+            Status::Idle,
+        ];
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for accent in AccentColor::ALL {
+                let theme = Theme::for_preferences(appearance, accent);
+                for (index, state) in states.iter().enumerate() {
+                    let style = status_style(*state, theme.appearance);
+                    for other in &states[index + 1..] {
+                        let other = status_style(*other, theme.appearance);
+                        assert_ne!(style.glyph, other.glyph);
+                    }
+                    let waiting = status_style(Status::Waiting, theme.appearance);
+                    let working = status_style(Status::Working, theme.appearance);
+                    assert!((working.color.h - waiting.color.h).abs() > 0.08);
+                }
+            }
+        }
+    }
+}
