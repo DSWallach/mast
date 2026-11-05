@@ -590,6 +590,8 @@ pub(crate) struct UserActionNotice {
     pub work_item_id: String,
     pub item_title: String,
     pub count: usize,
+    pub kind: mast_proto::work_outline_user_actions::UserActionKind,
+    pub group: NeedsGroup,
     /// The newest request's text (the banner body when `count == 1`).
     pub text: String,
     /// The newest request's origin Chat when it can be opened (banner click).
@@ -598,20 +600,26 @@ pub(crate) struct UserActionNotice {
 
 impl UserActionNotice {
     pub(crate) fn title(&self) -> String {
+        use mast_proto::work_outline_user_actions::UserActionKind;
+        let label = match self.kind {
+            UserActionKind::Ask => "Ask",
+            UserActionKind::Review => "Review",
+            UserActionKind::Approve => "Approve",
+            UserActionKind::Choose => "Choose",
+            UserActionKind::Handoff => "Handoff",
+            UserActionKind::Notice => "Notice",
+        };
         if self.item_title.trim().is_empty() {
-            "User action required".to_owned()
+            label.to_owned()
         } else {
-            self.item_title.clone()
+            format!("{label} · {}", self.item_title)
         }
     }
 
     pub(crate) fn body(&self) -> String {
-        if self.count == 1 && !self.text.trim().is_empty() {
-            self.text.clone()
-        } else {
-            format!("{} actions required", self.count)
-        }
+        self.text.lines().next().unwrap_or_default().trim().to_owned()
     }
+
 }
 
 #[derive(Debug, Default)]
@@ -695,7 +703,12 @@ impl UserActionNotifier {
             if !first && previous == 0 && fresh {
                 let newest = requests
                     .iter()
-                    .max_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
+                     .max_by(|a, b| {
+                        let eligible = |r: &&UserActionRequestView| {
+                            NeedsGroup::of(r.effective_kind(), r.priority) != NeedsGroup::Fyi
+                        };
+                        (eligible(a), a.created_at, &a.id).cmp(&(eligible(b), b.created_at, &b.id))
+                    })
                     .expect("non-empty");
                 notices.push(UserActionNotice {
                     space_id: space_id.to_owned(),
@@ -705,6 +718,8 @@ impl UserActionNotifier {
                         .map(|item| item.title.clone())
                         .unwrap_or_default(),
                     count: requests.len(),
+                    kind: newest.effective_kind(),
+                    group: NeedsGroup::of(newest.effective_kind(), newest.priority),
                     text: newest.text.clone(),
                     chat_id: newest
                         .origin_chat_available
@@ -1232,6 +1247,28 @@ mod tests {
     }
 
     #[test]
+    fn notification_content_includes_kind_item_and_first_line() {
+        use mast_proto::work_outline_user_actions::UserActionKind;
+        for (kind, label) in [
+            (UserActionKind::Ask, "Ask"),
+            (UserActionKind::Review, "Review"),
+            (UserActionKind::Approve, "Approve"),
+            (UserActionKind::Choose, "Choose"),
+            (UserActionKind::Handoff, "Handoff"),
+            (UserActionKind::Notice, "Notice"),
+        ] {
+            let mut notifier = UserActionNotifier::default();
+            notifier.observe("s1", &with(vec![]));
+            let mut row = request("r1", "s1", UI, CHAT_UI, "First line\nMore detail");
+            row.kind = Some(kind);
+            let notice = notifier.observe("s1", &with(vec![row])).remove(0);
+            assert_eq!(notice.title(), format!("{label} · UI"));
+            assert_eq!(notice.body(), "First line");
+            assert_eq!(notice.group == NeedsGroup::Fyi, kind == UserActionKind::Notice);
+        }
+    }
+
+    #[test]
     fn notifier_fires_once_on_zero_to_one_and_seeds_silently() {
         let mut notifier = UserActionNotifier::default();
         // First observation seeds silently, even with open requests.
@@ -1244,7 +1281,7 @@ mod tests {
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].work_item_id, UI);
         assert_eq!(notices[0].count, 1);
-        assert_eq!(notices[0].title(), "UI");
+        assert_eq!(notices[0].title(), "Ask · UI");
         assert_eq!(notices[0].body(), "Approve it");
         assert_eq!(notices[0].chat_id.as_deref(), Some(CHAT_UI));
         // The same frame again, and an equal open set in a new frame: quiet.
@@ -1274,7 +1311,7 @@ mod tests {
         assert_eq!(notices.len(), 2, "one event per item");
         let ui = notices.iter().find(|n| n.work_item_id == UI).unwrap();
         assert_eq!(ui.count, 2);
-        assert_eq!(ui.body(), "2 actions required");
+        assert_eq!(ui.body(), "Second");
         assert_eq!(ui.text, "Second");
     }
 
