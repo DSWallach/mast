@@ -848,3 +848,6 @@ async fn launcher_uses_space_prompt_settings() {
             .starts_with("Custom review of https://github.com/acme/flagship/pull/7 at ")
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

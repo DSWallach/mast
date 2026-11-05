@@ -478,3 +478,6 @@ async fn startup_catalog_rate_limit_retries_before_sending_but_auth_does_not() {
         assert_eq!(state["attempts"], if succeeds { 2 } else { 1 });
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

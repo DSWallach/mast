@@ -17,3 +17,6 @@ fn scans_a_real_session_with_known_subagents() {
         "this session has real subagent directories on disk"
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

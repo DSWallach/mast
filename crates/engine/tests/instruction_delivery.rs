@@ -1567,3 +1567,6 @@ async fn keeping_the_session_for_a_gated_queued_row_runs_it_on_the_old_session()
     );
     rig.core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

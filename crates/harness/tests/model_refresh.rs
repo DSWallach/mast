@@ -67,3 +67,6 @@ async fn acp_refreshes_large_catalogs_coalesces_and_recovers() {
     let harness = AcpHarness::grok().with_executable(fixture(dir.path()));
     check_refresh(&harness, dir.path()).await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

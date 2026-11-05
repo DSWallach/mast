@@ -100,3 +100,6 @@ async fn failed_or_logged_out_initialize_falls_back_to_curated_catalog() {
         assert!(harness.model_catalog(false).await.is_err());
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

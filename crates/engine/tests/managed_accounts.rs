@@ -747,3 +747,6 @@ exit 0
     assert!(snapshot.accounts[0].signed_in);
     assert_eq!(accounts.pinned_home("codex-chat", HarnessId::Codex), Some(home));
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

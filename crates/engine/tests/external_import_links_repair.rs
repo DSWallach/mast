@@ -279,3 +279,6 @@ async fn repair_still_scans_a_chat_that_only_has_a_ticket() {
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

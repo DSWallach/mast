@@ -130,3 +130,6 @@ async fn a_chat_with_no_harness_session_is_never_touched() {
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

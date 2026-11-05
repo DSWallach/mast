@@ -81,3 +81,6 @@ async fn independent_streams_large_bodies_half_close_and_cancellation() {
     .await
     .expect("mux stalled");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

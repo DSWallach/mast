@@ -148,3 +148,6 @@ fn codex_login_without_any_cli_fails_with_a_named_error() {
     let dir = tempfile::tempdir().unwrap();
     probe(dir.path(), None, false);
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

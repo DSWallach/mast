@@ -1119,3 +1119,7 @@ mod tests {
         assert!(apply_headless(&app_root, "0.2.0").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

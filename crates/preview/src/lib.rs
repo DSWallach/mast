@@ -10,3 +10,7 @@ pub mod signaling;
 
 pub mod service;
 pub use service::PreviewService;
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

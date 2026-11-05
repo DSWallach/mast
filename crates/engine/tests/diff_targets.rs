@@ -655,3 +655,6 @@ async fn checkout_candidates_report_their_repository_origin() {
         assert_eq!(candidate.repo_slug.as_deref(), Some(expected));
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

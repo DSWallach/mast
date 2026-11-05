@@ -956,3 +956,7 @@ mod tests {
         assert_eq!(echoed, serde_json::json!(2));
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

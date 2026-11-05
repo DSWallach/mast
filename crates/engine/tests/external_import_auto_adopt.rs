@@ -223,3 +223,6 @@ async fn auto_adopt_sweep_adopts_settled_external_sessions_only() {
         }
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -93,3 +93,6 @@ async fn resolves_and_scans_subagents_for_a_harness_session_chat_never_imported(
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

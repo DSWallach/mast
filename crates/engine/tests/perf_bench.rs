@@ -383,3 +383,6 @@ fn bench_journal_scans_real_copy() {
         journal.append(&biggest_id, &event).unwrap()
     });
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

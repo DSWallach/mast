@@ -234,3 +234,6 @@ async fn bad_slot_ids_are_rejected_before_touching_disk() {
         assert!(rig.agent.export_for_promotion(HarnessId::ClaudeCode, id).is_err());
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -93,3 +93,6 @@ async fn managed_install_reaches_session_started() {
         .path();
     assert!(version_dir.join(".zeron-install-ok").exists());
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

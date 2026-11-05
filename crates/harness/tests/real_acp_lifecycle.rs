@@ -118,3 +118,6 @@ async fn real_pi_slow_model_preserves_prompt_and_queued_followups() {
 async fn real_pi_cancel_during_post_tool_silence() {
     live_run(true).await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -663,3 +663,6 @@ async fn batch_executable_path_rejects_percent_expansion() {
         std::io::ErrorKind::InvalidInput
     );
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

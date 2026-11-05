@@ -151,3 +151,6 @@ async fn real_pi_mock_lifecycle() {
         eprintln!("live {scenario}: {done_count} terminal(s), tool={tool_seen}");
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

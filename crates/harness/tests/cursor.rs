@@ -517,3 +517,6 @@ async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
         assert_eq!(dones, 1);
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -329,3 +329,6 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
     core_a.shutdown().await;
     core_b.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

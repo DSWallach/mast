@@ -1762,3 +1762,6 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
     core_a.shutdown().await;
     core_b.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

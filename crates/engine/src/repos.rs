@@ -172,7 +172,11 @@ fn default_worktrees_root() -> PathBuf {
     mast_proto::env::var_os("MAST_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".zeron").join("worktrees"))
+        .unwrap_or_else(|| {
+            let home = home_dir();
+            mast_proto::env::assert_test_home_isolated(&home);
+            home.join(".zeron").join("worktrees")
+        })
 }
 
 struct ReposInner {

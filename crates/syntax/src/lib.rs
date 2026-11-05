@@ -1352,3 +1352,7 @@ fn build(value: usize) -> Widget {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

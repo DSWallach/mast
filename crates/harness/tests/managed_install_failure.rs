@@ -69,3 +69,6 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
     assert!(message.contains("failed silently"), "{message}");
     assert!(message.contains("pi-acp"), "names the package: {message}");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

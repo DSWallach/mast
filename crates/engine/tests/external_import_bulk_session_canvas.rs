@@ -164,3 +164,6 @@ async fn bulk_imports_every_session_and_carries_over_session_canvas_archive_stat
         }
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -160,3 +160,6 @@ async fn cursor_with_legacy_classification_fields_loads_syncs_and_keeps_them() {
     assert!(sidecars.join("legacy-chat.json").exists());
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

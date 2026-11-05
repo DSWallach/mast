@@ -89,3 +89,7 @@ pub fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
         .ok()?;
     Some((major, minor, patch))
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -684,3 +684,6 @@ async fn spaces_without_the_item_or_with_linear_off_make_no_assigned_calls() {
     assert_eq!(rig.mock.queries().len(), before, "Linear off: no calls");
     assert!(rig.children(&dest).is_empty());
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

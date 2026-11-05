@@ -235,3 +235,6 @@ async fn real_all_harnesses_quiet_survey() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

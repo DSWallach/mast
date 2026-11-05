@@ -858,3 +858,7 @@ mod tests {
         assert_eq!(variants * VisualFixture::ALL.len(), 300);
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

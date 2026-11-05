@@ -86,3 +86,6 @@ async fn preview_watch_follows_the_session_checkout_and_owning_device() {
     drop(stream);
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

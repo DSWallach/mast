@@ -69,3 +69,6 @@ async fn imports_a_large_real_session_from_this_machine() {
     )
     .await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

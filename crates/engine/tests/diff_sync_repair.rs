@@ -115,3 +115,6 @@ async fn repair_tick_skips_unchanged_checkouts_and_a_capture_is_five_processes()
     assert_ne!(changed, first);
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

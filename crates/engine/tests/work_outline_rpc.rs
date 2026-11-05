@@ -651,3 +651,6 @@ async fn mutations_stay_fast_on_a_large_local_registry() {
     assert!(frame < frame_budget, "frame latency {frame:?}");
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

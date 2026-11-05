@@ -236,3 +236,6 @@ async fn v2_followup_appends_to_the_original_document_and_updates_the_original_c
     )
     .await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

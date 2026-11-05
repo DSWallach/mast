@@ -822,3 +822,6 @@ async fn zombie_relay_path_trips_the_echo_deadline() {
     // Restore the production clocks for the rest of the process's tests.
     mast_rpc::device_room::set_client_liveness_for_tests(Duration::ZERO, Duration::ZERO);
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -605,3 +605,6 @@ async fn signing_in_does_not_activate_sync_for_the_running_local_profile() {
 
     runtime.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

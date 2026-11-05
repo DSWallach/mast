@@ -648,3 +648,7 @@ fn deliver_appshot(
         appshots::foreground_after_capture();
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

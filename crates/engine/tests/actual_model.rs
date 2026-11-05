@@ -280,3 +280,6 @@ async fn backfill_marks_checked_journals_and_rechecks_only_after_growth() {
     assert!(after.starts_with(&before));
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

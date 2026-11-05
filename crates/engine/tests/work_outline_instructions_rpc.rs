@@ -612,3 +612,6 @@ async fn keep_instruction_session_reverts_the_selection_to_the_session() {
     assert!(snapshot.chat_instruction_state("chat-1").unwrap().drift);
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

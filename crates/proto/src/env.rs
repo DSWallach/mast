@@ -36,9 +36,52 @@ pub fn var_os(name: &str) -> Option<OsString> {
     std::env::var_os(name).or_else(|| legacy_name(name).and_then(std::env::var_os))
 }
 
+/// Reject a test process resolving a home-relative default against its original home.
+/// The test initializer sets the marker before changing HOME; ordinary application
+/// processes never set it. This check does not alter release builds.
+#[cfg(debug_assertions)]
+pub fn assert_test_home_isolated(home: &std::path::Path) {
+    if let Some(original) = std::env::var_os("MAST_TEST_ORIGINAL_HOME") {
+        assert_ne!(
+            home,
+            std::path::Path::new(&original),
+            "test attempted to use its original home: {}",
+            home.display()
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub fn assert_test_home_isolated(_: &std::path::Path) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_process_home_is_isolated() {
+        let original = std::env::var_os("MAST_TEST_ORIGINAL_HOME").unwrap();
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_ne!(home, std::path::Path::new(&original));
+        assert_eq!(
+            std::env::var_os("CLAUDE_CONFIG_DIR"),
+            Some(home.join(".claude").into_os_string())
+        );
+        assert_eq!(
+            std::env::var_os("CODEX_HOME"),
+            Some(home.join(".codex").into_os_string())
+        );
+        assert_eq!(
+            std::env::var_os("MAST_DATA_DIR"),
+            Some(home.join(".zeron").into_os_string())
+        );
+        assert_test_home_isolated(&home);
+        assert!(
+            std::panic::catch_unwind(|| assert_test_home_isolated(std::path::Path::new(&original)))
+                .is_err()
+        );
+    }
 
     // Each test uses its own variable pair so parallel tests never collide.
     #[test]

@@ -172,3 +172,6 @@ async fn delayed_registry_survives_blackout_and_reset_without_losing_writes() {
     );
     client.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

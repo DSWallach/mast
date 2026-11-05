@@ -334,3 +334,6 @@ fn reference_contains_expected_visual_roles() {
         assert!(spans.iter().any(|(_, actual)| *actual == kind));
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

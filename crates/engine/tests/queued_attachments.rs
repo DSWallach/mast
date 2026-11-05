@@ -238,3 +238,6 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
 
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

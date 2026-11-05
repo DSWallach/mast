@@ -624,3 +624,6 @@ async fn rejected_update_retries_failed_checkpoint_and_retires_only_after_succes
     host.shutdown_workers().await;
     server.abort();
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -281,3 +281,6 @@ async fn exercise_projectless(command_first: bool) {
     assert_eq!(core.workspace.read_chats().unwrap().len(), 1);
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

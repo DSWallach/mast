@@ -1764,3 +1764,6 @@ async fn agent_tools_ride_thread_start_config_only_when_injected() {
     let events = run_to_end(&harness, request("scenario:agent-tools"), controls_b).await;
     assert_eq!(text_of(&events), "tools:no", "{events:?}");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

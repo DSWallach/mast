@@ -50,3 +50,6 @@ async fn pi_idle_crash_next_dispatch_loads_stored_session() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -273,3 +273,6 @@ async fn missing_transcript_is_skipped_silently() {
     assert_eq!(message_count(&root, "c3"), 2);
     core.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

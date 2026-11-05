@@ -27,3 +27,7 @@ pub use registry::*;
 pub use schema::*;
 pub use transcript_delta::*;
 pub use workspace::*;
+
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

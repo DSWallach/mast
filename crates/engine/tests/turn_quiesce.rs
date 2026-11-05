@@ -511,3 +511,6 @@ async fn stale_tool_echo_stays_parked() {
 
     rig.core.sessions.shutdown().await;
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

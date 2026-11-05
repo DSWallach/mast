@@ -290,3 +290,6 @@ async fn protocol_error_keeps_code_and_agent_detail() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

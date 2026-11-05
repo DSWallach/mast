@@ -82,3 +82,6 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         .expect("pi-acp resolves via login-shell PATH");
     assert_eq!(pi, shell_bin.join("pi-acp"), "{pi:?}");
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
