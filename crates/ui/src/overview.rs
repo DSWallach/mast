@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use gpui::{
-    Context, Entity, MouseButton, ScrollHandle, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    Context, Entity, ListAlignment, ListState, MouseButton, ScrollHandle, SharedString,
+    Subscription, Window, div, list, prelude::*, px,
 };
 
 use mast_engine::pr_ticket_cache::{ChecksStatus, PrAction, PrStatus, TicketStatus};
@@ -840,6 +840,29 @@ fn flatten_partition<'a>(
     }
 }
 
+#[derive(Clone, PartialEq)]
+enum ListPresentationItem {
+    Header {
+        label: String,
+        color: gpui::Hsla,
+        depth: usize,
+        count: usize,
+    },
+    Row {
+        chat_id: String,
+        row_index: usize,
+    },
+}
+
+impl ListPresentationItem {
+    fn same_identity(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Row { chat_id: left, .. }, Self::Row { chat_id: right, .. }) => left == right,
+            _ => self == other,
+        }
+    }
+}
+
 struct LinkStatusEntry {
     status: OverviewLinkStatus,
     /// Uncommitted diff stat, if the engine's `CHAT_LINK_STATUS` response
@@ -1440,7 +1463,9 @@ fn panel_chat_id(panel_open: bool, selected_chat: Option<&str>) -> Option<String
 pub struct Overview {
     state: Entity<AppState>,
     shell: gpui::WeakEntity<Shell>,
-    scroll: ScrollHandle,
+    list: ListState,
+    list_items: Vec<ListPresentationItem>,
+    list_rows: std::rc::Rc<Vec<OverviewRow>>,
     /// The focus target for the List surface: Esc, Enter and Down
     /// from the search field land here, and a click on the surface takes it.
     body_focus: gpui::FocusHandle,
@@ -1814,7 +1839,9 @@ impl Overview {
         Self {
             state,
             shell,
-            scroll: ScrollHandle::new(),
+            list: ListState::new(0, ListAlignment::Top, px(400.0)),
+            list_items: Vec::new(),
+            list_rows: std::rc::Rc::new(Vec::new()),
             body_focus: cx.focus_handle(),
             list_selected: None,
             list_order: Vec::new(),
@@ -1950,9 +1977,22 @@ impl Overview {
         let Some((chat_id, child)) = self.list_order.get(ix).cloned() else {
             return;
         };
-        self.scroll.scroll_to_item(child);
+        self.reveal_list_item(child);
         self.list_selected = Some(chat_id);
         cx.notify();
+    }
+
+    /// Unmeasured rows have no height in GPUI's list summary, so a distant
+    /// target must be anchored by index before it can be revealed.
+    fn reveal_list_item(&self, index: usize) {
+        if self.list.bounds_for_item(index).is_some() {
+            self.list.scroll_to_reveal_item(index);
+        } else {
+            self.list.scroll_to(gpui::ListOffset {
+                item_ix: index,
+                offset_in_item: px(0.0),
+            });
+        }
     }
 
     /// Keys on the search field. Esc clears a non-empty query, else returns
@@ -4471,6 +4511,7 @@ impl Overview {
         });
 
         div()
+            .debug_selector(|| "overview-expanded-detail".into())
             .w_full()
             .max_w_full()
             .flex()
@@ -5439,7 +5480,7 @@ fn lane_header(text: String, color: gpui::Hsla, depth: usize) -> gpui::Div {
 impl Overview {
     fn render_list_body(
         &mut self,
-        rows: &[OverviewRow],
+        rows: &std::rc::Rc<Vec<OverviewRow>>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -5448,74 +5489,93 @@ impl Overview {
         self.list_order.clear();
         if rows.is_empty() {
             self.list_selected = None;
+            self.list.reset(0);
+            self.list_items.clear();
+            self.list_rows = rows.clone();
             return self.render_empty_state(theme, cx);
         }
 
-        // PR-row jump target: the index among the scroll container's
-        // DIRECT children (group headers included), which is what
-        // `ScrollHandle::scroll_to_item` counts.
-        let focus_id = self.focus_due.take();
-        let mut focus_child: Option<usize> = None;
-        let children: Vec<gpui::AnyElement> = if self.active_groups.is_empty() {
-            focus_child = focus_id
-                .as_deref()
-                .and_then(|id| rows.iter().position(|r| r.chat.id == id));
-            self.list_order = rows
-                .iter()
-                .enumerate()
-                .map(|(ix, row)| (row.chat.id.clone(), ix))
-                .collect();
-            rows.iter()
-                .enumerate()
-                .map(|(ix, row)| self.render_list_row(ix, row, theme, cx))
-                .collect()
+        let row_indices: HashMap<&str, usize> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.chat.id.as_str(), index))
+            .collect();
+        let mut items = Vec::new();
+        if self.active_groups.is_empty() {
+            for (row_index, row) in rows.iter().enumerate() {
+                items.push(ListPresentationItem::Row {
+                    chat_id: row.chat.id.clone(),
+                    row_index,
+                });
+            }
         } else {
-            let mut items: Vec<ListItem<'_>> = Vec::new();
+            let mut flattened = Vec::new();
             let refs: Vec<&OverviewRow> = rows.iter().collect();
             flatten_partition(
                 &overview_grouping::partition(refs, &self.active_groups),
                 0,
-                &mut items,
+                &mut flattened,
             );
-            let mut out = Vec::new();
-            let mut ix = 0usize;
-            for item in items {
-                match item {
-                    // Same header treatment as the web's lane headers
-                    // (`.lane-header` / `.lane-header.nested`): colored,
-                    // underlined in its own color, uppercase+bold at the top
-                    // level, smaller/thinner nested.
+            for item in flattened {
+                items.push(match item {
                     ListItem::Header {
                         label,
                         color,
                         depth,
                         count,
-                    } => out.push(
-                        div()
-                            .flex()
-                            .pl(px(10.0 + depth as f32 * 14.0))
-                            .pr(px(10.0))
-                            .pt(px(if depth == 0 { 14.0 } else { 8.0 }))
-                            .pb(px(2.0))
-                            .child(lane_header(format!("{label} ({count})"), color, depth))
-                            .into_any_element(),
-                    ),
-                    ListItem::Row(row) => {
-                        if focus_id.as_deref() == Some(row.chat.id.as_str()) {
-                            focus_child = Some(out.len());
-                        }
-                        self.list_order.push((row.chat.id.clone(), out.len()));
-                        out.push(self.render_list_row(ix, row, theme, cx));
-                        ix += 1;
-                    }
-                }
+                    } => ListPresentationItem::Header {
+                        label,
+                        color,
+                        depth,
+                        count,
+                    },
+                    ListItem::Row(row) => ListPresentationItem::Row {
+                        chat_id: row.chat.id.clone(),
+                        row_index: row_indices[row.chat.id.as_str()],
+                    },
+                });
             }
-            out
-        };
-        if let Some(child) = focus_child {
-            self.scroll.scroll_to_item(child);
         }
-        // A filtered-out row loses the keyboard selection.
+        for (child, item) in items.iter().enumerate() {
+            if let ListPresentationItem::Row { chat_id, .. } = item {
+                self.list_order.push((chat_id.clone(), child));
+            }
+        }
+
+        if self.list_items != items {
+            let old = &self.list_items;
+            let prefix = old.iter().zip(&items).take_while(|(a, b)| a == b).count();
+            let suffix = old[prefix..]
+                .iter()
+                .rev()
+                .zip(items[prefix..].iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let mut anchor = self.list.logical_scroll_top();
+            let anchor_item = old.get(anchor.item_ix).cloned();
+            self.list
+                .splice(prefix..old.len() - suffix, items.len() - prefix - suffix);
+            if let Some(index) = anchor_item.and_then(|item| {
+                items
+                    .iter()
+                    .position(|candidate| candidate.same_identity(&item))
+            }) {
+                anchor.item_ix = index;
+                self.list.scroll_to(anchor);
+            }
+            self.list_items = items;
+        }
+        self.list_rows = rows.clone();
+        if let Some(child) = self.focus_due.take().and_then(|id| {
+            self.list_order
+                .iter()
+                .find_map(|(row, child)| (row == &id).then_some(*child))
+        }) {
+            self.reveal_list_item(child);
+        }
+        // Rows can change height when details, subagents, badges or link data
+        // change. Keep measured heights as hints while rechecking visible rows.
+        self.list.remeasure();
         if self
             .list_selected
             .as_ref()
@@ -5523,19 +5583,59 @@ impl Overview {
         {
             self.list_selected = None;
         }
-
         div()
             .id("overview-list")
+            .debug_selector(|| "overview-list-viewport".into())
             .flex_1()
             .min_h_0()
-            .flex()
-            .flex_col()
-            .gap(px(1.0))
             .px(px(8.0))
             .pb(px(8.0))
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .children(children)
+            .child(
+                list(self.list.clone(), cx.processor(Self::render_list_item))
+                    .size_full()
+                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+            )
+            .into_any_element()
+    }
+
+    fn render_list_item(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(item) = self.list_items.get(index).cloned() else {
+            return div().into_any_element();
+        };
+        let theme = Theme::of(cx).clone();
+        let content = match item {
+            ListPresentationItem::Header {
+                label,
+                color,
+                depth,
+                count,
+            } => div()
+                .flex()
+                .pl(px(10.0 + depth as f32 * 14.0))
+                .pr(px(10.0))
+                .pt(px(if depth == 0 { 14.0 } else { 8.0 }))
+                .pb(px(2.0))
+                .child(lane_header(format!("{label} ({count})"), color, depth))
+                .into_any_element(),
+            ListPresentationItem::Row { row_index, .. } => {
+                let rows = self.list_rows.clone();
+                let row = &rows[row_index];
+                let row_number = self
+                    .list_order
+                    .iter()
+                    .position(|(id, _)| id == &row.chat.id)
+                    .unwrap_or(row_index);
+                self.render_list_row(row_number, row, &theme, cx)
+            }
+        };
+        div()
+            .when(index + 1 < self.list_items.len(), |el| el.pb(px(1.0)))
+            .child(content)
             .into_any_element()
     }
 
@@ -5618,6 +5718,7 @@ impl Overview {
         let subagent_tiles = self.subagent_tiles_for(&chat_id, theme, show_all_subagents, cx);
         let detail = is_expanded.then(|| self.expanded_detail_for(row, theme, chat_id.clone(), cx));
         let toggle_id = chat_id.clone();
+        let row_selector = format!("overview-list-chat-{chat_id}");
         let hover_id = chat_id.clone();
         div()
             .id(("overview-row", ix))
@@ -5670,6 +5771,7 @@ impl Overview {
             .child(
                 div()
                     .id(("overview-row-click", ix))
+                    .debug_selector(move || row_selector.clone())
                     .flex()
                     .items_center()
                     .gap(px(10.0))
@@ -8751,6 +8853,202 @@ mod logic_tests {
         overview.update(vcx, |overview, _| {
             assert!(overview.subagent_peek.is_none(), "Escape closes the peek");
         });
+    }
+
+    #[test]
+    fn list_row_identity_survives_source_reordering() {
+        let row = ListPresentationItem::Row {
+            chat_id: "chat".into(),
+            row_index: 1,
+        };
+        let moved = ListPresentationItem::Row {
+            chat_id: "chat".into(),
+            row_index: 19,
+        };
+        let other = ListPresentationItem::Row {
+            chat_id: "other".into(),
+            row_index: 1,
+        };
+        assert!(row.same_identity(&moved));
+        assert!(!row.same_identity(&other));
+    }
+
+    #[gpui::test]
+    fn grouped_list_keeps_selection_expansion_and_scroll_targets(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = (0..60)
+                .map(|i| {
+                    let mut chat = row(
+                        &format!("c{i:02}"),
+                        if i % 2 == 0 {
+                            "/work/alpha"
+                        } else {
+                            "/work/beta"
+                        },
+                        None,
+                    )
+                    .chat;
+                    chat.last_message_at = Some(Utc::now());
+                    chat
+                })
+                .collect();
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+        let (overview, vcx) = cx.add_window_view(|_, cx| {
+            let mut overview = Overview::new(
+                state.clone(),
+                gpui::WeakEntity::new_invalid(),
+                transcript,
+                composer,
+                cx,
+            );
+            overview.active_groups = vec![GroupDimension::Repo];
+            overview
+        });
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        vcx.run_until_parked();
+        draw(vcx);
+        let (first, last, count) = overview.read_with(vcx, |o, _| {
+            assert_eq!(o.list_order.len(), 60);
+            assert_eq!(
+                o.list_order[0].1, 1,
+                "the first group header precedes its rows"
+            );
+            assert!(
+                o.list_order
+                    .windows(2)
+                    .any(|pair| pair[1].1 > pair[0].1 + 1),
+                "another group header separates rows"
+            );
+            (
+                o.list_order[0].0.clone(),
+                o.list_order[59].0.clone(),
+                o.list_order.len(),
+            )
+        });
+        let last_selector = Box::leak(format!("overview-list-chat-{last}").into_boxed_str());
+        assert!(
+            vcx.debug_bounds(last_selector).is_none(),
+            "offscreen rows are not rendered"
+        );
+        assert!(vcx.debug_bounds("overview-expanded-detail").is_none());
+        overview.update(vcx, |o, cx| {
+            o.toggle_expanded(&first, cx);
+            cx.notify();
+        });
+        draw(vcx);
+        assert!(overview.read_with(vcx, |o, _| o.expanded.contains(&first)));
+        assert!(vcx.debug_bounds("overview-expanded-detail").is_some());
+        overview.update(vcx, |o, cx| o.select_list_row(count - 1, cx));
+        draw(vcx);
+        assert_eq!(
+            overview.read_with(vcx, |o, _| o.list_selected.clone()),
+            Some(last.clone())
+        );
+        assert!(
+            overview.read_with(vcx, |o, _| o.list.logical_scroll_top().item_ix > 0),
+            "selection scrolls into view"
+        );
+        let selected = vcx
+            .debug_bounds(last_selector)
+            .expect("selected offscreen row is rendered");
+        let viewport = vcx.debug_bounds("overview-list-viewport").unwrap();
+        assert!(
+            selected.origin.y >= viewport.origin.y
+                && selected.origin.y < viewport.origin.y + viewport.size.height,
+            "selected row is inside the viewport"
+        );
+        let moved_chat = overview.read_with(vcx, |o, _| o.list_order[10].0.clone());
+        let old_position = overview.read_with(vcx, |o, _| {
+            o.list_order
+                .iter()
+                .position(|(id, _)| id == &moved_chat)
+                .unwrap()
+        });
+        let anchor_chat = overview.read_with(vcx, |o, _| {
+            let index = o.list.logical_scroll_top().item_ix;
+            match &o.list_items[index] {
+                ListPresentationItem::Row { chat_id, .. } => chat_id.clone(),
+                _ => panic!("expected a chat at the scroll anchor"),
+            }
+        });
+        state.update(vcx, |state, cx| {
+            let chat = state
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == moved_chat)
+                .unwrap();
+            chat.last_message_at = Some(Utc::now() + chrono::Duration::days(1));
+            cx.notify();
+        });
+        overview.update(vcx, |o, cx| {
+            o.rows_dirty = true;
+            cx.notify();
+        });
+        draw(vcx);
+        overview.read_with(vcx, |o, _| {
+            assert_ne!(o.list_order.iter().position(|(id, _)| id == &moved_chat).unwrap(), old_position, "fixture must reorder a chat");
+            let index = o.list.logical_scroll_top().item_ix;
+            assert!(matches!(&o.list_items[index], ListPresentationItem::Row { chat_id, .. } if chat_id == &anchor_chat), "reordering keeps the visible chat anchored");
+        });
+        overview.update(vcx, |o, cx| {
+            o.focus_due = Some(first.clone());
+            cx.notify();
+        });
+        draw(vcx);
+        assert!(
+            overview.read_with(vcx, |o, _| o.list.logical_scroll_top().item_ix <= 2),
+            "focus target scrolls back to the first group"
+        );
+        assert!(
+            overview.read_with(vcx, |o, _| o.expanded.contains(&first)),
+            "scrolling preserves expansion"
+        );
+        assert!(
+            vcx.debug_bounds("overview-expanded-detail").is_some(),
+            "expanded content returns after scrolling back"
+        );
+        let (boundary, before, after) = overview.read_with(vcx, |o, _| {
+            let boundary = o
+                .list_order
+                .windows(2)
+                .position(|pair| pair[1].1 > pair[0].1 + 1)
+                .unwrap();
+            (
+                boundary,
+                o.list_order[boundary].0.clone(),
+                o.list_order[boundary + 1].0.clone(),
+            )
+        });
+        overview.update(vcx, |o, cx| o.select_list_row(boundary, cx));
+        vcx.update(|window, cx| {
+            let focus = overview.read(cx).body_focus.clone();
+            window.focus(&focus, cx);
+        });
+        draw(vcx);
+        vcx.simulate_keystrokes("down");
+        draw(vcx);
+        assert_eq!(
+            overview.read_with(vcx, |o, _| o.list_selected.clone()),
+            Some(after)
+        );
+        vcx.simulate_keystrokes("up");
+        draw(vcx);
+        assert_eq!(
+            overview.read_with(vcx, |o, _| o.list_selected.clone()),
+            Some(before)
+        );
     }
 
     /// List mode with more rows than fit on screen: each row keeps its full

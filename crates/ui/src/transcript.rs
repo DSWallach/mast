@@ -1414,7 +1414,10 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 }
 
 #[cfg(test)]
-thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! {
+    static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RENDERED_ROW_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Build the block rows of one (already continuation-joined) entry.
 ///
@@ -6198,6 +6201,8 @@ impl Transcript {
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(test)]
+        RENDERED_ROW_COUNT.with(|count| count.set(count.get() + 1));
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
         };
