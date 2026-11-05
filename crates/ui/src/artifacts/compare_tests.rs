@@ -304,10 +304,7 @@ fn highlight_changes_diffs_two_offscreen_renders(cx: &mut TestAppContext) {
     let (tab, _, shown, renderer, vcx) = open(cx, kind, by_revision(kind));
     tab.update_in(vcx, |tab, window, cx| tab.compare_previous(window, cx));
     settle(vcx);
-    assert!(
-        renderer.documents.borrow().is_empty(),
-        "nothing renders until asked"
-    );
+    assert_eq!(renderer.documents.borrow().len(), 2);
     tab.update_in(vcx, |tab, window, cx| tab.toggle_highlight(window, cx));
     settle(vcx);
     // Both revisions rendered at the same viewport.
@@ -379,8 +376,19 @@ fn very_tall_renders_say_how_much_was_compared(cx: &mut TestAppContext) {
     let (tab, _, _, _, vcx) = open(cx, kind, reply);
     tab.update_in(vcx, |tab, window, cx| tab.compare_with(1, window, cx));
     settle(vcx);
+    for mode in [CompareMode::SideBySide, CompareMode::Onion] {
+        tab.update_in(vcx, |tab, window, cx| {
+            tab.set_compare_mode(mode, window, cx)
+        });
+        settle(vcx);
+        assert!(
+            vcx.debug_bounds("artifact-compare-coverage").is_some(),
+            "{mode:?}"
+        );
+    }
     tab.update_in(vcx, |tab, window, cx| tab.toggle_highlight(window, cx));
     settle(vcx);
+    assert!(vcx.debug_bounds("artifact-compare-coverage").is_some());
     tab.read_with(vcx, |tab, _| {
         let summary = tab.compare_view().unwrap().render_summary().unwrap();
         assert!(
@@ -1022,4 +1030,42 @@ fn image_compare_has_no_text_source(cx: &mut TestAppContext) {
         tab.compare_view().unwrap().data().unwrap().lines.is_none()
     }));
     assert!(vcx.debug_bounds("artifact-compare-message").is_some());
+}
+
+#[gpui::test]
+fn onion_zoom_tracks_shared_zoom_and_pinch(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let kind = ArtifactKind::HtmlFragment;
+    let (tab, _, _, _, vcx) = open(cx, kind, by_revision(kind));
+    tab.update_in(vcx, |tab, window, cx| tab.compare_with(1, window, cx));
+    settle(vcx);
+    assert!(vcx.debug_bounds("artifact-compare-coverage").is_none());
+    tab.update(vcx, |tab, cx| assert!(tab.zoom_step(1, cx)));
+    tab.update_in(vcx, |tab, window, cx| {
+        tab.set_compare_mode(CompareMode::Onion, window, cx)
+    });
+    settle(vcx);
+    assert!(vcx.debug_bounds("artifact-compare-coverage").is_none());
+    let width = |vcx: &mut VisualTestContext| {
+        f32::from(
+            vcx.debug_bounds("artifact-compare-onion-stack")
+                .unwrap()
+                .size
+                .width,
+        )
+    };
+    assert!((width(vcx) - 572.0).abs() < 1.0);
+    let at = vcx.debug_bounds("artifact-compare-onion").unwrap().center();
+    vcx.simulate_event(gpui::PinchEvent {
+        position: at,
+        delta: 0.5,
+        modifiers: Default::default(),
+        phase: gpui::TouchPhase::Moved,
+    });
+    settle(vcx);
+    assert!((tab.read_with(vcx, |tab, _| tab.zoom_level()) - 1.65).abs() < 0.001);
+    assert!((width(vcx) - 858.0).abs() < 1.0);
+    tab.update(vcx, |tab, cx| assert!(tab.zoom_reset(cx)));
+    settle(vcx);
+    assert!((width(vcx) - 520.0).abs() < 1.0);
 }

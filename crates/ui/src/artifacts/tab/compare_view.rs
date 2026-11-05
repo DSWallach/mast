@@ -157,7 +157,7 @@ impl CompareView {
     }
 
     fn wants_renders(&self) -> bool {
-        self.flavor.is_visual() && (self.highlight || self.mode == CompareMode::Onion)
+        self.flavor.is_visual() && self.mode != CompareMode::Source
     }
 }
 
@@ -208,14 +208,18 @@ impl ArtifactTab {
     }
 
     /// Whether the compare body on screen zooms: the Markdown panes, or the
-    /// two web frames (not onion skin, which stacks one picture).
+    /// two web frames, or the onion-skin stack.
     pub(super) fn compare_zooms(&self) -> bool {
         self.mode == Mode::Compare
             && (self
                 .compare
                 .as_ref()
                 .is_some_and(|view| view.markdown.is_some())
-                || self.compare_shows_web())
+                || self.compare_shows_web()
+                || self
+                    .compare
+                    .as_ref()
+                    .is_some_and(|view| view.mode == CompareMode::Onion && view.flavor.is_visual()))
     }
 
     /// The revision on screen (`0` = the current file).
@@ -961,6 +965,24 @@ impl ArtifactTab {
             .flex_col()
             .child(self.render_compare_toolbar(view, artifact.as_ref(), theme, cx))
             .children(picker)
+            .when_some(
+                (view.mode != CompareMode::Source)
+                    .then(|| view.rendered().and_then(|rendered| rendered.coverage))
+                    .flatten(),
+                |el, coverage| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .text_color(theme.text)
+                            .debug_selector(|| "artifact-compare-coverage".into())
+                            .child(SharedString::from(document::coverage_notice(coverage))),
+                    )
+                },
+            )
             .child(
                 div()
                     .flex_1()
@@ -1036,7 +1058,7 @@ impl ArtifactTab {
                 Some(match &view.renders {
                     RenderState::Idle | RenderState::Rendering => "Rendering\u{2026}".to_owned(),
                     RenderState::Failed(error) => error.clone(),
-                    RenderState::Ready(rendered) => rendered.summary(),
+                    RenderState::Ready(rendered) => rendered.diff.summary(),
                 })
             } else {
                 None
@@ -1485,6 +1507,7 @@ impl ArtifactTab {
                 .object_fit(gpui::ObjectFit::Fill)
                 .opacity(opacity)
         };
+        let zoom_tab = cx.weak_entity();
         div()
             .size_full()
             .flex()
@@ -1512,7 +1535,14 @@ impl ArtifactTab {
                             .child(SharedString::from(format!("{}%", view.onion.percent()))),
                     ),
             )
-            .child(
+            .child(super::super::zoom::zoom_surface(
+                self.zoom,
+                false,
+                move |input, _, cx| {
+                    zoom_tab
+                        .update(cx, |tab, cx| tab.apply_zoom_input(input, cx))
+                        .ok();
+                },
                 div()
                     .id("artifact-compare-onion")
                     .debug_selector(|| "artifact-compare-onion".into())
@@ -1523,15 +1553,17 @@ impl ArtifactTab {
                     .child(
                         div()
                             .relative()
-                            .w(px(COMPARE_VIEWPORT_WIDTH as f32))
-                            .h(px(compare::onion_height(
-                                rendered.diff.width,
-                                rendered.diff.height,
-                            )))
+                            .debug_selector(|| "artifact-compare-onion-stack".into())
+                            .w(px(COMPARE_VIEWPORT_WIDTH as f32 * self.zoom))
+                            .h(px(self.zoom
+                                * compare::onion_height(
+                                    rendered.diff.width,
+                                    rendered.diff.height,
+                                )))
                             .child(layer(&rendered.left, 1.0))
                             .child(layer(&rendered.right, opacity)),
                     ),
-            )
+            ))
             .into_any_element()
     }
 }
