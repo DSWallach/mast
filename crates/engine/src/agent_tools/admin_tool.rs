@@ -749,7 +749,7 @@ impl AgentToolsService {
                 Some(token) => {
                     let request_id = admin
                         .check_approval(&token, &context.grant.chat_id, &steps_hash)
-                        .map_err(|e| forbidden(e))?;
+                        .map_err(forbidden)?;
                     let approved = snapshot.user_action_requests.iter().find(|r| r.id == request_id).is_some_and(|r| {
                         !r.is_open()
                             && r.resolution
