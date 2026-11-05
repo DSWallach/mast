@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Rebindable outline and Team shortcuts** (2026-11-05 overnight, `rebindable-outline-shortcuts`, Terra): the
+  outline's default action table (with aliases such as F2/R, ⇧→/Tab, ⌘Z/Control-Z), Shift-F10/Menu and both
+  Team shortcuts (⌥⌘T global, `T` in the side panel) are persisted Settings → Shortcuts records under Outline and
+  Team; rebinding replaces the action's defaults, updates hints, and conflicts are checked by physical key and
+  context. Row-edit Enter/Escape and pickers stay hard-wired. Release run: UI 2467/0, nextest passed.
 - **Perf sweep: List virtualization** (2026-11-05 overnight, `perf-sweep`, Terra): List mode virtualizes
   variable-height rows, keeping grouped order, expansion, selection, scroll targets and visible anchors across
   reorder. 250-chat redraw 105.66→1.98 ms mean (p95 150.6→2.5), first draw 68.7→2.5 ms. Measured but not
@@ -861,8 +866,8 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization).
-- Running (01:50): `rebindable-outline-shortcuts` (chat d4606323, item 3b6f9919), `cleanup-sweep` (chat edf8933b,
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts.
+- Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
 - Release in batches; never run a release while 3 Terra builds compile.
