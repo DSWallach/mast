@@ -1,6 +1,6 @@
 //! Durable wake records. File operations are called from a blocking worker.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,34 @@ mod tests {
         std::fs::write(&path, b"{").unwrap();
         assert!(WakeStore::read(&path).orchestrators.is_empty());
     }
+
+    #[test]
+    fn reconciliation_retains_queued_and_restores_unreceipted_events() {
+        let mut store = WakeStore::default();
+        let mut queued = event(1);
+        queued.message_id = Some("queued".into());
+        let mut dispatched = event(2);
+        dispatched.message_id = Some("dispatched".into());
+        let mut lost = event(3);
+        lost.message_id = Some("lost".into());
+        store.orchestrators.insert("chat".into(), vec![queued, dispatched, lost]);
+        let held = store.reconcile("chat", &HashSet::from(["queued".into()]), &HashSet::from(["dispatched".into()]));
+        assert_eq!(held.iter().map(|e| e.at_ms).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(store.orchestrators["chat"].len(), 2);
+        assert_eq!(store.orchestrators["chat"][0].message_id.as_deref(), Some("queued"));
+    }
+
+    #[test]
+    fn transfer_is_idempotent_and_reholds_entries() {
+        let mut store = WakeStore::default();
+        let mut record = event(1);
+        record.message_id = Some("message".into());
+        store.orchestrators.insert("source".into(), vec![record]);
+        store.transfer("source", "destination");
+        store.transfer("source", "destination");
+        assert_eq!(store.orchestrators["destination"].len(), 1);
+        assert!(store.orchestrators["destination"][0].message_id.is_none());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,6 +86,34 @@ pub(super) struct StoredEvent {
 }
 
 impl WakeStore {
+    /// Reconcile receipts before restoring held events. Queue entries remain
+    /// durable until their corresponding transcript entry appears.
+    pub fn reconcile(&mut self, chat: &str, queue: &HashSet<String>, transcript: &HashSet<String>) -> Vec<WakeEvent> {
+        let Some(events) = self.orchestrators.get_mut(chat) else { return Vec::new() };
+        events.retain(|entry| !entry.message_id.as_ref().is_some_and(|id| transcript.contains(id)));
+        let mut held = Vec::new();
+        for entry in events {
+            if entry.message_id.as_ref().is_none_or(|id| !queue.contains(id)) {
+                entry.message_id = None;
+                held.push(entry.event.clone());
+            }
+        }
+        held
+    }
+
+    pub fn transfer(&mut self, from: &str, to: &str) {
+        if from == to { return; }
+        let Some(entries) = self.orchestrators.remove(from) else { return };
+        let destination = self.orchestrators.entry(to.to_owned()).or_default();
+        for mut entry in entries {
+            if !destination.iter().any(|existing| existing.event.id == entry.event.id) {
+                entry.message_id = None;
+                destination.push(entry);
+            }
+        }
+        self.limit();
+    }
+
     pub fn read(path: &Path) -> Self {
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
