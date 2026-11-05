@@ -50,7 +50,7 @@ impl Shell {
                 if sound {
                     crate::sound::play(crate::sound::Sound::Request);
                 }
-                if banner && notice.group != required_actions::NeedsGroup::Fyi {
+                if banner && notice.allows_banner() {
                     crate::notify::post(&notice.title(), &notice.body(), notice.chat_id.as_deref());
                 }
             }

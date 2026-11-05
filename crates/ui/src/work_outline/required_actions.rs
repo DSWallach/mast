@@ -599,6 +599,10 @@ pub(crate) struct UserActionNotice {
 }
 
 impl UserActionNotice {
+    pub(crate) fn allows_banner(&self) -> bool {
+        self.group != NeedsGroup::Fyi
+    }
+
     pub(crate) fn title(&self) -> String {
         use mast_proto::work_outline_user_actions::UserActionKind;
         let label = match self.kind {
@@ -1264,8 +1268,27 @@ mod tests {
             let notice = notifier.observe("s1", &with(vec![row])).remove(0);
             assert_eq!(notice.title(), format!("{label} · UI"));
             assert_eq!(notice.body(), "First line");
-            assert_eq!(notice.group == NeedsGroup::Fyi, kind == UserActionKind::Notice);
+            assert_eq!(notice.allows_banner(), kind != UserActionKind::Notice);
         }
+    }
+
+    #[test]
+    fn notification_suppresses_explicit_fyi_and_prefers_actionable_request() {
+        use mast_proto::work_outline_user_actions::UserActionPriority;
+        let mut notifier = UserActionNotifier::default();
+        notifier.observe("s1", &with(vec![]));
+        let mut fyi = request("fyi", "s1", UI, CHAT_UI, "For information");
+        fyi.priority = Some(UserActionPriority::Fyi);
+        let notice = notifier.observe("s1", &with(vec![fyi.clone()])).remove(0);
+        assert!(!notice.allows_banner());
+
+        let mut notifier = UserActionNotifier::default();
+        notifier.observe("s1", &with(vec![]));
+        fyi.created_at = NOW + 1;
+        let action = request("action", "s1", UI, CHAT_UI, "Review this");
+        let notice = notifier.observe("s1", &with(vec![action, fyi])).remove(0);
+        assert!(notice.allows_banner());
+        assert_eq!(notice.body(), "Review this");
     }
 
     #[test]
