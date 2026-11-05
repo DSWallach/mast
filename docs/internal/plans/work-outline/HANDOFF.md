@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Talk/decision metrics** (2026-11-05, `talk-metrics`, Terra; plan rev 3 phase 0): `tools/mast-metrics` reads an
+  immutable copy of the profile (sqlite `.backup` of docs.sqlite3 + copied journals, never the live store) and writes
+  aggregate JSON/Markdown with `--since/--until` and `--compare <old.json>`. Snapshots and reports live in
+  `~/mast-metrics/` (never committed); re-run steps in tools/mast-metrics/README.md. Baseline (14 days to
+  2026-11-05): 406 cards vs 872 heuristic prose questions; card replies median 9.4 h / p90 136 h (n=33); coordinator
+  replies median 171 words; 72 status checks. Summary mast-artifact:49d61202530e739e159d03b99bb0c7c8. Re-run ~2026-11-12.
 - **`zeron doctor`** (2026-11-05, `mast-doctor`, Terra; merged after Mikey's go-ahead): read-only setup checklist
   (`zeron doctor`, `--json`): agent CLIs (login-shell PATH, exact override paths, rustup shims kept), local agent
   sign-in, gh + auth, git/LFS, data dir access/size/free space, engine lock + IPC, Rust toolchain, Linear Keychain
