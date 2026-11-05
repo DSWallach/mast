@@ -29,7 +29,6 @@ cargo test -p mast-harness codex
 cargo test -p mast-harness --test codex
 cargo test -p mast-ui transcript
 cargo test -p mast-ui attachments
-cd edge && npm test
 ```
 
 The engine fixture covers repeated completions, restart-style Loro export/import,
@@ -100,32 +99,6 @@ The full workspace command used to continue past the confirmed baseline failure:
 ```sh
 cargo test --workspace -- --skip online_runtime_shutdown_stops_edge_workers_and_retires_the_graph
 ```
-
-## iOS client
-
-The iOS session mirror recognizes the same `image` part metadata. Generated
-images form independent transcript rows with the message's device as the first
-source and the chat host as fallback. They preserve aspect ratio, have rounded
-corners, and open the shared attachment lightbox. Loading and unavailable states
-use the existing attachment cache and relay; visible rows retry failed sources.
-The generation tool keeps its ordinary lifecycle presentation.
-
-Generated downloads validate the declared and actual raster MIME type and the
-24 MiB encoded-file limit. ImageIO reads dimensions before decoding, rejects
-sources exceeding 4096 pixels on either axis, and decodes one static frame at
-most 2048 pixels on its longest side off the main actor. The cache accounts for
-decoded pixel memory and separates validated generated images from generic
-attachment entries. Geometry changes notify the native transcript table.
-
-`GeneratedImageTests` covers metadata decoding, malformed references, row identity
-and device/content corrections, source ordering, raster limits, and cache policy
-isolation. `TranscriptLayoutTests.testGeneratedImageArrivalResizesTheRowAndKeepsTheTailVisible`
-covers a placeholder becoming a loaded image in the native scrolling transcript.
-These XCTest cases were added on Linux; they have **not** been run in Xcode or on
-an iPhone. Changed Swift files passed a tree-sitter syntax parse and `git diff
---check`; this does not replace Swift type checking or simulator validation.
-
-The iOS implementation and its tests are preserved on the `archive/ios` branch.
 
 ## Desktop security regressions
 

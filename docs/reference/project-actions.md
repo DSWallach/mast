@@ -60,9 +60,9 @@ For desktop sends, the worktree directive rides the durable queued `Run` command
 
 The queue reply is not held open while the host creates the worktree. Desktop polls a short-lived, command-scoped handoff to attach the already-open setup terminal when it becomes available. A lost relay reply therefore cannot leave the composer stuck on `Sending…` while the agent runs remotely.
 
-Direct `CreateWorktree` callers, including iOS, retain the same host-side setup behavior and receive the optional setup terminal in the RPC outcome.
+Direct `CreateWorktree` callers retain the same host-side setup behavior and receive the optional setup terminal in the RPC outcome.
 
-Desktop attaches the returned terminal to the bottom terminal drawer of the newly minted chat, even if another chat becomes selected while the request is in flight. Manual Actions use the same bottom drawer. iOS starts setup through the same host-side RPC but does not add a terminal surface in this release.
+Desktop attaches the returned terminal to the bottom terminal drawer of the newly minted chat, even if another chat becomes selected while the request is in flight. Manual Actions use the same bottom drawer.
 
 A failure to open or initialize the setup terminal is returned as `setupError`. The worktree remains available and the first agent turn continues; desktop presents the error as a non-blocking notice.
 
