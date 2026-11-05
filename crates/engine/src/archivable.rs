@@ -88,16 +88,24 @@ pub fn open_handoffs_for_pr<'a>(
 ) -> Vec<&'a UserActionRequestView> {
     use mast_proto::work_outline_user_actions::{RequestLinkTarget, UserActionKind};
     let canonical = crate::chat_links::canonicalize_pr_url(pr_url);
+    let external_id = canonical
+        .strip_prefix("https://github.com/")
+        .and_then(|path| path.split_once("/pull/"))
+        .map(|(repo, number)| format!("{repo}#{number}"));
     snapshot.user_action_requests.iter().filter(|request| {
-        request.is_unresolved()
-            && request.effective_kind() == UserActionKind::Handoff
-            && ((!branch.is_empty() && (request.links.iter().any(|link| {
-                matches!(&link.target, RequestLinkTarget::Diff { branch: Some(value) } if value == branch)
-            }) || request.facts.iter().any(|fact| {
-                fact.label.eq_ignore_ascii_case("branch") && fact.value.trim() == branch
-            }))) || (!canonical.is_empty() && request.links.iter().any(|link| {
-                matches!(&link.target, RequestLinkTarget::Pr { url } if crate::chat_links::canonicalize_pr_url(url) == canonical)
-            })))
+        let branch_matches = !branch.is_empty() && (request.links.iter().any(|link| {
+            matches!(&link.target, RequestLinkTarget::Diff { branch: Some(value) } if value == branch)
+        }) || request.facts.iter().any(|fact| {
+            fact.label.eq_ignore_ascii_case("branch") && fact.value.trim() == branch
+        }));
+        let pr_matches = !canonical.is_empty() && (request.links.iter().any(|link| {
+            matches!(&link.target, RequestLinkTarget::Pr { url } if crate::chat_links::canonicalize_pr_url(url) == canonical)
+        }) || request.facts.iter().any(|fact| {
+            fact.label.eq_ignore_ascii_case("pr") && (crate::chat_links::canonicalize_pr_url(&fact.value) == canonical
+                || external_id.as_ref().is_some_and(|id| fact.value.trim().eq_ignore_ascii_case(id)))
+        }));
+        request.is_unresolved() && request.effective_kind() == UserActionKind::Handoff
+            && (branch_matches || pr_matches)
     }).collect()
 }
 
