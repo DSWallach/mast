@@ -960,7 +960,8 @@ impl ChatTypeView {
                     })
                     .truncate()
                     .text_size(crate::typography::ui_rems(9.5))
-                    .child(SharedString::from(review_chats::open_review_detail(chat))),
+                    .text_color(crate::status_style::status_style(chat.state.into(), theme.appearance).color)
+                    .child(SharedString::from(format!("{} {}", crate::status_style::glyph(chat.state.into()), review_chats::open_review_detail(chat)))),
             )
             .into_any_element()
     }

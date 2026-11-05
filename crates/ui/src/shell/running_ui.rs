@@ -1002,7 +1002,7 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(if urgent {
-                        theme.warning
+                        crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color
                     } else {
                         theme.text_faint
                     })
@@ -1104,9 +1104,9 @@ impl Shell {
                             )
                             .when(row.state == RunState::Awaiting || failed, |el| {
                                 let (label, color) = if row.state == RunState::Awaiting {
-                                    ("waiting for input", theme.warning)
+                                    ("waiting for input", crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color)
                                 } else {
-                                    ("tool calls failed", theme.danger)
+                                    ("tool calls failed", crate::status_style::status_style(crate::status_style::Status::Errored, theme.appearance).color)
                                 };
                                 el.child(
                                     div()

@@ -644,6 +644,7 @@ impl ChatTypeView {
             },
         );
         let updated = row.chat.last_message_at.unwrap_or(row.chat.created_at);
+        let indicator = crate::status_style::animated_indicator(row.status.into(), theme.appearance, format!("review-chat-status-{index}"), cx.entity_id(), cx);
         div()
             .id(("pr-review-chat-row", index))
             .min_h(px(52.0))
@@ -717,7 +718,7 @@ impl ChatTypeView {
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .child(crate::status_style::indicator(row.status.into(), theme.appearance))
+                    .child(indicator)
                     .child(div().text_size(crate::typography::ui_rems(11.0))
                         .text_color(crate::status_style::status_style(row.status.into(), theme.appearance).color)
                         .child(SharedString::from(status_label(row.status)))),
