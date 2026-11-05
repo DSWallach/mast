@@ -72,6 +72,8 @@ fn isolate_test_home() {
     );
     let home = temporary_root.join(format!("mast-test-home-{}-{timestamp}", std::process::id()));
     std::fs::create_dir(&home).expect("create isolated test home");
+    // The `codex` CLI refuses to start when CODEX_HOME names a missing directory.
+    std::fs::create_dir(home.join(".codex")).expect("create isolated CODEX_HOME");
 
     // SAFETY: the constructor runs before the Rust test harness starts threads.
     unsafe {
