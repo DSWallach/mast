@@ -330,6 +330,7 @@ mod tests {
         };
         tracker.observe(url, &status).await;
         assert!(wakes.status("orch").held.is_empty());
+        let tracker = PrMergedWakes::new(path.clone(), workspace.clone(), wakes.clone());
         status.state = "MERGED".into();
         tracker.observe(url, &status).await;
         let held = wakes.status("orch").held;

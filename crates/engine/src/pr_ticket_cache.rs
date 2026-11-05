@@ -641,8 +641,14 @@ impl PrTicketCache {
             .await
             .unwrap_or(None);
             let wakes = lock(&inner.merged_wakes).clone();
-            if let (Some(wakes), PrKey::Url(url), Some(status)) = (&wakes, &key, &data) {
-                wakes.observe(url, status).await;
+            if let (Some(wakes), Some(status)) = (&wakes, &data) {
+                let url = match &key {
+                    PrKey::Url(url) => Some(url.as_str()),
+                    PrKey::Branch { .. } => status.url.as_deref(),
+                };
+                if let Some(url) = url {
+                    wakes.observe(url, status).await;
+                }
             }
             lock(&inner.pr_cache).insert(
                 key,
