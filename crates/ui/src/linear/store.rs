@@ -102,22 +102,6 @@ impl LinearStore {
         self.project_details.get(project_id)
     }
 
-    /// Hash of the project detail cache (what the plan panel reads).
-    pub(crate) fn project_details_fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut total = 0u64;
-        for (id, entry) in &self.project_details {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            id.hash(&mut h);
-            match entry {
-                ProjectDetailEntry::Loading => 0u8.hash(&mut h),
-                ProjectDetailEntry::Ready { at, .. } => (1u8, at).hash(&mut h),
-                ProjectDetailEntry::Failed { at, .. } => (2u8, at).hash(&mut h),
-            }
-            total ^= h.finish();
-        }
-        total
-    }
 
     fn project_needs_fetch(&self, project_id: &str, now: Instant) -> bool {
         match self.project_detail(project_id) {

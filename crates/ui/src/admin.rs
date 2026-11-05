@@ -209,10 +209,6 @@ impl AdminState {
         self.grants.len() != before
     }
 
-    pub(crate) fn grants(&self) -> &[AdminGrant] {
-        &self.grants
-    }
-
     /// Any grant the engine reported (live or about to be pruned).
     pub(crate) fn has_grants(&self) -> bool {
         !self.grants.is_empty()

@@ -388,10 +388,10 @@ fn repo_key(cwd: Option<&str>) -> String {
     let Some(cwd) = cwd else {
         return overview_grouping::NONE_KEY.to_string();
     };
-    if let Some(root) = workspace_root_of(cwd) {
-        if let Some(key) = last_segment(&root) {
-            return key;
-        }
+    if let Some(root) = workspace_root_of(cwd)
+        && let Some(key) = last_segment(&root)
+    {
+        return key;
     }
     last_segment(cwd).unwrap_or_else(|| overview_grouping::NONE_KEY.to_string())
 }
