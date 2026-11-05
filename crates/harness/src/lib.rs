@@ -24,6 +24,28 @@ use mast_proto::{
     UserInputAnswer, UserInputQuestion,
 };
 
+/// Whether a turn error reports that the agent's own login was rejected.
+/// Keep this narrow: tool failures and unrelated authorization errors must not
+/// sign out the account pinned to the conversation.
+pub fn is_authentication_failure(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    ["authentication failed", "authentication_failed", "not logged in", "not authenticated", "unauthenticated", "unauthorized", "invalid api key", "status 401", "http 401", "status code: 401", "status code 401"]
+        .iter().any(|phrase| message.contains(phrase))
+}
+
+#[cfg(test)]
+mod authentication_failure_tests {
+    #[test]
+    fn recognizes_agent_authentication_failures() {
+        for message in ["Authentication failed — sign in to Claude again.", "HTTP 401 Unauthorized", "not logged in"] {
+            assert!(super::is_authentication_failure(message));
+        }
+        for message in ["rate limit 429", "model v401 not found", "connection timed out"] {
+            assert!(!super::is_authentication_failure(message));
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
     #[error("harness binary not found: {0}")]

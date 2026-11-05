@@ -387,6 +387,7 @@ impl Harness for HomeRecorder {
         ));
         let barrier = self.started.clone();
         let wait_for_peers = request.prompt.starts_with("pair");
+        let authentication_failure = request.prompt == "authentication-failure";
         let events: Vec<Result<AgentEvent, HarnessError>> = vec![
             Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::ClaudeCode,
@@ -398,9 +399,9 @@ impl Harness for HomeRecorder {
             }),
             Ok(AgentEvent::TextDelta { text: "ok".into() }),
             Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
+                status: if authentication_failure { DoneStatus::Errored } else { DoneStatus::Completed },
                 result: None,
-                error: None,
+                error: authentication_failure.then(|| "Authentication failed — sign in to Claude again.".into()),
                 session_id: Some(format!("hs-{}", request.prompt)),
             }),
         ];
@@ -567,6 +568,12 @@ async fn dispatch_runs_each_chat_on_its_projects_account() {
         Some("hs-pair-work"),
         "and resumes its session"
     );
+    let home = home_of(&work.id);
+    std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"work@example.test"}}"#).unwrap();
+    assert!(core.managed_accounts.snapshot().accounts.iter().find(|account| account.id == work.id).unwrap().signed_in);
+    queue(&core, "chat-work", "authentication-failure", "m5");
+    wait_until(|| !core.managed_accounts.snapshot().accounts.iter().find(|account| account.id == work.id).unwrap().signed_in, "account marked signed out").await;
+    assert_eq!(core.managed_accounts.pinned_home("chat-work", HarnessId::ClaudeCode), Some(home));
     core.shutdown().await;
 }
 
@@ -727,4 +734,16 @@ exit 0
     })
     .await;
     assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+    accounts.pin_chat("codex-chat", HarnessId::Codex, &acct.id).unwrap();
+    let home = accounts.pinned_home("codex-chat", HarnessId::Codex).unwrap();
+    accounts.mark_chat_signed_out("codex-chat", HarnessId::Codex).unwrap();
+    assert!(!accounts.snapshot().accounts[0].signed_in);
+    let (login_id, _) = accounts.start_login(&acct.id).await.unwrap();
+    let poll = wait_poll(&accounts, &login_id, |poll| poll.status != AgentLoginStatus::Pending).await;
+    assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+    let snapshot = accounts.snapshot();
+    assert_eq!(snapshot.accounts.len(), 1);
+    assert_eq!(snapshot.accounts[0].id, acct.id);
+    assert!(snapshot.accounts[0].signed_in);
+    assert_eq!(accounts.pinned_home("codex-chat", HarnessId::Codex), Some(home));
 }

@@ -480,6 +480,8 @@ pub struct AccountFlow {
     space_id: Option<String>,
     device_id: Option<String>,
     phase: Phase,
+    signing_in_again: bool,
+    sign_in_label: Option<String>,
     name_input: Entity<ComposerInput>,
     code_input: Entity<ComposerInput>,
     /// What the running sign-in has printed so far (URL, code prompt).
@@ -522,6 +524,8 @@ impl AccountFlow {
             space_id,
             device_id,
             phase: if picking { Phase::Pick } else { Phase::Name },
+            signing_in_again: false,
+            sign_in_label: None,
             name_input,
             code_input,
             login: LoginView::default(),
@@ -596,7 +600,9 @@ impl AccountFlow {
     }
 
     /// Sign in to an existing account without replacing its home or pin.
-    pub fn sign_in_again(&mut self, account_id: String, cx: &mut Context<Self>) {
+    pub fn sign_in_again(&mut self, account_id: String, label: Option<String>, cx: &mut Context<Self>) {
+        self.signing_in_again = true;
+        self.sign_in_label = label;
         self.start_sign_in(Some(account_id), String::new(), cx);
     }
 
@@ -908,6 +914,14 @@ impl AccountFlow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let name = harness_name(self.harness);
+        let sign_in_title = if self.signing_in_again {
+            match &self.sign_in_label {
+                Some(label) => format!("Sign in again to {label} ({name})"),
+                None => format!("Sign in again to {name}"),
+            }
+        } else {
+            format!("Add {name} account")
+        };
         let (title, body): (String, AnyElement) = match &self.phase {
             Phase::Pick => (
                 format!("{name} account for this project"),
@@ -949,7 +963,7 @@ impl AccountFlow {
                 )
             }
             Phase::Creating => (
-                format!("Add {name} account"),
+                sign_in_title.clone(),
                 self.status_body(theme, "Setting up the account\u{2026}", "Cancel", cx),
             ),
             Phase::Waiting { .. } => {
@@ -957,7 +971,7 @@ impl AccountFlow {
                     window.focus(&self.code_input.focus_handle(cx), cx);
                 }
                 (
-                    format!("Add {name} account"),
+                    sign_in_title.clone(),
                     self.render_waiting(theme, cx),
                 )
             }
@@ -966,7 +980,7 @@ impl AccountFlow {
                 self.status_body(theme, "Moving the saved login\u{2026}", "Cancel", cx),
             ),
             Phase::Failed(message) => (
-                format!("Add {name} account"),
+                sign_in_title,
                 div()
                     .flex()
                     .flex_col()

@@ -537,6 +537,24 @@ impl AccountsPage {
         cx.notify();
     }
 
+    pub(crate) fn sign_in_for_chat(&mut self, device: String, harness: HarnessId, account_id: Option<String>, label: Option<String>, cx: &mut Context<Self>) {
+        let target = (!self.state.read(cx).is_local_device(&device)).then_some(device);
+        self.set_target_device(target, cx);
+        match account_id {
+            Some(id) => self.open_managed_sign_in(harness, Some((id, label)), cx),
+            None => self.start_login(harness, cx),
+        }
+    }
+
+    pub(crate) fn refresh_managed_accounts(&mut self, cx: &mut Context<Self>) {
+        self.load_managed(false, cx);
+    }
+
+    pub(crate) fn sign_in_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.managed_error = Some(message.into());
+        cx.notify();
+    }
+
     fn open_account_flow(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         self.open_managed_sign_in(harness, None, cx);
     }
@@ -544,14 +562,14 @@ impl AccountsPage {
     fn open_managed_sign_in(
         &mut self,
         harness: HarnessId,
-        account_id: Option<String>,
+        account: Option<(String, Option<String>)>,
         cx: &mut Context<Self>,
     ) {
         let state = self.state.clone();
         let device = self.target_device.clone();
         let flow = cx.new(|cx| AccountFlow::new(state, harness, None, device, cx));
-        if let Some(account_id) = account_id {
-            flow.update(cx, |flow, cx| flow.sign_in_again(account_id, cx));
+        if let Some((account_id, label)) = account {
+            flow.update(cx, |flow, cx| flow.sign_in_again(account_id, label, cx));
         }
         self.account_flow_sub = Some(cx.subscribe(&flow, |this: &mut Self, _, _, cx| {
             this.account_flow = None;
@@ -572,6 +590,7 @@ impl AccountsPage {
                 .map(|(ix, account)| {
                     let remove_id = account.id.clone();
                     let sign_in_id = account.id.clone();
+                    let sign_in_label = account.label.clone();
                     let harness = account.harness;
                     // The meters sit under this row's own label and email, so
                     // each ring is attributed to the account it measures.
@@ -628,7 +647,7 @@ impl AccountsPage {
                                 .id(("managed-account-sign-in", ix))
                                 .hover(|s| widgets::ghost_hover(theme, s))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_managed_sign_in(harness, Some(sign_in_id.clone()), cx)
+                                    this.open_managed_sign_in(harness, Some((sign_in_id.clone(), Some(sign_in_label.clone()))), cx)
                                 }))
                                 .child(SharedString::from("Sign in again")),
                         )
@@ -784,21 +803,17 @@ impl AccountsPage {
     // ---- add-account flows ----
 
     fn start_login(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
+        let rpc = self.state.read(cx).accounts_rpc(self.target_device.as_deref());
+        if !rpc.is_connected() { return; }
         self.login = Some(LoginFlow::Starting { harness });
         self.error = None;
-        let params = self.params(serde_json::json!({ "harness": harness }));
+        let params = serde_json::json!({ "harness": harness });
         self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::START_AGENT_LOGIN, params)
-                .await;
+            let result = rpc.call(methods::START_AGENT_LOGIN, params).await;
             this.update(cx, |page, cx| {
                 match result.and_then(|value| {
                     serde_json::from_value::<AgentLoginStart>(value)
-                        .map_err(|e| mast_rpc::RpcError::Failed(e.to_string()))
+                        .map_err(|e| e.to_string())
                 }) {
                     Ok(start) => {
                         cx.open_url(&start.url);

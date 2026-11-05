@@ -2974,7 +2974,7 @@ async fn drive_run(
             AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } => Some(message.as_str()),
             _ => None,
         };
-        if authentication_error.is_some_and(|message| message.to_ascii_lowercase().contains("authentication failed")) {
+        if authentication_error.is_some_and(mast_harness::is_authentication_failure) {
             if let Some(accounts) = inner.managed_accounts.get() {
                 if let Err(error) = accounts.mark_chat_signed_out(&chat_id, harness_id) {
                     tracing::warn!(%error, "could not record account sign-out");
