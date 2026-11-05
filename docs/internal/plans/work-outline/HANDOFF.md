@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Perf sweep: List virtualization** (2026-11-05 overnight, `perf-sweep`, Terra): List mode virtualizes
+  variable-height rows, keeping grouped order, expansion, selection, scroll targets and visible anchors across
+  reorder. 250-chat redraw 105.66→1.98 ms mean (p95 150.6→2.5), first draw 68.7→2.5 ms. Measured but not
+  changed: prepared 2,000-message transcript open+draw 9.7 ms (prep 74 ms off-thread), production streaming
+  5.8 ms/chunk mean (unchanged rows reused), Team facts 0.07 ms, outline redraw 3.2 ms. Benchmarks and method
+  in docs/performance-sweep.md (3 ignored bench tests). Release run: nextest passed, UI 2461/0.
 - **First-run audit fixes** (2026-11-05 overnight, `first-run-audit`, Terra): report at
   docs/internal/first-run-audit.md (6 findings). Fixed: profile classification (fresh vs existing) now uses
   saved settings or real Space/chat registry data before either startup mode, so headless-first startup no
@@ -866,7 +872,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
   redraws) and cleanup sweep (item e71201b1: warnings/clippy, dead code, stale docs/scripts; no behavior
   change). Mikey: "up until 8 am look for perf improvements and clean up opportunities".
 - Wave 3: Needs-you phase 4 (answer ask/choose on the card).
-- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging, first-run-audit.
+- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging, first-run-audit, perf-sweep.
 - Release in batches of ≤3 branches; never run a release while 3 Terra builds are compiling.
 - Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
 
