@@ -8,6 +8,10 @@ use mast_proto::work_outline_container_templates::{
     SetContainerTemplateParams,
 };
 use mast_proto::work_outline_instructions::InstructionScope;
+use mast_proto::work_outline_user_actions::{
+    ApproveWorkItemInstructionProposalParams, InstructionProposalOrigin,
+    InstructionProposalTarget, ProposalAction, ProposeWorkItemInstructionParams,
+};
 
 use crate::registry::RegistryDoc;
 use crate::registry::tests::{chat, space};
@@ -228,6 +232,42 @@ fn template_instructions_cannot_be_edited_but_can_be_muted() {
         ),
     );
     assert!(edit.is_err());
+    // Proposals created before template-aware proposals must not mutate the
+    // followed row when approved, whether they request an edit or removal.
+    for (operation, action, text) in [
+        ("edit", ProposalAction::Edit, "changed"),
+        ("remove", ProposalAction::Remove, ""),
+    ] {
+        let proposal = d.apply_work_outline_mutation(
+            &WorkOutlineMutation::ProposeWorkItemInstruction(ProposeWorkItemInstructionParams {
+                space_id: Some(SPACE.into()),
+                target: InstructionProposalTarget::default(),
+                origin: InstructionProposalOrigin::default(),
+                text: text.into(),
+                action,
+                instruction_id: Some(row.id.clone()),
+                rationale: None,
+                operation_id: format!("propose-{operation}"),
+            }),
+            &actor(WorkOutlineActorKind::User),
+            NOW,
+        ).unwrap().proposal_id.unwrap();
+        let approval = run(
+            &mut d,
+            WorkOutlineActorKind::User,
+            WorkOutlineMutation::ApproveWorkItemInstructionProposal(
+                ApproveWorkItemInstructionProposalParams {
+                    proposal_id: proposal,
+                    approved_text: text.into(),
+                    placement: None,
+                    allow_stale: false,
+                    operation_id: format!("approve-{operation}"),
+                },
+            ),
+        );
+        assert!(approval.is_err());
+        assert_eq!(live_instructions(&snap(&d), &planning), vec!["Plan first"]);
+    }
     // A user's own instruction can be added next to it.
     run(
         &mut d,
