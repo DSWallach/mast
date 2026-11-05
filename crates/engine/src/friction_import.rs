@@ -1,7 +1,9 @@
 //! Parsing for Markdown friction logs.
 
 use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
-use mast_proto::{FrictionApproval, FrictionKind, FrictionSeverity};
+use mast_proto::{
+    FrictionApproval, FrictionKind, FrictionSeverity, RequestLink, RequestLinkTarget,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ImportedFriction {
@@ -13,6 +15,7 @@ pub struct ImportedFriction {
     pub kind: FrictionKind,
     pub severity: Option<FrictionSeverity>,
     pub created_at: i64,
+    pub links: Vec<RequestLink>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,6 +50,33 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
     };
     if summary.is_empty() || summary.chars().count() > 140 {
         return Err("summary must contain 1 to 140 characters".into());
+    }
+    let clean = |s: &str| mast_harness::redact::redact_secrets(s);
+    let mut links = Vec::new();
+    for word in clean(body).split_whitespace() {
+        let word = word.trim_matches(|c: char| {
+            matches!(c, '`' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '.')
+        });
+        let target = if word.starts_with("https://") {
+            Some(RequestLinkTarget::Url {
+                url: word.to_owned(),
+            })
+        } else if word.starts_with('/') && word.len() > 1 {
+            Some(RequestLinkTarget::File {
+                path: word.to_owned(),
+                line: None,
+            })
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            if !links.iter().any(|link: &RequestLink| link.target == target) {
+                links.push(RequestLink {
+                    label: word.to_owned(),
+                    target,
+                });
+            }
+        }
     }
     let mut fields: Vec<(String, String)> = Vec::new();
     for line in body.lines() {
@@ -86,6 +116,16 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
             "suggested improvement" | "suggested rule/tooling improvement" | "suggestion" => {
                 suggestion = optional(&value)
             }
+            "links" => match serde_json::from_str::<Vec<RequestLink>>(&clean(&value)) {
+                Ok(values) => {
+                    for link in values {
+                        if !links.contains(&link) {
+                            links.push(link);
+                        }
+                    }
+                }
+                Err(_) => happened.push(format!("Links: {value}")),
+            },
             "approval requested" => command = optional(&value),
             "why" | "why approval was needed" => why = optional(&value),
             "kind" => {
@@ -107,6 +147,7 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
                     "low" => Some(FrictionSeverity::Low),
                     "medium" => Some(FrictionSeverity::Medium),
                     "high" => Some(FrictionSeverity::High),
+                    "n/a" | "none" | "" => None,
                     _ => {
                         happened.push(format!("Severity: {value}"));
                         None
@@ -140,6 +181,7 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
         }),
         kind,
         severity,
+        links,
         created_at: Utc.from_utc_datetime(&date_time).timestamp_millis(),
     })
 }

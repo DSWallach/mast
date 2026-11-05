@@ -38,6 +38,7 @@ async fn friction_rpc_list_dismiss_promote_and_propose() {
             branch: None,
             created_at: 100,
             source: FrictionSource::Agent,
+            file_name: None,
         },
         fingerprint: String::new(),
         occurrences: 0,
@@ -171,4 +172,45 @@ async fn friction_settings_persist_across_engine_restart() {
         false
     );
     assert!(!core.sessions.auto_capture_friction());
+}
+
+#[tokio::test]
+async fn friction_import_deduplicates_and_redacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp"})).await.unwrap();
+    let markdown = include_str!("fixtures/friction-log.md");
+    let params = json!({"spaceId":"space", "fileName":"friction.md", "markdown":markdown});
+    let first = client
+        .call(methods::IMPORT_FRICTION, params.clone())
+        .await
+        .unwrap();
+    assert_eq!(first["added"], 2);
+    assert_eq!(first["merged"], 0);
+    assert_eq!(first["skipped"].as_array().unwrap().len(), 2);
+    let second = client.call(methods::IMPORT_FRICTION, params).await.unwrap();
+    assert_eq!(second["added"], 0);
+    assert_eq!(second["merged"], 0);
+    assert_eq!(second["skipped"].as_array().unwrap().len(), 4);
+    let reports = core.workspace.friction_reports("space");
+    assert_eq!(reports.len(), 2);
+    assert!(reports.iter().all(|r| r.occurrences == 1));
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.provenance.source == FrictionSource::Import)
+    );
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.provenance.file_name.as_deref() == Some("friction.md"))
+    );
+    assert!(!format!("{reports:?}").contains("synthetic-secret"));
 }

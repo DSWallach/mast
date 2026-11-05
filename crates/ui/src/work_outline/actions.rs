@@ -384,6 +384,10 @@ impl WorkOutlineActions {
         self.call(methods::LIST_FRICTION_REPORTS, serde_json::to_value(params).unwrap(), decode_json::<Vec<mast_proto::FrictionReport>>)
     }
 
+    pub(crate) fn import_friction(&self, params: mast_proto::ImportFrictionParams) -> Task<Result<mast_proto::ImportFrictionResult, WorkOutlineError>> {
+        self.call(methods::IMPORT_FRICTION, serde_json::to_value(params).unwrap(), decode_json::<mast_proto::ImportFrictionResult>)
+    }
+
     pub(crate) fn set_friction_status(&self, params: mast_proto::SetFrictionStatusParams) -> Task<Result<mast_proto::FrictionReport, WorkOutlineError>> {
         self.call(methods::SET_FRICTION_STATUS, serde_json::to_value(params).unwrap(), decode_json::<mast_proto::FrictionReport>)
     }
