@@ -96,7 +96,7 @@ fn read_migrated_key(
         // An empty item records an explicit deletion and suppresses fallback.
         return Ok((!key.is_empty()).then_some(key));
     }
-    let key = read(LEGACY_KEYCHAIN_SERVICE)?;
+    let key = read(LEGACY_KEYCHAIN_SERVICE)?.filter(|key| !key.is_empty());
     if let Some(ref key) = key {
         write(KEYCHAIN_SERVICE, key)?;
     }
@@ -275,6 +275,11 @@ mod migration_tests {
         assert_eq!(read().unwrap(), None);
         items.borrow_mut().clear();
         assert_eq!(read().unwrap(), None);
+        items
+            .borrow_mut()
+            .insert(LEGACY_KEYCHAIN_SERVICE.into(), String::new());
+        assert_eq!(read().unwrap(), None);
+        assert!(!items.borrow().contains_key(KEYCHAIN_SERVICE));
     }
 
     #[test]
