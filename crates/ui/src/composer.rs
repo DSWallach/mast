@@ -975,7 +975,7 @@ fn dropped_file_mention(
     is_dir: bool,
 ) -> Option<(String, usize)> {
     if range.start > range.end
-        || !local_path_is_safe(path)
+        || !(local_path_is_safe(path) || absolute_path_is_safe(path))
         || !content.is_char_boundary(range.start)
     {
         return None;
@@ -1000,7 +1000,12 @@ fn dropped_file_mention(
     } else {
         " "
     };
-    let inserted = format!("{prefix}{}{trailing}", local_file_link(path, is_dir));
+    let reference = if absolute_path_is_safe(path) {
+        format!("`{path}{}`", if is_dir { "/" } else { "" })
+    } else {
+        local_file_link(path, is_dir)
+    };
+    let inserted = format!("{prefix}{reference}{trailing}");
     let cursor_advance = inserted.len() + existing_separator.map(char::len_utf8).unwrap_or(0);
     Some((inserted, cursor_advance))
 }
@@ -1013,6 +1018,14 @@ fn local_path_is_safe(path: &str) -> bool {
         && !path
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+fn absolute_path_is_safe(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains('`')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && local_path_is_safe(&path[1..])
 }
 
 fn label_close(text: &str, start: usize) -> Option<usize> {
@@ -2699,12 +2712,12 @@ impl ComposerInput {
                 ClipboardEntry::String(_) => {}
             }
         }
-        if !images.is_empty() {
-            cx.emit(ComposerInputEvent::PastedImages(images));
-            return;
-        }
         if !paths.is_empty() {
             cx.emit(ComposerInputEvent::PastedPaths(paths));
+            return;
+        }
+        if !images.is_empty() {
+            cx.emit(ComposerInputEvent::PastedImages(images));
             return;
         }
         if let Some(text) = item.text() {
@@ -5042,25 +5055,116 @@ impl Composer {
         cx.notify();
     }
 
-    /// Stage image files (picker / drop / pasted paths). Non-images are
-    /// skipped silently (matching the original's `image/*` filter); read
-    /// failures and oversize files surface in the failure notice.
+    /// Add dropped or pasted paths, staging images and mentioning other paths.
     pub(crate) fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.queue_edit_finishing {
+            self.failure =
+                Some("Wait for the queued message to finish saving before adding files.".into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return;
+        }
+        let (roots, remote_device) = {
+            let state = self.state.read(cx);
+            let chat = state.selected_chat_row();
+            let space = chat
+                .and_then(|chat| state.space_for_chat(chat))
+                .or_else(|| state.selected_space_row());
+            let device = chat
+                .map(|chat| chat.device_id.clone())
+                .or_else(|| state.effective_device_id());
+            let remote = device
+                .as_deref()
+                .filter(|id| state.local_device_id.as_deref() != Some(*id))
+                .map(|id| state.device_name(id).unwrap_or(id).to_owned());
+            let mut roots = Vec::new();
+            if let Some(cwd) = chat.and_then(|chat| chat.cwd.as_deref()) {
+                roots.push(PathBuf::from(cwd));
+            }
+            if let Some(space) = space {
+                roots.push(PathBuf::from(&space.path));
+            }
+            (roots, remote)
+        };
         let mut staged = Vec::new();
-        for path in &paths {
-            if attachments::format_by_extension(path).is_none() {
+        let mut failures = Vec::new();
+        for path in paths {
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned();
+            let metadata = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    failures.push(format!("{name}: {error}"));
+                    continue;
+                }
+            };
+            if metadata.is_file() && attachments::format_by_extension(&path).is_some() {
+                match attachments::stage_file(&path) {
+                    Ok(attachment) => staged.push(attachment),
+                    Err(message) => failures.push(message.to_string()),
+                }
                 continue;
             }
-            match attachments::stage_file(path) {
-                Ok(att) => staged.push(att),
-                Err(message) => {
-                    self.failure = Some(message.into());
-                    self.failure_key = Some(self.current_key.clone());
-                    cx.notify();
+            if !metadata.is_file() && !metadata.is_dir() {
+                failures.push(format!("{name}: not a regular file or folder"));
+                continue;
+            }
+            let access = if metadata.is_dir() {
+                std::fs::read_dir(&path).map(|_| ())
+            } else {
+                std::fs::File::open(&path).map(|_| ())
+            };
+            if let Err(error) = access {
+                failures.push(format!("{name}: {error}"));
+                continue;
+            }
+            let path = match path.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    failures.push(format!("{name}: {error}"));
+                    continue;
                 }
+            };
+            // A local path cannot identify a file on a different device, even
+            // when the two devices happen to use the same directory names.
+            if let Some(device) = &remote_device {
+                failures.push(format!("{name} is on this Mac; the chat runs on {device}"));
+                continue;
+            }
+            let relative = roots
+                .iter()
+                .filter_map(|root| root.canonicalize().ok())
+                .find_map(|root| {
+                    path.strip_prefix(root)
+                        .ok()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .map(PathBuf::from)
+                });
+            let reference = relative.as_deref().unwrap_or(&path);
+            let Some(reference) = reference.to_str() else {
+                failures.push(format!("{name}: path is not valid UTF-8"));
+                continue;
+            };
+            let inserted = self.input.update(cx, |input, cx| {
+                input.insert_dropped_mention(reference, metadata.is_dir(), cx)
+            });
+            if inserted {
+                self.reset_mention(None, cx);
+                self.reset_slash(None, cx);
+                self.focus_pending = true;
+            } else {
+                failures.push(format!("{name}: cannot insert this path in the composer"));
             }
         }
         self.add_staged(staged, cx);
+        if !failures.is_empty() {
+            self.failure = Some(failures.join("\n").into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+        }
     }
 
     /// Add a file-tree or file-tab drop through the existing file-mention
@@ -8952,6 +9056,79 @@ mod tests {
         (dir, window)
     }
 
+    #[gpui::test]
+    fn dropped_paths_include_files_folders_and_failures(cx: &mut gpui::TestAppContext) {
+        let (workspace, handle) = composer_focus_window(cx);
+        let outside = tempfile::tempdir().unwrap();
+        let json = workspace.path().join("config.json");
+        let folder = workspace.path().join("folder");
+        let image = workspace.path().join("image.png");
+        let text = outside.path().join("notes.txt");
+        std::fs::write(&json, "{}").unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&text, "notes").unwrap();
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.spaces.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "space", "deviceId": "local", "path": workspace.path(),
+                            "createdAt": "2026-01-01T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    );
+                    state.selected_space = Some("space".into());
+                    state.no_project = false;
+                });
+                composer.add_paths(
+                    vec![
+                        image,
+                        json,
+                        folder,
+                        text.clone(),
+                        workspace.path().join("missing"),
+                    ],
+                    cx,
+                );
+                let raw = composer.input.read(cx).text();
+                assert!(
+                    raw.contains("[config.json](mast-file:config.json)"),
+                    "{raw}"
+                );
+                assert!(raw.contains("[folder](mast-file:folder/)"), "{raw}");
+                assert!(
+                    raw.contains(&format!("`{}`", text.canonicalize().unwrap().display())),
+                    "{raw}"
+                );
+                assert_eq!(composer.staged().len(), 1);
+                assert!(composer.failure.as_ref().unwrap().contains("missing"));
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                composer.state.update(cx, |state, _| {
+                    state.spaces[0].device_id = "remote".into();
+                    state.devices.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "remote", "name": "Other Mac", "platform": "macos"
+                        }))
+                        .unwrap(),
+                    );
+                });
+                composer.add_paths(vec![text], cx);
+                assert!(composer.input.read(cx).text().is_empty());
+                assert!(
+                    composer
+                        .failure
+                        .as_ref()
+                        .unwrap()
+                        .contains("notes.txt is on this Mac; the chat runs on Other Mac")
+                );
+            })
+            .unwrap();
+    }
+
     /// Regression: the overview search was built with a bespoke key context
     /// ("OverviewSearch") that `input_bindings` never registers, so typing
     /// worked (IME path) but backspace/delete/⌥⌫/⌘⌫ were dead keys. A search
@@ -9004,17 +9181,29 @@ mod tests {
         let window = cx.add_window(|_, cx| {
             ComposerInput::with_context("Search", WORKSPACE_SEARCH_CONTEXT, cx)
         });
-        window.update(cx, |input, window, cx| {
-            input.set_text("hello big world", cx);
-            window.focus(&input.focus_handle, cx);
-        }).unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        window
+            .update(cx, |input, window, cx| {
+                input.set_text("hello big world", cx);
+                window.focus(&input.focus_handle, cx);
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
         let text = |cx: &mut gpui::TestAppContext| {
-            window.read_with(cx, |input, _| input.text().to_string()).unwrap()
+            window
+                .read_with(cx, |input, _| input.text().to_string())
+                .unwrap()
         };
         cx.simulate_keystrokes(window.into(), "backspace");
         assert_eq!(text(cx), "hello big worl");
-        cx.simulate_keystrokes(window.into(), if cfg!(target_os = "macos") { "alt-backspace" } else { "ctrl-backspace" });
+        cx.simulate_keystrokes(
+            window.into(),
+            if cfg!(target_os = "macos") {
+                "alt-backspace"
+            } else {
+                "ctrl-backspace"
+            },
+        );
         assert_eq!(text(cx), "hello big ");
         cx.simulate_keystrokes(window.into(), "left delete");
         assert_eq!(text(cx), "hello big");
@@ -9350,18 +9539,27 @@ mod tests {
     /// Orchestrator wakes: typing tells the engine at once when the draft
     /// flips between empty and non-empty, and is throttled otherwise.
     #[gpui::test]
-    fn typing_reports_user_activity_with_the_draft_flag_and_throttles(cx: &mut gpui::TestAppContext) {
+    fn typing_reports_user_activity_with_the_draft_flag_and_throttles(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| state.selected_chat = Some("c".into()));
         let composer = cx.new(|cx| Composer::new(state, cx));
         composer.update(cx, |composer, cx| {
-            composer.input.update(cx, |input, cx| input.set_text("hi", cx));
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("hi", cx));
             let first = composer.next_activity_ping(cx).unwrap();
-            assert_eq!((first.chat_id.as_str(), first.draft_non_empty), ("c", Some(true)));
+            assert_eq!(
+                (first.chat_id.as_str(), first.draft_non_empty),
+                ("c", Some(true))
+            );
             // Same flag again, inside the window: nothing more.
             assert!(composer.next_activity_ping(cx).is_none());
             // Cleared (a send, or deleting the text): the flip goes out at once.
-            composer.input.update(cx, |input, cx| input.set_text("", cx));
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("", cx));
             let cleared = composer.next_activity_ping(cx).unwrap();
             assert_eq!(cleared.draft_non_empty, Some(false));
         });
@@ -9851,8 +10049,13 @@ mod tests {
     }
 
     #[test]
-    fn dropped_mentions_reject_paths_outside_the_workspace() {
-        assert!(dropped_file_mention("", 0..0, "/tmp/file.rs", false).is_none());
+    fn dropped_mentions_accept_absolute_paths_and_reject_parent_paths() {
+        assert_eq!(
+            dropped_file_mention("", 0..0, "/tmp/file.rs", false)
+                .unwrap()
+                .0,
+            "`/tmp/file.rs` "
+        );
         assert!(dropped_file_mention("", 0..0, "../file.rs", false).is_none());
     }
 
