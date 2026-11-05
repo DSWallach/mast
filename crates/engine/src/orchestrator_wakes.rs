@@ -667,6 +667,23 @@ impl OrchestratorWakes {
     }
 
     pub(crate) fn spawn_watchers(&self) {
+        // The chat watch coalesces rapid changes. Discard while the chat is
+        // still archived, before a local unarchive can hide that transition.
+        let weak = Arc::downgrade(&self.inner);
+        self.inner.workspace.set_before_chat_unarchive(Arc::new(move |chat_id| {
+            if let Some(inner) = weak.upgrade() {
+                let wakes = OrchestratorWakes { inner };
+                wakes.evaluate_blocking(chat_id, false);
+                let state = lock(&wakes.inner.state);
+                let pending_discard = lock(&wakes.inner.event_turns.persistence).as_ref()
+                    .and_then(|persistence| persistence.store.orchestrators.get(chat_id))
+                    .is_some_and(|entries| entries.iter().any(|entry| !entry.discarded));
+                if state.core.has_held(chat_id) || pending_discard {
+                    return Err("could not discard archived wake events before unarchiving".into());
+                }
+            }
+            Ok(())
+        }));
         let mut signals = self.inner.sessions.watch_worker_signals();
         let this = self.clone();
         tokio::spawn(async move {

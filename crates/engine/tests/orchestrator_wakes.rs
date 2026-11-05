@@ -1268,6 +1268,21 @@ async fn explicit_parent_receives_wake_instead_of_project_coordinator() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn immediate_unarchive_does_not_replay_held_wakes() {
+    let rig = Rig::new().await;
+    let wakes = &rig.core.orchestrator_wakes;
+    wakes.note_user_activity(ORCH, Some(true)).await;
+    wakes.report_to_parent("w1", "discard before unarchive").await.unwrap();
+    assert_eq!(wakes.status(ORCH).held.len(), 1);
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    rig.core.workspace.set_chat_archived(ORCH, false).unwrap();
+    assert!(wakes.status(ORCH).held.is_empty());
+    wakes.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_wake_is_discarded_if_coordinator_is_archived_before_dispatch() {
     let rig = Rig::new().await;
     let handle = rig.core.doc_host.open(ORCH).unwrap();
