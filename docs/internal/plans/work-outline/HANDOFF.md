@@ -829,15 +829,19 @@ models to save Anthropic usage). Workers report to it (parentChatId). `hand_off_
 exists to move workers to a fresh coordinator; the UI menu item is a later slice. Release runs go
 DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n 4096`).
 
-**Running:** none.
+**Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h):**
+- Wave 1 running: `hand-off-ui` (chat 1dad5051, item 89136ef9), `wake-label-fd-limit` (chat fd03a9e0, item
+  461cf800: registry-title wake labels + raise child RLIMIT_NOFILE), `friction-import` (chat 72192da1, item
+  af739bc7: import the old agent-friction-log.md format; Mikey runs the import himself).
+- Wave 2 (as wave 1 frees builds): PR dashboard file paging (#5, past the first 100 files, "partial" badge
+  at ~3,000), rebindable outline/Team shortcuts (3b6f9919), first-run smoke audit on a temp data dir
+  (headless, report only).
+- Wave 3: Needs-you phase 4 (answer ask/choose on the card).
+- Release in batches of ≤3 branches; never run a release while 3 Terra builds are compiling.
+- Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
 
-**Queued (agreed with Mikey 2026-11-05):**
-2. Hand-off UI slice: "Hand off to new chat…" on a chat.
-3. PR dashboard file paging (#5, files changed within a PR beyond the first 100): asked Mikey, unanswered.
-4. Coworker readiness: first-run smoke test on a throwaway profile; import the Cofactr friction log.
-5. Later: Needs-you phases 4–6, PR review phase 4 (walkthrough), rebindable outline shortcuts (3b6f9919),
-   data/binary rename migration, item-tab artifact surfacing (171cde5a), container templates phases 2+.
-   `mast-doctor` branch: pushed, unmerged, awaiting Mikey's review.
+**Queued after overnight:** Needs-you phases 5–6, PR review phase 4 (walkthrough), data/binary rename
+migration, item-tab artifact surfacing (171cde5a), container templates phases 2+.
 
 **Terra working style:** it ends turns early ("can't complete in this turn") on anything that looks big.
 Give one or two concrete items per chat, say "partial progress is fine: commit and keep going", start a
