@@ -175,7 +175,7 @@ fn default_worktrees_root() -> PathBuf {
         .unwrap_or_else(|| {
             let home = home_dir();
             mast_proto::env::assert_test_home_isolated(&home);
-            home.join(".zeron").join("worktrees")
+            mast_proto::env::home_storage_dir(&home, false).0.join("worktrees")
         })
 }
 

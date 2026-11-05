@@ -740,7 +740,7 @@ fn toolchain_check(
     }
 }
 
-pub async fn inspect(data_dir: PathBuf, port: u16) -> Report {
+pub async fn inspect(data_dir: PathBuf, reason: &str, port: u16) -> Report {
     let env = System;
     let mut checks = Vec::new();
     let (claude, claude_path, _) = version_check(
@@ -783,7 +783,9 @@ pub async fn inspect(data_dir: PathBuf, port: u16) -> Report {
         )
         .0,
     );
-    checks.extend(data_checks(&data_dir));
+    let mut storage_checks = data_checks(&data_dir);
+    storage_checks[0].message.push_str(&format!("; selected by {reason}"));
+    checks.extend(storage_checks);
     checks.push(engine_check(&data_dir, port).await);
     let (cargo, _, cargo_version) = version_check(&env, "cargo", false, "Install Rust with rustup");
     checks.push(cargo);

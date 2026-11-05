@@ -11,7 +11,13 @@ VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 DEV_ROOT="$ROOT/target/macos-dev"
 APP="$DEV_ROOT/Mast Dev.app"
 CONTENTS="$APP/Contents"
-DATA_DIR="${MAST_DEV_DATA_DIR:-$DEV_ROOT/data}"
+if [[ -n "${MAST_DEV_DATA_DIR:-${ZERON_DEV_DATA_DIR:-}}" ]]; then
+  DATA_DIR="${MAST_DEV_DATA_DIR:-$ZERON_DEV_DATA_DIR}"
+elif [[ -e "$HOME/.zeron-dev" && ! -e "$HOME/.mast-dev" ]]; then
+  DATA_DIR="$HOME/.zeron-dev"
+else
+  DATA_DIR="$HOME/.mast-dev"
+fi
 IPC_PORT="${MAST_DEV_IPC_PORT:-49777}"
 
 if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1 || \

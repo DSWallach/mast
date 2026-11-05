@@ -4,17 +4,20 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
-    resolve_data_dir(|name| mast_proto::env::var_os(name), true)
+    resolve_data_dir(std::env::var_os, true).0
 }
 
 /// Resolve the configured location without performing the legacy migration.
-pub fn data_dir_read_only() -> PathBuf {
-    resolve_data_dir(|name| mast_proto::env::var_os(name), false)
+pub fn data_dir_read_only() -> (PathBuf, &'static str) {
+    resolve_data_dir(std::env::var_os, false)
 }
 
-fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>, migrate: bool) -> PathBuf {
+fn resolve_data_dir(
+    mut env: impl FnMut(&str) -> Option<OsString>,
+    migrate: bool,
+) -> (PathBuf, &'static str) {
     if let Some(dir) = env("MAST_DATA_DIR").or_else(|| env("ZERON_DATA_DIR")) {
-        return PathBuf::from(dir);
+        return (PathBuf::from(dir), "environment override");
     }
     #[cfg(windows)]
     {
@@ -30,7 +33,7 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>, migrate: bool
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
             .expect("LOCALAPPDATA and USERPROFILE not set; set MAST_DATA_DIR");
-        local.join("Zeron")
+        (local.join("Zeron"), "platform default")
     }
     #[cfg(not(windows))]
     {
@@ -38,13 +41,13 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>, migrate: bool
         mast_proto::env::assert_test_home_isolated(&home);
         let dir = home.join(".zeron");
         // One-shot 0.2.0 migration: adopt the pre-rename data dir.
-        if migrate && !dir.exists() {
+        if migrate && !dir.exists() && !home.join(".mast").exists() {
             let old = home.join(".comet-native");
             if old.exists() && std::fs::rename(&old, &dir).is_ok() {
                 eprintln!("migrated data dir {} -> {}", old.display(), dir.display());
             }
         }
-        dir
+        mast_proto::env::home_storage_dir(&home, false)
     }
 }
 
@@ -53,11 +56,15 @@ mod tests {
     use super::*;
 
     fn resolve(vars: &[(&str, &str)]) -> PathBuf {
-        resolve_data_dir(|name| {
-            vars.iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| value.into())
-        }, true)
+        resolve_data_dir(
+            |name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.into())
+            },
+            true,
+        )
+        .0
     }
 
     #[test]
@@ -65,6 +72,14 @@ mod tests {
         assert_eq!(
             resolve(&[("MAST_DATA_DIR", "custom data")]),
             PathBuf::from("custom data")
+        );
+        assert_eq!(
+            resolve(&[("ZERON_DATA_DIR", "legacy")]),
+            PathBuf::from("legacy")
+        );
+        assert_eq!(
+            resolve(&[("MAST_DATA_DIR", "current"), ("ZERON_DATA_DIR", "legacy")]),
+            PathBuf::from("current")
         );
     }
 
@@ -78,9 +93,9 @@ mod tests {
             |name| (name == "HOME").then(|| home.path().as_os_str().to_owned()),
             false,
         );
-        assert_eq!(path, home.path().join(".zeron"));
+        assert_eq!(path.0, home.path().join(".mast"));
         assert!(old.exists());
-        assert!(!path.exists());
+        assert!(!path.0.exists());
     }
 
     #[cfg(windows)]

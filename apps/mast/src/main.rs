@@ -250,7 +250,8 @@ fn main() -> anyhow::Result<()> {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(27654);
-            let report = runtime.block_on(doctor::inspect(paths::data_dir_read_only(), port));
+            let (data_dir, reason) = paths::data_dir_read_only();
+            let report = runtime.block_on(doctor::inspect(data_dir, reason, port));
             doctor::print_report(&report, json)?;
             if report.exit_code() != 0 {
                 std::process::exit(1);
