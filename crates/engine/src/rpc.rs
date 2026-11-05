@@ -3087,7 +3087,7 @@ impl RpcService for EngineRpc {
                     let ordinal = identities.entry(identity.clone()).or_default();
                     *ordinal += 1;
                     let import_id = mast_proto::derive_id(&format!("{filename}:{identity}:{ordinal}"), "friction-import-occurrence");
-                    let report = mast_proto::FrictionReport {
+                    let mut report = mast_proto::FrictionReport {
                         id: String::new(), kind: entry.kind, summary: entry.summary,
                         what_happened: entry.what_happened, workaround: entry.workaround,
                         suggestion: entry.suggestion, approval: entry.approval, severity: entry.severity,
@@ -3100,7 +3100,18 @@ impl RpcService for EngineRpc {
                         status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
                     };
                     let fingerprint = mast_doc::registry::friction::friction_fingerprint(&report);
-                    let exists = self.workspace.friction_reports(&p.space_id).iter().any(|r| r.fingerprint == fingerprint);
+                    let mut existing = self.workspace.friction_reports(&p.space_id);
+                    existing.sort_by(|a, b| a.id.cmp(&b.id));
+                    let normalized = |summary: &str| summary.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+                    let matching = existing.iter().find(|r| r.fingerprint == fingerprint).or_else(|| {
+                        existing.iter().find(|r| r.kind == report.kind && normalized(&r.summary) == normalized(&report.summary))
+                    });
+                    if let Some(existing) = matching {
+                        // The historical fingerprint also includes the approval command. Use the
+                        // existing command so same-kind summaries merge as the import contract requires.
+                        report.approval = existing.approval.clone();
+                    }
+                    let exists = matching.is_some();
                     match self.workspace.import_friction(report, &import_id) {
                         Ok((_, false)) => result.skipped.push(mast_proto::FrictionImportSkip { line: 0, reason: "already imported".into() }),
                         Ok((_, true)) if exists => result.merged += 1,

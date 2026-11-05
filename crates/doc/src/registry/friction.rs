@@ -134,6 +134,19 @@ impl RegistryDoc {
         report: FrictionReport,
         import_id: &str,
     ) -> Result<(FrictionReport, bool), DocError> {
+        let key = format!(
+            "{COUNTER_PREFIX}{}",
+            derive_id(import_id, "friction-import")
+        );
+        if let Some(existing) = self
+            .overlay_rows(KIND_FRICTION_REPORTS)
+            .iter()
+            .filter(|row| row.fields.contains_key(&key))
+            .filter_map(decode)
+            .find(|row| row.provenance.space_id == report.provenance.space_id)
+        {
+            return Ok((existing, false));
+        }
         self.record_friction_occurrence(report, Some(import_id))
     }
 

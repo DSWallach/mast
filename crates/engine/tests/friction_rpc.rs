@@ -194,7 +194,7 @@ async fn friction_import_deduplicates_and_redacts() {
         workaround: None,
         suggestion: None,
         approval: Some(mast_proto::FrictionApproval {
-            command: "cargo build".into(),
+            command: "different approval".into(),
             why: "Network access".into(),
             answer: None,
         }),
