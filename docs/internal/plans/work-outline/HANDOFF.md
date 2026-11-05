@@ -17,8 +17,10 @@ Prepared 2026-10-14, last updated 2026-11-02. Read this first in a new chat pick
 - **Original spec:** `work-outline-implementation-specification.md` (copy of Mikey's spec, plus an
   "Implementation contract amendments" section). The binding contract is `m0-contract.md` in this
   folder; it wins where it differs from the spec.
-- **Installed build:** `/Applications/Mast.app` (since 2026-10-26). It has the same bundle id
-  `sh.zeron.app.dev` and data `~/.zeron` as the earlier `Creel.app` and `Zeron Dev.app`, which are
+- **Installed build:** `/Applications/Mast.app` (since 2026-10-26). Since 2026-11-05 its bundle id is
+  `computer.mikey.mast.dev` and its executable `Contents/MacOS/mast` (`zeron` is a symlink for one release); data
+  stays in `~/.zeron` (new installs use `~/.mast`). Before that it shared `sh.zeron.app.dev` with the earlier
+  `Creel.app` and `Zeron Dev.app`, which are
   rollbacks only (`Zeron Dev.app` is in `~/zeron-dev-app-backups/`); never run two at once. Rollback binaries are
   in `~/zeron-dev-app-backups/`, one per install, named after the feature. Keep only the last few.
 
@@ -616,6 +618,14 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Rename for distribution** (2026-11-05, `rename-for-distribution`, Terra; decisions: bundle id
+  computer.mikey.mast / .dev, `~/.mast` for new installs, keep `~/.zeron`): binary `mast` with a `zeron` shim bin;
+  updater and `daemon install/status` accept both; `CFBundleExecutable mast`; both `mast://` and `zeron://` declared,
+  `mast://` generated; one-time copy of the old `sh.zeron.app[.dev]` UserDefaults domain; data dir: `MAST_DATA_DIR`/
+  `ZERON_DATA_DIR`, else `~/.zeron` if it exists and `~/.mast` doesn't, else `~/.mast`; Linear Keychain service
+  `computer.mikey.mast.linear` with read fallback to `sh.zeron.linear` (copied forward, old kept);
+  `scripts/install-macos-app.sh`; docs/guide upgrade note. Wire names unchanged. First restart re-asks macOS
+  permissions and the Linear Keychain item. Release run (`--all`): nextest 2434/2434, UI 2488/0.
 - **Distinct status indicators** (2026-11-05, `status-indicator-distinct`, Terra): one accent-independent state style
   (colour + glyph) shared by Team, running chats, sidebar, outline, item details, Overview, review chats, menu rows
   and Needs-you markers: Working clover/juniper spinner, Waiting bromine "!" badge, Errored cadmium ✕, Ready cobalt →,
@@ -987,8 +997,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 - Not touched: data/binary rename (needs Mikey), design items.
 - Open from first-run audit: signed-out-but-installed agent flow, sign-in gate and no-auth tab states.
 
-**Queued (2026-11-05):** distribution rename running (`rename-for-distribution`: binary `mast`, bundle id
-computer.mikey.mast(.dev), `mast://`, `~/.mast` for new installs with `~/.zeron` kept, Keychain fallback); After the rename: retire the agent-mode-tools wrapper (Space root → plain mast clone, move artifact
+**Queued (2026-11-05):** After the rename: retire the agent-mode-tools wrapper (Space root → plain mast clone, move artifact
 folders, update instructions/HANDOFF/memory; quiet window, no workers). Workflow pack (export Mikey's setup) not started.
 
 **Queued after overnight:** Needs-you phases 5–6, PR review phase 4 (walkthrough), data/binary rename
@@ -1100,9 +1109,10 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   with a plain `cargo build --profile installed -p mast` (incremental `target/installed`).
 - **Install:** `cargo build --profile installed -p mast` (optimised; since 2026-10-27, replaces the
   debug build); back up the current binary to `~/zeron-dev-app-backups/`;
-  `cp target/installed/zeron "$M/.zeron.installing" && mv -f` it to
-  `/Applications/Mast.app/Contents/MacOS/zeron`; `codesign --force --sign - --identifier
-  sh.zeron.app.dev` (sign the bundle path); push `work-outline-implementation`. Earlier bundles:
+  `scripts/install-macos-app.sh target/installed/mast /Applications/Mast.app computer.mikey.mast.dev` (atomic
+  binary copy to `Contents/MacOS/mast`, `zeron` symlink, Info.plist executable/id/URL schemes, ad-hoc codesign,
+  lsregister); push `work-outline-implementation`. Before 2026-11-05 this was a `cp … Contents/MacOS/zeron` plus
+  `codesign --identifier sh.zeron.app.dev`. Earlier bundles:
   `Zeron Dev.app` (until 2026-10-23) and `Creel.app` (until 2026-10-26), kept only as rollbacks.
 - **Never restart Mast automatically.** Install, then tell Mikey what to restart and test.
   Restarting kills agents running inside Mast, so commit WIP first.
