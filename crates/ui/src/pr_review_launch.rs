@@ -125,7 +125,7 @@ pub(crate) fn failure_text(error: &PrReviewError) -> String {
             " Fork PRs aren't checked out automatically; check the branch out by hand and start a chat there."
         }
         PrReviewErrorCode::RepoNotFound => {
-            " Add the folder that contains this repository (for Cofactr, the workspace superproject) as a project, then try again."
+            " Add the folder that contains this repository (for Cofactr, the workspace superproject) as a Space, then try again."
         }
         PrReviewErrorCode::GhUnavailable => {
             " Install the GitHub CLI and run `gh auth login` on the device that has the checkout."
@@ -194,7 +194,7 @@ mod tests {
         let missing = PrReviewError::new(PrReviewErrorCode::RepoNotFound, "No Space holds it.");
         assert_eq!(
             failure_text(&missing),
-            "No Space holds it. Add the folder that contains this repository (for Cofactr, the workspace superproject) as a project, then try again."
+            "No Space holds it. Add the folder that contains this repository (for Cofactr, the workspace superproject) as a Space, then try again."
         );
     }
 }

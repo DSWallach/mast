@@ -202,7 +202,7 @@ impl WorkItemDetails {
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_faint)
                     .child(if set {
-                        "Every open PR that requests your review in this project\u{2019}s \
+                        "Every open PR that requests your review in this Space\u{2019}s \
                          repositories gets an item here, with a Required Action per review \
                          round. Kept in step every 3 minutes; nothing is written to GitHub."
                     } else {

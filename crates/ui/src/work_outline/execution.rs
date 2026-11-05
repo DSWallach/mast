@@ -37,7 +37,7 @@ pub(crate) struct ExecutionFolderPick {
 
 /// Why the folder picker will not confirm the home directory as an
 /// execution root (the validator's `homeDirectoryRoot` remediation).
-pub(crate) const HOME_ROOT_REFUSAL: &str = "Your home directory can't be an execution root. Choose a project folder inside your home \
+pub(crate) const HOME_ROOT_REFUSAL: &str = "Your home directory can't be an execution root. Choose a Space folder inside your home \
      directory.";
 
 /// Whether `path` is the device's home directory: the home the browser

@@ -782,7 +782,7 @@ fn unassociated_group(space_id: Option<&str>, children: Vec<Node>) -> Node {
             label: if space_id.is_some() {
                 "Unassociated Chats".to_string()
             } else {
-                "Unassociated Chats · No project".to_string()
+                "Unassociated Chats · No Space".to_string()
             },
         },
         children,

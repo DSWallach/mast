@@ -641,7 +641,7 @@ impl GithubPanel {
                 format!("github-pr-linked-{key}"),
                 "Linked",
                 theme.text_muted,
-                "A work item in this project links it: click the row to reveal it".into(),
+                "A work item in this Space links it: click the row to reveal it".into(),
             ),
             RowSync::Pending => (
                 format!("github-pr-pending-{key}"),
