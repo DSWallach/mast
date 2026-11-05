@@ -544,7 +544,7 @@ impl WorkItemLaunchService {
                 &derive_id(op, "hand-off-notice"),
                 &format!("[Mast hand-off: {chat_id}]"),
                 chrono::Utc::now().timestamp_millis(),
-            ).map_err(|err| error(WorkOutlineErrorCode::Invalid, &err.to_string()))?;
+            ).map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
         }
         Ok(CreateChatForWorkItemReply {
             chat_id,
