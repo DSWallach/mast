@@ -4,10 +4,15 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
-    resolve_data_dir(|name| mast_proto::env::var_os(name))
+    resolve_data_dir(|name| mast_proto::env::var_os(name), true)
 }
 
-fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
+/// Resolve the configured location without performing the legacy migration.
+pub fn data_dir_read_only() -> PathBuf {
+    resolve_data_dir(|name| mast_proto::env::var_os(name), false)
+}
+
+fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>, migrate: bool) -> PathBuf {
     if let Some(dir) = env("MAST_DATA_DIR").or_else(|| env("ZERON_DATA_DIR")) {
         return PathBuf::from(dir);
     }
@@ -33,7 +38,7 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
         mast_proto::env::assert_test_home_isolated(&home);
         let dir = home.join(".zeron");
         // One-shot 0.2.0 migration: adopt the pre-rename data dir.
-        if !dir.exists() {
+        if migrate && !dir.exists() {
             let old = home.join(".comet-native");
             if old.exists() && std::fs::rename(&old, &dir).is_ok() {
                 eprintln!("migrated data dir {} -> {}", old.display(), dir.display());
@@ -52,7 +57,7 @@ mod tests {
             vars.iter()
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.into())
-        })
+        }, true)
     }
 
     #[test]
@@ -61,6 +66,21 @@ mod tests {
             resolve(&[("MAST_DATA_DIR", "custom data")]),
             PathBuf::from("custom data")
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn read_only_resolution_does_not_migrate_legacy_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join(".comet-native");
+        std::fs::create_dir(&old).unwrap();
+        let path = resolve_data_dir(
+            |name| (name == "HOME").then(|| home.path().as_os_str().to_owned()),
+            false,
+        );
+        assert_eq!(path, home.path().join(".zeron"));
+        assert!(old.exists());
+        assert!(!path.exists());
     }
 
     #[cfg(windows)]

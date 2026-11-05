@@ -47,6 +47,8 @@ cd mast                                   # the default branch is work-outline-i
 cargo build --profile installed -p mast   # optimised build, about 3 minutes the first time
 ```
 
+Run `target/installed/zeron doctor` from the checkout for a prerequisite checklist and suggested fixes (`--json` emits machine-readable results).
+
 The binary is `target/installed/zeron`. The binary and some internal names still say `zeron`; the product is Mast.
 
 To get a normal app you can keep in `/Applications`, build the bundle and disk image. Packaging also needs Python 3, pip and the `dmgbuild` Python package. It builds the release profile separately, so the first packaging run compiles again:

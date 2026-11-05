@@ -6,6 +6,8 @@ This gets you from a fresh install to a first chat running inside a work item.
 
 Follow the install steps in the [README](../../README.md). You need Rust, the Xcode command line tools and a signed-in agent CLI (Claude Code or Codex). The GitHub CLI (`gh`), signed in with `gh auth login`, is optional for PR features.
 
+After building, run `target/installed/zeron doctor` from the checkout to check your tools, sign-ins, storage and engine. Each warning or error includes a suggested fix; use `--json` for machine-readable output.
+
 ## Add a Space
 
 A Space is a folder you work in, usually a git repo. A project is an outline item marked as a project, with its own worker destination.

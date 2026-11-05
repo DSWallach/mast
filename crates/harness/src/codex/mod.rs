@@ -202,7 +202,8 @@ impl CodexHarness {
         self
     }
 
-    fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
+    /// Resolve the executable using the same overrides and search as a run.
+    pub fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
         if let Some(p) = &self.executable {
             return crate::executable::validate_native_override(p);
         }

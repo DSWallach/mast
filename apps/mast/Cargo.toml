@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 mast-proto.workspace = true
 mast-engine.workspace = true
+mast-harness.workspace = true
 mast-rpc.workspace = true
 mast-ui.workspace = true
 mast-update.workspace = true
@@ -21,6 +22,8 @@ clap.workspace = true
 anyhow.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+toml = "0.8"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
