@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **First-run follow-up** (2026-11-05 overnight, `first-run-followup`, Terra): PR dashboard no longer shows raw
+  `gh` auth output or "No pull requests" after a failed fetch; common auth and missing-CLI errors get a clear
+  next step; signed-out fake-Claude harness test added; findings appended to docs/internal/first-run-audit.md.
+  Release run: nextest 1680/1682 (`e2e::wrong_id_respond_is_rejected_and_correct_answer_still_resumes` and
+  `m5_repos_diffs_terminals::git_history_search_is_fuzzy_complete_and_accepts_sha_prefixes` failed under load,
+  passed twice alone), UI 2468/0.
 - **Rebindable outline and Team shortcuts** (2026-11-05 overnight, `rebindable-outline-shortcuts`, Terra): the
   outline's default action table (with aliases such as F2/R, ⇧→/Tab, ⌘Z/Control-Z), Shift-F10/Menu and both
   Team shortcuts (⌥⌘T global, `T` in the side panel) are persisted Settings → Shortcuts records under Outline and
@@ -866,7 +872,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
