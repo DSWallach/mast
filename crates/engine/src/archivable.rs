@@ -87,6 +87,10 @@ pub fn open_handoffs_for_pr<'a>(
     pr_url: &str,
 ) -> Vec<&'a UserActionRequestView> {
     use mast_proto::work_outline_user_actions::{RequestLinkTarget, UserActionKind};
+    let canonical_link = |value: &str| {
+        value.trim().to_ascii_lowercase().starts_with("https://github.com/")
+            .then(|| crate::chat_links::canonicalize_pr_url(value))
+    };
     let canonical = crate::chat_links::canonicalize_pr_url(pr_url);
     let external_id = canonical
         .strip_prefix("https://github.com/")
@@ -99,9 +103,9 @@ pub fn open_handoffs_for_pr<'a>(
             fact.label.eq_ignore_ascii_case("branch") && fact.value.trim() == branch
         }));
         let pr_matches = !canonical.is_empty() && (request.links.iter().any(|link| {
-            matches!(&link.target, RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } if crate::chat_links::canonicalize_pr_url(url) == canonical)
+            matches!(&link.target, RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } if canonical_link(url).as_deref() == Some(canonical.as_str()))
         }) || request.facts.iter().any(|fact| {
-            (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && (crate::chat_links::canonicalize_pr_url(&fact.value) == canonical
+            (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && (canonical_link(&fact.value).as_deref() == Some(canonical.as_str())
                 || external_id.as_ref().is_some_and(|id| fact.value.trim().eq_ignore_ascii_case(id)))
         }));
         request.is_open() && request.effective_kind() == UserActionKind::Handoff

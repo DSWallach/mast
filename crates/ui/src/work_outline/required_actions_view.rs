@@ -905,6 +905,20 @@ impl RequiredActionsList {
         let busy = self.in_flight.contains(&id);
         let attention = chips::attention_color(theme);
         if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff {
+            let branches: Vec<&str> = row.links.iter().filter_map(|link| match &link.target {
+                mast_proto::work_outline_user_actions::RequestLinkTarget::Diff { branch: Some(branch) } => Some(branch.as_str()),
+                _ => None,
+            }).chain(row.facts.iter().filter(|fact| fact.label.eq_ignore_ascii_case("branch")).map(|fact| fact.value.trim())).collect();
+            let branch_prs: Vec<_> = {
+                let state = self.state.read(cx);
+                state.chats.iter().filter(|chat| chat.space_id.as_deref() == Some(row.space_id.as_str())
+                    && chat.branch.as_deref().is_some_and(|branch| branches.contains(&branch)))
+                    .filter_map(|chat| chat.linked_pr_url.as_deref())
+                    .filter_map(required_actions::parse_handoff_pr).collect()
+            };
+            for pr in branch_prs {
+                crate::github::store::request_status(&self.state, &pr, false, cx);
+            }
             for link in &row.links {
                 if let mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } = &link.target {
                     if let Some(pr) = required_actions::parse_handoff_pr(url) {

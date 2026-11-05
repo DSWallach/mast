@@ -100,12 +100,17 @@ impl PrMergedWakes {
             if !snapshot.space_settings.resolve_merged_handoffs { continue; }
             let explicit = crate::archivable::open_handoffs_for_pr(&snapshot, "", url);
             let mut space_owns_pr = false;
+            let mut branch_ambiguous = false;
             for chat in chats.iter().filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str())) {
                 let links = self.workspace.chat_pr_links(&chat.id).map_err(|error| error.to_string())?;
                 if links.iter().any(|link| crate::archivable::owns_pr_link(link)
                     && crate::chat_links::canonicalize_pr_url(&link.url) == url) {
                     space_owns_pr = true;
-                    break;
+                }
+                if status.branch.as_deref().is_some_and(|branch| chat.branch.as_deref() == Some(branch))
+                    && links.iter().any(|link| crate::archivable::owns_pr_link(link)
+                        && crate::chat_links::canonicalize_pr_url(&link.url) != url) {
+                    branch_ambiguous = true;
                 }
             }
             for request in crate::archivable::open_handoffs_for_pr(&snapshot, status.branch.as_deref().unwrap_or(""), url) {
@@ -119,7 +124,7 @@ impl PrMergedWakes {
                     })
                         || request.facts.iter().any(|fact| fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request"));
                     if identifies_another_pr { continue; }
-                    if !space_owns_pr { continue; }
+                    if !space_owns_pr || branch_ambiguous { continue; }
                 }
                 let merged_at = merged_at.ok_or_else(|| "merged PR has no merge timestamp".to_owned())?;
                 let actor = mast_proto::WorkOutlineActor {
