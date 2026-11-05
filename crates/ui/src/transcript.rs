@@ -6291,6 +6291,11 @@ impl Transcript {
                     let (label, chat_id) = match source {
                         crate::message_source::MessageSource::OtherChat { chat_id, title } => (format!("From {title}"), Some(chat_id.clone())),
                         crate::message_source::MessageSource::Admin { chat_id, title } => (format!("Admin chat · {title}"), Some(chat_id.clone())),
+                        crate::message_source::MessageSource::HandOff { chat_id } => {
+                            let title = self.state.read(cx).chats.iter().find(|chat| chat.id == *chat_id)
+                                .and_then(|chat| chat.title.clone()).unwrap_or_else(|| "new chat".into());
+                            (format!("Handed off to {title}"), Some(chat_id.clone()))
+                        },
                         crate::message_source::MessageSource::System { label } => (format!("{label} · Mast"), None),
                         crate::message_source::MessageSource::Human => unreachable!(),
                     };

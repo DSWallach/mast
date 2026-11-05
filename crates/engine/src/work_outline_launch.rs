@@ -528,6 +528,14 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::TurnQueued)?;
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
+        if state != WorkItemLaunchState::Rejected && let Some((_, source)) = hand_off {
+            let handle = self.doc_host.open(source).map_err(engine_error)?;
+            handle.write_user_message(
+                &derive_id(op, "hand-off-notice"),
+                &format!("[Mast hand-off: {chat_id}]"),
+                chrono::Utc::now().timestamp_millis(),
+            ).map_err(|err| error(WorkOutlineErrorCode::Invalid, &err.to_string()))?;
+        }
         Ok(CreateChatForWorkItemReply {
             chat_id,
             message_id,

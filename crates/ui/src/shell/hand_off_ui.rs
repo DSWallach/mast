@@ -104,3 +104,30 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
             .child(popover::btn_primary(theme, if dialog.submitting { "Handing off…" } else { "Hand off" }).id("hand-off-submit").on_click(cx.listener(|this, _, _, cx| this.submit_hand_off(cx)))))
         .into_any_element()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work_outline::store::fixture_ids::{CHAT_API, CHAT_UI};
+
+    #[gpui::test]
+    fn dialog_lists_live_workers_and_prefills_summary(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            assert!(!shell.has_hand_off_workers(CHAT_API, cx));
+            shell.state.update(cx, |state, _| {
+                let worker = state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap();
+                worker.parent_chat_id = Some(CHAT_API.into());
+            });
+            assert!(shell.has_hand_off_workers(CHAT_API, cx));
+            shell.open_hand_off(CHAT_API.into(), cx);
+            let Some(WorkOutlineModal::HandOff(dialog)) = &shell.work_outline_modal else { panic!("hand-off dialog not opened") };
+            assert!(dialog.input.read(cx).text().starts_with("Continue as coordinator for "));
+            assert!(dialog.input.read(cx).text().ends_with("Read the work item, its instructions, and the worker list below."));
+            assert_eq!(dialog.workers.len(), 1);
+            assert!(dialog.workers[0].contains("Title of"));
+            assert!(dialog.workers[0].contains("0 open requests"));
+            assert!(!dialog.archive);
+        });
+    }
+}

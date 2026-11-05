@@ -6,11 +6,18 @@ pub enum MessageSource {
     OtherChat { chat_id: String, title: String },
     System { label: String },
     Admin { chat_id: String, title: String },
+    HandOff { chat_id: String },
 }
 
 /// Return the source and the body without Mast's transport envelope.
 pub fn classify(text: &str) -> (MessageSource, &str) {
     let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("[Mast hand-off: ")
+        && let Some((chat_id, body)) = rest.split_once(']')
+        && !chat_id.is_empty()
+    {
+        return (MessageSource::HandOff { chat_id: chat_id.into() }, body.trim_start());
+    }
     if let Some(rest) = trimmed.strip_prefix("[Mast: auto-continue ")
         && let Some((attempt, body)) = rest.split_once(']')
         && matches!(attempt, "1/3" | "2/3" | "3/3")
@@ -90,6 +97,7 @@ pub fn preview(text: &str) -> String {
             format!("From {title}: {body}")
         }
         MessageSource::System { .. } => format!("Mast: {body}"),
+        MessageSource::HandOff { .. } => "Handed off to a new chat".into(),
         MessageSource::Human => {
             // Old previews were truncated before the envelope was stripped.
             if let Some(rest) = text.trim_start().strip_prefix("[Message from Mast chat ") {
@@ -148,6 +156,7 @@ mod tests {
             )
         );
         assert_eq!(classify("hello"), (MessageSource::Human, "hello"));
+        assert_eq!(classify("[Mast hand-off: abc]"), (MessageSource::HandOff { chat_id: "abc".into() }, ""));
         assert_eq!(
             classify("[Mast system message, not from the user: coordinator hand-off.]\nContinue coordinating"),
             (MessageSource::System { label: "Coordinator hand-off".into() }, "Continue coordinating")

@@ -905,6 +905,10 @@ async fn user_hand_off_rpc_transfers_workers_and_replays() {
     let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
     assert_eq!(retry["chatId"], successor);
     assert_eq!(rig.core.workspace.chat("user-handoff-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor));
+    let source = rig.core.doc_host.open(CHAT).unwrap();
+    let entries = source.doc().read_entries().unwrap();
+    let marker = format!("[Mast hand-off: {successor}]");
+    assert_eq!(entries.iter().filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_proto::MessagePart::Text { text, .. } if text == &marker))).count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
