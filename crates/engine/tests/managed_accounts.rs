@@ -286,6 +286,23 @@ async fn sign_in_runs_the_cli_against_the_managed_home_only() {
     let snapshot = accounts.snapshot();
     assert!(snapshot.accounts[0].signed_in);
     assert_eq!(snapshot.accounts[0].email.as_deref(), Some("me@work.test"));
+    accounts.pin_chat("chat", HarnessId::ClaudeCode, &acct.id).unwrap();
+    accounts.mark_chat_signed_out("chat", HarnessId::ClaudeCode).unwrap();
+    assert!(!accounts.snapshot().accounts[0].signed_in);
+    let (login_id, _) = accounts.start_login(&acct.id).await.unwrap();
+    for _ in 0..100 {
+        status = accounts.poll_login(&login_id).status;
+        if status != AgentLoginStatus::Pending { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, AgentLoginStatus::Done);
+    let snapshot = accounts.snapshot();
+    assert_eq!(snapshot.accounts.len(), 1);
+    assert_eq!(snapshot.accounts[0].id, acct.id);
+    assert!(snapshot.accounts[0].signed_in);
+    assert_eq!(accounts.pinned_home("chat", HarnessId::ClaudeCode), Some(home.clone()));
+    let recorded = std::fs::read_to_string(&record).unwrap();
+    assert_eq!(recorded.lines().collect::<Vec<_>>(), vec![format!("auth login|{}", home.display()); 2]);
     // The live dir was never written.
     assert_eq!(std::fs::read_dir(&claude_live).unwrap().count(), 0);
 }

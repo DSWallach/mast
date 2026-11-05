@@ -622,6 +622,7 @@ impl AccountsPage {
                             theme,
                             crate::managed_accounts::harness_name(account.harness),
                         ))
+                        .when(!account.signed_in, |el| el.child(widgets::badge(theme, "Signed out")))
                         .child(
                             widgets::ghost_action(theme)
                                 .id(("managed-account-sign-in", ix))
