@@ -919,6 +919,7 @@ async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
     wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Continue the release")), "successor turn").await;
     let requests = rig.harness.requests.lock().unwrap();
     let prompt = &requests.iter().find(|r| r.prompt.contains("Continue the release")).unwrap().prompt;
+    assert!(prompt.starts_with("[Mast system message, not from the user: coordinator hand-off.]\n"));
     assert!(prompt.contains("handoff-worker"));
     assert!(prompt.contains("Review the result"));
 }

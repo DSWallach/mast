@@ -445,6 +445,7 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::BindingCaptured)?;
 
         if let Some((wakes, source)) = hand_off {
+            request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
                 .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
             let sessions = self.workspace.read_sessions().map_err(engine_error)?;

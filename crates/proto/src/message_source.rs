@@ -26,6 +26,8 @@ pub fn classify(text: &str) -> (MessageSource, &str) {
         if let Some((envelope, body)) = rest.split_once(']') {
             let label = if envelope.contains("worker updates") {
                 "Worker updates"
+            } else if envelope.contains("coordinator hand-off") {
+                "Coordinator hand-off"
             } else if envelope.contains("auto-continue") {
                 "Auto-continue"
             } else {
@@ -146,6 +148,10 @@ mod tests {
             )
         );
         assert_eq!(classify("hello"), (MessageSource::Human, "hello"));
+        assert_eq!(
+            classify("[Mast system message, not from the user: coordinator hand-off.]\nContinue coordinating"),
+            (MessageSource::System { label: "Coordinator hand-off".into() }, "Continue coordinating")
+        );
         assert_eq!(
             classify("[Message from Mast chat unfinished"),
             (MessageSource::Human, "[Message from Mast chat unfinished")
