@@ -773,3 +773,153 @@ crates/ui/src/lib.rs:290:        start_appshot_service(config.boot().data_dir, c
 crates/ui/src/composer/instruction_reset.rs:791:        let data_dir = dir.path().to_path_buf();
 crates/ui/src/composer/instruction_reset.rs:803:            crate::settings::init(crate::settings::UiSettings::default(), &data_dir, cx);
 ```
+
+## Additional home and fallback inventory
+
+Includes HOME string accesses, passwd lookups, absolute account paths, and Mast directory variables. Line numbers refer to f566310ac; matches require classification.
+
+```text
+crates/engine/src/rpc.rs:5659:                .env("MAST_ADAPTERS_DIR", root.path())
+crates/engine/src/registry.rs:1141:                .env("HOME", home.path())
+crates/engine/src/chat_workspace_plan.rs:1631:        // `MAST_WORKTREES_DIR` precedent).
+crates/engine/src/artifacts.rs:41:    LEGACY_ARTIFACT_URL_SCHEME, LEGACY_ARTIFACTS_DIR, LEGACY_ZERON_DIR, MAST_DIR,
+crates/engine/src/artifacts.rs:169:    let missing: Vec<&str> = [MAST_DIR, LEGACY_ZERON_DIR]
+crates/engine/src/artifacts.rs:684:                home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
+crates/engine/src/repos.rs:9://! matching `zeron/<name>` branch. `MAST_WORKTREES_DIR` overrides the root.
+crates/engine/src/repos.rs:91:    std::env::var_os("HOME")
+crates/engine/src/repos.rs:95:            std::env::var_os("USERPROFILE")
+crates/engine/src/repos.rs:169:/// worktrees are user-facing working checkouts. `MAST_WORKTREES_DIR` overrides
+crates/engine/src/repos.rs:172:    mast_proto::env::var_os("MAST_WORKTREES_DIR")
+crates/engine/src/repos.rs:213:    /// comes from `$MAST_WORKTREES_DIR` or `~/.zeron/worktrees`.
+crates/engine/tests/github_cli_login_shell.rs:92:        std::env::set_var("HOME", dir.path());
+crates/update/src/lib.rs:301:    let home = std::env::var_os("HOME").map(PathBuf::from);
+crates/engine/src/instance_lock.rs:65:                             stop it or use a different data dir (MAST_DATA_DIR)",
+crates/engine/src/instance_lock.rs:170:         stop it or use a different data dir (MAST_DATA_DIR)",
+crates/engine/src/instance_lock.rs:226:        let Some(dir) = mast_proto::env::var_os("MAST_INSTANCE_LOCK_TEST_DIR") else {
+crates/engine/src/instance_lock.rs:252:            .env("MAST_INSTANCE_LOCK_TEST_DIR", dir.path())
+crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:25:    let real_cwd = "/Users/mikey/Projects/agent-mode-tools";
+crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27:        "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/8de11ea8-2a2a-42a2-9784-81b4142b404d.jsonl",
+crates/engine/tests/external_import_bulk_session_canvas.rs:48:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/external_import_bulk_session_canvas.rs:50:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/external_import_bulk_session_canvas.rs:162:            Some(value) => std::env::set_var("HOME", value),
+crates/engine/tests/external_import_bulk_session_canvas.rs:163:            None => std::env::remove_var("HOME"),
+crates/engine/tests/subagent_scan_harness_session.rs:23:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/subagent_scan_harness_session.rs:27:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/subagent_scan_harness_session.rs:101:            Some(value) => std::env::set_var("HOME", value),
+crates/engine/tests/subagent_scan_harness_session.rs:102:            None => std::env::remove_var("HOME"),
+crates/engine/tests/worktree_on_run.rs:159:    unsafe { std::env::set_var("MAST_WORKTREES_DIR", &worktrees_root) };
+crates/proto/src/env.rs:5://! Callers pass the new name (`MAST_DATA_DIR`). The new name wins when both are
+crates/proto/src/env.rs:70:            legacy_name("MAST_DATA_DIR").as_deref(),
+crates/proto/src/env.rs:71:            Some("ZERON_DATA_DIR")
+crates/proto/src/env.rs:73:        assert_eq!(legacy_name("HOME"), None);
+crates/engine/tests/external_import_real_smoke.rs:52:            "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/572aa472-53ef-435f-8596-190f70bbf034.jsonl",
+crates/engine/tests/external_import_real_smoke.rs:65:            "/Users/mikey/.claude/projects/-Users-mikey-Projects-cofactr-workspace/258f3c46-1d77-46e8-b4bc-170ecd3dd0bc.jsonl",
+crates/engine/tests/external_import_title_repair_no_transcript.rs:22:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/external_import_title_repair_no_transcript.rs:25:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/external_import_title_repair_no_transcript.rs:87:            Some(value) => std::env::set_var("HOME", value),
+crates/engine/tests/external_import_title_repair_no_transcript.rs:88:            None => std::env::remove_var("HOME"),
+crates/engine/tests/external_import_junk_filter.rs:59:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/external_import_junk_filter.rs:63:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/external_import_junk_filter.rs:145:            Some(value) => std::env::set_var("HOME", value),
+crates/engine/tests/external_import_junk_filter.rs:146:            None => std::env::remove_var("HOME"),
+crates/engine/tests/external_import_titles.rs:66:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/external_import_titles.rs:70:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/external_import_titles.rs:271:            Some(value) => std::env::set_var("HOME", value),
+crates/engine/tests/external_import_titles.rs:272:            None => std::env::remove_var("HOME"),
+crates/harness/src/opencode/mod.rs:127:    // `crate::executable::home_dir` checks USERPROFILE too, so the Unix-style
+crates/harness/src/opencode/mod.rs:143:     fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE, \
+crates/engine/tests/codex_catalog.rs:51:        "HOME",
+crates/engine/tests/codex_catalog.rs:52:        "USERPROFILE",
+crates/engine/tests/cursor_live.rs:2://! MAST_CURSOR_STATE_DIR=$(mktemp -d) cargo test -p mast-engine --test cursor_live -- --ignored --nocapture --test-threads=1
+crates/engine/tests/cursor_live.rs:14:        mast_proto::env::var_os("MAST_CURSOR_STATE_DIR").is_some(),
+crates/proto/src/artifacts.rs:46:pub const MAST_DIR: &str = ".mast";
+crates/proto/src/artifacts.rs:50:pub const LEGACY_ZERON_DIR: &str = ".zeron";
+crates/engine/tests/external_import_auto_adopt.rs:56:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/external_import_auto_adopt.rs:60:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/external_import_auto_adopt.rs:217:            Some(v) => std::env::set_var("HOME", v),
+crates/engine/tests/external_import_auto_adopt.rs:218:            None => std::env::remove_var("HOME"),
+crates/engine/tests/m5_repos_diffs_terminals.rs:1931:    unsafe { std::env::set_var("MAST_WORKTREES_DIR", tmp.path().join("worktrees")) };
+crates/engine/tests/codex_login_resolution.rs:88:        "HOME",
+crates/engine/tests/codex_login_resolution.rs:89:        "USERPROFILE",
+crates/engine/tests/projectless.rs:229:        std::path::Path::new(&std::env::var("HOME").expect("HOME set in test env"))
+crates/engine/tests/external_import_title_repair_harness_session.rs:51:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/external_import_title_repair_harness_session.rs:55:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/external_import_title_repair_harness_session.rs:155:            Some(value) => std::env::set_var("HOME", value),
+crates/engine/tests/external_import_title_repair_harness_session.rs:156:            None => std::env::remove_var("HOME"),
+crates/harness/examples/cursor_stability_probe.rs:2://! MAST_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p mast-harness --example cursor_stability_probe -- sessions 20
+crates/harness/examples/cursor_stability_probe.rs:87:                                mast_proto::env::var_os("MAST_CURSOR_STATE_DIR")
+crates/harness/examples/cursor_stability_probe.rs:525:        assert!(mast_proto::env::var_os("MAST_CURSOR_STATE_DIR").is_some());
+crates/harness/examples/cursor_stability_probe.rs:528:        assert!(mast_proto::env::var_os("MAST_CURSOR_STATE_DIR").is_some());
+crates/harness/examples/cursor_stability_probe.rs:531:        assert!(mast_proto::env::var_os("MAST_CURSOR_STATE_DIR").is_some());
+crates/harness/examples/cursor_stability_probe.rs:535:            mast_proto::env::var_os("MAST_CURSOR_STATE_DIR").is_some(),
+crates/harness/examples/cursor_stability_probe.rs:536:            "set an isolated MAST_CURSOR_STATE_DIR"
+crates/engine/tests/work_outline_launch.rs:1346:    let home = std::env::var("HOME").expect("HOME is set");
+crates/engine/tests/subagent_scan_real_smoke.rs:8:        "/Users/mikey/.claude/projects/-Users-mikey-Projects-cofactr-workspace/13371e6c-e8b4-4c61-a772-da80b5909352.jsonl",
+crates/engine/tests/pr_ticket_cache_login_shell.rs:91:        std::env::set_var("HOME", dir.path());
+crates/harness/src/executable.rs:292:    env("HOME")
+crates/harness/src/executable.rs:296:                .then(|| env("USERPROFILE").filter(|value| !value.is_empty()))
+crates/harness/src/executable.rs:322:            env_path(env, "USERPROFILE").map(|profile| profile.join("AppData").join("Roaming"))
+crates/harness/src/executable.rs:348:                    env_path(env, "USERPROFILE")
+crates/harness/src/executable.rs:363:            env_path(env, "USERPROFILE").map(|profile| profile.join("AppData").join("Local"))
+crates/harness/src/executable.rs:366:            env_path(env, "USERPROFILE").map(|profile| profile.join("AppData").join("Roaming"))
+crates/harness/src/executable.rs:809:            ("USERPROFILE", profile.clone().into_os_string()),
+crates/harness/src/executable.rs:841:            ("USERPROFILE", profile.into_os_string()),
+crates/harness/src/executable.rs:882:        let lookup = env(&[("HOME", home.as_os_str().to_owned())]);
+crates/engine/tests/external_import_title_repair.rs:71:    let previous_home = std::env::var_os("HOME");
+crates/engine/tests/external_import_title_repair.rs:75:        std::env::set_var("HOME", fake_home.path());
+crates/engine/tests/external_import_title_repair.rs:274:            Some(value) => std::env::set_var("HOME", value),
+crates/engine/tests/external_import_title_repair.rs:275:            None => std::env::remove_var("HOME"),
+crates/harness/src/shell_env.rs:105:        // SAFETY: getpwuid's static buffer is only read here, and callers are
+crates/harness/src/shell_env.rs:108:            let pw = libc::getpwuid(libc::getuid());
+crates/harness/tests/shell_env_resolution.rs:48:        std::env::set_var("HOME", dir.path());
+crates/harness/src/archive_install.rs:369:        if std::env::var_os("HOME").is_some()
+crates/harness/src/archive_install.rs:370:            || mast_proto::env::var_os("MAST_ADAPTERS_DIR").is_some()
+crates/harness/src/acp/mod.rs:934:        let home = std::env::var("HOME").ok();
+crates/harness/src/acp/mod.rs:991:        if let Some(home) = std::env::var_os("HOME") {
+crates/harness/src/acp/antigravity_paths.rs:9:    let child_cwd = std::env::var_os("HOME")
+crates/harness/src/acp/antigravity_paths.rs:46:    match std::env::var_os("HOME") {
+crates/harness/src/acp/antigravity_paths.rs:54:    Ok(std::env::var_os("USERPROFILE")
+crates/harness/src/acp/antigravity_paths.rs:132:                Some(name) => libc::getpwnam_r(
+crates/harness/src/acp/antigravity_paths.rs:139:                None => libc::getpwuid_r(
+crates/harness/src/adapter_install.rs:65:/// Managed adapter storage. `$MAST_ADAPTERS_DIR` wins, followed by
+crates/harness/src/adapter_install.rs:66:/// `$MAST_DATA_DIR/adapters`. Windows defaults to
+crates/harness/src/adapter_install.rs:67:/// `%LOCALAPPDATA%/Zeron/adapters` (or `%USERPROFILE%/AppData/Local/...`);
+crates/harness/src/adapter_install.rs:85:    if let Some(dir) = value("MAST_ADAPTERS_DIR") {
+crates/harness/src/adapter_install.rs:88:    if let Some(dir) = value("MAST_DATA_DIR") {
+crates/harness/src/adapter_install.rs:95:                value("USERPROFILE").map(|home| {
+crates/harness/src/adapter_install.rs:103:        value("HOME").map(|home| home.join(".zeron").join("adapters"))
+crates/harness/src/adapter_install.rs:703:                    ("MAST_ADAPTERS_DIR", explicit.clone().into_os_string()),
+crates/harness/src/adapter_install.rs:704:                    ("MAST_DATA_DIR", data.clone().into_os_string()),
+crates/harness/src/adapter_install.rs:713:                &env(&[("MAST_DATA_DIR", data.clone().into_os_string())]),
+crates/harness/src/adapter_install.rs:727:                &env(&[("USERPROFILE", profile.clone().into_os_string())]),
+crates/harness/src/cursor/state.rs:17:    let root = mast_proto::env::var_os("MAST_CURSOR_STATE_DIR")
+crates/harness/src/cursor/mod.rs:66:    // USERPROFILE-aware home (see `crate::executable::home_dir`), plus the
+crates/harness/src/cursor/mod.rs:77:                std::env::var_os("USERPROFILE")
+crates/harness/src/cursor/mod.rs:322:            cmd.env("MAST_CURSOR_STATE_DIR", state::state_root());
+crates/harness/tests/claude_availability.rs:25:        "HOME",
+crates/harness/tests/claude_availability.rs:26:        "USERPROFILE",
+crates/harness/tests/codex_availability.rs:30:        "HOME",
+crates/harness/tests/codex_availability.rs:31:        "USERPROFILE",
+crates/harness/tests/real_quiet_survey.rs:62:        cwd: std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+crates/harness/tests/cursor_shim.rs:128:            .env("MAST_CURSOR_STATE_DIR", self.dir.path().join("state"))
+crates/harness/tests/cursor_shim.rs:279:        .env("MAST_CURSOR_STATE_DIR", fixture.dir.path().join("state"))
+crates/harness/tests/managed_install_failure.rs:31:        std::env::set_var("MAST_ADAPTERS_DIR", dir.path().join("adapters"));
+crates/harness/tests/managed_install_failure.rs:34:        std::env::set_var("HOME", dir.path());
+crates/harness/tests/managed_install.rs:3://! `$MAST_ADAPTERS_DIR`, spawn it via node, and reach SessionStarted (the
+crates/harness/tests/managed_install.rs:10://! Single-test binary: it mutates MAST_ADAPTERS_DIR process-wide.
+crates/harness/tests/managed_install.rs:24:        std::env::set_var("MAST_ADAPTERS_DIR", adapters.path());
+crates/harness/tests/model_catalog.rs:186:        .env("HOME", dir.path())
+crates/harness/src/codex/mod.rs:218:                 and fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE \
+crates/harness/src/claude/mod.rs:263:                 fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE \
+crates/harness/tests/acp.rs:1285:        .env("HOME", child_home.path())
+crates/harness/tests/acp.rs:1925:            .env("HOME", dir.path())
+crates/harness/tests/acp.rs:1928:            .env("MAST_ADAPTERS_DIR", &adapters)
+crates/harness/tests/acp.rs:1985:    let adapters = PathBuf::from(mast_proto::env::var_os("MAST_ADAPTERS_DIR").unwrap());
+crates/ui/src/appshots/linux/x11.rs:548:    if let Some(home) = std::env::var_os("HOME") {
+crates/ui/src/appshots/linux/x11.rs:564:    if let Some(home) = std::env::var_os("HOME") {
+crates/ui/src/shell/project_icon.rs:389:        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+crates/ui/src/chat_closeout.rs:865:        let home = std::env::var_os("HOME")
+crates/ui/src/browser/linux/mod.rs:59:        .or_else(|| std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join(".cache")))
+crates/ui/src/overview.rs:7591:        let home = std::env::var_os("HOME")
+crates/ui/src/composer/skill_completion.rs:301:            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
+```
