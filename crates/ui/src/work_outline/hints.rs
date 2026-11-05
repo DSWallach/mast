@@ -334,15 +334,15 @@ pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<Sho
         },
         linear_group(mac),
         github_group(mac, keymap),
-        chat_item_group(mac),
+        chat_item_group(mac, keymap),
         plan_group(mac),
     ]
 }
 
 /// The chat header's keys: the side panel's Item tab and the pinned context
 /// card (fixed combos, defined in the Shell).
-fn chat_item_group(mac: bool) -> ShortcutGroup {
-    use crate::shell::{OPEN_ITEM_TAB_COMBO, OPEN_TEAM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO};
+fn chat_item_group(mac: bool, keymap: &KeymapConfig) -> ShortcutGroup {
+    use crate::shell::{OPEN_ITEM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO};
     ShortcutGroup {
         title: "Chat header",
         rows: vec![
@@ -352,7 +352,8 @@ fn chat_item_group(mac: bool) -> ShortcutGroup {
             },
             ShortcutRow {
                 label: "Open the Team tab (chats with workers)",
-                keys: Some(key_label_on(mac, OPEN_TEAM_TAB_COMBO)),
+                keys: (!keymap.open_team_tab.is_empty())
+                    .then(|| key_label_on(mac, &keymap.open_team_tab)),
             },
             ShortcutRow {
                 label: "Open the Team tab from the side panel (not in a text field)",

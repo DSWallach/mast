@@ -498,7 +498,6 @@ pub fn apply_keymap(
             None,
         ),
         KeyBinding::new(&platform_combo(OPEN_ITEM_TAB_COMBO), OpenItemTab, None),
-        KeyBinding::new(&platform_combo(OPEN_TEAM_TAB_COMBO), OpenTeamTab, None),
         KeyBinding::new(
             &platform_combo(running_ui::TOGGLE_RUNNING_CHATS_COMBO),
             ToggleRunningChats,
@@ -515,6 +514,13 @@ pub fn apply_keymap(
             None,
         ),
     ]);
+    if !keymap.open_team_tab.is_empty() {
+        cx.bind_keys([KeyBinding::new(
+            &valid_or_default(&keymap.open_team_tab, ShortcutId::OpenTeamTab.default_combo()),
+            OpenTeamTab,
+            None,
+        )]);
+    }
     crate::browser::bind_keys(cx, keymap);
     // ⌘F / ⌘G / ⇧⌘G inside an Artifact tab (after the global ⌘F above).
     crate::artifacts::tab::bind_keys(cx);
@@ -12924,7 +12930,6 @@ mod tests {
             "mod-k",
             "mod-shift-o",
             OPEN_ITEM_TAB_COMBO,
-            OPEN_TEAM_TAB_COMBO,
             TOGGLE_ITEM_CARD_COMBO,
             running_ui::TOGGLE_RUNNING_CHATS_COMBO,
         ];

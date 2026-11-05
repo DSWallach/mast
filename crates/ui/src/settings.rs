@@ -964,11 +964,12 @@ pub enum ShortcutId {
     OutdentWorkItem,
     ShowOutlineShortcuts,
     OpenLinear,
+    OpenTeamTab,
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 18 + WORK_OUTLINE_SHORTCUTS + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 19 + WORK_OUTLINE_SHORTCUTS + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -1005,6 +1006,7 @@ impl ShortcutId {
         ShortcutId::OutdentWorkItem,
         ShortcutId::ShowOutlineShortcuts,
         ShortcutId::OpenLinear,
+        ShortcutId::OpenTeamTab,
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -1059,6 +1061,7 @@ impl ShortcutId {
             ShortcutId::OutdentWorkItem => "Outdent work item",
             ShortcutId::ShowOutlineShortcuts => "Show Outline shortcuts",
             ShortcutId::OpenLinear => "Toggle Inbox column (Linear, GitHub)",
+            ShortcutId::OpenTeamTab => "Open Team tab",
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1158,6 +1161,7 @@ impl ShortcutId {
             // Linear on.
             ShortcutId::OpenLinear if mac => "mod-alt-l",
             ShortcutId::OpenLinear => "mod-shift-e",
+            ShortcutId::OpenTeamTab => "mod-alt-t",
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1213,6 +1217,7 @@ pub struct KeymapConfig {
     pub outdent_work_item: String,
     pub show_outline_shortcuts: String,
     pub open_linear: String,
+    pub open_team_tab: String,
     /// One combo per jump slot, in slot order. A list rather than nine fields:
     /// [`UiSettings::load`] discards the WHOLE file on a parse error, so a
     /// fixed-length array would let one malformed entry reset every unrelated
@@ -1306,6 +1311,7 @@ impl Default for KeymapConfig {
             outdent_work_item: ShortcutId::OutdentWorkItem.default_combo().into(),
             show_outline_shortcuts: ShortcutId::ShowOutlineShortcuts.default_combo().into(),
             open_linear: ShortcutId::OpenLinear.default_combo().into(),
+            open_team_tab: ShortcutId::OpenTeamTab.default_combo().into(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -1350,6 +1356,7 @@ impl KeymapConfig {
             ShortcutId::OutdentWorkItem => &self.outdent_work_item,
             ShortcutId::ShowOutlineShortcuts => &self.show_outline_shortcuts,
             ShortcutId::OpenLinear => &self.open_linear,
+            ShortcutId::OpenTeamTab => &self.open_team_tab,
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -1396,6 +1403,7 @@ impl KeymapConfig {
             ShortcutId::OutdentWorkItem => self.outdent_work_item = combo,
             ShortcutId::ShowOutlineShortcuts => self.show_outline_shortcuts = combo,
             ShortcutId::OpenLinear => self.open_linear = combo,
+            ShortcutId::OpenTeamTab => self.open_team_tab = combo,
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -3339,6 +3347,18 @@ mod tests {
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-alt-p");
         restored.reset(ShortcutId::NewProject);
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-shift-n");
+    }
+
+    #[test]
+    fn team_tab_shortcut_persists_and_detects_conflicts() {
+        let mut keymap: KeymapConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(keymap.get(ShortcutId::OpenTeamTab), "mod-alt-t");
+        keymap.set(ShortcutId::OpenTeamTab, "mod-alt-o".into());
+        let restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.get(ShortcutId::OpenTeamTab), "mod-alt-o");
+        keymap.set(ShortcutId::OpenTeamTab, "mod-o".into());
+        assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::OpenTeamTab));
     }
 
     #[test]

@@ -538,7 +538,7 @@ fn the_keys_are_registered_and_listed_in_the_reference(_cx: &mut TestAppContext)
         "{keys:?}"
     );
     // Both parse and neither shadows a customizable default.
-    for combo in [OPEN_ITEM_TAB_COMBO, OPEN_TEAM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO] {
+    for combo in [OPEN_ITEM_TAB_COMBO, TOGGLE_ITEM_CARD_COMBO] {
         assert!(gpui::Keystroke::parse(&crate::settings::platform_combo(combo)).is_ok());
         assert!(
             crate::settings::ShortcutId::ALL
@@ -1219,7 +1219,7 @@ fn the_team_hotkey_avoids_the_browsers_new_tab(_cx: &mut TestAppContext) {
     assert!(
         crate::settings::ShortcutId::ALL
             .into_iter()
-            .all(|id| id.default_combo() != "mod-t" && id.default_combo() != OPEN_TEAM_TAB_COMBO)
+            .all(|id| id.default_combo() != "mod-t" && (id == crate::settings::ShortcutId::OpenTeamTab || id.default_combo() != OPEN_TEAM_TAB_COMBO))
     );
 }
 
