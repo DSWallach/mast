@@ -4,7 +4,7 @@ This gets you from a fresh install to a first chat running inside a work item.
 
 ## Install
 
-Follow the install steps in the [README](../../README.md). You need Rust, the Xcode command line tools, a signed-in agent CLI (Claude Code or Codex) and `gh`.
+Follow the install steps in the [README](../../README.md). You need Rust, the Xcode command line tools and a signed-in agent CLI (Claude Code or Codex). The GitHub CLI (`gh`), signed in with `gh auth login`, is optional for PR features.
 
 ## Add a Space
 
