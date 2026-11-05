@@ -230,6 +230,8 @@ pub mod methods {
     /// `work-outline/<code>: …` (`execution-scope:<code>: …` inside the message
     /// for validation failures).
     pub const CREATE_CHAT_FOR_WORK_ITEM: &str = "CreateChatForWorkItem";
+    /// Stage a coordinator successor and transfer its active workers.
+    pub const HAND_OFF_ORCHESTRATOR: &str = "HandOffOrchestrator";
     /// Queue the next Turn of a work-item Chat (`mast_proto::
     /// ContinueChatForWorkItemParams` → `mast_proto::
     /// ContinueChatForWorkItemReply`): message and command ids derive from

@@ -104,6 +104,15 @@ pub struct CreateChatForWorkItemParams {
     pub account_id: Option<String>,
 }
 
+/// Request a successor for an existing coordinator chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandOffOrchestratorParams {
+    pub chat_id: String,
+    pub summary: String,
+    pub operation_id: String,
+}
+
 /// Params of `ContinueChatForWorkItem`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

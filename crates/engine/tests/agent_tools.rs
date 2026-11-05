@@ -893,6 +893,21 @@ fn launch_args(key: &str, item: &str, sandbox: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_rpc_transfers_workers_and_replays() {
+    let rig = rig().await;
+    let item = create_item(&rig, "user-handoff-item", "Coordinator", None).await;
+    assign_chat(&rig, "user-handoff-assignment", CHAT, &item).await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"user-handoff-worker", "spaceId":SPACE,
+        "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    let params = json!({"chatId": CHAT, "summary":"Continue coordinating", "operationId":"user-handoff"});
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await.unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
+    assert_eq!(retry["chatId"], successor);
+    assert_eq!(rig.core.workspace.chat("user-handoff-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
     let rig = rig().await;
     let item = create_item(&rig, "handoff-item", "Coordinator", None).await;

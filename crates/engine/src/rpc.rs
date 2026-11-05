@@ -3420,6 +3420,33 @@ impl RpcService for EngineRpc {
                 let reply = self.create_chat_for_work_item(p).await?;
                 RpcReply::value(&reply)
             }
+            methods::HAND_OFF_ORCHESTRATOR => {
+                let p: mast_proto::HandOffOrchestratorParams = parse_params(params)?;
+                let source = self.workspace.chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::Failed("Chat not found".into()))?;
+                if source.archived {
+                    return Err(RpcError::Failed("An archived chat cannot hand off orchestration".into()));
+                }
+                let space_id = source.space_id.as_deref()
+                    .ok_or_else(|| RpcError::Failed("Chat has no Space".into()))?;
+                let item = self.workspace.chat_assigned_work_item(&p.chat_id, space_id)
+                    .ok_or_else(|| RpcError::Failed("Chat has no work item".into()))?;
+                let launch = mast_proto::CreateChatForWorkItemParams {
+                    work_item_id: item,
+                    initial_prompt: mast_proto::WorkItemPrompt { text: p.summary, attachments: Vec::new() },
+                    config: source.config,
+                    execution_override: None,
+                    worktree_choice: None,
+                    operation_id: p.operation_id,
+                    parent_chat_id: None,
+                    target_device_id: None,
+                    account_id: None,
+                };
+                let reply = self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &p.chat_id)
+                    .await.map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                RpcReply::value(&reply)
+            }
             methods::CONTINUE_CHAT_FOR_WORK_ITEM => {
                 let p: mast_proto::ContinueChatForWorkItemParams = parse_params(params)?;
                 let reply = self
