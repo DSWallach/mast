@@ -5,6 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use mast_proto::{WakeEventKind, WakeEventView, WakeHoldReason, WakeSettings, WakeStatus};
+use serde::{Deserialize, Serialize};
 
 /// How long events are collected before they go out as one message. At most
 /// one wake is delivered per window.
@@ -18,7 +19,7 @@ pub const DEDUPE_TTL_MS: i64 = 10 * 60_000;
 const LOG_CAP: usize = 50;
 
 /// One worker event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WakeEvent {
     pub id: String,
     /// Identity for dedupe (same action re-raised = same key).
@@ -100,13 +101,13 @@ struct Orch {
     draft_non_empty: bool,
     last_user_ms: Option<i64>,
     delivered_keys: HashMap<String, i64>,
+    delivered_ids: HashMap<String, i64>,
     log: VecDeque<LogEntry>,
 }
 
 #[derive(Debug, Default)]
 pub struct WakeCore {
     orchs: HashMap<String, Orch>,
-    seq: u64,
 }
 
 impl WakeCore {
@@ -115,8 +116,15 @@ impl WakeCore {
     }
 
     pub fn next_event_id(&mut self) -> String {
-        self.seq += 1;
-        format!("wake-{}", self.seq)
+        crate::new_id()
+    }
+
+    pub fn remember_delivered_id(&mut self, orch: &str, id: &str, now: i64) {
+        let ids = &mut self.orchs.entry(orch.to_owned()).or_default().delivered_ids;
+        ids.insert(id.to_owned(), now);
+        if ids.len() > 500 && let Some(oldest) = ids.iter().min_by_key(|(_, at)| *at).map(|(id, _)| id.clone()) {
+            ids.remove(&oldest);
+        }
     }
 
     pub fn settings(&self, orch: &str) -> WakeSettings {
@@ -189,13 +197,20 @@ impl WakeCore {
             .collect()
     }
 
+    /// Snapshot events awaiting queue acceptance.
+    pub fn held_events(&self) -> HashMap<String, Vec<WakeEvent>> {
+        self.orchs.iter().filter(|(_, orch)| !orch.held.is_empty())
+            .map(|(id, orch)| (id.clone(), orch.held.clone())).collect()
+    }
+
     /// Record a worker event. Always logged (for the unseen marks); held for
     /// delivery only when the settings wake for its kind and it is not a
     /// duplicate. Returns whether it was held.
     pub fn record(&mut self, orch: &str, event: WakeEvent, now: i64) -> bool {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         o.delivered_keys.retain(|_, at| now - *at < DEDUPE_TTL_MS);
-        if o.held.iter().any(|e| e.key == event.key) || o.delivered_keys.contains_key(&event.key) {
+        if o.held.iter().any(|e| e.id == event.id || e.key == event.key)
+            || o.delivered_ids.contains_key(&event.id) || o.delivered_keys.contains_key(&event.key) {
             return false;
         }
         // Raised then resolved before the orchestrator heard of it: neither
@@ -257,6 +272,7 @@ impl WakeCore {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         for event in events {
             o.delivered_keys.remove(&event.key);
+            o.delivered_ids.remove(&event.id);
             if let Some(entry) = o.log.iter_mut().find(|l| l.event.id == event.id) {
                 entry.delivered = false;
             }
@@ -324,6 +340,10 @@ impl WakeCore {
         o.held.retain(|e| !ids.contains(&e.id.as_str()));
         for event in &batch.events {
             o.delivered_keys.insert(event.key.clone(), now);
+            o.delivered_ids.insert(event.id.clone(), now);
+            if o.delivered_ids.len() > 500 && let Some(oldest) = o.delivered_ids.iter().min_by_key(|(_, at)| *at).map(|(id, _)| id.clone()) {
+                o.delivered_ids.remove(&oldest);
+            }
             if let Some(entry) = o.log.iter_mut().find(|l| l.event.id == event.id) {
                 entry.delivered = true;
             }
@@ -396,6 +416,32 @@ mod tests {
     use super::*;
 
     const ORCH: &str = "orch";
+
+    #[test]
+    fn repeated_event_id_is_not_delivered_twice() {
+        let mut core = WakeCore::new();
+        let first = event(&mut core, "worker", WakeEventKind::WorkerReport, "first", 1);
+        assert!(core.record(ORCH, first.clone(), 1));
+        let batch = match core.decide(ORCH, WAKE_WINDOW_MS + 1, IDLE, false) {
+            Decision::Deliver(batch) => batch,
+            other => panic!("expected delivery: {other:?}"),
+        };
+        core.delivered(ORCH, &batch, WAKE_WINDOW_MS + 1);
+        let mut replay = first;
+        replay.key = "different-key".into();
+        assert!(!core.record(ORCH, replay, WAKE_WINDOW_MS + 2));
+    }
+
+    #[test]
+    fn wake_event_serialization_preserves_identity_and_report() {
+        let mut core = WakeCore::new();
+        let mut original = event(&mut core, "worker", WakeEventKind::WorkerReport, "report", 123);
+        original.report = Some("report body".into());
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: WakeEvent = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, original);
+        assert_ne!(WakeCore::new().next_event_id(), original.id);
+    }
 
     fn event(
         core: &mut WakeCore,

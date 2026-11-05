@@ -66,6 +66,17 @@ impl ChatPersistence {
         self.snapshot_bytes.load(Ordering::Relaxed)
     }
 
+    /// The generation containing all changes observed so far.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Whether a successful snapshot included this generation.
+    pub(crate) fn has_saved(&self, generation: u64) -> bool {
+        self.saved.load(Ordering::Acquire) >= generation
+    }
+
+
     pub(crate) fn applied(&self, cursor: u64, immediate: bool) {
         self.cursor.fetch_max(cursor, Ordering::AcqRel);
         self.dirty(immediate);

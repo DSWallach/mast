@@ -3062,7 +3062,7 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
-        self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true)
+        self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true, None)
     }
 
     /// Queue an orchestrator wake message. It is not a user message: it never
@@ -3072,8 +3072,9 @@ impl DocHost {
         &self,
         chat_id: &str,
         text: &str,
+        message_id: &str,
     ) -> Result<String, EngineError> {
-        self.queue_message_inner(chat_id, text, Vec::new(), false, false)
+        self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))
     }
 
     fn queue_message_inner(
@@ -3083,6 +3084,7 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
         from_user: bool,
+        message_id: Option<&str>,
     ) -> Result<String, EngineError> {
         if from_user {
             // User first: a wake still waiting in the queue is pulled back
@@ -3093,7 +3095,7 @@ impl DocHost {
             self.spawn_interrupt_event_turn(chat_id);
         }
         let handle = self.open(chat_id)?;
-        let id = new_id();
+        let id = message_id.map(str::to_owned).unwrap_or_else(new_id);
         // Capture at queue time (acceptance 10): the row is delivered with the
         // revision the Chat had selected when the user queued it, even if a
         // newer one is applied before it drains.
@@ -3665,6 +3667,7 @@ impl DocHost {
             return;
         };
         if matches!(handle.doc.take_queued(&message_id), Ok(Some(_))) {
+            turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
             handle.publish_queue();
             turns.cancel_pending(chat_id);
         } else {
@@ -3856,7 +3859,14 @@ impl DocHost {
                 .steer(chat_id, &prompt, Some(message_id.clone()))
                 .await?
             {
-                SteerOutcome::Accepted => return Ok(()),
+                SteerOutcome::Accepted => {
+                    let turns = self.inner.event_turns.clone();
+                    let chat = chat_id.to_owned();
+                    let message = message_id.clone();
+                    let snapshot = handle.persistence.clone();
+                    let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message, snapshot.as_ref())).await;
+                    return Ok(());
+                },
                 // The run died under us between the status read and the send;
                 // fall through and start a fresh turn with it.
                 SteerOutcome::NotSteerable => {}
@@ -3913,8 +3923,12 @@ impl DocHost {
             sessions.confirm_context_reset(&message_id);
         }
         // Validated above; skip the chokepoint's second validation.
-        self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id))
+        self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id.clone()))
             .await?;
+        let turns = self.inner.event_turns.clone();
+        let chat = chat_id.to_owned();
+        let snapshot = handle.persistence.clone();
+        let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message_id, snapshot.as_ref())).await;
         Ok(())
     }
 

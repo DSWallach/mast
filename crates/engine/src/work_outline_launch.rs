@@ -445,7 +445,7 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::BindingCaptured)?;
 
         if let Some((wakes, source)) = hand_off {
-            let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source)
+            let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
                 .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
             let sessions = self.workspace.read_sessions().map_err(engine_error)?;
             let current = mast_doc::materialize_work_outline(

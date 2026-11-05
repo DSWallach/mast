@@ -321,6 +321,11 @@ impl EngineCore {
         // as configInvalid and its resume attempt consumed.
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
+        let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::new(
+            sessions.clone(), doc_host.clone(), workspace.clone(),
+            Some(data_dir.join("orchestrator-wakes.json")),
+            orchestrator_wakes::system_clock(),
+        );
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
         match sessions.recover_stale() {
@@ -597,12 +602,7 @@ impl EngineCore {
             .agent_tokens()
             .admin()
             .set_store(data_dir.join("admin-grants.json"));
-        let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::start(
-            sessions.clone(),
-            doc_host.clone(),
-            workspace.clone(),
-            Some(data_dir.join("orchestrator-wakes.json")),
-        );
+        orchestrator_wakes.spawn_watchers();
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));
@@ -838,6 +838,7 @@ impl EngineCore {
         self.spaces_sync.shutdown().await;
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
+        self.orchestrator_wakes.flush_receipts().await;
         self.workspace.shutdown();
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
