@@ -1822,10 +1822,8 @@ impl UiSettings {
                 migrated = true;
             }
         }
-        if migrated {
-            if let Err(error) = settings.save(data_dir) {
-                tracing::warn!(%error, "failed to save ui settings migration");
-            }
+        if migrated && let Err(error) = settings.save(data_dir) {
+            tracing::warn!(%error, "failed to save ui settings migration");
         }
         settings
     }
