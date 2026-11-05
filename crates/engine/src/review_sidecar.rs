@@ -83,11 +83,10 @@ fn parse_hunks(patch: &str) -> Vec<Hunk> {
                     String::new(),
                 ));
             }
-        } else if let Some((_, lines)) = current.as_mut() {
-            if line.starts_with([' ', '+', '-', '\\']) {
+        } else if let Some((_, lines)) = current.as_mut()
+            && line.starts_with([' ', '+', '-', '\\']) {
                 lines.push_str(line);
             }
-        }
     }
     if let Some((mut hunk, lines)) = current {
         hunk.hash = format!("{:x}", Sha256::digest(lines.as_bytes()));

@@ -2871,8 +2871,7 @@ impl DocHost {
         let latest = handle
             .doc
             .read_commands()?
-            .into_iter()
-            .filter(|c| match &c.payload {
+            .into_iter().rfind(|c| match &c.payload {
                 SessionCommandPayload::Run { message_id: m, .. }
                 | SessionCommandPayload::RunWithInstructions { message_id: m, .. } => {
                     m == message_id
@@ -2881,8 +2880,7 @@ impl DocHost {
                     m.as_deref() == Some(message_id)
                 }
                 _ => false,
-            })
-            .next_back();
+            });
         Ok((latest, landed))
     }
 
@@ -5361,7 +5359,7 @@ impl DocHost {
         let worktree_spec = request.worktree.take();
         let fresh_worktree = match &worktree_spec {
             Some(spec) => {
-                let (cwd, fresh) = self.materialize_worktree(chat_id, &spec).await?;
+                let (cwd, fresh) = self.materialize_worktree(chat_id, spec).await?;
                 request.cwd = cwd;
                 fresh
             }

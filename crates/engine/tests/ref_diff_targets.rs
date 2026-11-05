@@ -581,7 +581,7 @@ async fn free_text_branch_number_and_url_pick_the_right_repository() {
         .unwrap()
         .target;
     assert_eq!(root.path, text(&f.ws));
-    assert_eq!(root.repo_id == sub.repo_id, false);
+    assert!(!(root.repo_id == sub.repo_id));
 
     // A bare PR number needs a linked PR (or a single GitHub repository).
     let ambiguous = targets

@@ -237,7 +237,7 @@ async fn serve_daemon_edge(
                     "presence": {}
                 });
                 if sink
-                    .send(WsMessage::Text(state.to_string().into()))
+                    .send(WsMessage::Text(state.to_string()))
                     .await
                     .is_err()
                 {

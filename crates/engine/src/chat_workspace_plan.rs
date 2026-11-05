@@ -918,13 +918,12 @@ fn validate_closeout_inspection(inspection: &Inspection, force: bool) -> Result<
         ));
     }
     let plan = &inspection.plan;
-    if let (Some(branch), Some(default)) = (&plan.branch, &plan.default_branch) {
-        if branch == default {
+    if let (Some(branch), Some(default)) = (&plan.branch, &plan.default_branch)
+        && branch == default {
             return refuse(format!(
                 "refusing to close out: worktree is on the repository's default branch `{default}`"
             ));
         }
-    }
     if let Some(error) = &inspection.dirty_inspection_error {
         return refuse(format!(
             "refusing to close out because dirty files could not be inspected: {error}"
@@ -1010,8 +1009,8 @@ pub fn close_chat_worktree(
     // Only the worktree's own checked-out branch, and never the default
     // (guarded above, re-checked here so the invariant is local).
     let mut branch_deleted = false;
-    if let Some(branch) = plan.branch.as_deref() {
-        if plan.default_branch.as_deref() != Some(branch) {
+    if let Some(branch) = plan.branch.as_deref()
+        && plan.default_branch.as_deref() != Some(branch) {
             let flag = if force { "-D" } else { "-d" };
             match run_git(repo, &["branch", flag, branch]) {
                 Ok(_) => branch_deleted = true,
@@ -1021,7 +1020,6 @@ pub fn close_chat_worktree(
                 Err(err) => tracing::warn!(branch, error = %err, "close-out: branch not deleted"),
             }
         }
-    }
 
     Ok(CloseoutOutcome {
         removed: true,
@@ -1083,11 +1081,10 @@ fn default_branch(repo_path: &Path) -> Option<String> {
     if let Ok(short) = run_git(
         repo_path,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    ) {
-        if let Some((_, branch)) = short.trim().split_once('/') {
+    )
+        && let Some((_, branch)) = short.trim().split_once('/') {
             return Some(branch.to_string());
         }
-    }
     run_git(repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok()
         .map(|out| out.trim().to_string())

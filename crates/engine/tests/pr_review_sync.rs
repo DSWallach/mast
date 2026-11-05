@@ -1045,7 +1045,7 @@ async fn a_merged_pr_archives_its_item_and_leaves_chats_alone() {
         Some("PR merged")
     );
     // Chats stay as they are: still assigned, assignment row untouched.
-    assert!(archived.chat_ids.iter().any(|c| *c == chat));
+    assert!(archived.chat_ids.contains(&chat));
     assert!(
         rig.core
             .workspace

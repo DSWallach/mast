@@ -70,14 +70,13 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
         } else {
             None
         };
-        if let Some(target) = target {
-            if !links.iter().any(|link: &RequestLink| link.target == target) {
+        if let Some(target) = target
+            && !links.iter().any(|link: &RequestLink| link.target == target) {
                 links.push(RequestLink {
                     label: word.to_owned(),
                     target,
                 });
             }
-        }
     }
     let mut fields: Vec<(String, String)> = Vec::new();
     for line in body.lines() {

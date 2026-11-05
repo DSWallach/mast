@@ -1152,12 +1152,11 @@ pub fn annotate_stacks(rows: &mut [PrDashRow]) {
     let mut parent: HashMap<usize, usize> = HashMap::new();
     let mut kids: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, row) in rows.iter().enumerate() {
-        if let Some(&p) = by_head.get(&(row.repo_full.as_str(), row.base_ref.as_str())) {
-            if p != i {
+        if let Some(&p) = by_head.get(&(row.repo_full.as_str(), row.base_ref.as_str()))
+            && p != i {
                 parent.insert(i, p);
                 kids.entry(p).or_default().push(i);
             }
-        }
     }
     let mut chains: Vec<Vec<usize>> = Vec::new();
     for i in 0..rows.len() {

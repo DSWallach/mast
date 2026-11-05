@@ -1251,17 +1251,15 @@ impl SessionsEngine {
             mast_proto::validate_input_answers(questions, &mut answers).map_err(EngineError::Other)?;
             pending.remove(request_id).expect("pending input exists").1
         };
-        if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id) {
-            if let Some(ws) = self.inner.workspace() {
+        if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id)
+            && let Some(ws) = self.inner.workspace() {
                 for (question_id, row_id) in rows {
                     if let Some(answer) = answers.iter().find(|a| a.question_id == question_id).and_then(|a| a.labels.first()).and_then(|label| {
                         if label.eq_ignore_ascii_case("yes") { Some(true) } else if label.eq_ignore_ascii_case("no") { Some(false) } else { None }
-                    }) {
-                        if let Err(err) = ws.answer_friction_approval(&row_id, answer) { tracing::warn!(error = %err, "friction approval update failed"); }
-                    }
+                    })
+                        && let Err(err) = ws.answer_friction_approval(&row_id, answer) { tracing::warn!(error = %err, "friction approval update failed"); }
                 }
             }
-        }
         let _ = resolver.send(answers);
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
@@ -2981,13 +2979,11 @@ async fn drive_run(
             AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } => Some(message.as_str()),
             _ => None,
         };
-        if authentication_error.is_some_and(mast_harness::is_authentication_failure) {
-            if let Some(accounts) = inner.managed_accounts.get() {
-                if let Err(error) = accounts.mark_chat_signed_out(&chat_id, harness_id) {
+        if authentication_error.is_some_and(mast_harness::is_authentication_failure)
+            && let Some(accounts) = inner.managed_accounts.get()
+                && let Err(error) = accounts.mark_chat_signed_out(&chat_id, harness_id) {
                     tracing::warn!(%error, "could not record account sign-out");
                 }
-            }
-        }
         if let AgentEvent::Error { message } = &event { friction_turn_error = Some(message.clone()); }
         if let AgentEvent::Done { status: DoneStatus::Errored, error, .. } = &event {
             let detail = error.as_deref().filter(|text| !text.trim().is_empty()).or(friction_turn_error.as_deref().filter(|text| !text.trim().is_empty())).unwrap_or("Session errored");

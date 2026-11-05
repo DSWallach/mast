@@ -1217,11 +1217,10 @@ impl EngineRpc {
     /// may close an unmatched worktree without a chat id; that path still
     /// receives the cwd-based process protection.
     async fn closeout_is_live(&self, chat_id: Option<&str>, cwd: &str) -> bool {
-        if let Some(chat_id) = chat_id {
-            if self.sessions.has_live_run(chat_id) || self.sessions.turn_in_flight(chat_id) {
+        if let Some(chat_id) = chat_id
+            && (self.sessions.has_live_run(chat_id) || self.sessions.turn_in_flight(chat_id)) {
                 return true;
             }
-        }
         let session_id = chat_id
             .and_then(|chat_id| self.workspace.chat(chat_id).ok().flatten())
             .and_then(|c| c.harness_session_id)
@@ -6259,7 +6258,7 @@ mod context_usage_tests {
             text: value.into(),
         };
         let cached = text("body", "café histórico");
-        writer.sync(&[cached.clone()]).unwrap();
+        writer.sync(std::slice::from_ref(&cached)).unwrap();
         sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
             .unwrap();
         // Cached content exists before the first watcher and never enters
@@ -6273,7 +6272,7 @@ mod context_usage_tests {
         );
 
         let live = text("body", "café histórico y nuevo");
-        writer.sync(&[live.clone()]).unwrap();
+        writer.sync(std::slice::from_ref(&live)).unwrap();
         sink.apply_row(&source.export_snapshot().unwrap(), 1);
         let update: mast_doc::TranscriptUpdate = serde_json::from_value(
             tokio::time::timeout(std::time::Duration::from_secs(2), first.next())

@@ -577,7 +577,7 @@ mod tests {
         let mut c = chat("a");
         c.links = vec![link(6487, ChatLinkSource::CreatedInChat)];
         let cand = candidate(6487, "x", "t");
-        let plan = plan_matches(&[c], &[cand.clone()], &GitFacts::default());
+        let plan = plan_matches(&[c], std::slice::from_ref(&cand), &GitFacts::default());
         assert_eq!(
             sources(&plan, &cand.url),
             vec![("a".into(), ChatLinkSource::CreatedInChat)]
@@ -613,7 +613,7 @@ mod tests {
             let mut c = chat("t");
             c.branch = Some(trunk.into());
             let cand = candidate(3, trunk.trim(), "");
-            let plan = plan_matches(&[c], &[cand.clone()], &GitFacts::default());
+            let plan = plan_matches(&[c], std::slice::from_ref(&cand), &GitFacts::default());
             assert!(plan.by_url[&cand.url].is_empty(), "{trunk:?}");
         }
     }
@@ -627,16 +627,16 @@ mod tests {
         let mut git = GitFacts::default();
         git.slugs
             .insert("/work/other".into(), Some("acme/other".into()));
-        let plan = plan_matches(&[c.clone()], &[cand.clone()], &git);
+        let plan = plan_matches(&[c.clone()], std::slice::from_ref(&cand), &git);
         assert!(plan.by_url[&cand.url].is_empty());
 
         git.slugs
             .insert("/work/other".into(), Some("cofactr/flagship".into()));
-        let plan = plan_matches(&[c.clone()], &[cand.clone()], &git);
+        let plan = plan_matches(&[c.clone()], std::slice::from_ref(&cand), &git);
         assert_eq!(plan.by_url[&cand.url].len(), 1);
 
         // Unknown repository: the check is skipped.
-        let plan = plan_matches(&[c], &[cand.clone()], &GitFacts::default());
+        let plan = plan_matches(&[c], std::slice::from_ref(&cand), &GitFacts::default());
         assert_eq!(plan.by_url[&cand.url].len(), 1);
     }
 
@@ -647,7 +647,7 @@ mod tests {
         let cand = candidate(6488, "michael/eng-3012-kit-line", "");
         let plan = plan_matches(
             &[c.clone()],
-            &[cand.clone()],
+            std::slice::from_ref(&cand),
             &git_head("/ws/flagship", Some("michael/eng-3012-kit-line")),
         );
         assert_eq!(
@@ -657,7 +657,7 @@ mod tests {
         for head in [None, Some("main"), Some("other")] {
             let plan = plan_matches(
                 &[c.clone()],
-                &[cand.clone()],
+                std::slice::from_ref(&cand),
                 &git_head("/ws/flagship", head),
             );
             assert!(plan.by_url[&cand.url].is_empty(), "{head:?}");
@@ -666,7 +666,7 @@ mod tests {
         let trunk = candidate(9, "main", "");
         let plan = plan_matches(
             &[c],
-            &[trunk.clone()],
+            std::slice::from_ref(&trunk),
             &git_head("/ws/flagship", Some("main")),
         );
         assert!(plan.by_url[&trunk.url].is_empty());
@@ -706,7 +706,7 @@ mod tests {
         launched.links = vec![link(1, ChatLinkSource::ReviewLauncher)];
         let mut manual = chat("manual");
         manual.links = vec![link(1, ChatLinkSource::Manual)];
-        let plan = plan_matches(&[launched, manual], &[cand.clone()], &GitFacts::default());
+        let plan = plan_matches(&[launched, manual], std::slice::from_ref(&cand), &GitFacts::default());
         let flags: Vec<(&str, bool)> = plan.by_url[&cand.url]
             .iter()
             .map(|c| (c.chat_id.as_str(), c.is_review))
@@ -732,7 +732,7 @@ mod tests {
         stored.links = vec![link(1, ChatLinkSource::Mentioned)];
         let plan = plan_matches(
             &[archived, noisy, stored],
-            &[cand.clone()],
+            std::slice::from_ref(&cand),
             &GitFacts::default(),
         );
         assert_eq!(
@@ -757,7 +757,7 @@ mod tests {
         let mut both = chat("both");
         both.branch = Some("feat/eng-1-x".into());
         both.tickets = vec!["ENG-1".into()];
-        let plan = plan_matches(&[strong, weak, both], &[cand.clone()], &GitFacts::default());
+        let plan = plan_matches(&[strong, weak, both], std::slice::from_ref(&cand), &GitFacts::default());
         let got = sources(&plan, &cand.url);
         assert_eq!(
             got,
@@ -801,7 +801,7 @@ mod tests {
             c.links = vec![link(1, source)];
             chats.push(c);
         }
-        let plan = plan_matches(&chats, &[cand.clone()], &GitFacts::default());
+        let plan = plan_matches(&chats, std::slice::from_ref(&cand), &GitFacts::default());
         let order: Vec<_> = plan.by_url[&cand.url]
             .iter()
             .map(|c| c.chat_id.as_str())
@@ -825,7 +825,7 @@ mod tests {
                 c
             })
             .collect();
-        let plan = plan_matches(&many, &[cand.clone()], &GitFacts::default());
+        let plan = plan_matches(&many, std::slice::from_ref(&cand), &GitFacts::default());
         assert_eq!(plan.by_url[&cand.url].len(), MAX_CHATS_PER_PR);
     }
 
@@ -835,7 +835,7 @@ mod tests {
         c.title = Some("  ".into());
         c.links = vec![link(1, ChatLinkSource::Mentioned)];
         let cand = candidate(1, "x", "t");
-        let plan = plan_matches(&[c], &[cand.clone()], &GitFacts::default());
+        let plan = plan_matches(&[c], std::slice::from_ref(&cand), &GitFacts::default());
         assert_eq!(plan.by_url[&cand.url][0].title, "Untitled chat");
         assert!(plan.by_url[&cand.url][0].updated_at.is_some());
     }
@@ -850,7 +850,7 @@ mod tests {
                 c
             })
             .collect();
-        assert_eq!(heads_needed(&chats, &[cand.clone()]).len(), MAX_GIT_PROBES);
+        assert_eq!(heads_needed(&chats, std::slice::from_ref(&cand)).len(), MAX_GIT_PROBES);
         // No head_ref anywhere: nothing to probe.
         assert!(heads_needed(&chats, &[candidate(2, "", "t")]).is_empty());
         // Slugs are only asked about checkouts whose branch/HEAD matched.
