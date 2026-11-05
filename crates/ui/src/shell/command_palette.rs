@@ -57,7 +57,7 @@ impl Entry {
     fn action(&self) -> Option<(&'static str, &'static str)> {
         match self {
             Self::NewChat => Some(("New chat", icons::PEN_NEW_SQUARE)),
-            Self::NewProject => Some(("New project", icons::FOLDER)),
+            Self::NewProject => Some(("New Space", icons::FOLDER)),
             Self::Settings => Some(("Open settings", icons::SETTINGS_MINIMALISTIC)),
             Self::Overview => Some(("Open overview", icons::WIDGET)),
             Self::PrReviewChats => Some(("Open PR review chats", icons::PULL_REQUEST)),
@@ -417,7 +417,7 @@ impl Shell {
                         .child(
                             div()
                                 .text_color(theme.text_muted)
-                                .child("Try a command, chat title, project, or device."),
+                                .child("Try a command, chat title, Space, or device."),
                         ),
                 )
             });

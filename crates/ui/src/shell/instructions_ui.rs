@@ -873,11 +873,11 @@ impl Shell {
             let space_id = chat
                 .space_id
                 .clone()
-                .ok_or("Chats without a project cannot have instructions")?;
+                .ok_or("Chats without a Space cannot have instructions")?;
             let load = state.work_outline(&space_id);
             let snapshot = load
                 .snapshot()
-                .ok_or("This project's outline is not loaded")?
+                .ok_or("This Space's outline is not loaded")?
                 .clone();
             (space_id, snapshot)
         };

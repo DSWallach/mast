@@ -5,7 +5,7 @@
 //!   Linear…" (Settings → Linear) while this device has no key.
 //! - Items of a Linear-enabled Space: the **Linear** section (live issue
 //!   chip, project chip, ↻ = `LinearRefreshLinkedItems` for the Space,
-//!   Unlink; on a project link also "Add issues from <project>…" and, for a
+//!   Unlink; on a project link also "Add issues from <Space>…" and, for a
 //!   pasted-URL link My projects resolves, Fix link), and "Synced from Linear" on a title / description that still
 //!   follows the issue (`externalSyncModifiedFields` does not list it).
 //! - Pasted references: a Linear URL becomes an `issue` / `project`
@@ -103,7 +103,7 @@ impl WorkItemDetails {
         self.linear.paste_hint = true;
     }
 
-    /// A pasted project URL: link the matching "My projects" project
+    /// A pasted project URL: link the matching "My Spaces" project
     /// (`linkLinearProject`); without a match, a `linear`/`project`
     /// reference keyed by the URL's slug.
     fn link_pasted_project(&mut self, url: String, slug: String, cx: &mut Context<Self>) {
@@ -618,9 +618,9 @@ impl WorkItemDetails {
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_faint)
                     .child(if enabled {
-                        "On: the Linear panel, chips and links work in this project. Nothing is created or written automatically."
+                        "On: the Linear panel, chips and links work in this Space. Nothing is created or written automatically."
                     } else {
-                        "Off: no Linear calls or UI in this project; Linear URLs stay plain links."
+                        "Off: no Linear calls or UI in this Space; Linear URLs stay plain links."
                     }),
             );
         if not_available {

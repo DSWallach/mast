@@ -501,7 +501,7 @@ fn one_undo_archives_the_new_project_and_redo_restores_it(cx: &mut gpui::TestApp
         outline
             .read_with(vcx, |o, cx| o.next_undo_label(cx))
             .as_deref(),
-        Some("created project \u{2018}Q3 launch\u{2019} from template \u{2018}Launch kit\u{2019}")
+        Some("created project \u{2018}Q3 launch\u{2019} from blueprint \u{2018}Launch kit\u{2019}")
     );
 
     vcx.simulate_keystrokes("cmd-z");

@@ -118,7 +118,7 @@ impl LinearUiError {
                     }
                 }
                 LinearErrorCode::DisabledForSpace => {
-                    "Linear is turned off for this project".to_string()
+                    "Linear is turned off for this Space".to_string()
                 }
                 LinearErrorCode::Invalid => {
                     if self.message.is_empty() {

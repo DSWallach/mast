@@ -1,5 +1,5 @@
 //! Project templates, the pure parts: turning a template into the ordered
-//! mutation list a "New from template" sends (ids derived from ONE operation
+//! mutation list a "New from blueprint" sends (ids derived from ONE operation
 //! key, every id <= 64 chars, retries replay), and the right-click entries.
 //!
 //! A template is a frozen copy (`mast_proto::WorkItemTemplateView`);
@@ -171,20 +171,20 @@ pub(crate) enum TemplateMenuAction {
     SaveAsTemplate { space_id: String, item_id: String },
     /// Open the "Convert to project…" wizard in the item's details.
     ConvertToProject { space_id: String, item_id: String },
-    /// "New from template…": under `parent` (`None` = the Space's top level).
+    /// "New from blueprint…": under `parent` (`None` = the Space's top level).
     NewFromTemplate {
         space_id: String,
         parent: Option<String>,
     },
 }
 
-/// Why "Save as Template…" is unavailable for `item_id`, if it is.
+/// Why "Save as blueprint…" is unavailable for `item_id`, if it is.
 pub(crate) fn save_blocked(
     snapshot: Option<&WorkOutlineSnapshot>,
     item_id: &str,
 ) -> Option<&'static str> {
     let Some(item) = snapshot.and_then(|snapshot| snapshot.item(item_id)) else {
-        return Some("This project's outline is not loaded");
+        return Some("This Space's outline is not loaded");
     };
     if item.archived_at.is_some() {
         return Some("Restore this work item first");
@@ -205,13 +205,13 @@ pub(crate) fn convert_blocked(
     } else if item.is_project {
         Some("This item is already a project")
     } else if snapshot.templates.is_empty() {
-        Some("Save a template first (Save as Template\u{2026} on any item)")
+        Some("Save a blueprint first (Save as blueprint\u{2026} on any item)")
     } else {
         None
     }
 }
 
-/// Put "Save as Template…" and "New from Template…" after "Group into…".
+/// Put "Save as blueprint…" and "New from blueprint…" after "Group into…".
 pub(crate) fn insert_item_entries(
     menu: &mut OutlineContextMenu,
     snapshot: Option<&WorkOutlineSnapshot>,
@@ -224,7 +224,7 @@ pub(crate) fn insert_item_entries(
     let entries = [
         MenuEntry::new(
             "save-as-template",
-            "Save as Template\u{2026}",
+            "Save as blueprint\u{2026}",
             icons::DOCUMENT_ADD,
             MenuAction::Template(TemplateMenuAction::SaveAsTemplate {
                 space_id: space_id.to_owned(),
@@ -235,14 +235,14 @@ pub(crate) fn insert_item_entries(
         .separated(),
         MenuEntry::new(
             "new-from-template",
-            "New from Template\u{2026}",
+            "New from blueprint\u{2026}",
             icons::ADD_CIRCLE,
             MenuAction::Template(TemplateMenuAction::NewFromTemplate {
                 space_id: space_id.to_owned(),
                 parent: Some(item_id.to_owned()),
             }),
         )
-        .disabled(archived.then_some("Restore this work item to add a project under it")),
+        .disabled(archived.then_some("Restore this work item to add an item under it")),
         MenuEntry::new(
             "convert-to-project",
             "Convert to Project\u{2026}",
@@ -262,7 +262,7 @@ pub(crate) fn insert_item_entries(
     menu.entries.splice(at..at, entries);
 }
 
-/// Put "New from Template…" after "New Work Item" on a Space root's menu.
+/// Put "New from blueprint…" after "New Work Item" on a Space root's menu.
 pub(crate) fn insert_space_entries(
     menu: &mut OutlineContextMenu,
     space_id: &str,
@@ -270,7 +270,7 @@ pub(crate) fn insert_space_entries(
 ) {
     let entry = MenuEntry::new(
         "new-from-template",
-        "New from Template\u{2026}",
+        "New from blueprint\u{2026}",
         icons::ADD_CIRCLE,
         MenuAction::Template(TemplateMenuAction::NewFromTemplate {
             space_id: space_id.to_owned(),

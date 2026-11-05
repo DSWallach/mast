@@ -1809,7 +1809,7 @@ fn chat_moves_never_cross_spaces(cx: &mut gpui::TestAppContext) {
     assert_eq!(calls.lock().unwrap().len(), 2);
     assert_eq!(
         outline.read_with(vcx, |o, _| o.notice().map(str::to_owned)),
-        Some("Chats without a project cannot be associated".to_owned())
+        Some("Chats without a Space cannot be associated".to_owned())
     );
 }
 

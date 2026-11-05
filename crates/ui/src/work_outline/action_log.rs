@@ -755,7 +755,7 @@ pub(crate) fn group_entry(
     ))
 }
 
-/// "New from template…": the project root `work_item_id` plus its whole
+/// "New from blueprint…": the project root `work_item_id` plus its whole
 /// instantiated subtree as ONE entry. Undo archives the root with its
 /// descendants (the normal archive-descendants op); redo restores it, which
 /// restores the cascade-archived subtree. `operation_id` is the first
@@ -768,7 +768,7 @@ pub(crate) fn instantiate_entry(
 ) -> Draft {
     draft(
         format!(
-            "created project {} from template {}",
+            "created project {} from blueprint {}",
             quoted(title),
             quoted(template_name)
         ),
@@ -875,7 +875,7 @@ pub(crate) fn convert_entry(
     let item = quoted(&snapshot.item(&plan.item_id)?.title);
     Some(draft(
         format!(
-            "converted {item} to a project from template {}",
+            "converted {item} to a project from blueprint {}",
             quoted(&plan.template_name)
         ),
         Step::Batch(forward),

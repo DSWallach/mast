@@ -68,7 +68,7 @@ impl OutlineView {
             .selection_space()
             .is_some_and(|space| space != item.space_id)
         {
-            return Err("Group items from one project at a time");
+            return Err("Group items from one Space at a time");
         }
         Ok(())
     }
@@ -192,12 +192,12 @@ impl OutlineView {
             .selection_space()
             .ok_or("Select a work item first")?;
         if self.group_selection().iter().any(|(space, _)| *space != space_id) {
-            return Err("Group items from one project at a time");
+            return Err("Group items from one Space at a time");
         }
         let ids: Vec<String> = self.group_selection().into_iter().map(|(_, id)| id).collect();
         let snapshot = self
             .snapshot(&space_id)
-            .ok_or("This project's outline is not loaded")?;
+            .ok_or("This Space's outline is not loaded")?;
         let top = self.top_most(snapshot, &space_id, &ids);
         if top.is_empty() {
             return Err("Select a work item first");
@@ -274,7 +274,7 @@ impl OutlineView {
     ) -> Result<(), String> {
         let snapshot = self
             .snapshot(space_id)
-            .ok_or("This project's outline is not loaded")?;
+            .ok_or("This Space's outline is not loaded")?;
         let top = self.top_most(snapshot, space_id, &item_ids);
         let first = top.first().ok_or("Select a work item first")?.clone();
         let parent = snapshot
@@ -314,7 +314,7 @@ impl OutlineView {
         }
         let snapshot = self
             .snapshot(space_id)
-            .ok_or("This project's outline is not loaded")?;
+            .ok_or("This Space's outline is not loaded")?;
         let top = self.top_most(snapshot, space_id, item_ids);
         let Some(first) = top.first().cloned() else {
             return Err("Select a work item first".into());

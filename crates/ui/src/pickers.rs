@@ -1604,7 +1604,7 @@ impl Pickers {
             PickerKind::Space => {
                 let handle = self.search.read(cx).focus_handle(cx);
                 self.search.update(cx, |input, cx| {
-                    input.set_placeholder("Search projects…", cx);
+                    input.set_placeholder("Search Spaces…", cx);
                 });
                 window.focus(&handle, cx);
             }
@@ -3508,7 +3508,7 @@ impl Pickers {
     }
 
     /// The project popover: search + one row per project on the picked device
-    /// (check on the current pick), then "New project…" and the opt-out rows. Rows
+    /// (check on the current pick), then "New Space…" and the opt-out rows. Rows
     /// are device-scoped, so no per-row `@ device` tag — the device chip next
     /// door names the host.
     fn render_space_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -3526,9 +3526,9 @@ impl Pickers {
             // Distinguish "the filter ate everything" from "this device has
             // no projects yet" — the scoped list makes the latter common.
             let empty: &str = if self.search.read(cx).text().is_empty() {
-                "No projects on this device."
+                "No Spaces on this device."
             } else {
-                "No projects match."
+                "No Spaces match."
             };
             div()
                 .p(px(Theme::SPACE_SM))
@@ -3584,7 +3584,7 @@ impl Pickers {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .child("Don't work in a project"),
+                .child("Don't work in a Space"),
         );
         // Action row under a hairline: mint a project.
         let new_project = popover::menu_row_nav(&theme, false, false, "project-new".to_string())
@@ -3604,7 +3604,7 @@ impl Pickers {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(SharedString::from("New project…")),
+                    .child(SharedString::from("New Space…")),
             );
         div()
             .flex()
@@ -4002,7 +4002,7 @@ impl Pickers {
             let project_label: SharedString = state
                 .selected_space_row()
                 .map(|s| s.display_name().to_string())
-                .unwrap_or_else(|| "No project".to_string())
+                .unwrap_or_else(|| "No Space".to_string())
                 .into();
             (device_label, project_label, offline)
         };
@@ -4576,7 +4576,7 @@ impl Pickers {
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No project selected"))
+                .child(SharedString::from("No Space selected"))
                 .into_any_element();
         }
         let rows = self.filtered_ref_rows(cx);
@@ -4808,7 +4808,7 @@ impl Pickers {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.clear_draft_worktree_target(cx);
                                 }))
-                                .child("Use project checkout instead"),
+                                .child("Use Space checkout instead"),
                         ),
                 )
             })

@@ -335,7 +335,7 @@ impl WorkItemDetails {
                     div()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
-                        .child("No work items in this project yet"),
+                        .child("No work items in this Space yet"),
                 )
             })
             .children(rows)

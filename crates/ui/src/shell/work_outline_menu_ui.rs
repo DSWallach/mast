@@ -1838,7 +1838,7 @@ mod tests {
         assert_eq!(row(&shell, cx, "move-up").disabled, None);
         assert_eq!(
             row(&shell, cx, "move-down").disabled.as_deref(),
-            Some("Already the last project")
+            Some("Already the last Space")
         );
         // Move Up dispatches the ⇧↑ action on the selected Space row.
         click(cx, "move-up");

@@ -4,7 +4,7 @@
 //! viewer only gets a message (the file is never read for a peer).
 use super::*;
 
-/// What the inline "outside the project" strip shows.
+/// What the inline "outside the Space" strip shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OutsideFileState {
     /// Owning device: offer "Open as artifact".
@@ -36,11 +36,11 @@ impl OutsideFilePrompt {
     pub(crate) fn message(&self) -> String {
         match &self.state {
             OutsideFileState::Offer | OutsideFileState::Registering => {
-                "This file is outside the project".to_owned()
+                "This file is outside the Space".to_owned()
             }
             OutsideFileState::Refused(reason) => reason.clone(),
             OutsideFileState::Remote { device } => {
-                format!("This file is outside the project on {device}")
+                format!("This file is outside the Space on {device}")
             }
         }
     }
@@ -107,7 +107,7 @@ impl Shell {
         }
         let Some(mut params) = self.register_params_for_active_chat(&prompt.path, cx) else {
             self.outside_file_prompt = Some(OutsideFilePrompt {
-                state: OutsideFileState::Refused("This chat is not in a project".into()),
+                state: OutsideFileState::Refused("This chat is not in a Space".into()),
                 ..prompt
             });
             cx.notify();

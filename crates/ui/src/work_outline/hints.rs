@@ -250,8 +250,8 @@ pub(crate) const CHAT_MOVE_KEYS: [(&str, OutlineNavKey); 3] = [
 /// The restructuring keys on a project (Space root) row of a multi-project
 /// Outline: Shift+Up / Down reorder the project roots (this device only).
 pub(crate) const SPACE_MOVE_KEYS: [(&str, OutlineNavKey); 2] = [
-    ("Project up (project row)", OutlineNavKey::MoveItemUp),
-    ("Project down (project row)", OutlineNavKey::MoveItemDown),
+    ("Space up (Space row)", OutlineNavKey::MoveItemUp),
+    ("Space down (Space row)", OutlineNavKey::MoveItemDown),
 ];
 
 /// The shortcut reference against the live keymap: the Outline keys grouped
@@ -450,7 +450,7 @@ fn linear_group(mac: bool) -> ShortcutGroup {
                 keys: Some(format!("{} / Double-click", key_label_on(mac, "enter"))),
             },
             ShortcutRow {
-                label: "Add issues from project (project-linked item)",
+                label: "Add issues from Space (Space-linked item)",
                 keys: Some(
                     if mac {
                         "Right-click / \u{2303}-click"

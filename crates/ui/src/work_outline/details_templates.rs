@@ -1,13 +1,13 @@
 //! Project templates in Work Item Details.
 //!
-//! - A project's **Project** section gets "Save as template…": a small name
+//! - A project's **Project** section gets "Save as blueprint…": a small name
 //!   prompt prefilled with the project's title. A project that already links
-//!   a live template offers "Update template" (replace it, revision + 1) or
+//!   a live template offers "Update blueprint" (replace it, revision + 1) or
 //!   "Save as new". Saving is not an undo step; it sends
 //!   `saveWorkItemTemplate` and reports through a notice (an error card on
 //!   failure).
 //! - The Space-root variant lists the Space's **Templates** (name, revision,
-//!   item count) with "New from template…" and "Delete" per row; Delete
+//!   item count) with "New from blueprint…" and "Delete" per row; Delete
 //!   confirms first.
 //!
 //! A child module of `details_panel` (like the other sections), so it uses
@@ -21,7 +21,7 @@ use super::super::store::{WorkItemView, WorkOutlineSnapshot};
 use super::{DetailsEvent, WorkItemDetails};
 use crate::theme::Theme;
 
-/// The open "Save as template…" prompt.
+/// The open "Save as blueprint…" prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SavePrompt {
     /// The live template the project already links: `(id, name, revision)`.
@@ -42,7 +42,7 @@ pub(crate) struct TemplatesDetailsState {
 }
 
 impl WorkItemDetails {
-    /// "Save as template…": open the name prompt (projects only).
+    /// "Save as blueprint…": open the name prompt (projects only).
     pub(crate) fn begin_save_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.item().cloned() else {
             return;
@@ -111,7 +111,7 @@ impl WorkItemDetails {
             .to_string();
         let max = mast_proto::template_limits::MAX_TEMPLATE_NAME_CHARS;
         if name.is_empty() || name.chars().count() > max {
-            self.templates.error = Some(format!("Name the template (1 to {max} characters)"));
+            self.templates.error = Some(format!("Name the blueprint (1 to {max} characters)"));
             cx.notify();
             return;
         }
@@ -142,14 +142,14 @@ impl WorkItemDetails {
                     Ok(_) => {
                         this.templates.prompt = None;
                         cx.emit(DetailsEvent::Notice {
-                            text: format!("Saved template \u{2018}{name}\u{2019} \u{b7} rev {revision}"),
+                            text: format!("Saved blueprint \u{2018}{name}\u{2019} \u{b7} rev {revision}"),
                             error: false,
                         });
                     }
                     Err(error) => {
                         this.templates.error = Some(error.message.clone());
                         cx.emit(DetailsEvent::Notice {
-                            text: format!("Couldn\u{2019}t save the template\n{}", error.message),
+                            text: format!("Couldn\u{2019}t save the blueprint\n{}", error.message),
                             error: true,
                         });
                     }
@@ -167,8 +167,8 @@ impl WorkItemDetails {
         let id = template.id.clone();
         let name = template.name.clone();
         let request = WorkOutlineConfirmRequest {
-            title: format!("Delete template \u{2018}{}\u{2019}?", template.name).into(),
-            body: "Projects made from it keep working; they just can\u{2019}t be compared with it any more."
+            title: format!("Delete blueprint \u{2018}{}\u{2019}?", template.name).into(),
+            body: "Items made from it keep working; they just can\u{2019}t be compared with it any more."
                 .into(),
             confirm_label: "Delete".into(),
             cancel_label: "Cancel".into(),
@@ -211,11 +211,11 @@ impl WorkItemDetails {
                 this.in_flight.remove(&key);
                 cx.emit(match result {
                     Ok(_) => DetailsEvent::Notice {
-                        text: format!("Deleted template \u{2018}{name}\u{2019}"),
+                        text: format!("Deleted blueprint \u{2018}{name}\u{2019}"),
                         error: false,
                     },
                     Err(error) => DetailsEvent::Notice {
-                        text: format!("Couldn\u{2019}t delete the template\n{}", error.message),
+                        text: format!("Couldn\u{2019}t delete the blueprint\n{}", error.message),
                         error: true,
                     },
                 });
@@ -244,7 +244,7 @@ impl WorkItemDetails {
                 revision + 1
             ),
             None => format!(
-                "Saves a copy of \u{2018}{}\u{2019} and its items; later edits to it don\u{2019}t change the template.",
+                "Saves a copy of \u{2018}{}\u{2019} and its items; later edits to it don\u{2019}t change the blueprint.",
                 item.title
             ),
         };
@@ -281,7 +281,7 @@ impl WorkItemDetails {
         if prompt.existing.is_some() {
             buttons = buttons
                 .child(
-                    Self::small_button("work-item-template-update", "Update template", theme)
+                    Self::small_button("work-item-template-update", "Update blueprint", theme)
                         .debug_selector(|| "work-item-template-update".into())
                         .on_click(cx.listener(|this, _, _, cx| this.save_template(false, cx))),
                 )
@@ -305,7 +305,7 @@ impl WorkItemDetails {
         out
     }
 
-    /// The Space-root "Templates" section.
+    /// The Space-root "Blueprints" section.
     pub(super) fn render_templates_section(
         &self,
         snapshot: &WorkOutlineSnapshot,
@@ -322,14 +322,18 @@ impl WorkItemDetails {
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
-                    .child("Templates"),
+                    .child("Blueprints"),
             );
+        section = section.child(
+            div().text_size(crate::typography::ui_rems(10.5)).text_color(theme.text_muted)
+                .child("Blueprints copy a saved tree once. Child templates apply live rules to direct children; configure one in an item’s details."),
+        );
         if snapshot.templates.is_empty() {
             return section.child(
                 div()
                     .text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_muted)
-                    .child("No templates yet. Pick any item and Save as template\u{2026} to copy its tree."),
+                    .child("No blueprints yet. Pick any item and Save as blueprint\u{2026} to copy its tree."),
             );
         }
         for (ix, template) in snapshot.templates.iter().enumerate() {
@@ -372,7 +376,7 @@ impl WorkItemDetails {
                             })),
                     )
                     .child(
-                        Self::small_button(("space-template-new", ix), "New from template\u{2026}", theme)
+                        Self::small_button(("space-template-new", ix), "New from blueprint\u{2026}", theme)
                             .debug_selector(move || new_selector.clone())
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(DetailsEvent::NewFromTemplate {

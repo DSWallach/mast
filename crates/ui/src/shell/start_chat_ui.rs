@@ -163,7 +163,7 @@ impl Shell {
             .work_outline(space_id)
             .snapshot()
             .cloned()
-            .ok_or("This project's outline is not loaded")?;
+            .ok_or("This Space's outline is not loaded")?;
         let item = snapshot.item(item_id).ok_or("That work item is gone")?;
         if item.archived_at.is_some() {
             return Err("Restore the work item to start a Chat in it");

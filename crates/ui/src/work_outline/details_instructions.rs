@@ -646,7 +646,7 @@ impl WorkItemDetails {
                                             .border_color(theme.border)
                                             .text_size(crate::typography::ui_rems(9.5))
                                             .text_color(theme.accent)
-                                            .child("From template"),
+                                            .child("From child template"),
                                     )
                                 })
                                 .when_some(badge, |el, badge| {

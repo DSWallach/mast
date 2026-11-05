@@ -231,9 +231,9 @@ impl BrowserSurface {
             let message = if self.previews_loading {
                 "Looking for dev servers…"
             } else if snapshot.remote {
-                "Start a dev server in this project on your other device. Its preview will appear here when that device is online."
+                "Start a dev server in this Space on your other device. Its preview will appear here when that device is online."
             } else {
-                "Start a dev server in this project. It will appear here automatically, ready to open."
+                "Start a dev server in this Space. It will appear here automatically, ready to open."
             };
             content = content.child(
                 div()

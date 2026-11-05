@@ -195,7 +195,7 @@ fn the_chip_shows_only_when_the_linked_revision_is_behind(cx: &mut gpui::TestApp
     });
     assert_eq!(
         review::chip_text(1, 2),
-        "Template changed (rev 1 \u{2192} 2)",
+        "Blueprint changed (rev 1 \u{2192} 2)",
         "the text names both revisions"
     );
     open_details(&overview, vcx, HOUSEKEEPING);

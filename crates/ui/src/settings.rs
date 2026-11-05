@@ -1036,7 +1036,7 @@ impl ShortcutId {
             ShortcutId::SearchWorkspaceContent => "Search in files",
             ShortcutId::QuickOpen => "Quick open",
             ShortcutId::NewSession => "New session",
-            ShortcutId::NewProject => "New project",
+            ShortcutId::NewProject => "New Space",
             ShortcutId::OpenModelPicker => "Open model picker",
             ShortcutId::NextSession => "Next session",
             ShortcutId::PrevSession => "Previous session",

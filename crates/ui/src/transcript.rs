@@ -7543,7 +7543,7 @@ fn visualization_card(
         (Some((artifact, path)), _) if artifact.wide => format!("Wide · {path}"),
         (Some((_, path)), _) => path.clone(),
         (None, Some(_)) => {
-            "Saved outside this chat’s workspace. Ask the agent to save it inside the project."
+            "Saved outside this chat’s workspace. Ask the agent to save it inside the Space."
                 .to_owned()
         }
         (None, None) => "This visualization reference couldn’t be read.".to_owned(),

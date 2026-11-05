@@ -1328,7 +1328,7 @@ impl Shell {
                         "Work item",
                         "chat-item-work-item-icon".into(),
                     ))
-                    .child(muted("No item. This chat is only in its project.".into()))
+                    .child(muted("No item. This chat is only in its Space.".into()))
                     .child(
                         link("chat-item-add-to-outline".into(), theme.success, false)
                             .child("Add to outline")
@@ -1698,7 +1698,7 @@ impl Shell {
             let chat_id = facts.chat_id.clone();
             col = col.child(
                 section("work-item", "Work item")
-                    .child(muted("No item. This chat is only in its project.".into()))
+                    .child(muted("No item. This chat is only in its Space.".into()))
                     .child(
                         action_link(format!("{prefix}-add-to-outline"), "Add to outline").on_click(
                             cx.listener(move |this, _, window, cx| {

@@ -142,9 +142,9 @@ impl OutlineView {
         )
         .is_none()
         .then_some(if up {
-            "Already the first project"
+            "Already the first Space"
         } else {
-            "Already the last project"
+            "Already the last Space"
         })
     }
 
@@ -230,7 +230,7 @@ impl OutlineView {
             .iter()
             .find(|space| space.id == space_id)
             .map(|space| space.label.clone())
-            .unwrap_or_else(|| "Project".into());
+            .unwrap_or_else(|| "Space".into());
         if hidden && self.selected.as_deref() == Some(row_key::space(space_id).as_str()) {
             // Keep the keyboard somewhere useful when the row goes away.
             self.select_past(&row_key::space(space_id), cx);
@@ -244,7 +244,7 @@ impl OutlineView {
         if hidden {
             self.show_notice(
                 format!(
-                    "Hid \u{201c}{label}\u{201d} from the Outline. Hidden projects shows it again."
+                    "Hid \u{201c}{label}\u{201d} from the Outline. Hidden Spaces shows it again."
                 ),
                 cx,
             );
@@ -262,7 +262,7 @@ impl OutlineView {
         self.show_hidden_spaces
     }
 
-    /// The toolbar's "Hidden projects (N)": show hidden Spaces as dimmed root
+    /// The toolbar's "Hidden Spaces (N)": show hidden Spaces as dimmed root
     /// rows (with Unhide), or stop showing them.
     pub(crate) fn set_show_hidden_spaces(&mut self, show: bool, cx: &mut Context<Self>) {
         if self.show_hidden_spaces == show {

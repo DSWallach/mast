@@ -44,11 +44,11 @@ impl WorkItemDetails {
             return;
         };
         let reason = match self.snapshot.as_deref() {
-            None => Some("This project\u{2019}s outline is not loaded"),
+            None => Some("This Space\u{2019}s outline is not loaded"),
             Some(_) if item.archived_at.is_some() => Some("Restore this work item first"),
             Some(_) if item.is_project => Some("This item is already a project"),
             Some(snapshot) if snapshot.templates.is_empty() => {
-                Some("Save a template first (Save as template\u{2026} on any item)")
+                Some("Save a blueprint first (Save as blueprint\u{2026} on any item)")
             }
             Some(_) => None,
         };
@@ -177,7 +177,7 @@ impl WorkItemDetails {
                         }
                         this.templates.convert = None;
                         cx.emit(DetailsEvent::Notice {
-                            text: format!("Converted to a project from template \u{2018}{name}\u{2019}"),
+                            text: format!("Converted to a project from blueprint \u{2018}{name}\u{2019}"),
                             error: false,
                         });
                     }
@@ -225,7 +225,7 @@ impl WorkItemDetails {
                 .into_any_element()
         };
         out.push(muted(
-            "Convert to project: pick the template this item should become. Nothing is changed until Apply."
+            "Convert to project: pick the blueprint this item should become. Nothing is changed until Apply."
                 .into(),
         ));
         let mut picks = div().flex().flex_wrap().gap(px(4.0));

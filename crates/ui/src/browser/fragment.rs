@@ -465,7 +465,7 @@ impl FragmentError {
                 "{path} no longer exists in this chat’s workspace. Ask the agent to recreate it, then try again."
             ),
             Self::OutsideWorkspace { path } => format!(
-                "{path} isn’t inside this chat’s checkout. Ask the agent to save the fragment inside the project."
+                "{path} isn’t inside this chat’s checkout. Ask the agent to save the fragment inside the Space."
             ),
             Self::TooLarge { bytes } => format!(
                 "The fragment is {} KB; visualizations are limited to 1 MB. Ask the agent to downsample its data.",

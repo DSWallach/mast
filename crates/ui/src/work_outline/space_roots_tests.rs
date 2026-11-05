@@ -284,7 +284,7 @@ fn new_spaces_append_after_the_saved_order(cx: &mut gpui::TestAppContext) {
 }
 
 /// Hide from Outline drops the Space and its Chats from the Outline only:
-/// List rows and the app's Chats keep them. The toolbar's "Hidden projects
+/// List rows and the app's Chats keep them. The toolbar's "Hidden Spaces
 /// (N)" reveals hidden roots dimmed with Unhide; both states persist.
 #[gpui::test]
 fn hiding_a_space_only_affects_the_outline(cx: &mut gpui::TestAppContext) {
