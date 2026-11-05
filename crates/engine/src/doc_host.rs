@@ -3077,27 +3077,6 @@ impl DocHost {
         self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))
     }
 
-    /// Reconcile and enqueue while excluding the queue drain, which removes
-    /// a row before writing its transcript entry.
-    pub(crate) async fn queue_event_message_with_id(
-        &self,
-        chat_id: &str,
-        text: &str,
-        message_id: &str,
-        events: Vec<crate::orchestrator_wakes::WakeEvent>,
-    ) -> Result<Option<String>, EngineError> {
-        let handle = self.open(chat_id)?;
-        let _drain = handle.drain_lock.lock().await;
-        if handle.doc.read_opening_tail(50)?.iter().any(|entry| entry.id == message_id) {
-            return Ok(None);
-        }
-        if !handle.doc.read_queue()?.iter().any(|item| item.id == message_id) {
-            self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))?;
-        }
-        self.inner.event_turns.register(chat_id, message_id.to_owned(), events);
-        Ok(Some(message_id.to_owned()))
-    }
-
     fn queue_message_inner(
         &self,
         chat_id: &str,
@@ -3688,6 +3667,7 @@ impl DocHost {
             return;
         };
         if matches!(handle.doc.take_queued(&message_id), Ok(Some(_))) {
+            turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
             handle.publish_queue();
             turns.cancel_pending(chat_id);
         } else {
@@ -3880,7 +3860,11 @@ impl DocHost {
                 .await?
             {
                 SteerOutcome::Accepted => {
-                    self.inner.event_turns.mark_delivered(chat_id, &message_id, handle.persistence.as_ref());
+                    let turns = self.inner.event_turns.clone();
+                    let chat = chat_id.to_owned();
+                    let message = message_id.clone();
+                    let snapshot = handle.persistence.clone();
+                    let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message, snapshot.as_ref())).await;
                     return Ok(());
                 },
                 // The run died under us between the status read and the send;
@@ -3941,7 +3925,10 @@ impl DocHost {
         // Validated above; skip the chokepoint's second validation.
         self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id.clone()))
             .await?;
-        self.inner.event_turns.mark_delivered(chat_id, &message_id, handle.persistence.as_ref());
+        let turns = self.inner.event_turns.clone();
+        let chat = chat_id.to_owned();
+        let snapshot = handle.persistence.clone();
+        let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message_id, snapshot.as_ref())).await;
         Ok(())
     }
 

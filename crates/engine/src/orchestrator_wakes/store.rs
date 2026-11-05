@@ -9,7 +9,7 @@ use super::WakeEvent;
 
 const EVENT_CAP: usize = 500;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct WakeStore {
     pub orchestrators: HashMap<String, Vec<StoredEvent>>,
 }
@@ -28,6 +28,8 @@ mod tests {
             },
             message_id: None,
             delivered: false,
+            retired_message_id: None,
+            retired_chat_id: None,
         }
     }
 
@@ -119,13 +121,18 @@ mod tests {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct StoredEvent {
     pub event: WakeEvent,
     /// Queue and transcript messages retain the same id.
     pub message_id: Option<String>,
     #[serde(default)]
     pub delivered: bool,
+    /// Queue row removed during recovery; retained until its removal is durable.
+    #[serde(default)]
+    pub retired_message_id: Option<String>,
+    #[serde(default)]
+    pub retired_chat_id: Option<String>,
 }
 
 impl WakeStore {
@@ -139,10 +146,11 @@ impl WakeStore {
             let entries = self.orchestrators.entry(chat.clone()).or_default();
             for event in events {
                 if let Some(entry) = entries.iter_mut().find(|entry| entry.event.id == event.id) {
+                    if entry.message_id.is_some() { entry.retired_message_id = entry.message_id.clone(); entry.retired_chat_id = Some(chat.clone()); }
                     entry.message_id = None;
                     entry.delivered = false;
                 } else {
-                    entries.push(StoredEvent { event: event.clone(), message_id: None, delivered: false });
+                    entries.push(StoredEvent { event: event.clone(), message_id: None, delivered: false, retired_message_id: None, retired_chat_id: None });
                 }
             }
         }
@@ -168,6 +176,7 @@ impl WakeStore {
 
     /// Reconcile receipts before restoring held events. Queue entries remain
     /// durable until their corresponding transcript entry appears.
+    #[cfg(test)]
     pub fn reconcile(&mut self, chat: &str, queue: &HashSet<String>, transcript: &HashSet<String>) -> Vec<WakeEvent> {
         let Some(events) = self.orchestrators.get_mut(chat) else { return Vec::new() };
         events.retain(|entry| !entry.message_id.as_ref().is_some_and(|id| transcript.contains(id)));
@@ -190,6 +199,7 @@ impl WakeStore {
         let destination = self.orchestrators.entry(to.to_owned()).or_default();
         for mut entry in entries {
             if !destination.iter().any(|existing| existing.event.id == entry.event.id) {
+                if entry.message_id.is_some() { entry.retired_message_id = entry.message_id.clone(); entry.retired_chat_id = Some(from.to_owned()); }
                 entry.message_id = None;
                 entry.delivered = false;
                 destination.push(entry);

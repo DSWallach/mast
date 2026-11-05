@@ -76,6 +76,7 @@ impl ChatPersistence {
         self.saved.load(Ordering::Acquire) >= generation
     }
 
+
     pub(crate) fn applied(&self, cursor: u64, immediate: bool) {
         self.cursor.fetch_max(cursor, Ordering::AcqRel);
         self.dirty(immediate);

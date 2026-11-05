@@ -408,6 +408,21 @@ mod tests {
     const ORCH: &str = "orch";
 
     #[test]
+    fn repeated_event_id_is_not_delivered_twice() {
+        let mut core = WakeCore::new();
+        let first = event(&mut core, "worker", WakeEventKind::WorkerReport, "first", 1);
+        assert!(core.record(ORCH, first.clone(), 1));
+        let batch = match core.decide(ORCH, WAKE_WINDOW_MS + 1, IDLE, false) {
+            Decision::Deliver(batch) => batch,
+            other => panic!("expected delivery: {other:?}"),
+        };
+        core.delivered(ORCH, &batch, WAKE_WINDOW_MS + 1);
+        let mut replay = first;
+        replay.key = "different-key".into();
+        assert!(!core.record(ORCH, replay, WAKE_WINDOW_MS + 2));
+    }
+
+    #[test]
     fn wake_event_serialization_preserves_identity_and_report() {
         let mut core = WakeCore::new();
         let mut original = event(&mut core, "worker", WakeEventKind::WorkerReport, "report", 123);

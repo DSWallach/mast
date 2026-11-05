@@ -42,6 +42,84 @@ async fn held_report_survives_service_restart_and_respects_draft() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_reclaims_only_wake_rows() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "queued report").await.unwrap();
+    let path = rig.store.with_file_name("orchestrator-wake-events.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["orchestrators"][ORCH][0]["message_id"] = "wake-row".into();
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let handle = rig.core.doc_host.open(ORCH).unwrap();
+    for (id, text) in [("user-row", "user message"), ("wake-row", "Worker updates")] {
+        handle.doc().push_queued(&mast_doc::QueuedMessage { id: id.into(), text: text.into(), attachments: vec![],
+            hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None,
+            delivery_gate: (id == "user-row").then(|| mast_doc::QueueDeliveryGate::ReviewRequired {
+                previous_lease_id: "lease".into(), owner_device_id: rig.core.device_id.clone(), since_ms: 1, base_text_hash: "hash".into(),
+            }) }).unwrap();
+    }
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    let queue = handle.doc().read_queue().unwrap();
+    assert_eq!(queue.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), vec!["user-row"]);
+    assert_eq!(restarted.status(ORCH).held.len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_replays_a_dequeued_unreceipted_report() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "dequeued report").await.unwrap();
+    let path = rig.store.with_file_name("orchestrator-wake-events.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["orchestrators"][ORCH][0]["message_id"] = "dequeued-row".into();
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert_eq!(restarted.status(ORCH).held.len(), 1);
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, false).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|prompt| prompt.contains("dequeued report")), "replayed report").await;
+    assert_eq!(rig.wake_prompts().iter().filter(|prompt| prompt.contains("dequeued report")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graceful_restart_does_not_replay_a_delivered_report() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "delivered report").await.unwrap();
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate(ORCH, false).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|prompt| prompt.contains("delivered report")), "delivered report").await;
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(restarted.status(ORCH).held.is_empty());
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, false).await;
+    assert_eq!(rig.wake_prompts().iter().filter(|prompt| prompt.contains("delivered report")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_moves_report_restored_after_restart() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("restore-handoff-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("restore-source", None), ("restore-destination", None), ("restore-worker", Some("restore-source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("restore-handoff-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    rig.wakes.report_to_parent("restore-worker", "restored hand-off").await.unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    restarted.hand_off_orchestrator("restore-source", "restore-destination", "restore-source").await.unwrap();
+    assert!(restarted.status("restore-source").held.is_empty());
+    assert_eq!(restarted.status("restore-destination").held.len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hand_off_reparents_workers_and_moves_held_reports() {
     let rig = Rig::new().await;
     rig.core.workspace.create_space("handoff-space", &rig.core.device_id, "/tmp", None, false).unwrap();
