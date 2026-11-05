@@ -5057,6 +5057,13 @@ impl Composer {
 
     /// Add dropped or pasted paths, staging images and mentioning other paths.
     pub(crate) fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.queue_edit_finishing {
+            self.failure =
+                Some("Wait for the queued message to finish saving before adding files.".into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return;
+        }
         let (roots, remote_device) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat_row();
@@ -5085,7 +5092,8 @@ impl Composer {
             let name = path
                 .file_name()
                 .unwrap_or(path.as_os_str())
-                .to_string_lossy().into_owned();
+                .to_string_lossy()
+                .into_owned();
             let metadata = match std::fs::metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
@@ -9048,6 +9056,79 @@ mod tests {
         (dir, window)
     }
 
+    #[gpui::test]
+    fn dropped_paths_include_files_folders_and_failures(cx: &mut gpui::TestAppContext) {
+        let (workspace, handle) = composer_focus_window(cx);
+        let outside = tempfile::tempdir().unwrap();
+        let json = workspace.path().join("config.json");
+        let folder = workspace.path().join("folder");
+        let image = workspace.path().join("image.png");
+        let text = outside.path().join("notes.txt");
+        std::fs::write(&json, "{}").unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&text, "notes").unwrap();
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.spaces.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "space", "deviceId": "local", "path": workspace.path(),
+                            "createdAt": "2026-01-01T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    );
+                    state.selected_space = Some("space".into());
+                    state.no_project = false;
+                });
+                composer.add_paths(
+                    vec![
+                        image,
+                        json,
+                        folder,
+                        text.clone(),
+                        workspace.path().join("missing"),
+                    ],
+                    cx,
+                );
+                let raw = composer.input.read(cx).text();
+                assert!(
+                    raw.contains("[config.json](mast-file:config.json)"),
+                    "{raw}"
+                );
+                assert!(raw.contains("[folder](mast-file:folder/)"), "{raw}");
+                assert!(
+                    raw.contains(&format!("`{}`", text.canonicalize().unwrap().display())),
+                    "{raw}"
+                );
+                assert_eq!(composer.staged().len(), 1);
+                assert!(composer.failure.as_ref().unwrap().contains("missing"));
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                composer.state.update(cx, |state, _| {
+                    state.spaces[0].device_id = "remote".into();
+                    state.devices.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "remote", "name": "Other Mac", "platform": "macos"
+                        }))
+                        .unwrap(),
+                    );
+                });
+                composer.add_paths(vec![text], cx);
+                assert!(composer.input.read(cx).text().is_empty());
+                assert!(
+                    composer
+                        .failure
+                        .as_ref()
+                        .unwrap()
+                        .contains("notes.txt is on this Mac; the chat runs on Other Mac")
+                );
+            })
+            .unwrap();
+    }
+
     /// Regression: the overview search was built with a bespoke key context
     /// ("OverviewSearch") that `input_bindings` never registers, so typing
     /// worked (IME path) but backspace/delete/⌥⌫/⌘⌫ were dead keys. A search
@@ -9968,7 +10049,7 @@ mod tests {
     }
 
     #[test]
-    fn dropped_mentions_reject_paths_outside_the_workspace() {
+    fn dropped_mentions_accept_absolute_paths_and_reject_parent_paths() {
         assert_eq!(
             dropped_file_mention("", 0..0, "/tmp/file.rs", false)
                 .unwrap()
