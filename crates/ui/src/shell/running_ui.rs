@@ -496,7 +496,6 @@ impl Shell {
         #[cfg(test)]
         {
             RELAUNCHES.with(|count| count.set(count.get() + 1));
-            return;
         }
         #[cfg(not(test))]
         {

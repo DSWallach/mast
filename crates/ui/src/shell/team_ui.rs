@@ -634,7 +634,7 @@ impl Shell {
     ) -> AnyElement {
         let finished = team.finished();
         let n = finished.len();
-        let mut block = div().flex().flex_col().gap(px(5.0));
+        let block = div().flex().flex_col().gap(px(5.0));
         if n == 0 {
             self.wakes.archive_confirm.remove(chat_id);
             return block.into_any_element();

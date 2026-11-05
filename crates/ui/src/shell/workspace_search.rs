@@ -296,12 +296,12 @@ impl Shell {
                 let Some(paths) = diff.read(cx).changed_paths() else {
                     return;
                 };
-                if let Some(search) = this.workspace_search.as_mut() {
-                    if !search.has_diff || search.changed != paths {
-                        search.has_diff = true;
-                        search.changed = paths;
-                        this.update_workspace_search(cx);
-                    }
+                if let Some(search) = this.workspace_search.as_mut()
+                    && (!search.has_diff || search.changed != paths)
+                {
+                    search.has_diff = true;
+                    search.changed = paths;
+                    this.update_workspace_search(cx);
                 }
             }));
         }

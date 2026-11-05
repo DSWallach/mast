@@ -1012,7 +1012,7 @@ mod pinned_session_tests {
         let (host, cx) = cx.add_window_view(|_, cx| {
             PinnedHost(cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
+                let shell = Shell::new(
                     state,
                     EngineBootConfig {
                         data_dir: dir.path().into(),
@@ -2721,15 +2721,14 @@ impl Shell {
             self.cancel_sidebar_session_transfer(cx);
             return;
         }
-        if let SidebarSessionDrop::Section(id) = &target {
-            if !self
+        if let SidebarSessionDrop::Section(id) = &target
+            && !self
                 .active_sidebar_sections(cx)
                 .iter()
                 .any(|section| &section.id == id)
-            {
-                self.cancel_sidebar_session_transfer(cx);
-                return;
-            }
+        {
+            self.cancel_sidebar_session_transfer(cx);
+            return;
         }
         let saved = self.raw_sidebar_pins(cx);
         let next = sidebar_session_drop_pins(
@@ -3252,13 +3251,13 @@ impl Shell {
             }
         }
         self.schedule_save(cx);
-        if row.closes_submenu() {
-            if let Some(menu) = self.sidebar_view_menu.open_mut() {
-                menu.submenu = None;
-                menu.submenu_active = None;
-                menu.submenu_bounds = None;
-                menu.hover_intent.cancel();
-            }
+        if row.closes_submenu()
+            && let Some(menu) = self.sidebar_view_menu.open_mut()
+        {
+            menu.submenu = None;
+            menu.submenu_active = None;
+            menu.submenu_bounds = None;
+            menu.hover_intent.cancel();
         }
         cx.notify();
     }
@@ -3365,12 +3364,11 @@ impl Shell {
             }
             "right" | "enter" | "space" => {
                 if let Some(group) = menu.submenu {
-                    if key == "enter" {
-                        if let Some(choice) = menu.submenu_active {
-                            let row =
-                                SIDEBAR_VIEW_ROWS[SIDEBAR_VIEW_GROUPS[group].1.start + choice];
-                            self.activate_sidebar_view_row(row, cx);
-                        }
+                    if key == "enter"
+                        && let Some(choice) = menu.submenu_active
+                    {
+                        let row = SIDEBAR_VIEW_ROWS[SIDEBAR_VIEW_GROUPS[group].1.start + choice];
+                        self.activate_sidebar_view_row(row, cx);
                     }
                 } else {
                     let group = menu.active.unwrap_or(0);
@@ -3497,11 +3495,11 @@ impl Shell {
                     move |bounds, window, cx| {
                         let left = bounds.right() + px(244.0) > window.viewport_size().width;
                         let _ = entity.update(cx, |this, cx| {
-                            if let Some(menu) = this.sidebar_view_menu.open_mut() {
-                                if menu.submenu_on_left != left {
-                                    menu.submenu_on_left = left;
-                                    cx.notify();
-                                }
+                            if let Some(menu) = this.sidebar_view_menu.open_mut()
+                                && menu.submenu_on_left != left
+                            {
+                                menu.submenu_on_left = left;
+                                cx.notify();
                             }
                         });
                     },
@@ -4747,17 +4745,17 @@ impl Shell {
                 }
                 continue;
             };
-            if let Some(id) = key.strip_prefix("section:") {
-                if let Some(section) = custom_sections.iter().find(|section| section.id == id) {
-                    rendered.push(self.render_custom_sidebar_section(
-                        section.clone(),
-                        rendered_rows,
-                        drag_group,
-                        theme,
-                        cx,
-                    ));
-                    continue;
-                }
+            if let Some(id) = key.strip_prefix("section:")
+                && let Some(section) = custom_sections.iter().find(|section| section.id == id)
+            {
+                rendered.push(self.render_custom_sidebar_section(
+                    section.clone(),
+                    rendered_rows,
+                    drag_group,
+                    theme,
+                    cx,
+                ));
+                continue;
             }
             let organization = match self.settings.sidebar_organization {
                 SidebarOrganization::ByDevice => "device",
@@ -5515,11 +5513,10 @@ impl Shell {
         };
         if rows.is_empty() {
             let text = flow.search.read(cx).text().to_string();
-            if text.starts_with('/') || text.starts_with('~') {
-                if let Some(target) = crate::pickers::typed_path_target(&text, flow.home.as_deref())
-                {
-                    self.add_space_descend(target, false, cx);
-                }
+            if (text.starts_with('/') || text.starts_with('~'))
+                && let Some(target) = crate::pickers::typed_path_target(&text, flow.home.as_deref())
+            {
+                self.add_space_descend(target, false, cx);
             }
             return;
         }
@@ -5822,7 +5819,7 @@ impl Shell {
             return;
         };
         match flow.step {
-            ProjectStep::Devices => return,
+            ProjectStep::Devices => (),
             ProjectStep::Locations => self.add_space_back_to(ProjectStep::Devices, cx),
             ProjectStep::Folders => {
                 let listing = flow.browser.ready();

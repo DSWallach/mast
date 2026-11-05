@@ -174,7 +174,7 @@ impl Shell {
                 window,
                 move |this: &mut Self, source, event, window, cx| match event {
                     FilesEvent::OpenFile(path)
-                        if this.accepts_file_navigation(&owner, &source, cx) =>
+                        if this.accepts_file_navigation(&owner, source, cx) =>
                     {
                         this.add_file_surface(path.clone(), window, cx);
                     }
