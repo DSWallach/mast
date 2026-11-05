@@ -1,5 +1,6 @@
 //! Classifiers and aggregate calculations for offline Mast measurements.
 
+pub mod metrics;
 pub mod snapshot;
 
 /// Detect a potential prose question; this is a heuristic, not a decision audit.
