@@ -26,10 +26,10 @@ impl RegistryDoc {
                 if value.as_bool() == Some(true) {
                     state.viewed_hunks.insert(hash.to_owned());
                 }
-            } else if field.starts_with("f:") {
-                if let Some(path) = value.as_str() {
-                    state.viewed_files.insert(path.to_owned());
-                }
+            } else if field.starts_with("f:")
+                && let Some(path) = value.as_str()
+            {
+                state.viewed_files.insert(path.to_owned());
             }
         }
         Some(state)
@@ -67,12 +67,13 @@ impl RegistryDoc {
                 "diff review state was cleared; reload before editing".into(),
             ));
         }
-        if let Some(current) = self.diff_review_state(&state.target) {
-            if current.head_sha != before.head_sha && current.head_sha != state.head_sha {
-                return Err(DocError::Schema(
-                    "review head changed; reload and mark it again".into(),
-                ));
-            }
+        if let Some(current) = self.diff_review_state(&state.target)
+            && current.head_sha != before.head_sha
+            && current.head_sha != state.head_sha
+        {
+            return Err(DocError::Schema(
+                "review head changed; reload and mark it again".into(),
+            ));
         }
         let id = row_id(&state.target);
         self.observe_row(KIND_DIFF_REVIEW_STATE, &id);

@@ -571,16 +571,15 @@ impl RegistryDoc {
             return Err(invalid("A fact label or value exceeds its character limit"));
         }
         if p.options.iter().any(|option| {
-                option.id.trim().is_empty()
-                    || option.id.chars().count() > 120
-                    || option.label.trim().is_empty()
-                    || option.label.chars().count() > 120
-                    || option
-                        .detail
-                        .as_ref()
-                        .is_some_and(|detail| detail.chars().count() > 1000)
-            })
-        {
+            option.id.trim().is_empty()
+                || option.id.chars().count() > 120
+                || option.label.trim().is_empty()
+                || option.label.chars().count() > 120
+                || option
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.chars().count() > 1000)
+        }) {
             return Err(invalid(
                 "Options require an id and label and must fit within their limits",
             ));
@@ -739,17 +738,16 @@ impl RegistryDoc {
                 ));
             }
         }
-        if let Some(via) = p.via.as_deref() {
-            if !["card", "chat", "agent"].contains(&via)
+        if let Some(via) = p.via.as_deref()
+            && (!["card", "chat", "agent"].contains(&via)
                 || (via == "card" && actor.kind != WorkOutlineActorKind::User)
                 || (via == "chat" && p.answer.is_none())
-                || (via == "agent" && actor.kind != WorkOutlineActorKind::Agent)
-            {
-                return Err(WorkOutlineError::new(
-                    WorkOutlineErrorCode::Invalid,
-                    "Invalid resolution provenance",
-                ));
-            }
+                || (via == "agent" && actor.kind != WorkOutlineActorKind::Agent))
+        {
+            return Err(WorkOutlineError::new(
+                WorkOutlineErrorCode::Invalid,
+                "Invalid resolution provenance",
+            ));
         }
         if p.values
             .as_ref()
