@@ -631,6 +631,24 @@ impl WorkOutlineActions {
         }
     }
 
+    /// Transfer a coordinator's workers to a successor before its first turn.
+    pub(crate) fn hand_off_orchestrator(
+        &self,
+        params: mast_proto::HandOffOrchestratorParams,
+    ) -> Task<Result<mast_proto::CreateChatForWorkItemReply, WorkOutlineError>> {
+        match serde_json::to_value(&params) {
+            Ok(value) => self.call(
+                methods::HAND_OFF_ORCHESTRATOR,
+                value,
+                decode_json::<mast_proto::CreateChatForWorkItemReply>,
+            ),
+            Err(error) => Task::ready(Err(WorkOutlineError::new(
+                WorkOutlineErrorCode::Invalid,
+                error.to_string(),
+            ))),
+        }
+    }
+
     /// `ContinueChatForWorkItem`: queue the next Turn of an existing Chat
     /// with ids derived from `operationId` (message `derive_id(op,
     /// "message")`, command `derive_id(op, "command")`). The host pins the
