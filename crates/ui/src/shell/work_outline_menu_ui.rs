@@ -2006,6 +2006,51 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn sign_in_again_starts_login_for_existing_account(cx: &mut gpui::TestAppContext) {
+        use crate::managed_accounts::AccountFlow;
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, _outline, _calls, cx) = two_space_shell(cx, dir.path());
+        let accounts = script_accounts(&shell, cx);
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        let flow = cx.new(|cx| AccountFlow::new(
+            state, mast_proto::HarnessId::ClaudeCode, None, Some("d".into()), cx,
+        ));
+        flow.update(cx, |flow, cx| flow.sign_in_again("a1".into(), Some("Work".into()), cx));
+        cx.run_until_parked();
+        let calls = accounts.lock().unwrap();
+        assert!(!calls.iter().any(|(method, _)| method == mast_rpc::methods::CREATE_MANAGED_ACCOUNT));
+        let login = calls.iter().find(|(method, _)| method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN).unwrap();
+        assert_eq!(login.1["accountId"], "a1");
+    }
+
+    #[gpui::test]
+    fn chat_sign_in_again_uses_the_pinned_account_or_default(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, _outline, _calls, cx) = two_space_shell(cx, dir.path());
+        let accounts = script_accounts(&shell, cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                for chat in state.chats.iter_mut().filter(|chat| chat.id == "chat-api" || chat.id == "chat-ui") {
+                    chat.config = Some(mast_proto::ChatConfig {
+                        harness: mast_proto::HarnessId::ClaudeCode, model: None, reasoning: None,
+                        model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+                        auto_approve: false,
+                    });
+                }
+            });
+            shell.sign_in_for_chat("chat-api".into(), cx);
+        });
+        cx.run_until_parked();
+        assert!(accounts.lock().unwrap().iter().any(|(method, params)|
+            method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN && params["accountId"] == "a1"));
+        assert!(cx.debug_bounds("managed-account-a1").is_some());
+        shell.update(cx, |shell, cx| shell.sign_in_for_chat("chat-ui".into(), cx));
+        cx.run_until_parked();
+        assert!(accounts.lock().unwrap().iter().any(|(method, params)|
+            method == mast_rpc::methods::START_AGENT_LOGIN && params["harness"] == "claude-code"));
+    }
+
     /// The sign-in sheet follows the CLI's output (URL, code prompt) and a
     /// pasted code goes out as one SubmitManagedAccountLoginCode call, with the
     /// field cleared afterwards.

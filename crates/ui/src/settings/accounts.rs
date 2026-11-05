@@ -14,6 +14,8 @@ use gpui::{
     AnyElement, Context, Entity, Hsla, SharedString, Subscription, Task, Window, div, prelude::*,
     px,
 };
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use mast_proto::{
@@ -199,6 +201,9 @@ pub struct AccountsPage {
     /// Project accounts section (managed accounts, device-local).
     managed: Loadable<ManagedAccountsSnapshot>,
     managed_error: Option<SharedString>,
+    focused_managed_account: Option<String>,
+    focused_account_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    focus_account_pending: bool,
     managed_task: Option<Task<()>>,
     account_flow: Option<Entity<AccountFlow>>,
     account_flow_sub: Option<Subscription>,
@@ -242,6 +247,9 @@ impl AccountsPage {
             poll_task: None,
             managed: Loadable::Idle,
             managed_error: None,
+            focused_managed_account: None,
+            focused_account_bounds: Rc::new(Cell::new(None)),
+            focus_account_pending: false,
             managed_task: None,
             account_flow: None,
             account_flow_sub: None,
@@ -537,13 +545,48 @@ impl AccountsPage {
         cx.notify();
     }
 
+    pub(crate) fn sign_in_for_chat(&mut self, device: String, harness: HarnessId, account_id: Option<String>, label: Option<String>, snapshot: ManagedAccountsSnapshot, cx: &mut Context<Self>) {
+        let target = (!self.state.read(cx).is_local_device(&device)).then_some(device);
+        self.set_target_device(target, cx);
+        self.managed = Loadable::Ready(snapshot);
+        self.focused_managed_account = account_id.clone();
+        self.focused_account_bounds.set(None);
+        self.focus_account_pending = account_id.is_some();
+        match account_id {
+            Some(id) => self.open_managed_sign_in(harness, Some((id, label)), cx),
+            None => self.start_login(harness, cx),
+        }
+    }
+
+    pub(crate) fn refresh_managed_accounts(&mut self, cx: &mut Context<Self>) {
+        self.load_managed(false, cx);
+    }
+
+    pub(crate) fn sign_in_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.managed_error = Some(message.into());
+        cx.notify();
+    }
+
     fn open_account_flow(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        self.open_managed_sign_in(harness, None, cx);
+    }
+
+    fn open_managed_sign_in(
+        &mut self,
+        harness: HarnessId,
+        account: Option<(String, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
         let state = self.state.clone();
         let device = self.target_device.clone();
         let flow = cx.new(|cx| AccountFlow::new(state, harness, None, device, cx));
+        if let Some((account_id, label)) = account {
+            flow.update(cx, |flow, cx| flow.sign_in_again(account_id, label, cx));
+        }
         self.account_flow_sub = Some(cx.subscribe(&flow, |this: &mut Self, _, _, cx| {
             this.account_flow = None;
             this.account_flow_sub = None;
+            this.focused_managed_account = None;
             this.load_managed(true, cx);
         }));
         self.account_flow = Some(flow);
@@ -559,6 +602,11 @@ impl AccountsPage {
                 .enumerate()
                 .map(|(ix, account)| {
                     let remove_id = account.id.clone();
+                    let sign_in_id = account.id.clone();
+                    let sign_in_label = account.label.clone();
+                    let focused = self.focused_managed_account.as_deref() == Some(account.id.as_str());
+                    let focus_bounds = self.focused_account_bounds.clone();
+                    let harness = account.harness;
                     // The meters sit under this row's own label and email, so
                     // each ring is attributed to the account it measures.
                     let meters: Vec<AnyElement> = account
@@ -568,6 +616,12 @@ impl AccountsPage {
                         .collect();
                     div()
                         .id(("managed-account-row", ix))
+                        .debug_selector({ let selector = format!("managed-account-{}", account.id); move || selector.clone() })
+                        .relative()
+                        .when(focused, |el| el.bg(theme.accent.opacity(0.08)).child(
+                            gpui::canvas(move |bounds, _, _| focus_bounds.set(Some(bounds)), |_, _, _, _| {})
+                                .absolute().size_full()
+                        ))
                         .px(px(20.0))
                         .py(px(12.0))
                         .when(ix > 0, |el| el.border_t_1().border_color(theme.border))
@@ -608,6 +662,16 @@ impl AccountsPage {
                             theme,
                             crate::managed_accounts::harness_name(account.harness),
                         ))
+                        .when(!account.signed_in, |el| el.child(widgets::badge(theme, "Signed out")))
+                        .child(
+                            widgets::ghost_action(theme)
+                                .id(("managed-account-sign-in", ix))
+                                .hover(|s| widgets::ghost_hover(theme, s))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_managed_sign_in(harness, Some((sign_in_id.clone(), Some(sign_in_label.clone()))), cx)
+                                }))
+                                .child(SharedString::from("Sign in again")),
+                        )
                         .child(
                             widgets::ghost_action(theme)
                                 .id(("managed-account-remove", ix))
@@ -760,21 +824,17 @@ impl AccountsPage {
     // ---- add-account flows ----
 
     fn start_login(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
+        let rpc = self.state.read(cx).accounts_rpc(self.target_device.as_deref());
+        if !rpc.is_connected() { return; }
         self.login = Some(LoginFlow::Starting { harness });
         self.error = None;
-        let params = self.params(serde_json::json!({ "harness": harness }));
+        let params = serde_json::json!({ "harness": harness });
         self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::START_AGENT_LOGIN, params)
-                .await;
+            let result = rpc.call(methods::START_AGENT_LOGIN, params).await;
             this.update(cx, |page, cx| {
                 match result.and_then(|value| {
                     serde_json::from_value::<AgentLoginStart>(value)
-                        .map_err(|e| mast_rpc::RpcError::Failed(e.to_string()))
+                        .map_err(|e| e.to_string())
                 }) {
                     Ok(start) => {
                         cx.open_url(&start.url);
@@ -1485,6 +1545,25 @@ impl Render for AccountsPage {
         let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
         let project_accounts = self.render_project_accounts(&theme, cx);
+        if self.focus_account_pending {
+            self.focus_account_pending = false;
+            let bounds = self.focused_account_bounds.clone();
+            let scroll = self.scroll.scroll.clone();
+            window.on_next_frame(move |_, _| {
+                if let Some(row) = bounds.get() {
+                    let viewport = scroll.bounds();
+                    let offset = scroll.offset();
+                    let adjustment = if row.top() < viewport.top() {
+                        viewport.top() - row.top()
+                    } else if row.bottom() > viewport.bottom() {
+                        viewport.bottom() - row.bottom()
+                    } else {
+                        px(0.0)
+                    };
+                    scroll.set_offset(gpui::point(offset.x, (offset.y + adjustment).clamp(-scroll.max_offset().y, px(0.0))));
+                }
+            });
+        }
         let flow_dialog = self.account_flow.clone().map(|flow| {
             let popup_theme = Theme::of(cx).for_popup();
             let card = flow.update(cx, |flow, cx| flow.render_card(&popup_theme, window, cx));

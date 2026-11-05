@@ -3879,6 +3879,7 @@ impl Shell {
     ) {
         match event {
             TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
+            TranscriptEvent::SignInAgain(chat_id) => self.sign_in_for_chat(chat_id.clone(), cx),
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,
@@ -3895,6 +3896,36 @@ impl Shell {
                 );
             }
         }
+    }
+
+    fn sign_in_for_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let Some((device, harness)) = self.state.read(cx).chats.iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref().map(|config| (chat.device_id.clone(), config.harness))) else { return; };
+        let rpc = self.state.read(cx).accounts_rpc(Some(&device));
+        self.open_settings(SettingsSection::Agents, cx);
+        if self.accounts_page.is_none() {
+            let state = self.state.clone();
+            self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
+        }
+        let page = self.accounts_page.clone().expect("accounts page initialized");
+        cx.spawn(async move |_, cx| {
+            let snapshot = rpc.call(methods::LIST_MANAGED_ACCOUNTS, crate::managed_accounts::list_params(false)).await
+                .and_then(|value| serde_json::from_value::<mast_proto::ManagedAccountsSnapshot>(value).map_err(|error| error.to_string()));
+            let result = snapshot.and_then(|snapshot| {
+                snapshot.chat_pins.iter().find(|pin| pin.chat_id == chat_id && pin.harness == harness)
+                    .map(|pin| {
+                        let account_id = pin.account_id.clone();
+                        let label = account_id.as_ref().and_then(|id| snapshot.accounts.iter().find(|account| &account.id == id)).map(|account| account.label.clone());
+                        (account_id, label, snapshot.clone())
+                    })
+                    .ok_or_else(|| "Could not find the account pinned to this chat.".to_string())
+            });
+            page.update(cx, |page, cx| match result {
+                Ok((account_id, label, snapshot)) => page.sign_in_for_chat(device, harness, account_id, label, snapshot, cx),
+                Err(error) => page.sign_in_error(error, cx),
+            });
+        }).detach();
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -4660,6 +4691,11 @@ impl Shell {
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
+        }
+        if section == SettingsSection::Agents {
+            if let Some(page) = &self.accounts_page {
+                page.update(cx, |page, cx| page.refresh_managed_accounts(cx));
+            }
         }
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));

@@ -2969,6 +2969,18 @@ async fn drive_run(
             inner.capture_friction(&chat_id, mast_proto::FrictionKind::ToolFailure, &format!("{server_name} rejected server request: {method}"), &format!("Unsupported server request {method} from {server_name}"), None);
             continue;
         }
+        let authentication_error = match &event {
+            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } => Some(message.as_str()),
+            _ => None,
+        };
+        if authentication_error.is_some_and(mast_harness::is_authentication_failure) {
+            if let Some(accounts) = inner.managed_accounts.get() {
+                if let Err(error) = accounts.mark_chat_signed_out(&chat_id, harness_id) {
+                    tracing::warn!(%error, "could not record account sign-out");
+                }
+            }
+        }
         if let AgentEvent::Error { message } = &event { friction_turn_error = Some(message.clone()); }
         if let AgentEvent::Done { status: DoneStatus::Errored, error, .. } = &event {
             let detail = error.as_deref().filter(|text| !text.trim().is_empty()).or(friction_turn_error.as_deref().filter(|text| !text.trim().is_empty())).unwrap_or("Session errored");

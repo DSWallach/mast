@@ -3273,6 +3273,7 @@ impl Render for BlobFetchErrorTooltip {
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
     OpenChat(String),
+    SignInAgain(String),
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -6498,7 +6499,23 @@ impl Transcript {
                 );
                 crate::artifacts::cards::artifact_card(&row.id, card, self.link_ui(), &theme)
             }
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ErrorChip { message } => {
+                let chat = self.chat_id.clone().filter(|_| self.doc_override.is_none());
+                let action = chat.filter(|chat_id| {
+                    mast_harness::is_authentication_failure(message)
+                        && self.state.read(cx).chats.iter().find(|chat| chat.id == *chat_id)
+                            .and_then(|chat| chat.config.as_ref())
+                            .is_some_and(|config| crate::managed_accounts::supports_accounts(config.harness))
+                });
+                div().child(error_chip(message.clone(), &theme))
+                    .when_some(action, |el, chat_id| el.child(
+                        div().id(SharedString::from(format!("{}-sign-in-again", row.id)))
+                            .debug_selector({ let selector = format!("{}-sign-in-again", row.id); move || selector.clone() })
+                            .cursor_pointer().text_color(theme.accent)
+                            .child("Sign in again…")
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(TranscriptEvent::SignInAgain(chat_id.clone()))))
+                    )).into_any_element()
+            },
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -13260,6 +13277,59 @@ mod tests {
             fixture.update(vcx, |_, cx| cx.notify());
             vcx.run_until_parked();
             assert_eq!(vcx.debug_bounds("relay-source").is_some(), has_header);
+        }
+    }
+
+    #[gpui::test]
+    fn authentication_notice_offers_sign_in_for_managed_and_default_chats(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            for chat_id in ["managed", "default"] {
+                let mut chat: mast_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": chat_id, "deviceId": "device", "archived": false,
+                    "createdAt": chrono::Utc::now(), "spaceId": "space"
+                })).unwrap();
+                chat.config = Some(mast_proto::ChatConfig {
+                    harness: mast_proto::HarnessId::ClaudeCode, model: None, reasoning: None,
+                    model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+                    auto_approve: false,
+                });
+                state.chats.push(chat);
+            }
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let selected = Rc::new(std::cell::RefCell::new(None));
+        let captured = selected.clone();
+        let _subscription = cx.update(|cx| cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+            if let TranscriptEvent::SignInAgain(id) = event { *captured.borrow_mut() = Some(id.clone()); }
+        }));
+        let mut entry = assistant("failure", MessageStatus::Complete, vec![]);
+        entry.parts = vec![MessagePart::Error { id: "error".into(), message: "Authentication failed — sign in to Claude again.".into() }];
+        transcript.update(cx, |this, _| {
+            this.rows = rows_for_entry(&entry, false, &mut parse);
+            this.chat_id = Some("managed".into());
+            this.content_width = 600.0;
+        });
+        struct RowFixture(Entity<Transcript>);
+        impl Render for RowFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |this, cx| this.render_row(0, window, cx))
+            }
+        }
+        let (fixture, vcx) = cx.add_window_view(|_, _| RowFixture(transcript.clone()));
+        for chat_id in ["managed", "default"] {
+            transcript.update(vcx, |this, _| this.chat_id = Some(chat_id.into()));
+            fixture.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            let action = vcx.debug_bounds("failure#error-sign-in-again").expect("sign-in action").center();
+            vcx.simulate_click(action, gpui::Modifiers::default());
+            assert_eq!(selected.borrow().as_deref(), Some(chat_id));
         }
     }
 

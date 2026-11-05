@@ -163,6 +163,8 @@ struct StoredAccount {
     harness: HarnessId,
     label: String,
     created_at_ms: i64,
+    #[serde(default)]
+    signed_out: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -432,6 +434,7 @@ impl ManagedAccounts {
             harness,
             label: label.to_string(),
             created_at_ms: now_ms(),
+            signed_out: false,
         };
         let home = self.home_of(harness, &account.id);
         create_private_dir(&home)?;
@@ -598,7 +601,8 @@ impl ManagedAccounts {
             id: account.id.clone(),
             harness: account.harness,
             label: account.label.clone(),
-            signed_in: email.is_some() || has_credentials_file(account.harness, &home),
+            signed_in: !account.signed_out
+                && (email.is_some() || has_credentials_file(account.harness, &home)),
             email,
             plan_label: None,
             usage_windows: Vec::new(),
@@ -746,6 +750,28 @@ impl ManagedAccounts {
         self.save(&store)
     }
 
+    /// Record a rejected login for the account pinned to this chat.
+    pub fn mark_chat_signed_out(&self, chat_id: &str, harness: HarnessId) -> Result<(), EngineError> {
+        let mut store = lock(&self.store);
+        let Some(id) = store.chat_pins.get(&key(chat_id, harness)).cloned() else {
+            return Ok(());
+        };
+        if let Some(account) = store.accounts.iter_mut().find(|account| account.id == id) {
+            account.signed_out = true;
+            self.save(&store)?;
+        }
+        Ok(())
+    }
+
+    fn clear_signed_out(&self, account_id: &str) -> Result<(), EngineError> {
+        let mut store = lock(&self.store);
+        if let Some(account) = store.accounts.iter_mut().find(|account| account.id == account_id) {
+            account.signed_out = false;
+            self.save(&store)?;
+        }
+        Ok(())
+    }
+
     /// The home a chat is already pinned to (no side effects): for work that
     /// belongs to the chat but runs outside its dispatch, such as titles.
     pub fn pinned_home(&self, chat_id: &str, harness: HarnessId) -> Option<PathBuf> {
@@ -879,8 +905,11 @@ impl ManagedAccounts {
                 logins.remove(login_id);
                 drop(logins);
                 match code {
-                    Some(0) if self.is_signed_in(&account_id) => {
-                        poll(AgentLoginStatus::Done, None)
+                    Some(0) if self.has_login(&account_id) => {
+                        match self.clear_signed_out(&account_id) {
+                            Ok(()) => poll(AgentLoginStatus::Done, None),
+                            Err(error) => poll(AgentLoginStatus::Error, Some(error.to_string())),
+                        }
                     }
                     Some(0) => poll(
                         AgentLoginStatus::Error,
@@ -903,8 +932,13 @@ impl ManagedAccounts {
         }
     }
 
-    fn is_signed_in(&self, account_id: &str) -> bool {
-        self.view_by_id(account_id).is_some_and(|a| a.signed_in)
+    fn has_login(&self, account_id: &str) -> bool {
+        let store = lock(&self.store);
+        store.accounts.iter().find(|account| account.id == account_id).is_some_and(|account| {
+            let home = self.home_of(account.harness, &account.id);
+            read_identity(account.harness, &home).is_some()
+                || has_credentials_file(account.harness, &home)
+        })
     }
 
     /// Paste the code the browser showed into the running CLI. The code is
