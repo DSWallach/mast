@@ -616,6 +616,17 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Space account re-sign-in, durable wakes, drop any file** (2026-11-05, `managed-account-reauth`,
+  `durable-wakes`, `composer-drop-any-file`, Terra): Settings → Space accounts has **Sign in again** (same home
+  and id, Claude and Codex); auth failures mark the pinned account signed out and the chat error offers
+  "Sign in again…". Worker wakes/reports persist in a bounded store (≤500 per orchestrator, atomic
+  temp+rename, writes only on record/queue/deliver/prune, off executor threads): UUID event ids, restore
+  before any queue drain, recovered wake-only queue rows re-held (user rows stay frozen), `delivered` pruned
+  after the snapshot generation persists (legacy 3 s fallback); a crash between dequeue and transcript write
+  can duplicate at most once, never lose. Composer: Finder drops and pasted files of any type: images attach,
+  workspace files/folders become mentions, outside files insert absolute paths, remote-device chats and
+  unreadable paths show a notice. Merge conflict in engine lib.rs resolved (durable's early wake service
+  construction + PR-merged wiring after `spawn_watchers`). Release run: nextest 2058/2058, UI 2449/0.
 - **Terminology pass** (2026-11-05, `terminology-pass`, Terra; text only): copy templates are **Blueprints**
   ("New from blueprint…", "Blueprint changed"), container templates are **Child template** ("Set up child
   template…", "Child template applied"); glossary in docs/work-outline.md (Space = the folder/outline root,
@@ -818,16 +829,9 @@ models to save Anthropic usage). Workers report to it (parentChatId). `hand_off_
 exists to move workers to a fresh coordinator; the UI menu item is a later slice. Release runs go
 DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n 4096`).
 
-**Running (Codex Terra):**
-- `durable-wakes` (chat 6adacaf4, items aa155e46 + 68b601a8): persisted wake/report store (≤500 per
-  orchestrator, atomic writes behind one lock), restore before any queue drain, `delivered` marked at the
-  transcript write and pruned only after the snapshot debounce, crash-window check against the last 50
-  transcript messages. Merge only if sound and cheap (Mikey's bar).
+**Running:** none.
 
 **Queued (agreed with Mikey 2026-11-05):**
-1. `managed-account-reauth` (chat df06ad6f, item 86405070, running): "Sign in again" for Space accounts in the
-   same home, signed-out badge, chat auth-error action. Workaround meanwhile: `CLAUDE_CONFIG_DIR=<home>
-   claude auth login` in Terminal.
 2. Hand-off UI slice: "Hand off to new chat…" on a chat.
 3. PR dashboard file paging (#5, files changed within a PR beyond the first 100): asked Mikey, unanswered.
 4. Coworker readiness: first-run smoke test on a throwaway profile; import the Cofactr friction log.
