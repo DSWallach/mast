@@ -46,9 +46,9 @@ fn chat_row(index: usize) -> mast_proto::Chat {
     }
 }
 
-fn snapshot() -> WorkOutlineSnapshot {
+fn snapshot(roots: usize) -> WorkOutlineSnapshot {
     let mut snap = crate::work_outline::store::fixture_snapshot(SPACE);
-    for i in 0..40 {
+    for i in 0..roots {
         let root = format!("w-bench-{i}");
         let pr = format!("w-bench-{i}-pr");
         let lin = format!("w-bench-{i}-lin");
@@ -165,7 +165,7 @@ fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
         let mut map = HashMap::new();
         map.insert(
             SPACE.to_string(),
-            WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot())),
+            WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot(40))),
         );
         o.outline_fixture = Some(map);
         o.view_mode = OverviewMode::List;
@@ -197,5 +197,28 @@ fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
     measure_n("overview", "Outline redraw (rows dirty)", 20, |_| {
         overview.update(vcx, |o, _| o.rows_dirty = true);
         draw(vcx);
+    });
+}
+
+#[test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_team_300_items_50_chats() {
+    let snapshot = snapshot(100);
+    let mut chats: Vec<_> = (0..50).map(chat_row).collect();
+    for chat in &mut chats[1..] {
+        chat.parent_chat_id = Some("c0".into());
+    }
+    let indicators = HashMap::new();
+    let links = HashMap::new();
+    let input = crate::team::TeamInput {
+        chat_id: "c0",
+        chats: &chats,
+        indicators: &indicators,
+        snapshot: Some(&snapshot),
+        links: &links,
+        now: Utc::now(),
+    };
+    measure_n("team", "300 items, 50 chats fact sheet", 100, |_| {
+        std::hint::black_box(crate::team::team(&input));
     });
 }

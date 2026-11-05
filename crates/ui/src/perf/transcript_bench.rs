@@ -153,3 +153,42 @@ fn bench_transcript_long_chat(cx: &mut gpui::TestAppContext) {
         },
     );
 }
+
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_prepared_transcript_open(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let entries = long_chat(2000);
+    let update = mast_doc::TranscriptUpdate {
+        frame: mast_doc::TranscriptFrame::reset(&entries),
+        context_usage: None,
+        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
+    };
+    let prepared = measure("transcript", "prepare 2000 entries", || {
+        crate::transcript::TranscriptPreparation::default().prepare(&update).unwrap()
+    });
+    let state = cx.new(|_| AppState::new());
+    let (view, vcx) = cx.add_window_view(|_, cx| {
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        Cached(transcript)
+    });
+    let transcript = view.read_with(vcx, |v, _| v.0.clone());
+    measure("transcript", "open prepared 2000 entries and draw", || {
+        transcript.update(vcx, |this, cx| {
+            this.state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = entries;
+                state.transcript_revision += 1;
+                state.prepared_transcripts.insert("chat".into(), prepared);
+            });
+            this.sync(cx);
+        });
+        draw(vcx);
+    });
+}
