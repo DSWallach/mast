@@ -21,6 +21,37 @@ use mast_proto::{
 const ORCH: &str = "orch";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_coordinator_does_not_receive_reports() {
+    let rig = Rig::new().await;
+    let mut settings = rig.wakes.settings(ORCH);
+    settings.enabled = false;
+    rig.wakes.set_settings(ORCH, settings).await;
+    let result = rig.wakes.report_to_parent("w1", "disabled report").await.unwrap();
+    assert_eq!(result.delivery, "parentReportsOff");
+    assert!(rig.wakes.status(ORCH).held.is_empty());
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archived_coordinator_drops_durable_report_on_restore() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "discarded report").await.unwrap();
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(restarted.status(ORCH).held.is_empty());
+    rig.core.workspace.set_chat_archived(ORCH, false).unwrap();
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_report_survives_service_restart_and_respects_draft() {
     let rig = Rig::new().await;
     rig.wakes.note_user_activity(ORCH, Some(true)).await;

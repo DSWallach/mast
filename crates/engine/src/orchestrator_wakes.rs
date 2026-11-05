@@ -488,6 +488,15 @@ impl OrchestratorWakes {
                         }
                     }
                 }
+                let ineligible = workspace.chat(&chat).ok().flatten().is_some_and(|recipient| recipient.archived)
+                    || !state.core.settings(&chat).enabled;
+                if ineligible && cross_blocked.is_empty() && queue.iter().all(|id| {
+                    !saved.orchestrators.get(&chat).is_some_and(|events| events.iter().any(|entry| entry.message_id.as_ref() == Some(id))) || removed.contains(id)
+                }) {
+                    tracing::info!(%chat, "discarded wakes for archived or disabled coordinator during recovery");
+                    saved.orchestrators.remove(&chat);
+                    continue;
+                }
                 let mut held = Vec::new();
                 let mut completed = Vec::new();
                 let mut blocked = false;
@@ -1160,6 +1169,7 @@ impl OrchestratorWakes {
     pub async fn ingest_chats(&self, chats: &[Chat]) {
         let now = self.now();
         let mut recorded: HashSet<String> = HashSet::new();
+        let mut archived = Vec::new();
         {
             let mut state = lock(&self.inner.state);
             let seeded = state.chats_seeded;
@@ -1173,6 +1183,9 @@ impl OrchestratorWakes {
                     last_active: chat.last_message_at.unwrap_or(chat.created_at).timestamp_millis(),
                 };
                 let prev = state.chats.insert(chat.id.clone(), info.clone());
+                if info.archived && prev.as_ref().is_none_or(|previous| !previous.archived) {
+                    archived.push(chat.id.clone());
+                }
                 if !seeded {
                     continue;
                 }
@@ -1197,6 +1210,9 @@ impl OrchestratorWakes {
             state.chats_seeded = true;
         }
         self.after_ingest(recorded).await;
+        for chat in archived {
+            self.evaluate(&chat, false).await;
+        }
     }
 
     /// Whether any current orchestrator has enabled PR-merged wakes.
@@ -1264,6 +1280,9 @@ impl OrchestratorWakes {
             .ok()
             .flatten()
             .ok_or("the parent chat no longer exists")?;
+        if parent.archived {
+            return Err("the parent chat is archived; hand off or unarchive it before reporting".into());
+        }
         if parent.space_id != worker.space_id {
             return Err("the parent chat is in another Space; reports never cross Spaces".into());
         }
@@ -1275,6 +1294,14 @@ impl OrchestratorWakes {
             );
         }
         let (report, truncated) = mast_proto::cap_worker_report(text);
+        if !state.core.settings(&parent_id).wakes_for(WakeEventKind::WorkerReport) {
+            return Ok(mast_proto::ReportToParentResult {
+                parent_chat_id: parent_id,
+                delivery: "parentReportsOff".into(),
+                held_reason: None,
+                truncated,
+            });
+        }
         let now = self.now();
         {
             let info = state.chats.entry(from.to_owned()).or_default();
@@ -1468,6 +1495,23 @@ impl OrchestratorWakes {
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        let archived = self.inner.workspace.chat(orch).ok().flatten().is_some_and(|chat| chat.archived);
+        if archived || !state.core.settings(orch).enabled {
+            self.inner.doc_host.pull_pending_event_message(orch);
+            let _ = self.inner.event_turns.take_cancelled(orch);
+            state.core.discard_held(orch);
+            state.timers.remove(orch);
+            if !self.inner.event_turns.has_started(orch) && self.inner.event_turns.pending_message(orch).is_none() {
+                if let Some(persistence) = lock(&self.inner.event_turns.persistence).as_mut() {
+                    persistence.store.orchestrators.remove(orch);
+                    if let Err(error) = persistence.write() {
+                        tracing::warn!(%error, chat = %orch, "could not discard ineligible wake entries");
+                    }
+                }
+            }
+            tracing::info!(chat = %orch, "discarded wakes for archived or disabled coordinator");
+            return;
+        }
         if state.hand_off_pending.contains(orch) {
             return;
         }
