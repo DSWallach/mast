@@ -63,7 +63,8 @@ impl Shell {
                         Some(chat_title) => format!("{} · {chat_title}", notice.title()),
                         None => notice.title(),
                     };
-                    crate::notify::post(&title, &notice.body(), notice.chat_id.as_deref());
+                    let target = crate::notify::request_target(&notice.space_id, &notice.request_id);
+                    crate::notify::post(&title, &notice.body(), Some(&target));
                 }
             }
         }

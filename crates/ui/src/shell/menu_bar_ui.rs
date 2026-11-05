@@ -59,7 +59,7 @@ impl Shell {
             (None, Some(reason)) => menu_bar::UsageView::Failed(reason),
             (None, None) => menu_bar::UsageView::Loading,
         };
-        let view = menu_bar::build_menu(
+        let mut view = menu_bar::build_menu(
             &MenuInput {
                 snapshot: &snapshot,
                 interrupted: interrupted.as_ref(),
@@ -70,6 +70,37 @@ impl Shell {
             },
             &chrono::Local,
         );
+        let requests = {
+            let state = self.state.read(cx);
+            let mut requests = Vec::new();
+            for space in &state.spaces {
+                let load = state.work_outline(&space.id);
+                let Some(snapshot) = load.snapshot() else { continue; };
+                for request in snapshot.user_action_requests.iter().filter(|request| request.is_open() && !request.deduped) {
+                    let Some(item) = snapshot.item(&request.work_item_id).filter(|item| item.archived_at.is_none()) else { continue; };
+                    let chat = state.chats.iter().find(|chat| chat.id == request.chat_id)
+                        .and_then(|chat| chat.title.as_deref()).filter(|title| !title.trim().is_empty());
+                    let origin = chat.map_or_else(|| item.title.clone(), |title| format!("{title} / {}", item.title));
+                    let actions = menu_bar::request_actions(
+                        request.effective_kind(), &request.options,
+                        request.origin_chat_available && !request.chat_id.is_empty(),
+                    );
+                    requests.push(menu_bar::RequestPreview {
+                        space_id: space.id.clone(), request_id: request.id.clone(),
+                        group: match request.priority {
+                            Some(mast_proto::work_outline_user_actions::UserActionPriority::Blocking) => crate::work_outline::required_actions::NeedsGroup::Blocking,
+                            Some(mast_proto::work_outline_user_actions::UserActionPriority::Normal) => crate::work_outline::required_actions::NeedsGroup::ReadyToMerge,
+                            Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi) => crate::work_outline::required_actions::NeedsGroup::Fyi,
+                            None => crate::work_outline::required_actions::NeedsGroup::of(request.effective_kind(), None),
+                        },
+                        kind: request.effective_kind(), text: request.text.clone(), origin,
+                        created_at: request.created_at, actions,
+                    });
+                }
+            }
+            requests
+        };
+        menu_bar::insert_requests(&mut view, requests, utc_now);
         if self.menu_bar.last.as_ref() != Some(&view) {
             menu_bar::apply(Some(&view));
             self.menu_bar.last = Some(view);
@@ -160,6 +191,16 @@ impl Shell {
             MenuEvent::WillOpen => {
                 self.request_usage(menu_bar::UsageTrigger::MenuOpen, cx);
                 self.sync_menu_bar(true, cx);
+            }
+            MenuEvent::Action(MenuAction::OpenRequest { space_id: _, request_id }) => {
+                if !matches!(self.route, Route::Overview) { self.open_overview(cx); }
+                let page = self.ensure_overview_page(cx);
+                page.update(cx, |overview, cx| overview.open_required_action(request_id, cx));
+            }
+            MenuEvent::Action(MenuAction::DecideRequest { space_id: _, request_id, decision }) => {
+                if !matches!(self.route, Route::Overview) { self.open_overview(cx); }
+                let page = self.ensure_overview_page(cx);
+                page.update(cx, |overview, cx| overview.decide_required_action(request_id, decision, cx));
             }
             MenuEvent::Action(MenuAction::RestartWhenIdle) => {
                 if self.pending_build().is_some() {

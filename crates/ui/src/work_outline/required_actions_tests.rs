@@ -1135,6 +1135,28 @@ fn choice_button_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn menu_choice_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
+    use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
+    use crate::menu_bar::RequestDecision;
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
+    request.kind = Some(UserActionKind::Choose);
+    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None }];
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
+    let list = open_global(&overview, vcx);
+    list.update(vcx, |list, cx| {
+        list.menu_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), cx);
+        list.menu_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), cx);
+    });
+    vcx.run_until_parked();
+    assert_eq!(sends(&calls).len(), 1);
+    assert_eq!(resolves(&calls).len(), 1);
+    assert_eq!(resolves(&calls)[0]["values"]["optionId"], "b");
+    assert_eq!(resolves(&calls)[0]["via"], "menu");
+}
+
+#[gpui::test]
 fn inline_ask_reply_relays_and_resolves(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), reply_started);

@@ -615,3 +615,37 @@ fn an_admin_chat_row_carries_an_admin_tag_and_others_do_not() {
     assert!(admin_row.contains("\u{b7} Admin"), "{admin_row}");
     assert!(!plain_row.contains("Admin"), "{plain_row}");
 }
+
+#[test]
+fn requests_are_ordered_by_priority_then_age() {
+    use crate::work_outline::required_actions::NeedsGroup;
+    use mast_proto::work_outline_user_actions::UserActionKind;
+    let mut view = menu(&snapshot(&[]), None, None);
+    let request = |id: &str, group, created_at| RequestPreview {
+        space_id: "space".into(), request_id: id.into(), group,
+        kind: UserActionKind::Ask, text: id.into(), origin: "Chat / Item".into(), created_at, actions: Vec::new(),
+    };
+    insert_requests(&mut view, vec![
+        request("normal", NeedsGroup::ReadyToMerge, 1),
+        request("later", NeedsGroup::Blocking, 3),
+        request("earlier", NeedsGroup::Blocking, 2),
+    ], now());
+    let ids: Vec<&str> = view.items.iter().filter_map(|item| match item {
+        Item::Action { action: MenuAction::OpenRequest { request_id, .. }, .. } => Some(request_id.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(ids, ["earlier", "later", "normal"]);
+}
+
+#[test]
+fn request_choices_are_limited_to_three_and_require_an_available_chat() {
+    use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
+    let options: Vec<_> = (0..5).map(|id| RequestOption {
+        id: id.to_string(), label: format!("Option {id}"), detail: None,
+    }).collect();
+    let actions = request_actions(UserActionKind::Choose, &options, true);
+    assert_eq!(actions.len(), 3);
+    assert_eq!(actions[2].1, RequestDecision::Choose("2".into()));
+    assert!(request_actions(UserActionKind::Choose, &options, false).is_empty());
+    assert_eq!(request_actions(UserActionKind::Approve, &[], true).len(), 2);
+}

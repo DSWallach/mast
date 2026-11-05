@@ -247,7 +247,19 @@ pub fn run_app(config: UiConfig) {
         let click_state = state.clone();
         cx.spawn(async move |cx| {
             while let Some(chat_id) = click_rx.next().await {
-                let _ = cx.update(|cx| open_notified_chat(Some(chat_id), &click_state, cx));
+                let _ = cx.update(|cx| {
+                    if let Some((space_id, request_id)) = notify::parse_request_target(&chat_id) {
+                        open_notified_chat(None, &click_state, cx);
+                        #[cfg(target_os = "macos")]
+                        handle_menu_bar_event(menu_bar::MenuEvent::Action(
+                            menu_bar::MenuAction::OpenRequest { space_id, request_id },
+                        ), &click_state, cx);
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = (space_id, request_id);
+                    } else {
+                        open_notified_chat(Some(chat_id), &click_state, cx);
+                    }
+                });
             }
         })
         .detach();
@@ -344,6 +356,13 @@ fn handle_menu_bar_event(
     match event {
         MenuEvent::Action(MenuAction::OpenChat(chat_id)) => {
             open_notified_chat(Some(chat_id), state, cx)
+        }
+        event @ MenuEvent::Action(MenuAction::OpenRequest { .. } | MenuAction::DecideRequest { .. }) => {
+            open_notified_chat(None, state, cx);
+            let shell = cx.windows().into_iter().find_map(|window| window.downcast::<shell::Shell>());
+            if let Some(shell) = shell {
+                let _ = shell.update(cx, |shell, _, cx| shell.handle_menu_bar_event(event, cx));
+            }
         }
         MenuEvent::Action(MenuAction::OpenMast) => open_notified_chat(None, state, cx),
         MenuEvent::Action(MenuAction::Quit) => app_menus::request_quit(cx),

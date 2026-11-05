@@ -37,6 +37,17 @@ pub fn post(title: &str, body: &str, chat_id: Option<&str>) {
     post_impl(title, body, chat_id);
 }
 
+/// Encode a request target for the native notification callback.
+pub(crate) fn request_target(space_id: &str, request_id: &str) -> String {
+    format!("request:{}", serde_json::json!([space_id, request_id]))
+}
+
+pub(crate) fn parse_request_target(value: &str) -> Option<(String, String)> {
+    let json = value.strip_prefix("request:")?;
+    let [space_id, request_id]: [String; 2] = serde_json::from_str(json).ok()?;
+    Some((space_id, request_id))
+}
+
 /// Route banner clicks: `handler` receives the clicked banner's chat id.
 /// Main thread only; replaces any previous handler. Only the native macOS
 /// path reports clicks (osascript and notify-send banners can't).
