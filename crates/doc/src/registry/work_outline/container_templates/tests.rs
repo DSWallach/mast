@@ -147,6 +147,25 @@ fn a_new_child_gets_the_whole_structure_at_once() {
 }
 
 #[test]
+fn followed_rule_resolution_checks_the_template_path() {
+    let mut d = doc();
+    let projects = create(&mut d, "resolve-projects", None, "Projects");
+    set_rules(&mut d, "resolve-rules", &projects, Some(projects_rules()));
+    let project = create(&mut d, "resolve-project", Some(&projects), "Checkout");
+    let planning = child_titled(&snap(&d), &project, "Planning").id.clone();
+    let task = create(&mut d, "resolve-task", Some(&planning), "Task");
+    assert_eq!(
+        d.followed_template_rule(SPACE, &task),
+        Some((projects.clone(), "n-plan".into(), planning.clone()))
+    );
+    assert_eq!(d.followed_template_rule(SPACE, &projects), None);
+    let mut template = snap(&d).item(&projects).unwrap().container_template.clone().unwrap();
+    template.root.children.remove(0);
+    set_rules(&mut d, "resolve-remove", &projects, Some(template));
+    assert_eq!(d.followed_template_rule(SPACE, &task), Some((projects, "n-root".into(), project)));
+}
+
+#[test]
 fn replaying_the_creation_adds_nothing() {
     let mut d = doc();
     let projects = create(&mut d, "op-projects", None, "Projects");
