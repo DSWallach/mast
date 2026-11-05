@@ -3117,8 +3117,10 @@ impl DocHost {
             instructions.as_ref(),
         )?;
         handle.publish_queue();
-        // Same reasoning as a command: the user is acting in this chat again.
-        self.unarchive_on_send(chat_id);
+        // Only a user message revives a chat; system wake messages must not.
+        if from_user {
+            self.unarchive_on_send(chat_id);
+        }
         self.nudge_remote_host(chat_id);
         Ok(id)
     }
