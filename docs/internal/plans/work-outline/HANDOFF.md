@@ -616,6 +616,14 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Test home isolation guard** (2026-11-05 overnight, `test-home-isolation`, Terra + coordinator fix 0c9ed930): a
+  test_support initializer gives every test process its own temp HOME, CLAUDE_CONFIG_DIR, CODEX_HOME (created; the
+  codex CLI refuses a missing one) and Mast data dir, preserving inherited fixture homes for re-executed test
+  binaries; debug/test builds refuse engine and local-profile data paths inside the original home; three live
+  transcript smoke tests replaced with synthetic fixtures; `linear_assigned` waits for archive + reason + sync flag
+  together (settle race). `scripts/check_test_isolation.sh` (+ allowlist) fails on new home-dependent references in
+  test code. Audit: docs/internal/audits/test-home-isolation.md. Release run: nextest 2411/2411, UI 2481/0 (first run
+  with the guard caught the CODEX_HOME regression; fixed).
 - **Needs-you phase 6** (2026-11-05 overnight, `needs-you-phase-6`, Terra): notification banners and the menu bar's
   needs-you section show the request kind, one-line ask, origin chat/item and age, ordered by priority then age;
   quick actions (choose options capped at 3, Approve/Decline) go through the card relay/resolve path (idempotent,
@@ -939,7 +947,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2, cleanup-sweep-3, perf-sweep-3, cleanup-sweep-4, perf-sweep-4, flaky-local-import, needs-you-phase-6.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2, cleanup-sweep-3, perf-sweep-3, cleanup-sweep-4, perf-sweep-4, flaky-local-import, needs-you-phase-6, test-home-isolation.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
