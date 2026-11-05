@@ -71,6 +71,7 @@ mod command_palette;
 mod workspace_search;
 mod files_panel;
 mod github_ui;
+mod hand_off_ui;
 mod instructions_ui;
 mod linear_ui;
 mod outside_file_ui;
@@ -9300,6 +9301,8 @@ impl Shell {
             let identity_id = chat_id.clone();
             let admin_id = chat_id.clone();
             let revoke_id = chat_id.clone();
+            let hand_off_id = chat_id.clone();
+            let has_workers = self.has_hand_off_workers(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
             let closeable = menu_state.closeable;
@@ -9312,6 +9315,16 @@ impl Shell {
                 .flex_col();
             let menu = match menu_state.page {
                 ChatMenuPage::Root => menu
+                    .when(has_workers, |menu| menu.child(
+                        popover::menu_row(&theme, false, format!("chat-menu-hand-off-{chat_id}"))
+                            .id("chat-menu-hand-off")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.open_hand_off(hand_off_id.clone(), cx);
+                            }))
+                            .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from("Hand off to new chat…")),
+                    ))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                             .id("chat-menu-rename")

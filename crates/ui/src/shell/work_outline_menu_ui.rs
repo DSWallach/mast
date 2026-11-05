@@ -188,6 +188,9 @@ impl Shell {
         };
         let entries = self.admin_menu_entries(chat, &chat_id, cx);
         menu.entries.splice(at + 1..at + 1, entries);
+        if self.has_hand_off_workers(&chat_id, cx) {
+            menu.entries.insert(at, MenuEntry::new("hand-off-chat", "Hand off to new chat…", icons::CHAT_ROUND_LINE, MenuAction::HandOffChat(chat_id)));
+        }
     }
 
     /// The sidebar Chat menu's own actions, reused on Chat rows (only for
@@ -215,6 +218,9 @@ impl Shell {
             return;
         };
         let closeable = crate::chat_closeout::is_closeout_candidate(chat.cwd.as_deref());
+        if self.has_hand_off_workers(&chat_id, cx) {
+            menu.entries.push(MenuEntry::new("hand-off-chat", "Hand off to new chat…", icons::CHAT_ROUND_LINE, MenuAction::HandOffChat(chat_id.clone())));
+        }
         menu.entries
             .extend(self.admin_menu_entries(chat, &chat_id, cx));
         let pinned = self.active_sidebar_pins(cx).contains(&chat_id);
@@ -486,6 +492,7 @@ impl Shell {
             MenuAction::GrantAdmin(chat_id) => self.open_admin_dialog(&chat_id, cx),
             MenuAction::RevokeAdmin(chat_id) => self.revoke_chat_admin(&chat_id, cx),
             MenuAction::ArchiveChat(chat_id) => self.archive_chat(chat_id, cx),
+            MenuAction::HandOffChat(chat_id) => self.open_hand_off(chat_id, cx),
             MenuAction::HideSpace(space_id) => {
                 Self::set_outline_space_hidden(outline, &space_id, true, cx)
             }
