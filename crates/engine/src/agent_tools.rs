@@ -2324,6 +2324,36 @@ impl AgentToolsService {
             account_id: None,
         })
     }
+
+    /// Authorize a successor launch using the caller's own item and configuration.
+    pub fn prepare_orchestrator_successor(
+        &self,
+        params: &AgentToolCallParams,
+    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String), AgentToolError> {
+        let context = self.context(&params.token)?;
+        let operation_id = context.operation_id(&params.arguments)?;
+        let summary = params.arguments.get("summary").and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| AgentToolError::invalid("summary is required"))?;
+        let work_item_id = context.require_item("handing off orchestration")?;
+        let caller = self.workspace.chat(&context.grant.chat_id).ok().flatten()
+            .ok_or_else(AgentToolError::unauthenticated)?;
+        if caller.archived {
+            return Err(AgentToolError::invalid("an archived chat cannot hand off orchestration"));
+        }
+        let source = context.grant.chat_id.clone();
+        Ok((mast_proto::CreateChatForWorkItemParams {
+            work_item_id,
+            initial_prompt: mast_proto::WorkItemPrompt { text: summary.to_owned(), attachments: Vec::new() },
+            config: caller.config,
+            execution_override: None,
+            worktree_choice: None,
+            operation_id,
+            parent_chat_id: None,
+            target_device_id: None,
+            account_id: None,
+        }, source))
+    }
 }
 
 /// One `work_outline_read_subtree` walk.

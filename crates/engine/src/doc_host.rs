@@ -3656,7 +3656,7 @@ impl DocHost {
 
     /// A wake message still waiting in the queue is taken back out and its
     /// events handed back to the wake service.
-    fn pull_pending_event_message(&self, chat_id: &str) {
+    pub(crate) fn pull_pending_event_message(&self, chat_id: &str) {
         let turns = &self.inner.event_turns;
         let Some(message_id) = turns.pending_message(chat_id) else {
             return;

@@ -20,6 +20,122 @@ use mast_proto::{
 
 const ORCH: &str = "orch";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_reparents_workers_and_moves_held_reports() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("handoff-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("source", None), ("successor", None), ("worker", Some("source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("handoff-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    let settings = WakeSettings { auto_continue: true, ..WakeSettings::default() };
+    rig.wakes.set_settings("source", settings).await;
+    rig.wakes.report_to_parent("worker", "before hand-off").await.unwrap();
+    assert_eq!(rig.wakes.hand_off_orchestrator("source", "successor", "source").await.unwrap(), vec!["worker"]);
+    assert_eq!(rig.wakes.hand_off_orchestrator("source", "successor", "source").await.unwrap(), vec!["worker"]);
+    assert_eq!(rig.core.workspace.chat("worker").unwrap().unwrap().parent_chat_id.as_deref(), Some("successor"));
+    assert_eq!(rig.wakes.settings("successor"), settings);
+    assert!(rig.wakes.status("source").held.is_empty());
+    assert_eq!(rig.wakes.status("successor").held.len(), 1);
+    let result = rig.wakes.report_to_parent("worker", "after hand-off").await.unwrap();
+    assert_eq!(result.parent_chat_id, "successor");
+    assert_eq!(rig.wakes.status("successor").held.len(), 2);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_reclaims_a_queued_worker_report() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("queued-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("queued-source", None), ("queued-successor", None), ("queued-worker", Some("queued-source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("queued-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    rig.wakes.note_user_activity("queued-successor", Some(true)).await;
+    rig.core.doc_host.queue_message("queued-source", "opening", Vec::new()).unwrap();
+    rig.wait_for(|| rig.core.sessions.turn_in_flight("queued-source"), "source turn").await;
+    let handle = rig.core.doc_host.open("queued-source").unwrap();
+    handle.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "queued-wake".into(), text: "Worker updates: queued report".into(), attachments: vec![],
+        hold_for_turn_end: true, issued_by: rig.core.device_id.clone(), issued_at: 1,
+        edited_at: None, delivery_gate: None,
+    }).unwrap();
+    rig.core.doc_host.event_turns().register("queued-source", "queued-wake".into(), vec![
+        mast_engine::orchestrator_wakes::WakeEvent {
+            id: "event-1".into(), key: "report-1".into(), worker_chat_id: "queued-worker".into(),
+            worker_title: None, kind: WakeEventKind::WorkerReport, summary: "queued report".into(),
+            report: Some("report body".into()), at_ms: 1,
+        }
+    ]);
+    rig.wakes.hand_off_orchestrator("queued-source", "queued-successor", "queued-source").await.unwrap();
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert!(rig.wakes.status("queued-source").held.is_empty());
+    assert_eq!(rig.wakes.status("queued-successor").held.len(), 1);
+    rig.wakes.note_user_activity("queued-successor", Some(false)).await;
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate("queued-successor", false).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("report body")), "transferred report").await;
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_retry_finishes_after_registry_write() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("retry-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("retry-source", None), ("retry-successor", None), ("retry-worker", Some("retry-source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("retry-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    rig.wakes.report_to_parent("retry-worker", "pending report").await.unwrap();
+    rig.core.workspace.hand_off_chat_children("retry-source", "retry-successor", "retry-source", 1).unwrap();
+    rig.wakes.hand_off_orchestrator("retry-source", "retry-successor", "retry-source").await.unwrap();
+    assert!(rig.wakes.status("retry-source").held.is_empty());
+    assert_eq!(rig.wakes.status("retry-successor").held.len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_retry_after_restart_copies_settings_once() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("restart-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("restart-source", None), ("restart-successor", None), ("restart-worker", Some("restart-source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("restart-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    let settings = WakeSettings { auto_continue: true, turn_finished: true, ..WakeSettings::default() };
+    rig.wakes.set_settings("restart-source", settings).await;
+    rig.core.workspace.hand_off_chat_children("restart-source", "restart-successor", "restart-source", 1).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert_eq!(restarted.hand_off_orchestrator("restart-source", "restart-successor", "restart-source").await.unwrap(), vec!["restart-worker"]);
+    assert_eq!(restarted.settings("restart-successor"), settings);
+    let changed = WakeSettings { auto_continue: false, ..settings };
+    restarted.set_settings("restart-successor", changed).await;
+    restarted.hand_off_orchestrator("restart-source", "restart-successor", "restart-source").await.unwrap();
+    assert_eq!(restarted.settings("restart-successor"), changed);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_retry_after_settings_write_failure() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("write-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for id in ["write-source", "write-successor"] {
+        rig.core.workspace.create_chat_with_parent(id, Some("write-space"), Some(&rig.core.device_id), None, None, None).unwrap();
+    }
+    let directory = rig.store.parent().unwrap().join("missing-settings-directory");
+    let path = directory.join("wakes.json");
+    let tick = rig.clock.clone();
+    let wakes = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(path.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    let settings = WakeSettings { auto_continue: true, ..WakeSettings::default() };
+    wakes.set_settings("write-source", settings).await;
+    assert!(wakes.hand_off_orchestrator("write-source", "write-successor", "write-source").await.is_err());
+    std::fs::create_dir(&directory).unwrap();
+    wakes.hand_off_orchestrator("write-source", "write-successor", "write-source").await.unwrap();
+    assert_eq!(wakes.settings("write-successor"), settings);
+    assert!(path.exists());
+    rig.core.shutdown().await;
+}
+
 /// A turn that ends only when the test says so.
 struct HeldHarness {
     finish: tokio::sync::broadcast::Sender<()>,

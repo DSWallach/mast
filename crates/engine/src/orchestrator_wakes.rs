@@ -190,6 +190,8 @@ struct State {
     turn_starts: HashMap<String, TurnStart>,
     auto_continue_default: bool,
     settings_overrides: HashMap<String, WakeSettings>,
+    handed_off_to: HashMap<String, String>,
+    hand_off_pending: HashSet<String>,
     chats: HashMap<String, ChatInfo>,
     chats_seeded: bool,
     /// Per Space: worker chat → orchestrators by project worker destination.
@@ -239,6 +241,12 @@ impl OrchestratorWakes {
                 && let Ok(saved) = serde_json::from_value(saved.clone())
             {
                 state.auto_continue = saved;
+            }
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let Some(saved) = value.get("handedOffTo")
+                && let Ok(saved) = serde_json::from_value(saved.clone())
+            {
+                state.handed_off_to = saved;
             }
             let (auto_continue_default, saved) = read_settings(&bytes);
             state.auto_continue_default = auto_continue_default;
@@ -403,18 +411,91 @@ impl OrchestratorWakes {
         self.status(chat_id)
     }
 
+    /// Reclaim a queued wake and transfer its events and effective settings.
+    /// Call under the wake state lock, serialized with wake delivery.
+    fn transfer_wakes(&self, state: &mut State, from: &str, to: &str) {
+        self.inner.doc_host.pull_pending_event_message(from);
+        let cancelled = self.inner.event_turns.take_cancelled(from);
+        state.core.restore_for_hand_off(from, cancelled, self.now());
+        let settings = state.settings_overrides.get(from).copied().unwrap_or_else(|| WakeSettings {
+            auto_continue: state.auto_continue_default,
+            ..WakeSettings::default()
+        });
+        state.core.set_settings_preserving_held(to, settings);
+        state.settings_overrides.insert(to.to_owned(), settings);
+        state.core.transfer_held(from, to);
+        state.handed_off_to.insert(from.to_owned(), to.to_owned());
+        state.timers.remove(from);
+    }
+
+    /// Hand off direct workers and their pending wakes to another orchestrator.
+    pub async fn hand_off_orchestrator(&self, from: &str, to: &str, actor: &str) -> Result<Vec<String>, String> {
+        let workers = self.hand_off_orchestrator_without_delivery(from, to, actor)?;
+        self.finish_orchestrator_hand_off(to);
+        self.evaluate(to, false).await;
+        Ok(workers)
+    }
+
+    pub(crate) fn hand_off_orchestrator_without_delivery(&self, from: &str, to: &str, actor: &str) -> Result<Vec<String>, String> {
+        let workers = {
+            let mut state = lock(&self.inner.state);
+            if state.handed_off_to.get(from).is_some_and(|existing| existing != to) {
+                return Err("source already handed off to another chat".into());
+            }
+            let mut cursor = to;
+            let mut remaining = state.handed_off_to.len() + 1;
+            while let Some(next) = state.handed_off_to.get(cursor) {
+                if next == from || remaining == 0 {
+                    return Err("hand-off would create a routing cycle".into());
+                }
+                cursor = next;
+                remaining -= 1;
+            }
+            let (workers, replayed) = self.inner.workspace.hand_off_chat_children(from, to, actor, self.now())?;
+            state.hand_off_pending.insert(to.to_owned());
+            // Registry and wake settings use separate stores. If a process
+            // stopped after the registry write, complete the transfer on retry.
+            if !replayed || state.handed_off_to.get(from).map(String::as_str) != Some(to) {
+                self.transfer_wakes(&mut state, from, to);
+                for worker in &workers {
+                    if let Some(info) = state.chats.get_mut(worker) {
+                        info.parent = Some(to.to_owned());
+                    }
+                }
+            }
+            self.persist_checked(&state).map_err(|error| format!("could not save wake settings: {error}"))?;
+            workers
+        };
+        Ok(workers)
+    }
+
+    pub(crate) fn finish_orchestrator_hand_off(&self, to: &str) {
+        lock(&self.inner.state).hand_off_pending.remove(to);
+    }
+
     fn persist(&self, state: &State) {
+        if let Err(error) = self.persist_checked(state) {
+            tracing::warn!(%error, "could not save orchestrator wake settings");
+        }
+    }
+
+    fn persist_checked(&self, state: &State) -> Result<(), std::io::Error> {
         let Some(path) = &self.inner.store else {
-            return;
+            return Ok(());
         };
         let settings = serde_json::json!({
             "autoContinue": state.auto_continue_default,
             "orchestrators": state.settings_overrides,
             "autoContinueWorkers": state.auto_continue,
+            "handedOffTo": state.handed_off_to,
         });
-        if let Ok(bytes) = serde_json::to_vec_pretty(&settings) {
-            let _ = std::fs::write(path, bytes);
-        }
+        let bytes = serde_json::to_vec_pretty(&settings).map_err(std::io::Error::other)?;
+        let staging = path.with_extension("handoff-tmp");
+        let mut file = std::fs::File::create(&staging)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        std::fs::rename(staging, path)?;
+        Ok(())
     }
 
     pub fn status(&self, chat_id: &str) -> WakeStatus {
@@ -823,6 +904,8 @@ impl OrchestratorWakes {
         if text.is_empty() {
             return Err("text is empty".into());
         }
+        let (parent_id, truncated) = {
+        let mut state = lock(&self.inner.state);
         let worker = self
             .inner
             .workspace
@@ -855,7 +938,6 @@ impl OrchestratorWakes {
         let (report, truncated) = mast_proto::cap_worker_report(text);
         let now = self.now();
         {
-            let mut state = lock(&self.inner.state);
             let info = state.chats.entry(from.to_owned()).or_default();
             info.title = worker.title.clone();
             info.ticket = worker.linked_ticket_id.clone();
@@ -878,6 +960,8 @@ impl OrchestratorWakes {
             event.report = Some(report);
             state.core.record(&parent_id, event, now);
         }
+        (parent_id, truncated)
+        };
         self.evaluate(&parent_id, false).await;
         let status = self.status(&parent_id);
         if !status.settings.wakes_for(WakeEventKind::WorkerReport) {
@@ -1017,11 +1101,14 @@ impl OrchestratorWakes {
     /// keep holding until the next event (turn end, draft cleared).
     pub async fn evaluate(&self, orch: &str, force: bool) {
         let now = self.now();
-        let cancelled = self.inner.event_turns.take_cancelled(orch);
         let ctx = self.ctx(orch);
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        if state.hand_off_pending.contains(orch) {
+            return;
+        }
+        let cancelled = self.inner.event_turns.take_cancelled(orch);
         if !cancelled.is_empty() {
             state.core.restore(orch, cancelled, now);
         }
@@ -1180,7 +1267,19 @@ fn parents_of(state: &State, worker: &str) -> Vec<String> {
             }
         }
     }
-    out
+    let mut redirected = Vec::new();
+    for mut parent in out {
+        let mut remaining = state.handed_off_to.len();
+        while remaining > 0 {
+            let Some(next) = state.handed_off_to.get(&parent) else { break };
+            parent = next.clone();
+            remaining -= 1;
+        }
+        if parent != worker && !redirected.contains(&parent) {
+            redirected.push(parent);
+        }
+    }
+    redirected
 }
 
 fn is_orchestrator(state: &State, chat_id: &str) -> bool {
@@ -1224,6 +1323,20 @@ fn destination_parents(snapshot: &WorkOutlineSnapshot) -> HashMap<String, Vec<St
         }
     }
     out
+}
+
+#[cfg(test)]
+mod hand_off_tests {
+    use super::*;
+
+    #[test]
+    fn hand_off_redirects_project_destination_wakes() {
+        let mut state = State::default();
+        state.chats.insert("worker".into(), ChatInfo { parent: Some("successor".into()), ..Default::default() });
+        state.destination_parents.entry("space".into()).or_default().insert("worker".into(), vec!["source".into()]);
+        state.handed_off_to.insert("source".into(), "successor".into());
+        assert_eq!(parents_of(&state, "worker"), vec!["successor"]);
+    }
 }
 
 #[cfg(test)]

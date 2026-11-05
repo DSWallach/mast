@@ -1400,6 +1400,66 @@ impl RegistryDoc {
         Ok(chats)
     }
 
+    /// Reparent active direct children and record the hand-off on the destination.
+    pub fn hand_off_chat_children(
+        &mut self,
+        from: &str,
+        to: &str,
+        actor: &str,
+        at_ms: i64,
+    ) -> Result<(Vec<String>, bool), String> {
+        let source = self.chat(from).map_err(|e| e.to_string())?
+            .ok_or("source chat does not exist")?;
+        let destination = self.chat(to).map_err(|e| e.to_string())?
+            .ok_or("destination chat does not exist")?;
+        if from == to || source.archived || destination.archived {
+            return Err("hand-off requires two distinct, active chats".into());
+        }
+        if source.space_id.is_none() || source.space_id != destination.space_id {
+            return Err("chats must belong to the same Space".into());
+        }
+        if !self.chats_share_project(source.space_id.as_deref().unwrap(), from, to) {
+            return Err("chats must belong to the same project".into());
+        }
+        let mut ancestor = destination.parent_chat_id.as_deref();
+        let chats = self.read_chats().map_err(|e| e.to_string())?;
+        let mut remaining = chats.len();
+        while let Some(id) = ancestor {
+            if id == from {
+                return Err("destination cannot be a descendant of the source".into());
+            }
+            if remaining == 0 {
+                return Err("destination has a cyclic parent chain".into());
+            }
+            remaining -= 1;
+            ancestor = chats.iter().find(|chat| chat.id == id)
+                .and_then(|chat| chat.parent_chat_id.as_deref());
+        }
+        if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
+            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+        {
+            if provenance.get("fromChatId").and_then(Value::as_str) != Some(from)
+                || provenance.get("actorChatId").and_then(Value::as_str) != Some(actor)
+            {
+                return Err("destination already has a different hand-off".into());
+            }
+            return serde_json::from_value(provenance["workerChatIds"].clone())
+                .map(|workers| (workers, true))
+                .map_err(|e| format!("invalid hand-off provenance: {e}"));
+        }
+        let workers: Vec<String> = chats.into_iter()
+            .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))
+            .map(|chat| chat.id).collect();
+        for worker in &workers {
+            self.write(KIND_CHATS, worker, OpKind::Update,
+                fields([("parentChatId", json!(to))]));
+        }
+        self.write(KIND_CHATS, to, OpKind::Update, fields([("orchestratorHandOff", json!({
+            "fromChatId": from, "actorChatId": actor, "at": at_ms, "workerChatIds": workers,
+        }))]));
+        Ok((workers, false))
+    }
+
     pub fn rename_chat(&mut self, chat_id: &str, title: &str) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);

@@ -285,6 +285,47 @@ pub(super) fn chat(id: &str, device_id: &str) -> Chat {
     }
 }
 
+#[test]
+fn hand_off_chat_children_records_provenance_and_replays() {
+    let mut doc = RegistryDoc::new("dev-a");
+    for id in ["source", "destination", "worker", "archived"] {
+        let mut row = chat(id, "dev-a");
+        row.space_id = Some("space".into());
+        row.parent_chat_id = (id == "worker" || id == "archived").then(|| "source".into());
+        row.archived = id == "archived";
+        doc.upsert_chat(&row).unwrap();
+    }
+    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 123).unwrap(), (vec!["worker".into()], false));
+    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 999).unwrap(), (vec!["worker".into()], true));
+    assert_eq!(doc.chat("worker").unwrap().unwrap().parent_chat_id.as_deref(), Some("destination"));
+    assert_eq!(doc.chat("archived").unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+    let provenance = doc.overlay_row(KIND_CHATS, "destination").unwrap().fields["orchestratorHandOff"].clone();
+    assert_eq!(provenance["at"], 123);
+}
+
+#[test]
+fn hand_off_chat_children_refuses_archived_cross_space_and_child() {
+    let mut doc = RegistryDoc::new("dev-a");
+    for (id, space, parent, archived) in [
+        ("source", "one", None, false),
+        ("other", "two", None, false),
+        ("child", "one", Some("source"), false),
+        ("grandchild", "one", Some("child"), false),
+        ("archived", "one", None, true),
+    ] {
+        let mut row = chat(id, "dev-a");
+        row.space_id = Some(space.into());
+        row.parent_chat_id = parent.map(str::to_owned);
+        row.archived = archived;
+        doc.upsert_chat(&row).unwrap();
+    }
+    for destination in ["other", "child", "grandchild", "archived"] {
+        assert!(doc.hand_off_chat_children("source", destination, "source", 1).is_err());
+    }
+    assert!(doc.hand_off_chat_children("archived", "source", "archived", 1).is_err());
+    assert_eq!(doc.chat("child").unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+}
+
 pub(super) fn space(id: &str, device_id: &str, path: &str) -> Space {
     Space {
         id: id.into(),

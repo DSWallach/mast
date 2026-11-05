@@ -1207,6 +1207,24 @@ impl RegistryDoc {
         (item.space_id == space_id).then(|| item_id.to_owned())
     }
 
+    pub fn chats_share_project(&self, space: &str, first: &str, second: &str) -> bool {
+        let tree = self.outline_tree(space);
+        let project = |chat: &str| {
+            let mut cursor = self.chat_assigned_work_item(chat, space);
+            let mut remaining = tree.items.len() + 1;
+            while let Some(id) = cursor {
+                if tree.items.get(&id).is_some_and(|item| item.is_project) {
+                    return Some(id);
+                }
+                if remaining == 0 { break; }
+                remaining -= 1;
+                cursor = tree.parent.get(&id).cloned().flatten();
+            }
+            None
+        };
+        project(first) == project(second)
+    }
+
     /// The effective (repaired) parent of `work_item_id` in `space_id`
     /// (`None` for a root item or an unknown one).
     pub fn effective_work_item_parent(&self, space_id: &str, work_item_id: &str) -> Option<String> {

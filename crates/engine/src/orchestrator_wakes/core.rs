@@ -134,6 +134,11 @@ impl WakeCore {
         }
     }
 
+    /// Copy settings during a hand-off without discarding already held events.
+    pub fn set_settings_preserving_held(&mut self, orch: &str, settings: WakeSettings) {
+        self.orchs.entry(orch.to_owned()).or_default().settings = settings;
+    }
+
     pub fn all_settings(&self) -> HashMap<String, WakeSettings> {
         self.orchs
             .iter()
@@ -144,6 +149,35 @@ impl WakeCore {
 
     pub fn has_held(&self, orch: &str) -> bool {
         self.orchs.get(orch).is_some_and(|o| !o.held.is_empty())
+    }
+
+    /// Transfer undelivered events without reapplying settings or deduplication.
+    /// The caller serializes this with delivery and copies settings separately.
+    pub fn transfer_held(&mut self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        let Some(source) = self.orchs.get_mut(from) else {
+            return;
+        };
+        let held = std::mem::take(&mut source.held);
+        let window_start = source.window_start_ms.take();
+        if held.is_empty() {
+            return;
+        }
+        let destination = self.orchs.entry(to.to_owned()).or_default();
+        for event in held {
+            if !destination.held.iter().any(|existing| existing.id == event.id) {
+                push_log(destination, event.clone(), false);
+                destination.held.push(event);
+            }
+        }
+        if !destination.held.is_empty() {
+            destination.window_start_ms = match (destination.window_start_ms, window_start) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
     }
 
     /// Orchestrators with held events, for re-evaluation after a state change.
@@ -212,13 +246,22 @@ impl WakeCore {
     /// Put back events whose delivery was cancelled before the orchestrator
     /// saw them (the user's message went first).
     pub fn restore(&mut self, orch: &str, events: Vec<WakeEvent>, now: i64) {
+        self.restore_events(orch, events, now, false);
+    }
+
+    pub fn restore_for_hand_off(&mut self, orch: &str, events: Vec<WakeEvent>, now: i64) {
+        self.restore_events(orch, events, now, true);
+    }
+
+    fn restore_events(&mut self, orch: &str, events: Vec<WakeEvent>, now: i64, preserve: bool) {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         for event in events {
             o.delivered_keys.remove(&event.key);
             if let Some(entry) = o.log.iter_mut().find(|l| l.event.id == event.id) {
                 entry.delivered = false;
             }
-            if !o.held.iter().any(|e| e.key == event.key) && o.settings.wakes_for(event.kind) {
+            if !o.held.iter().any(|e| if preserve { e.id == event.id } else { e.key == event.key })
+                && (preserve || o.settings.wakes_for(event.kind)) {
                 o.held.push(event);
             }
         }
@@ -387,6 +430,42 @@ mod tests {
         busy: false,
         queue_nonempty: false,
     };
+
+    #[test]
+    fn hand_off_transfer_held_preserves_reports_and_is_safe_to_retry() {
+        let mut core = WakeCore::new();
+        let mut report = event(&mut core, "worker", WakeEventKind::WorkerReport, "report", 1_000);
+        report.report = Some("details".into());
+        assert!(core.record("source", report.clone(), 1_000));
+        core.transfer_held("source", "destination");
+        core.transfer_held("source", "destination");
+        assert!(!core.has_held("source"));
+        assert_eq!(
+            core.decide("destination", 50_000, IDLE, false),
+            Decision::Deliver(Batch { events: vec![report] })
+        );
+    }
+
+    #[test]
+    fn hand_off_transfer_held_merges_existing_events_and_preserves_window() {
+        let mut core = WakeCore::new();
+        let source = raised(&mut core, "worker-1", "one", 1_000);
+        let destination = raised(&mut core, "worker-2", "two", 10_000);
+        assert!(core.record("source", source.clone(), 1_000));
+        assert!(core.record("destination", destination.clone(), 10_000));
+        core.transfer_held("source", "destination");
+        assert_eq!(
+            core.decide("destination", 30_000, IDLE, false),
+            Decision::WaitUntil {
+                at_ms: 1_000 + WAKE_WINDOW_MS,
+                reason: WakeHoldReason::Window,
+            }
+        );
+        assert_eq!(
+            core.decide("destination", 50_000, IDLE, false),
+            Decision::Deliver(Batch { events: vec![destination, source] })
+        );
+    }
 
     #[test]
     fn defaults_wake_for_required_actions_and_errors_only() {
