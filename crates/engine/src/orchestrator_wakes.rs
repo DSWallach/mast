@@ -408,7 +408,7 @@ impl OrchestratorWakes {
     fn transfer_wakes(&self, state: &mut State, from: &str, to: &str) {
         self.inner.doc_host.pull_pending_event_message(from);
         let cancelled = self.inner.event_turns.take_cancelled(from);
-        state.core.restore(from, cancelled, self.now());
+        state.core.restore_for_hand_off(from, cancelled, self.now());
         let settings = state.settings_overrides.get(from).copied().unwrap_or_else(|| WakeSettings {
             auto_continue: state.auto_continue_default,
             ..WakeSettings::default()

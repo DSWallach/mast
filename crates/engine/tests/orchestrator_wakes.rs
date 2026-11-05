@@ -20,6 +20,28 @@ use mast_proto::{
 
 const ORCH: &str = "orch";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_reparents_workers_and_moves_held_reports() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("handoff-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("source", None), ("successor", None), ("worker", Some("source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("handoff-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    let settings = WakeSettings { auto_continue: true, ..WakeSettings::default() };
+    rig.wakes.set_settings("source", settings).await;
+    rig.wakes.report_to_parent("worker", "before hand-off").await.unwrap();
+    assert_eq!(rig.wakes.hand_off_orchestrator("source", "successor", "source").await.unwrap(), vec!["worker"]);
+    assert_eq!(rig.wakes.hand_off_orchestrator("source", "successor", "source").await.unwrap(), vec!["worker"]);
+    assert_eq!(rig.core.workspace.chat("worker").unwrap().unwrap().parent_chat_id.as_deref(), Some("successor"));
+    assert_eq!(rig.wakes.settings("successor"), settings);
+    assert!(rig.wakes.status("source").held.is_empty());
+    assert_eq!(rig.wakes.status("successor").held.len(), 1);
+    let result = rig.wakes.report_to_parent("worker", "after hand-off").await.unwrap();
+    assert_eq!(result.parent_chat_id, "successor");
+    assert_eq!(rig.wakes.status("successor").held.len(), 2);
+    rig.core.shutdown().await;
+}
+
 /// A turn that ends only when the test says so.
 struct HeldHarness {
     finish: tokio::sync::broadcast::Sender<()>,

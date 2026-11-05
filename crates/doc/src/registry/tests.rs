@@ -303,6 +303,28 @@ fn hand_off_chat_children_records_provenance_and_replays() {
     assert_eq!(provenance["at"], 123);
 }
 
+#[test]
+fn hand_off_chat_children_refuses_archived_cross_space_and_child() {
+    let mut doc = RegistryDoc::new("dev-a");
+    for (id, space, parent, archived) in [
+        ("source", "one", None, false),
+        ("other", "two", None, false),
+        ("child", "one", Some("source"), false),
+        ("archived", "one", None, true),
+    ] {
+        let mut row = chat(id, "dev-a");
+        row.space_id = Some(space.into());
+        row.parent_chat_id = parent.map(str::to_owned);
+        row.archived = archived;
+        doc.upsert_chat(&row).unwrap();
+    }
+    for destination in ["other", "child", "archived"] {
+        assert!(doc.hand_off_chat_children("source", destination, "source", 1).is_err());
+    }
+    assert!(doc.hand_off_chat_children("archived", "source", "archived", 1).is_err());
+    assert_eq!(doc.chat("child").unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+}
+
 pub(super) fn space(id: &str, device_id: &str, path: &str) -> Space {
     Space {
         id: id.into(),

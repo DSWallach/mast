@@ -246,13 +246,22 @@ impl WakeCore {
     /// Put back events whose delivery was cancelled before the orchestrator
     /// saw them (the user's message went first).
     pub fn restore(&mut self, orch: &str, events: Vec<WakeEvent>, now: i64) {
+        self.restore_events(orch, events, now, false);
+    }
+
+    pub fn restore_for_hand_off(&mut self, orch: &str, events: Vec<WakeEvent>, now: i64) {
+        self.restore_events(orch, events, now, true);
+    }
+
+    fn restore_events(&mut self, orch: &str, events: Vec<WakeEvent>, now: i64, preserve: bool) {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         for event in events {
             o.delivered_keys.remove(&event.key);
             if let Some(entry) = o.log.iter_mut().find(|l| l.event.id == event.id) {
                 entry.delivered = false;
             }
-            if !o.held.iter().any(|e| e.key == event.key) && o.settings.wakes_for(event.kind) {
+            if !o.held.iter().any(|e| if preserve { e.id == event.id } else { e.key == event.key })
+                && (preserve || o.settings.wakes_for(event.kind)) {
                 o.held.push(event);
             }
         }
