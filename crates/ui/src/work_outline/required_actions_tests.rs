@@ -59,11 +59,30 @@ fn handoff_card_displays_cached_lifecycle(cx: &mut gpui::TestAppContext) {
     let mut snapshot = m4::snapshot("s1");
     let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
     request.kind = Some(UserActionKind::Handoff);
-    request.facts.push(RequestFact { label: "PR".into(), value: "acme/app#7".into() });
+    request.facts.push(RequestFact { label: "Branch".into(), value: "feature/a".into() });
     let (overview, _, vcx) = m4_overview(cx, dir.path(), snapshot, reply_ok);
     let state = overview.read_with(vcx, |overview, _| overview.state.clone());
-    let _list = open_global(&overview, vcx);
+    state.update(vcx, |state, _| {
+        let chat = state.chats.iter_mut().find(|chat| chat.id == "chat-ui").unwrap();
+        chat.branch = Some("feature/a".into());
+        chat.linked_pr_url = Some("https://github.com/acme/app/pull/6".into());
+    });
+    let list = open_global(&overview, vcx);
     assert!(row_bounds(vcx, format!("required-actions-lifecycle-{}-Ready", m4::R_UI)).is_some());
+    let links = mast_engine::pr_ticket_cache::ChatLinkStatus {
+        pr_links: vec![6, 7].into_iter().map(|number| mast_engine::pr_ticket_cache::PrLinkStatus {
+            url: format!("https://github.com/acme/app/pull/{number}"), source: None, detail: None,
+        }).collect(), ..Default::default()
+    };
+    list.update(vcx, |list, cx| list.set_handoff_chat_links_for_test("chat-ui", &links, cx));
+    state.update(vcx, |state, cx| {
+        state.github.set_ready_for_test(PullRequestStatusSummary {
+            pr_ref: PullRequestRef::new("other", "repo", 99),
+            head_ref_name: Some("feature/a".into()), state: PullRequestState::Merged,
+            ..Default::default()
+        }, false);
+        cx.notify();
+    });
     let mut status = PullRequestStatusSummary { pr_ref: PullRequestRef::new("acme", "app", 7), head_ref_name: Some("feature/a".into()), ..Default::default() };
     for (pr_state, review, label) in [
         (PullRequestState::Open, Some(PullRequestReviewDecision::Approved), "Waiting to land"),
