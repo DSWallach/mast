@@ -489,6 +489,7 @@ impl OrchestratorWakes {
                     });
                 }
                 for id in completed { saved.remember_completed(&chat, &id); }
+                if !held.is_empty() { state.core.note_user_activity(&chat, clock(), None); }
                 state.core.restore_for_hand_off(&chat, held, clock());
                 if let (Some(snapshot), Some(events)) = (&handle.persistence, saved.orchestrators.get(&chat)) {
                     for entry in events.iter().filter(|entry| entry.delivered) {

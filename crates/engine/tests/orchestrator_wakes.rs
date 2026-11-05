@@ -147,6 +147,10 @@ async fn hand_off_reclaims_a_source_row_that_returns_after_restart() {
     saved["orchestrators"]["retired-source"][0]["message_id"] = "retired-row".into();
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let handle = rig.core.doc_host.open("retired-source").unwrap();
+    handle.doc().push_queued(&mast_doc::QueuedMessage { id: "user-row".into(), text: "user message".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None,
+        delivery_gate: Some(mast_doc::QueueDeliveryGate::ReviewRequired { previous_lease_id: "lease".into(),
+            owner_device_id: rig.core.device_id.clone(), since_ms: 1, base_text_hash: "hash".into() }) }).unwrap();
     let queued = mast_doc::QueuedMessage { id: "retired-row".into(), text: "Worker updates".into(), attachments: vec![],
         hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None };
     handle.doc().push_queued(&queued).unwrap();
@@ -154,11 +158,15 @@ async fn hand_off_reclaims_a_source_row_that_returns_after_restart() {
     let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(),
         Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
     restarted.hand_off_orchestrator("retired-source", "retired-destination", "retired-source").await.unwrap();
+    // Simulate a crash before the source queue removal was snapshotted.
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["orchestrators"]["retired-destination"][0]["retired_messages"] = serde_json::json!([{"chat_id": "retired-source", "message_id": "retired-row"}]);
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     handle.doc().push_queued(&queued).unwrap();
     let tick = rig.clock.clone();
     let restarted_again = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(),
         Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
-    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert_eq!(handle.doc().read_queue().unwrap().iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), vec!["user-row"]);
     assert_eq!(restarted_again.status("retired-destination").held.len(), 1);
     rig.core.shutdown().await;
 }
