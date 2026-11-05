@@ -5,6 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use mast_proto::{WakeEventKind, WakeEventView, WakeHoldReason, WakeSettings, WakeStatus};
+use serde::{Deserialize, Serialize};
 
 /// How long events are collected before they go out as one message. At most
 /// one wake is delivered per window.
@@ -18,7 +19,7 @@ pub const DEDUPE_TTL_MS: i64 = 10 * 60_000;
 const LOG_CAP: usize = 50;
 
 /// One worker event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WakeEvent {
     pub id: String,
     /// Identity for dedupe (same action re-raised = same key).
@@ -185,6 +186,12 @@ impl WakeCore {
             .filter(|(_, o)| !o.held.is_empty())
             .map(|(id, _)| id.clone())
             .collect()
+    }
+
+    /// Snapshot events awaiting queue acceptance.
+    pub fn held_events(&self) -> HashMap<String, Vec<WakeEvent>> {
+        self.orchs.iter().filter(|(_, orch)| !orch.held.is_empty())
+            .map(|(id, orch)| (id.clone(), orch.held.clone())).collect()
     }
 
     /// Record a worker event. Always logged (for the unseen marks); held for
@@ -394,6 +401,17 @@ mod tests {
     use super::*;
 
     const ORCH: &str = "orch";
+
+    #[test]
+    fn wake_event_serialization_preserves_identity_and_report() {
+        let mut core = WakeCore::new();
+        let mut original = event(&mut core, "worker", WakeEventKind::WorkerReport, "report", 123);
+        original.report = Some("report body".into());
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: WakeEvent = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, original);
+        assert_ne!(WakeCore::new().next_event_id(), original.id);
+    }
 
     fn event(
         core: &mut WakeCore,

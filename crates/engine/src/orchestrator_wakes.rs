@@ -16,6 +16,7 @@
 
 mod auto_continue;
 mod core;
+mod store;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
