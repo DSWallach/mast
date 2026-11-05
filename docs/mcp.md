@@ -1,6 +1,6 @@
 # Mast MCP server
 
-`zeron mcp` serves the Model Context Protocol on stdin/stdout and proxies every
+`mast mcp` serves the Model Context Protocol on stdin/stdout and proxies every
 tool into the running engine's localhost IPC (`ws://127.0.0.1:$MAST_IPC_PORT`,
 default 27654) — the same `mast_rpc` surface the headed app and `zeron sync`
 dial. It is a subcommand of the one `zeron` binary: no Node runtime, no extra
@@ -18,7 +18,7 @@ belong to a project under the server name `mast-agent` (Claude: `--mcp-config
 <owner-only file>`, tools surface as `mcp__mast-agent__<tool>`; Codex: per-thread
 `mcp_servers.mast-agent.*` config overrides). The distinct name keeps it from
 colliding with a server the user configured themselves (for example a
-terminal `zeron mcp`). Before the rename the server was called `zeron-agent`:
+terminal `mast mcp`). Before the rename the server was called `zeron-agent`:
 only new Runs get the new name (a Run already in progress keeps its tools), the
 engine never matches on the name, and old transcripts that mention
 `mcp__zeron-agent__<tool>` still render. The token and port reach the child as
@@ -61,7 +61,7 @@ the original tools to the token's Chat, project, and device:
 | `list_projects`, `list_devices` | Only the token's project / device. |
 | `whoami`, `list_harnesses`, `list_models` | Unscoped (this device's capabilities). |
 
-Without a token (a human running `zeron mcp` in a terminal) the original tools
+Without a token (a human running `mast mcp` in a terminal) the original tools
 work unattributed and unscoped. Contract:
 `docs/plans/work-outline/m0-contract.md`, "Milestone 4 agent tool discoveries".
 
@@ -138,7 +138,7 @@ done (this was the one bug the first live run found).
 ## Smoke recipe
 
 ```sh
-BIN=target/debug/zeron
+BIN=target/debug/mast
 { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_chats","arguments":{"limit":5}}}'
   sleep 5; } | MAST_IPC_PORT=27655 $BIN mcp

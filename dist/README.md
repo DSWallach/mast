@@ -19,8 +19,8 @@ on them); the dmg volume and the app inside it are named Mast. The manual steps 
    cargo build --release -p mast --target aarch64-apple-darwin
    cargo build --release -p mast --target x86_64-apple-darwin
    lipo -create -output zeron \
-     target/aarch64-apple-darwin/release/zeron \
-     target/x86_64-apple-darwin/release/zeron
+     target/aarch64-apple-darwin/release/mast \
+     target/x86_64-apple-darwin/release/mast
    ```
 2. Assemble the bundle:
    ```sh
