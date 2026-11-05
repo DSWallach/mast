@@ -1039,7 +1039,13 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let status = crate::status_style::status_style(row.state.into(), theme.appearance);
+        let status = crate::status_style::Status::from(row.state);
+        let indicator = if status == crate::status_style::Status::Working {
+            let color = crate::status_style::status_style(status, theme.appearance).color;
+            crate::loaders::mini_mono_spinner(format!("running-status-{}", row.chat_id), 1.5, color, cx.entity_id(), cx).into_any_element()
+        } else {
+            crate::status_style::indicator(status, theme.appearance).into_any_element()
+        };
         let meta = [
             row.item_path.clone(),
             row.account.clone(),
@@ -1075,12 +1081,7 @@ impl Shell {
                 }),
             )
             .child(
-                div()
-                    .mt(px(5.0))
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(status.color)
-                    .child(status.glyph),
+                div().mt(px(5.0)).child(indicator),
             )
             .child(
                 div()

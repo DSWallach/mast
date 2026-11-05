@@ -123,10 +123,7 @@ impl Shell {
                     el.child(
                         div()
                             .debug_selector(|| "right-surface-team-dot".into())
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color)
-                            .child("!"),
+                            .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance)),
                     )
                 })
                 .into_any_element(),
@@ -316,13 +313,13 @@ impl Shell {
         let indicator = if worker.state == WorkerState::Working {
             crate::loaders::mini_mono_spinner(format!("{prefix}-status-{id}"), 1.5, status.color, cx.entity_id(), cx).into_any_element()
         } else {
-            div().text_size(crate::typography::ui_rems(11.0)).text_color(status.color).child(status.glyph).into_any_element()
+            crate::status_style::indicator(worker.state.into(), theme.appearance).into_any_element()
         };
         let open_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
         let stalled = self.state.read(cx).session_for(&id).and_then(|session| {
             if session.status == mast_proto::SessionStatus::AwaitingInput {
-                Some(("waiting for input".to_owned(), theme.warning))
+                Some(("waiting for input".to_owned(), crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color))
             } else {
                 session
                     .last_turn_tool_failures
@@ -653,6 +650,7 @@ impl Shell {
                         )
                     })
             };
+            let ready_color = crate::status_style::status_style(crate::status_style::Status::Ready, theme.appearance).color;
             row = row.child(
                 div()
                     .pl(px(13.0))
@@ -665,8 +663,8 @@ impl Shell {
                             .min_w_0()
                             .truncate()
                             .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.success)
-                            .child(SharedString::from(text)),
+                            .text_color(ready_color)
+                            .child(SharedString::from(format!("→ {text}"))),
                     )
                     .when_some(lifecycle, |el, lifecycle| {
                         el.child(Self::chip(
@@ -687,11 +685,11 @@ impl Shell {
                             .px(px(6.0))
                             .rounded(px(4.0))
                             .border_1()
-                            .border_color(theme.success.opacity(0.5))
+                            .border_color(ready_color.opacity(0.5))
                             .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.success)
+                            .text_color(ready_color)
                             .cursor_pointer()
-                            .hover(|el| el.bg(theme.success.opacity(0.12)))
+                            .hover(|el| el.bg(ready_color.opacity(0.12)))
                             .child("Jump")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();

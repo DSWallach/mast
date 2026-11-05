@@ -3777,7 +3777,7 @@ fn compact_chat_segment(
     theme: &Theme,
 ) -> AnyElement {
     let chat = &row.chat;
-    let status = crate::status_style::status_style(chat.status.into(), theme.appearance);
+    let status = crate::status_style::Status::from(chat.status);
     let tip: SharedString = format!("Chat: {}", chat.title).into();
     div()
         .flex_none()
@@ -3792,9 +3792,7 @@ fn compact_chat_segment(
                     move || selector.clone()
                 })
                 .flex_none()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(status.color)
-                .child(status.glyph)
+                .child(crate::status_style::indicator(status, theme.appearance))
                 .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
         )
         .when_some(drift, |el, drift| el.child(drift))
@@ -3846,14 +3844,14 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme)
             .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
             .into_any_element();
     }
-    let status = crate::status_style::status_style(chat.status.into(), theme.appearance);
+    let status = crate::status_style::Status::from(chat.status);
     div()
         .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .gap(px(6.0))
-        .child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(status.color).child(status.glyph))
+        .child(crate::status_style::indicator(status, theme.appearance))
         .child(
             div()
                 .flex_1()

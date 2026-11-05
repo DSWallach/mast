@@ -714,9 +714,13 @@ impl ChatTypeView {
             )
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(status_label(row.status))),
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(crate::status_style::indicator(row.status.into(), theme.appearance))
+                    .child(div().text_size(crate::typography::ui_rems(11.0))
+                        .text_color(crate::status_style::status_style(row.status.into(), theme.appearance).color)
+                        .child(SharedString::from(status_label(row.status)))),
             )
             .child(
                 div()

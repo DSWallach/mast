@@ -7325,11 +7325,10 @@ impl Shell {
                     .text_color(status_color)
                     .into_any_element()
             } else {
-                div()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(status_color)
-                    .child(if queued || undelivered { "!" } else { crate::status_style::status_style(status.into(), theme.appearance).glyph })
-                    .into_any_element()
+                crate::status_style::indicator(
+                    if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
+                    theme.appearance,
+                ).into_any_element()
             };
             div()
                 .id(SharedString::from(format!("{row_id}-status")))
@@ -7435,21 +7434,19 @@ impl Shell {
                             .text_color(status_color)
                             .into_any_element()
                     } else if working {
-                        loaders::mini_glyph_spinner(
+                        loaders::mini_mono_spinner(
                             format!("{row_id}-working"),
                             2.0,
-                            theme.glyph,
+                            status_color,
                             self.sidebar_pane.entity_id(),
                             cx,
                         )
                         .into_any_element()
                     } else {
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(status_color)
-                            .into_any_element()
+                        crate::status_style::indicator(
+                            if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
+                            theme.appearance,
+                        ).into_any_element()
                     };
                     div()
                         .flex()

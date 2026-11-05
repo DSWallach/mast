@@ -1,6 +1,8 @@
 //! Accent-independent presentation of chat and worker states.
 
 use crate::theme::Appearance;
+use gpui::prelude::FluentBuilder;
+use gpui::{Div, ParentElement, Styled, div, px};
 use mast_proto::ChatIndicator;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,10 +80,70 @@ pub(crate) fn status_style(status: Status, appearance: Appearance) -> StatusStyl
     }
 }
 
+/// A fixed-size status marker for rows that do not host a live spinner.
+pub(crate) fn indicator(status: Status, appearance: Appearance) -> Div {
+    let style = status_style(status, appearance);
+    div()
+        .flex_none()
+        .size(px(10.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(style.color)
+        .when(status == Status::Waiting, |element| {
+            element
+                .rounded_full()
+                .bg(style.color)
+                .text_color(gpui::rgb(0x183028))
+        })
+        .child(style.glyph)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::theme::{AccentColor, Theme};
+
+    #[test]
+    fn view_models_share_status_mapping() {
+        use crate::running_chats::RunState;
+        use crate::team::WorkerState;
+        let rows = [
+            (
+                ChatIndicator::Working,
+                WorkerState::Working,
+                RunState::Working,
+                Status::Working,
+            ),
+            (
+                ChatIndicator::AwaitingInput,
+                WorkerState::Waiting,
+                RunState::Awaiting,
+                Status::Waiting,
+            ),
+            (
+                ChatIndicator::Errored,
+                WorkerState::Errored,
+                RunState::Errored,
+                Status::Errored,
+            ),
+            (
+                ChatIndicator::Idle,
+                WorkerState::Idle,
+                RunState::IdleBackground,
+                Status::Idle,
+            ),
+        ];
+        for (chat, worker, running, expected) in rows {
+            assert_eq!(Status::from(chat), expected);
+            assert_eq!(Status::from(worker), expected);
+            assert_eq!(Status::from(running), expected);
+        }
+        assert_eq!(Status::from(ChatIndicator::Completed), Status::Done);
+        assert_eq!(Status::from(WorkerState::Done), Status::Done);
+        assert_eq!(Status::from(RunState::ToolFailed), Status::Errored);
+    }
 
     fn luminance(rgb: [u8; 3]) -> f64 {
         let channel = |value: u8| {
