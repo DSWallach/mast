@@ -582,19 +582,19 @@ fn description(id: ShortcutId) -> &'static str {
             "Show the actions waiting on you for the selected work item."
         }
         ShortcutId::MoveWorkItemUp => {
-            "Move the selected work item above its previous sibling (Outline: Option+Shift+Up)."
+            "Move the selected work item above its previous sibling."
         }
         ShortcutId::MoveWorkItemDown => {
-            "Move the selected work item below its next sibling (Outline: Option+Shift+Down)."
+            "Move the selected work item below its next sibling."
         }
         ShortcutId::IndentWorkItem => {
-            "Make the selected work item the last child of its previous sibling (Outline: Tab)."
+            "Make the selected work item the last child of its previous sibling."
         }
         ShortcutId::OutdentWorkItem => {
-            "Move the selected work item out of its parent, right after it (Outline: Shift+Tab)."
+            "Move the selected work item out of its parent, right after it."
         }
         ShortcutId::ShowOutlineShortcuts => {
-            "List the Outline keys and Work Outline commands (Outline: ?)."
+            "List the Outline keys and Work Outline commands."
         }
         ShortcutId::OpenLinear => {
             "Show or hide the Linear panel beside the Overview body; from anywhere else in the \

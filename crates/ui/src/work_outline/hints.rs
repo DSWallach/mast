@@ -2,8 +2,7 @@
 //! and carry its CURRENT key binding.
 //!
 //! Bindings are read when the tooltip is built, from the live settings
-//! keymap (rebindable [`WorkOutlineCommand`] shortcuts) or the fixed
-//! Outline-context table (`shell::work_outline_ui::OUTLINE_NAVIGATION_KEYS`),
+//! keymap (including Outline-context shortcuts),
 //! so a rebind shows up on the next hover without re-rendering anything. An
 //! unbound command shows its label alone. Keys are spelled per platform:
 //! modifier glyphs on macOS (`⌃⌥⇧⌘`), `Ctrl+Alt+Shift+` elsewhere.
@@ -33,7 +32,7 @@ pub(crate) enum HintKey {
     None,
     /// A rebindable Work Outline command (empty combo = unbound = no key).
     Command(WorkOutlineCommand),
-    /// A fixed Outline-context key.
+    /// A rebindable Outline-context key.
     Outline(OutlineNavKey),
     /// An app-wide rebindable shortcut that also acts on the selected
     /// Outline row ([`OUTLINE_APP_KEYS`]).
@@ -354,8 +353,8 @@ fn chat_item_group(mac: bool, keymap: &KeymapConfig) -> ShortcutGroup {
             },
             ShortcutRow {
                 label: "Open the Team tab (chats with workers)",
-                keys: (!keymap.open_team_tab.is_empty())
-                    .then(|| key_label_on(mac, &keymap.open_team_tab)),
+                keys: shortcut_combo(keymap, ShortcutId::OpenTeamTab)
+                    .map(|combo| key_label_on(mac, &combo)),
             },
             ShortcutRow {
                 label: "Open the Team tab from the side panel (not in a text field)",
