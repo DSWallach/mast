@@ -73,7 +73,14 @@ impl Batch {
         for event in &self.events {
             out.push_str("\n- ");
             out.push_str(&label(&event.worker_chat_id));
-            if let Some((_, detail)) = event.summary.split_once(" — ") {
+            let short: String = event.worker_chat_id.chars().take(12).collect();
+            let marker = format!("chat {short}");
+            let detail = event.summary.find(&marker).and_then(|index| {
+                event.summary[index + marker.len()..]
+                    .strip_prefix(") — ")
+                    .or_else(|| event.summary[index + marker.len()..].strip_prefix(" — "))
+            }).or_else(|| event.summary.split_once(" — ").map(|(_, detail)| detail));
+            if let Some(detail) = detail {
                 out.push_str(" — ");
                 out.push_str(detail);
             } else {
