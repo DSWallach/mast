@@ -279,6 +279,7 @@ async fn hand_off_reparents_workers_and_moves_held_reports() {
     let result = rig.wakes.report_to_parent("worker", "after hand-off").await.unwrap();
     assert_eq!(result.parent_chat_id, "successor");
     assert_eq!(rig.wakes.status("successor").held.len(), 2);
+    assert!(rig.wakes.status("source").held.is_empty());
     rig.core.shutdown().await;
 }
 
@@ -1263,6 +1264,23 @@ async fn explicit_parent_receives_wake_instead_of_project_coordinator() {
     rig.wakes.ingest_snapshot(&project_snapshot(serde_json::json!([request("r-parent", "w1", "ready", "open")]))).await;
     assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
     assert!(rig.wakes.status("coordinator").held.is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_wake_is_discarded_if_coordinator_is_archived_before_dispatch() {
+    let rig = Rig::new().await;
+    let handle = rig.core.doc_host.open(ORCH).unwrap();
+    handle.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "archive-queued-wake".into(), text: "Worker updates: queued report".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1,
+        edited_at: None, delivery_gate: None,
+    }).unwrap();
+    rig.core.doc_host.event_turns().register(ORCH, "archive-queued-wake".into(), vec![]);
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    rig.core.doc_host.drain_queue(&handle).await;
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert!(rig.wake_prompts().is_empty());
     rig.core.shutdown().await;
 }
 
