@@ -971,7 +971,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 20 + WORK_OUTLINE_SHORTCUTS + 22 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 20 + WORK_OUTLINE_SHORTCUTS + 23 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -1032,6 +1032,7 @@ impl ShortcutId {
         ShortcutId::Outline(19),
         ShortcutId::Outline(20),
         ShortcutId::Outline(21),
+        ShortcutId::Outline(22),
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),

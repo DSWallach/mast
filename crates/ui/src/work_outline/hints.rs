@@ -16,7 +16,6 @@ use gpui::{
 };
 
 use super::command::WorkOutlineCommand;
-use super::outline_view::context_menu::OPEN_MENU_KEYS;
 use crate::settings::{KeymapConfig, ShortcutId, platform_combo};
 use crate::shell::work_outline_ui::{OUTLINE_NAVIGATION_KEYS, OutlineKeyGroup, OutlineNavKey};
 use crate::theme::Theme;
@@ -469,20 +468,22 @@ fn linear_group(mac: bool) -> ShortcutGroup {
 /// The shortcut reference's footer: where Outline keys work, how to reach a
 /// row's context menu (right-click, Control-click on macOS, or the
 /// keyboard), and where to rebind.
-pub(crate) fn shortcuts_footer() -> String {
-    shortcuts_footer_on(cfg!(target_os = "macos"))
+pub(crate) fn shortcuts_footer(keymap: &KeymapConfig) -> String {
+    shortcuts_footer_on(cfg!(target_os = "macos"), keymap)
 }
 
 /// [`shortcuts_footer`] for an explicit platform.
-pub(crate) fn shortcuts_footer_on(mac: bool) -> String {
-    let menu_key = key_label_on(mac, OPEN_MENU_KEYS[0]);
+pub(crate) fn shortcuts_footer_on(mac: bool, keymap: &KeymapConfig) -> String {
+    let menu_key = shortcut_combo(keymap, OutlineNavKey::OpenContextMenu.shortcut_id())
+        .map(|combo| format!(" (or press {})", key_label_on(mac, &combo)))
+        .unwrap_or_default();
     let click = if mac {
         "Right-click or Control-click a row"
     } else {
         "Right-click a row"
     };
     format!(
-        "Outline keys work while the Outline has focus. {click} (or press {menu_key}) for its \
+        "Outline keys work while the Outline has focus. {click}{menu_key} for its \
          actions. Rebind commands in Settings \u{203a} Shortcuts."
     )
 }
@@ -620,10 +621,10 @@ mod tests {
 
     #[test]
     fn shortcuts_footer_mentions_right_click_and_the_menu_key() {
-        let mac = shortcuts_footer_on(true);
+        let mac = shortcuts_footer_on(true, &KeymapConfig::default());
         assert!(mac.contains("Right-click or Control-click a row"), "{mac}");
         assert!(mac.contains("\u{21e7}F10"), "{mac}");
-        let other = shortcuts_footer_on(false);
+        let other = shortcuts_footer_on(false, &KeymapConfig::default());
         assert!(other.contains("Right-click a row"), "{other}");
         assert!(!other.contains("Control-click"), "{other}");
         assert!(other.contains("Shift+F10"), "{other}");
@@ -686,7 +687,7 @@ mod tests {
         // the Chat-row moves add their own rows.
         assert_eq!(
             outline_rows,
-            OUTLINE_NAVIGATION_KEYS.len() - 5
+            OUTLINE_NAVIGATION_KEYS.len() - 6
                 + CHAT_MOVE_KEYS.len()
                 + SPACE_MOVE_KEYS.len()
                 + OUTLINE_APP_KEYS.len()

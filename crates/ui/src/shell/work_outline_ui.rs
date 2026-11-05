@@ -203,6 +203,7 @@ pub(crate) enum OutlineNavKey {
     Redo,
     /// Open the shortcut reference.
     ShowShortcuts,
+    OpenContextMenu,
 }
 
 /// The shortcut reference's groups for the Outline keys.
@@ -214,7 +215,7 @@ pub(crate) enum OutlineKeyGroup {
 }
 
 impl OutlineNavKey {
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::SelectNext,
         Self::SelectPrevious,
         Self::SelectFirst,
@@ -237,6 +238,7 @@ impl OutlineNavKey {
         Self::Undo,
         Self::Redo,
         Self::ShowShortcuts,
+        Self::OpenContextMenu,
     ];
 
     pub(crate) fn shortcut_id(self) -> crate::settings::ShortcutId {
@@ -267,6 +269,7 @@ impl OutlineNavKey {
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::ShowShortcuts => "ShowShortcuts",
+            Self::OpenContextMenu => "OpenContextMenu",
         }
     }
 
@@ -295,6 +298,7 @@ impl OutlineNavKey {
             Self::Undo => "Undo change",
             Self::Redo => "Redo change",
             Self::ShowShortcuts => "Show shortcuts",
+            Self::OpenContextMenu => "Open context menu",
         }
     }
 
@@ -310,7 +314,8 @@ impl OutlineNavKey {
             | Self::Collapse
             | Self::OpenSelected
             | Self::OpenDetails
-            | Self::ShowShortcuts => OutlineKeyGroup::Navigate,
+            | Self::ShowShortcuts
+            | Self::OpenContextMenu => OutlineKeyGroup::Navigate,
             Self::StartChat
             | Self::RenameSelected
             | Self::CreateSibling
@@ -368,7 +373,7 @@ impl OutlineNavKey {
 ///   character, so it follows the keyboard layout.
 ///
 /// When an action has several keys, the first is the one tooltips show.
-pub(crate) const OUTLINE_NAVIGATION_KEYS: [(&str, OutlineNavKey); 27] = [
+pub(crate) const OUTLINE_NAVIGATION_KEYS: [(&str, OutlineNavKey); 29] = [
     ("up", OutlineNavKey::SelectPrevious),
     ("down", OutlineNavKey::SelectNext),
     ("home", OutlineNavKey::SelectFirst),
@@ -396,6 +401,8 @@ pub(crate) const OUTLINE_NAVIGATION_KEYS: [(&str, OutlineNavKey); 27] = [
     ("mod-shift-z", OutlineNavKey::Redo),
     ("ctrl-shift-z", OutlineNavKey::Redo),
     ("?", OutlineNavKey::ShowShortcuts),
+    ("shift-f10", OutlineNavKey::OpenContextMenu),
+    ("menu", OutlineNavKey::OpenContextMenu),
 ];
 
 /// Bindings for the configurable Work Outline commands. An empty combo is
@@ -499,6 +506,7 @@ pub(crate) fn bind_work_outline_navigation(cx: &mut App, keymap: &KeymapConfig) 
             OutlineNavKey::GroupInto => KeyBinding::new(keys, GroupSelected, context),
             OutlineNavKey::Undo => KeyBinding::new(keys, UndoChange, context),
             OutlineNavKey::Redo => KeyBinding::new(keys, RedoChange, context),
+            OutlineNavKey::OpenContextMenu => KeyBinding::new(keys, crate::work_outline::outline_view::context_menu::OpenContextMenu, context),
             OutlineNavKey::ShowShortcuts => KeyBinding::new(
                 keys,
                 RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts),
@@ -586,7 +594,7 @@ fn shortcuts_card(theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
                     div()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
-                        .child(crate::work_outline::hints::shortcuts_footer()),
+                        .child(crate::work_outline::hints::shortcuts_footer(&keymap)),
                 )
                 .child(
                     popover::btn_ghost(theme, "Close", "work-outline-shortcuts-close")
@@ -2210,6 +2218,7 @@ mod tests {
                 OutlineNavKey::Undo => Box::new(UndoChange),
                 OutlineNavKey::Redo => Box::new(RedoChange),
                 OutlineNavKey::ShowShortcuts => Box::new(RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts)),
+                OutlineNavKey::OpenContextMenu => Box::new(crate::work_outline::outline_view::context_menu::OpenContextMenu),
             };
             let key = Keystroke::parse(&platform_combo(combo)).unwrap();
             let bindings = cx.update(|_, cx| cx.all_bindings_for_input(&[key]));
