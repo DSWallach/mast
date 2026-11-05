@@ -734,7 +734,7 @@ impl ChatTypeView {
         // Churn, reviewers / author, CI, open, updated.
         let (churn, excluded) = pr_page::churn(&row.diff);
         let partial_tooltip = pr_page::partial_score_tooltip(&row.diff);
-        let partial_id = SharedString::from(row.url.clone());
+        let partial_id = SharedString::from(format!("partial-score-{}", row.url));
         let churn = div()
             .flex_none()
             .w(px(W_CHURN))
@@ -746,7 +746,7 @@ impl ChatTypeView {
             .when_some(partial_tooltip, |el, tip| {
                 el.child(
                     div()
-                        .id(("partial-score", partial_id))
+                        .id(partial_id)
                         .text_size(crate::typography::ui_rems(9.0))
                         .text_color(theme.text_faint)
                         .child("partial")
