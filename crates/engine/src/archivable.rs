@@ -61,6 +61,44 @@ pub struct ArchivableInput<'a> {
     pub now: DateTime<Utc>,
 }
 
+/// Whether a durable PR link represents work owned by the chat.
+pub fn owns_pr_link(link: &mast_proto::ChatPrLink) -> bool {
+    matches!(
+        link.source,
+        mast_proto::ChatLinkSource::Manual
+            | mast_proto::ChatLinkSource::CreatedInChat
+            | mast_proto::ChatLinkSource::Branch
+            | mast_proto::ChatLinkSource::DiffTarget
+    )
+}
+
+/// Open handoffs that explicitly identify a branch in a diff link or Branch fact.
+pub fn open_handoffs_for_branch<'a>(
+    snapshot: &'a WorkOutlineSnapshot,
+    branch: &str,
+) -> Vec<&'a UserActionRequestView> {
+    use mast_proto::work_outline_user_actions::{RequestLinkTarget, UserActionKind};
+    if branch.is_empty() {
+        return Vec::new();
+    }
+    snapshot
+        .user_action_requests
+        .iter()
+        .filter(|request| {
+            request.is_unresolved()
+                && request.effective_kind() == UserActionKind::Handoff
+                && (request.links.iter().any(|link| {
+                    matches!(
+                        &link.target,
+                        RequestLinkTarget::Diff { branch: Some(value) } if value == branch
+                    )
+                }) || request.facts.iter().any(|fact| {
+                    fact.label.eq_ignore_ascii_case("branch") && fact.value.trim() == branch
+                }))
+        })
+        .collect()
+}
+
 /// The requests a chat originated, from the outline snapshot.
 pub fn requests_of<'a>(
     snapshot: &'a WorkOutlineSnapshot,

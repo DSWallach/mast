@@ -4,15 +4,13 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
-use mast_proto::{
-    Chat, ChatIndicator, ChatLinkSource, ChatPrLink, WorkOutlineSnapshot, chat_indicator,
-};
+use mast_proto::{Chat, ChatIndicator, ChatPrLink, WorkOutlineSnapshot, chat_indicator};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{AgentToolError, AgentToolErrorCode, AgentToolsService, CallContext, lock, parse_args};
 use crate::archivable::{
-    AgentArchive, Archivable, ArchivableInput, archivable, requests_of, worker_scope,
+    AgentArchive, Archivable, ArchivableInput, archivable, owns_pr_link, requests_of, worker_scope,
 };
 
 #[derive(Deserialize)]
@@ -243,15 +241,7 @@ impl AgentToolsService {
 fn owned_pr_states(links: &[ChatPrLink], state: impl Fn(&str) -> Option<String>) -> Vec<String> {
     links
         .iter()
-        .filter(|link| {
-            matches!(
-                link.source,
-                ChatLinkSource::Manual
-                    | ChatLinkSource::CreatedInChat
-                    | ChatLinkSource::Branch
-                    | ChatLinkSource::DiffTarget
-            )
-        })
+        .filter(|link| owns_pr_link(link))
         .map(|link| state(&link.url).unwrap_or_default())
         .collect()
 }
@@ -259,6 +249,7 @@ fn owned_pr_states(links: &[ChatPrLink], state: impl Fn(&str) -> Option<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mast_proto::ChatLinkSource;
 
     #[test]
     fn archivable_pr_states_include_only_owned_links_and_preserve_unknown_states() {
