@@ -349,6 +349,7 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 #[ignore = "benchmark: run with --ignored --nocapture"]
 fn bench_engine_chat_selection(cx: &mut gpui::TestAppContext) {
+    crate::perf::require_offline_executables();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

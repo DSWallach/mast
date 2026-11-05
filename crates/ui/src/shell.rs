@@ -2118,7 +2118,8 @@ impl Shell {
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
         // Bind the customizable shortcuts from the persisted keymap.
-        apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+        tracing::info_span!("startup_apply_keymap")
+            .in_scope(|| apply_keymap(cx, &settings.keymap, settings.composer_send_behavior));
         // Dev/testing knob: `MAST_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.

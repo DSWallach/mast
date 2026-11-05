@@ -289,3 +289,173 @@ fn bench_shell_initialization(cx: &mut TestAppContext) {
         });
     });
 }
+
+/// A profile-backed startup including registry loading and the first sidebar data.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_profile_startup(cx: &mut TestAppContext) {
+    crate::perf::require_offline_executables();
+    use mast_proto::{
+        CreateWorkItemParams, WorkOutlineActor, WorkOutlineActorKind, WorkOutlineMutation,
+        WorkOutlinePlacement,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let dir = tempfile::tempdir().unwrap();
+    let profile = mast_engine::EngineProfile::development(dir.path(), "benchmark-org", "dev-user");
+    let mut registry = mast_doc::RegistryDoc::new("benchmark-device");
+    registry
+        .upsert_space(&mast_proto::Space {
+            id: "benchmark-space".into(),
+            device_id: "benchmark-device".into(),
+            path: dir.path().to_string_lossy().into_owned(),
+            name: Some("Benchmark".into()),
+            git_detected: false,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    let mut chats: Vec<_> = (0..250).map(chat_row).collect();
+    for chat in &mut chats {
+        chat.device_id = "benchmark-device".into();
+        chat.space_id = Some("benchmark-space".into());
+        registry.upsert_chat(chat).unwrap();
+    }
+    let actor = WorkOutlineActor {
+        kind: WorkOutlineActorKind::User,
+        device_id: "benchmark-device".into(),
+        chat_id: None,
+        message_id: None,
+    };
+    for i in 0..300 {
+        registry
+            .apply_work_outline_mutation(
+                &WorkOutlineMutation::CreateWorkItem(CreateWorkItemParams {
+                    space_id: "benchmark-space".into(),
+                    parent_work_item_id: None,
+                    placement: WorkOutlinePlacement::Last,
+                    title: format!("Benchmark item {i}"),
+                    description: None,
+                    status: None,
+                    operation_id: format!("benchmark-item-{i}"),
+                }),
+                &actor,
+                1_700_000_000_000 + i,
+            )
+            .unwrap();
+    }
+    // Accumulated pending updates make the serialized registry approximately
+    // 50 MiB while preserving 250 visible chats and 300 visible work items.
+    let padding = "x".repeat(8192);
+    for i in 0..6000 {
+        chats[0].last_message_preview = Some(format!("{i}:{padding}"));
+        registry.upsert_chat(&chats[0]).unwrap();
+    }
+    chats[0].last_message_preview = None;
+    registry.upsert_chat(&chats[0]).unwrap();
+    let bytes = registry.to_bytes().unwrap();
+    eprintln!("BENCH startup | registry bytes={}", bytes.len());
+    assert!((45_000_000..65_000_000).contains(&bytes.len()));
+    let store = mast_sync::DocsStore::open(profile.store_root()).unwrap();
+    store
+        .save_snapshot(mast_doc::REGISTRY_DOC_ID, &bytes)
+        .unwrap();
+    assert_eq!(
+        store
+            .load_snapshot(mast_doc::REGISTRY_DOC_ID)
+            .unwrap()
+            .unwrap()
+            .len(),
+        bytes.len()
+    );
+    drop((bytes, registry, store));
+    let started = std::time::Instant::now();
+    let settings = settings::UiSettings::load(dir.path());
+    cx.update(|cx| {
+        gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+        gpui_base::init(cx);
+        settings::init(settings.clone(), dir.path(), cx);
+        let fonts = crate::typography::register_fonts(cx);
+        crate::typography::init(
+            settings.ui_font_family.clone(),
+            settings.ui_font_size,
+            settings.terminal_font_family.clone(),
+            settings.terminal_font_size,
+            settings.code_font_family.clone(),
+            settings.code_font_size,
+            fonts,
+            cx,
+        );
+        crate::theme_library::init(dir.path(), cx);
+        crate::appearance::init(
+            settings.appearance,
+            settings.theme_selection.clone(),
+            settings.accent,
+            settings.surface,
+            cx,
+        );
+        crate::history::init(
+            settings.git_history_columns,
+            settings.git_history_column_widths,
+            settings.git_history_column_order,
+            settings.git_history_author_display,
+            cx,
+        );
+        crate::composer::init(cx, settings.composer_send_behavior);
+        crate::terminal::panel::init(cx);
+        crate::app_menus::init(cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    let boot = EngineBootConfig {
+        data_dir: dir.path().to_path_buf(),
+        ipc_port: 0,
+        edge_url: "http://127.0.0.1:1".into(),
+        edge_token: None,
+        org_id: Some("benchmark-org".into()),
+        workos_client_id: None,
+        default_harness: mast_proto::HarnessId::Mock,
+    };
+    cx.update(|cx| AppState::bootstrap(state.clone(), boot.clone(), cx));
+    let (_, vcx) = cx.add_window_view(|_, cx| Shell::new(state.clone(), boot, cx));
+    vcx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    eprintln!(
+        "BENCH startup | initial shell draw | ms={:.2}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    state.update(vcx, |state, cx| {
+        state.declare_work_outline_visible(vec!["benchmark-space".into()], cx)
+    });
+    loop {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if state.read_with(vcx, |state, _| {
+            state.chats.len() == 250
+                && state
+                    .work_outline("benchmark-space")
+                    .snapshot()
+                    .is_some_and(|snapshot| snapshot.items.len() == 300)
+        }) {
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(120),
+            "profile startup did not load sidebar data"
+        );
+        std::thread::yield_now();
+    }
+    vcx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    eprintln!(
+        "BENCH startup | loaded sidebar draw | ms={:.2}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}

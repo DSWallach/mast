@@ -5356,6 +5356,7 @@ dependencies = [
  "mast-harness",
  "mast-proto",
  "mast-rpc",
+ "mast-sync",
  "mast-syntax",
  "mast-theme",
  "mast-update",
