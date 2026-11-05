@@ -33,6 +33,7 @@ pub mod diff_targets;
 pub mod doc_host;
 pub mod execution_scope;
 pub mod external_import;
+pub mod friction_import;
 mod http_error;
 pub mod instance_lock;
 pub mod instruction_delivery;
