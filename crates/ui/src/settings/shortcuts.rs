@@ -782,6 +782,7 @@ impl Render for ShortcutsPage {
             }
             groups.push(
                 div()
+                    .debug_selector(move || format!("shortcuts-group-{name}").into())
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -1087,6 +1088,18 @@ mod tests {
             record_key("ctrl", true, false, false, false),
             RecordOutcome::Ignored
         );
+    }
+
+    #[gpui::test]
+    fn settings_render_outline_and_team_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::default()); });
+        let (_, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            ShortcutsPage::new(state, KeymapConfig::default(), false, ComposerSendBehavior::default(), false, false, AppshotDestination::Automatic, cx)
+        });
+        vcx.update(|window, cx| { window.draw(cx).clear(); });
+        assert!(vcx.debug_bounds("shortcuts-group-Outline").is_some());
+        assert!(vcx.debug_bounds("shortcuts-group-Team").is_some());
     }
 
     #[test]
