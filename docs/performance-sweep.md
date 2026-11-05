@@ -10,8 +10,11 @@ Baseline on integration commit `ccb8cc107`, macOS, installed profile, headless G
 | Transcript streaming sync and draw | 14.55 ms mean, 36.75 ms p95 | 30 updates; older direct-sync benchmark bypasses background preparation, and adds a part per tick. Not end-to-end production streaming latency. |
 | Team facts, 300 items and 50 chats | 0.07 ms mean, 0.08 ms p95 | 100 pure fact-sheet builds; does not measure Team drawing. |
 | Outline redraw | 3.18 ms mean, 5.96 ms p95 | Existing fixture: 120 items and 250 chats, clean rows. |
-| List redraw | 105.66 ms mean, 150.63 ms p95 | Same fixture; existing unvirtualized List mode. |
+| List redraw | 105.66 → 1.98 ms mean; 150.63 → 2.54 ms p95 | Same 250-chat fixture, before and after variable-height List virtualization. |
+| List first draw | 68.66 → 2.54 ms | Same fixture; allocations requested 332.32 → 11.70 MiB. |
 | Observer notifications, 50 background heartbeats | Overview 1, shell 1, transcript 1 | 250 chats; other measured views 0. |
 | Observer notifications, 50 preview changes | shell 50, transcript 50, chat-type view 50 | Other measured views 0; selected transcript revisions separately notify transcript 50 times. |
 
 Transcript rows and settled markdown trees are cached per entry; live markdown uses incremental parsers. Syntax highlights and cross-frame rendering also have caches. A changed transcript still traverses and reconstructs the flattened row vector in `Transcript::sync`. The cached-open timing is not selection-to-first-frame latency: it excludes asynchronous replay and the fixture inserts already prepared rows. The existing streaming test similarly does not establish production per-chunk cost. Startup-to-interactive, a 300-item outline redraw, Team redraw and real status-tick fan-out remain unmeasured. Engine bootstrap is dispatched to Tokio by `AppState::bootstrap`; this alone does not establish that every startup operation is off the UI thread.
+
+List virtualization (`88dfa4dab`) retains the flattened grouped order and virtualizes variable-height rows. The GPUI regression checks distant selection, expansion after scrolling away and back, group ordering and the visible chat anchor after reordering. Existing tests cover List keyboard navigation and Outline keyboard restructuring and drag. Every render marks measured row heights for remeasurement because expansion, hover, subagents and asynchronously fetched details can change height. The two timing runs were taken on the same host using the same installed-profile fixture; normal machine load may differ.
