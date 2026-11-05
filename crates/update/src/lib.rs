@@ -857,7 +857,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
-                socket.read(&mut request).await.unwrap();
+                let _ = socket.read(&mut request).await.unwrap();
                 if stall_body {
                     socket
                         .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
@@ -889,7 +889,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            let _ = socket.read(&mut request).await.unwrap();
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
                 .await

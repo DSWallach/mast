@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, px,
 };
 use mast_proto::{
     ArtifactKind, ArtifactOptionPick, ArtifactPickOptionParams, ArtifactView, pick_message,

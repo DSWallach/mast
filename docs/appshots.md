@@ -17,9 +17,7 @@ ignored. No message is sent automatically.
   X11 text enrichment requires matching native window, process, title, and
   retained AT-SPI object identity. Portal captures omit accessibility text because
   the selected native window cannot currently be verified.
-- iOS displays desktop Appshots received through the existing attachment
-  transport. It does not capture other iOS applications. Windows capture is not
-  implemented.
+- Windows capture is not implemented.
 
 Optional accessibility collection has a 900 ms budget. Linux races enrichment
 against the overall deadline; macOS applies the remaining timeout to each queried
@@ -36,14 +34,12 @@ Accessibility text is agent context, not visible message text.
 
 Queued images use small cropped thumbnails. Narrow desktop windows show one
 thumbnail with an additional-image count; desktop actions retain their fixed
-slots when modifier hints appear. iOS uses one thumbnail, an image gallery, and
-44-point edit/send/menu targets. Its queue scrolls after three rows.
+slots when modifier hints appear.
 
 Visible desktop queue thumbnails have their own bounded lifecycle, independent
 of eviction from the full-image cache. Full images load when opened. Failed
-previews require user activation to retry. iOS retains prepared thumbnails while
-their rows are realized. Queue editing preserves the original Appshot context
-and attachment references on both clients.
+previews require user activation to retry. Queue editing preserves the original
+Appshot context and attachment references.
 
 Capture and settings belong to the viewer's UI. Sending uses the existing
 attachment upload/host acknowledgement flow and prompt context; no RPC or
@@ -54,7 +50,7 @@ Enter/Space, accessible names and state, and visible keyboard focus.
 ## Verification and visual fixtures
 
 The focused final suites passed on macOS (829 UI tests), native Linux (849 UI
-tests), and iOS Simulator (107 unit tests plus one Appshots UI flow). App checks
+tests). App checks
 passed on macOS and Linux. Native capture permission dialogs, real desktop
 focus changes, interactive Linux portals, VoiceOver, and physical remote-device
 delivery still require a live release pass; the fixtures do not establish them.
@@ -63,10 +59,8 @@ The opt-in `appshots-fixture` Rust example renders isolated native GPUI frames
 from supplied PNG fixtures. Run it with an output directory and a directory
 containing `wide.png`, `tall.png`, and `square.png` after building with
 `cargo build -p mast-ui --example appshots-fixture --features appshots-fixture`.
-It uses a temporary data directory and an ephemeral IPC listener. iOS's
-`-demo -appshots` fixture supplies neutral images; `AppshotUITests` verifies
-portrait/landscape presentation, image opening, the gallery, and queue actions.
-Neither fixture sends an agent prompt.
+It uses a temporary data directory and an ephemeral IPC listener and does not
+send an agent prompt.
 
 The initial whole-workspace review reported four failures, three reproduced on
 an upstream baseline, plus existing upstream formatting differences. Focused

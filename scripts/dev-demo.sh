@@ -61,5 +61,5 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   touch "$DAEMON_DIR/.demo-seeded"
 fi
 
-echo "▸ opening zeron (composer is live — type into it; --slow shows streaming)"
+echo "▸ opening Mast (composer is live — type into it; --slow shows streaming)"
 MAST_DATA_DIR="$UI_DIR" MAST_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/zeron
