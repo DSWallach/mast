@@ -499,7 +499,20 @@ async fn an_untouched_child_is_archived_when_its_ticket_leaves() {
 
         rig.mock.set(vec![leaving], &[]);
         rig.refresh(SPACE).await.unwrap();
-        let item = rig.child(&dest, "ENG-1");
+        // Archive and sync state are separate document mutations; wait until
+        // the materialized snapshot contains both before asserting either.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let item = loop {
+            let item = rig.child(&dest, "ENG-1");
+            if (item.archived_at.is_some()
+                && marker(&item).as_deref() == Some(reason)
+                && item.external_sync_state.as_ref().is_some_and(|s| s.archived_by_linear_sync))
+                || tokio::time::Instant::now() >= deadline
+            {
+                break item;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
         assert!(item.archived_at.is_some(), "{name}: archived");
         assert_eq!(marker(&item).as_deref(), Some(reason), "{name}");
         let record = item.external_sync_state.unwrap();
