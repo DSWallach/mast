@@ -2712,12 +2712,12 @@ impl ComposerInput {
                 ClipboardEntry::String(_) => {}
             }
         }
-        if !images.is_empty() {
-            cx.emit(ComposerInputEvent::PastedImages(images));
-            return;
-        }
         if !paths.is_empty() {
             cx.emit(ComposerInputEvent::PastedPaths(paths));
+            return;
+        }
+        if !images.is_empty() {
+            cx.emit(ComposerInputEvent::PastedImages(images));
             return;
         }
         if let Some(text) = item.text() {
