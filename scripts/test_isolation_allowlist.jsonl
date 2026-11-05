@@ -483,3 +483,4 @@
 {"path": "crates/proto/src/env.rs", "line": "(true, \".mast-dev\", \".zeron-dev\"),", "occurrence": 1, "reason": "Storage path selection; tests resolve only temporary homes and synthetic environment values."}
 {"path": "apps/mast/src/paths.rs", "line": "resolve(&[(\"ZERON_DATA_DIR\", \"legacy\")]),", "occurrence": 1, "reason": "Storage path selection; tests resolve only temporary homes and synthetic environment values."}
 {"path": "apps/mast/src/paths.rs", "line": "resolve(&[(\"MAST_DATA_DIR\", \"current\"), (\"ZERON_DATA_DIR\", \"legacy\")]),", "occurrence": 1, "reason": "Storage path selection; tests resolve only temporary homes and synthetic environment values."}
+{"path": "apps/mast/src/daemon.rs", "line": "report_legacy_executable(&launchd_plist_path()?.with_file_name(\"sh.zeron.app.plist\"));", "occurrence": 1, "reason": "Read-only status check for the legacy launch agent; tests use isolated homes."}

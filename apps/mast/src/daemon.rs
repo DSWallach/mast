@@ -195,6 +195,7 @@ pub fn restart() -> anyhow::Result<()> {
 pub fn status() -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
         report_legacy_executable(&launchd_plist_path()?);
+        report_legacy_executable(&launchd_plist_path()?.with_file_name("sh.zeron.app.plist"));
         let output = Command::new("launchctl")
             .args(["print", &launchd_service_target()?])
             .output()
