@@ -441,60 +441,63 @@ impl WorkItemDetails {
                                 })
                             })),
                     );
-                } else if picker_open {
-                    if let Some(snapshot) = &self.snapshot {
-                        let last = crate::settings::current(cx)
-                            .friction_destination_by_space_id
-                            .get(&self.space_id)
-                            .cloned();
-                        let mut choices: Vec<_> = snapshot
-                            .items
-                            .iter()
-                            .filter(|item| item.archived_at.is_none())
-                            .collect();
-                        choices.sort_by_key(|item| last.as_deref() != Some(item.id.as_str()));
-                        for (choice_index, item) in choices.into_iter().enumerate() {
-                            let parent_item_id = item.id.clone();
-                            let fingerprint = report.fingerprint.clone();
-                            let report_id = report.id.clone();
-                            details = details.child(
-                                div()
-                                    .id(("friction-parent", index * 10000 + choice_index))
-                                    .debug_selector({
-                                        let selector = format!("friction-parent-{}", item.id);
-                                        move || selector.clone()
-                                    })
-                                    .cursor_pointer()
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(item.title.clone()))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let task = this
-                                            .state
-                                            .read(cx)
-                                            .work_outline_actions()
-                                            .promote_friction_to_item(
-                                                mast_proto::PromoteFrictionToItemParams {
-                                                    space_id: this.space_id.clone(),
-                                                    fingerprint: fingerprint.clone(),
-                                                    parent_item_id: parent_item_id.clone(),
-                                                },
-                                            );
-                                        let report_id = report_id.clone();
-                                        let parent_item_id = parent_item_id.clone();
-                                        let space_id = this.space_id.clone();
-                                        cx.spawn(async move |this, cx| {
-                                            let result = task.await;
-                                            this.update(cx, |this, cx| {
-                                                match result {
-                                                    Ok(result) => {
-                                                        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
-                                                            settings.friction_destination_by_space_id.insert(space_id, parent_item_id);
-                                                        });
-                                                        if let Some(report) = this
-                                                            .friction
-                                                            .reports
-                                                            .as_mut()
-                                                            .and_then(|reports| {
+                } else if picker_open && let Some(snapshot) = &self.snapshot {
+                    let last = crate::settings::current(cx)
+                        .friction_destination_by_space_id
+                        .get(&self.space_id)
+                        .cloned();
+                    let mut choices: Vec<_> = snapshot
+                        .items
+                        .iter()
+                        .filter(|item| item.archived_at.is_none())
+                        .collect();
+                    choices.sort_by_key(|item| last.as_deref() != Some(item.id.as_str()));
+                    for (choice_index, item) in choices.into_iter().enumerate() {
+                        let parent_item_id = item.id.clone();
+                        let fingerprint = report.fingerprint.clone();
+                        let report_id = report.id.clone();
+                        details = details.child(
+                            div()
+                                .id(("friction-parent", index * 10000 + choice_index))
+                                .debug_selector({
+                                    let selector = format!("friction-parent-{}", item.id);
+                                    move || selector.clone()
+                                })
+                                .cursor_pointer()
+                                .text_color(theme.text)
+                                .child(SharedString::from(item.title.clone()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let task = this
+                                        .state
+                                        .read(cx)
+                                        .work_outline_actions()
+                                        .promote_friction_to_item(
+                                            mast_proto::PromoteFrictionToItemParams {
+                                                space_id: this.space_id.clone(),
+                                                fingerprint: fingerprint.clone(),
+                                                parent_item_id: parent_item_id.clone(),
+                                            },
+                                        );
+                                    let report_id = report_id.clone();
+                                    let parent_item_id = parent_item_id.clone();
+                                    let space_id = this.space_id.clone();
+                                    cx.spawn(async move |this, cx| {
+                                        let result = task.await;
+                                        this.update(cx, |this, cx| {
+                                            match result {
+                                                Ok(result) => {
+                                                    crate::settings::update(
+                                                        crate::settings::SavePolicy::Debounced,
+                                                        cx,
+                                                        |settings| {
+                                                            settings
+                                                                .friction_destination_by_space_id
+                                                                .insert(space_id, parent_item_id);
+                                                        },
+                                                    );
+                                                    if let Some(report) =
+                                                        this.friction.reports.as_mut().and_then(
+                                                            |reports| {
                                                                 reports.iter_mut().find(|report| {
                                                                     report.id == report_id
                                                                 })
@@ -514,10 +517,11 @@ impl WorkItemDetails {
                                             })
                                             .ok();
                                         })
-                                        .detach();
-                                    })),
-                            );
-                        }
+                                        .ok();
+                                    })
+                                    .detach();
+                                })),
+                        );
                     }
                 }
                 let dismiss = Self::small_button(("friction-dismiss", index), "Dismiss", theme)

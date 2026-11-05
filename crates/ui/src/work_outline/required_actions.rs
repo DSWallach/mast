@@ -148,14 +148,31 @@ pub(crate) fn handoff_lifecycle_parts<'a>(
         }
     }
     for fact in facts {
-        if fact.label.eq_ignore_ascii_case("branch") && !fact.value.trim().is_empty() { branches.push(fact.value.trim()); }
-        if fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request") { if let Some(pr) = parse_handoff_pr(&fact.value) { references.push(pr); } }
+        if fact.label.eq_ignore_ascii_case("branch") && !fact.value.trim().is_empty() {
+            branches.push(fact.value.trim());
+        }
+        if (fact.label.eq_ignore_ascii_case("pr")
+            || fact.label.eq_ignore_ascii_case("pull request"))
+            && let Some(pr) = parse_handoff_pr(&fact.value)
+        {
+            references.push(pr);
+        }
     }
-    if branches.is_empty() && references.is_empty() { return None; }
-    let matching: Vec<_> = statuses.filter(|status| {
-        if !references.is_empty() { references.iter().any(|pr| pr.key() == status.pr_ref.key()) }
-        else { status.head_ref_name.as_deref().is_some_and(|branch| branches.contains(&branch)) }
-    }).collect();
+    if branches.is_empty() && references.is_empty() {
+        return None;
+    }
+    let matching: Vec<_> = statuses
+        .filter(|status| {
+            if !references.is_empty() {
+                references.iter().any(|pr| pr.key() == status.pr_ref.key())
+            } else {
+                status
+                    .head_ref_name
+                    .as_deref()
+                    .is_some_and(|branch| branches.contains(&branch))
+            }
+        })
+        .collect();
     // A bare branch can exist in several repositories; avoid choosing one.
     let status = if matching.len() == 1 { matching.first().copied() } else { None };
     Some(match status {

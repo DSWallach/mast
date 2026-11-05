@@ -24,9 +24,9 @@ use gpui::{
     WeakEntity, Window, div, prelude::*, px,
 };
 use mast_proto::{
-    ArchiveWorkItemParams, AssignChatToWorkItemParams, CreateWorkItemExternalReferenceParams,
-    FieldPatch, RemoveChatFromWorkItemParams, RemoveWorkItemExternalReferenceParams,
-    RestoreWorkItemParams, UpdateWorkItemParams, WorkItemChanges,
+    ArchiveWorkItemParams, CreateWorkItemExternalReferenceParams, FieldPatch,
+    RemoveWorkItemExternalReferenceParams, RestoreWorkItemParams, UpdateWorkItemParams,
+    WorkItemChanges,
 };
 
 use super::actions::{ActionTask, new_operation_id};

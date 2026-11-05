@@ -97,10 +97,9 @@ impl WorkOutlineStore {
     pub(crate) fn set(&mut self, space_id: &str, load: WorkOutlineLoad) -> bool {
         if let (Some(WorkOutlineLoad::Ready(old)), WorkOutlineLoad::Ready(new)) =
             (self.loads.get(space_id), &load)
+            && old.same_content_as(new)
         {
-            if old.same_content_as(new) {
-                return false;
-            }
+            return false;
         }
         if self
             .loads

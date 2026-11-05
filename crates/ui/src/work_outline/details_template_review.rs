@@ -110,11 +110,10 @@ impl WorkItemDetails {
             .review
             .as_mut()
             .and_then(|review| review.rows.get_mut(ix))
+            && (row.state == RowState::Pending || matches!(row.state, RowState::Failed(_)))
         {
-            if row.state == RowState::Pending || matches!(row.state, RowState::Failed(_)) {
-                row.state = RowState::Skipped;
-                cx.notify();
-            }
+            row.state = RowState::Skipped;
+            cx.notify();
         }
     }
 
@@ -238,11 +237,10 @@ impl WorkItemDetails {
                 }
             }
             let mut link_error = None;
-            if advance && !failed {
-                if let Err(error) = actions.mutate(link).await {
+            if advance && !failed
+                && let Err(error) = actions.mutate(link).await {
                     link_error = Some(error.message);
                 }
-            }
             this.update(cx, |this, cx| {
                 this.in_flight.remove(&in_flight);
                 if let Some(message) = link_error {

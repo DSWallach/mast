@@ -80,14 +80,13 @@ impl OutlineView {
             self.show_notice(notice, cx);
             return;
         }
-        if self.multi.is_empty() {
-            if let Some(primary) = self
+        if self.multi.is_empty()
+            && let Some(primary) = self
                 .selected
                 .clone()
                 .filter(|primary| self.model.row(primary).is_some_and(|r| r.item().is_some()))
-            {
-                self.multi.insert(primary);
-            }
+        {
+            self.multi.insert(primary);
         }
         if !self.multi.remove(key) {
             self.multi.insert(key.to_owned());

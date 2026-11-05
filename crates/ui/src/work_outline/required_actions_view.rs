@@ -969,17 +969,20 @@ impl RequiredActionsList {
                 crate::github::store::request_status(&self.state, pr, false, cx);
             }
             for link in &row.links {
-                if let mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } = &link.target {
-                    if let Some(pr) = required_actions::parse_handoff_pr(url) {
-                        crate::github::store::request_status(&self.state, &pr, false, cx);
-                    }
+                if let mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url }
+                | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } =
+                    &link.target
+                    && let Some(pr) = required_actions::parse_handoff_pr(url)
+                {
+                    crate::github::store::request_status(&self.state, &pr, false, cx);
                 }
             }
             for fact in &row.facts {
-                if fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request") {
-                    if let Some(pr) = required_actions::parse_handoff_pr(&fact.value) {
-                        crate::github::store::request_status(&self.state, &pr, false, cx);
-                    }
+                if (fact.label.eq_ignore_ascii_case("pr")
+                    || fact.label.eq_ignore_ascii_case("pull request"))
+                    && let Some(pr) = required_actions::parse_handoff_pr(&fact.value)
+                {
+                    crate::github::store::request_status(&self.state, &pr, false, cx);
                 }
             }
         }
@@ -1487,14 +1490,12 @@ impl RequiredActionsList {
             .when_some(choice_focus, |el, focus| el.track_focus(&focus))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                 if !keyboard_enabled || event.is_held || event.keystroke.modifiers != gpui::Modifiers::default() { return; }
-                if let Ok(index) = event.keystroke.key.parse::<usize>() {
-                    if (1..=9).contains(&index) {
-                        if let Some(option) = keyboard_options.get(index - 1) {
+                if let Ok(index) = event.keystroke.key.parse::<usize>()
+                    && (1..=9).contains(&index)
+                        && let Some(option) = keyboard_options.get(index - 1) {
                             this.choose_option(keyboard_id.clone(), option.id.clone(), cx);
                             cx.stop_propagation();
                         }
-                    }
-                }
             }))
             .flex()
             .flex_col()

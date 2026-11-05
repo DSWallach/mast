@@ -470,7 +470,7 @@ pub(crate) fn linear_visible_slots(room: f32, id_width: f32) -> LinearSlots {
 }
 
 /// Everything the Linear cluster needs from the row.
-pub(crate) struct LinearRowArgs<'a> {
+pub(super) struct LinearRowArgs<'a> {
     pub key: &'a str,
     pub issue: &'a LinearIssueRow,
     pub shell: Option<WeakEntity<crate::shell::Shell>>,
@@ -511,7 +511,7 @@ pub(crate) fn linear_group_line(
 /// status`. The totals text, chat count and references icon are folded into
 /// the tooltip. Without a fetched issue the status slot carries the row and
 /// the assignee stays empty so the columns still line up.
-pub(crate) fn issue_row_slots(args: LinearRowArgs<'_>, theme: &Theme) -> AnyElement {
+pub(super) fn issue_row_slots(args: LinearRowArgs<'_>, theme: &Theme) -> AnyElement {
     let LinearRowArgs {
         key,
         issue,

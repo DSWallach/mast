@@ -712,11 +712,11 @@ impl OutlineView {
             self.follow = Some(key.clone());
         }
         self.reflatten();
-        if let Some(key) = follow {
-            if self.model.position(&key).is_some() {
-                self.follow = None;
-                self.select(&key, cx);
-            }
+        if let Some(key) = follow
+            && self.model.position(&key).is_some()
+        {
+            self.follow = None;
+            self.select(&key, cx);
         }
         cx.notify();
     }
@@ -815,27 +815,27 @@ impl OutlineView {
             let place =
                 |model: &OutlineModel| model.position(&follow).map(|ix| (ix, model.rows[ix].depth));
             let before = place(&previous);
-            if let Some((after, depth)) = place(&self.model) {
-                if before != Some((after, depth)) {
-                    // The moved item's new place: select and reveal it.
-                    self.selected = Some(
-                        self.model
-                            .canonical_key(&follow)
-                            .unwrap_or(&follow)
-                            .to_string(),
-                    );
-                    self.follow = None;
-                    self.scroll.scroll_to_item(after, ScrollStrategy::Nearest);
-                    return;
-                }
-            }
-        }
-        if let Some(pending) = self.pending_select.clone() {
-            if let Some(key) = self.model.canonical_key(&pending) {
-                self.selected = Some(key.to_string());
-                self.pending_select = None;
+            if let Some((after, depth)) = place(&self.model)
+                && before != Some((after, depth))
+            {
+                // The moved item's new place: select and reveal it.
+                self.selected = Some(
+                    self.model
+                        .canonical_key(&follow)
+                        .unwrap_or(&follow)
+                        .to_string(),
+                );
+                self.follow = None;
+                self.scroll.scroll_to_item(after, ScrollStrategy::Nearest);
                 return;
             }
+        }
+        if let Some(pending) = self.pending_select.clone()
+            && let Some(key) = self.model.canonical_key(&pending)
+        {
+            self.selected = Some(key.to_string());
+            self.pending_select = None;
+            return;
         }
         if let Some(selected) = self.selected.clone() {
             self.selected = nav::reconcile_selection(&previous, &self.model, &selected);
@@ -1169,15 +1169,15 @@ impl OutlineView {
     /// app's selected Space, else the only/first Space shown.
     fn target_space(&self, cx: &App) -> Option<String> {
         let shown = |id: &str| self.inputs.spaces.iter().any(|space| space.id == id);
-        if let Some(space) = self.selected_row().and_then(OutlineRow::space_id) {
-            if shown(space) {
-                return Some(space.to_string());
-            }
+        if let Some(space) = self.selected_row().and_then(OutlineRow::space_id)
+            && shown(space)
+        {
+            return Some(space.to_string());
         }
-        if let Some(space) = self.state.read(cx).selected_space.as_deref() {
-            if shown(space) {
-                return Some(space.to_string());
-            }
+        if let Some(space) = self.state.read(cx).selected_space.as_deref()
+            && shown(space)
+        {
+            return Some(space.to_string());
         }
         self.inputs.spaces.first().map(|space| space.id.clone())
     }
@@ -2257,10 +2257,8 @@ impl OutlineView {
                             error = %error.message,
                             "send_direct: reply failed"
                         );
-                        if ours {
-                            if let Some(attempt) = this.attempt.as_mut() {
-                                attempt.state = AttemptState::Failed;
-                            }
+                        if ours && let Some(attempt) = this.attempt.as_mut() {
+                            attempt.state = AttemptState::Failed;
                         }
                         if ours || !this.restructuring_busy() {
                             this.queued_restructure.clear();
