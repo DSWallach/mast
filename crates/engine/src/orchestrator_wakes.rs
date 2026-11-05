@@ -455,6 +455,13 @@ impl OrchestratorWakes {
                             }
                     }
                     let ids: HashSet<_> = events.iter().flat_map(|entry| entry.message_id.iter().chain(entry.retired_messages.iter().filter(|retired| retired.chat_id == chat).map(|retired| &retired.message_id))).filter(|id| queue.contains(*id)).cloned().collect();
+                    for id in events.iter().filter_map(|entry| entry.message_id.as_ref()).filter(|id| !queue.contains(*id) && !transcript.contains(*id)) {
+                        if let Some(snapshot) = &handle.persistence {
+                            retired_generations.insert((chat.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
+                        } else {
+                            legacy_retired.insert((chat.clone(), id.clone()), std::time::Instant::now());
+                        }
+                    }
                     for retired in events.iter().flat_map(|entry| entry.retired_messages.iter()).filter(|retired| retired.chat_id == chat && !queue.contains(&retired.message_id)) {
                         if let Some(snapshot) = &handle.persistence {
                             retired_generations.insert((chat.clone(), retired.message_id.clone()), (snapshot.clone(), snapshot.generation()));
@@ -485,7 +492,8 @@ impl OrchestratorWakes {
                         if entry.retired_messages.iter().any(|retired| cross_blocked.contains(&(retired.chat_id.clone(), retired.message_id.clone()))) { blocked = true; return true; }
                         if let Some(id) = entry.message_id.clone() {
                             if transcript.contains(&id) {
-                                if removed.contains(&id) || !entry.retired_messages.is_empty() {
+                                let snapshot_pending = handle.persistence.as_ref().is_none_or(|snapshot| !snapshot.has_saved(snapshot.generation()));
+                                if removed.contains(&id) || !entry.retired_messages.is_empty() || snapshot_pending {
                                     entry.delivered = true;
                                     if removed.contains(&id) { entry.retire(&chat, &id); }
                                     return true;
@@ -494,7 +502,7 @@ impl OrchestratorWakes {
                                 return false;
                             }
                             if queue.contains(&id) && !removed.contains(&id) { blocked = true; return true; }
-                            if removed.contains(&id) { entry.retire(&chat, &id); }
+                            entry.retire(&chat, &id);
                             entry.message_id = None;
                             entry.delivered = false;
                         }

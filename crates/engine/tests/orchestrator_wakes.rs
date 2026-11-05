@@ -87,6 +87,8 @@ async fn restart_replays_a_dequeued_unreceipted_report() {
     let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
         rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
     assert_eq!(restarted.status(ORCH).held.len(), 1);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["orchestrators"][ORCH][0]["retired_messages"][0]["message_id"], "dequeued-row");
     rig.advance(2 * USER_QUIET_MS);
     restarted.evaluate(ORCH, false).await;
     rig.wait_for(|| rig.wake_prompts().iter().any(|prompt| prompt.contains("dequeued report")), "replayed report").await;
