@@ -589,6 +589,7 @@ pub(crate) struct UserActionNotice {
     pub request_id: String,
     pub kind: mast_proto::work_outline_user_actions::UserActionKind,
     pub group: NeedsGroup,
+    pub options: Vec<mast_proto::work_outline_user_actions::RequestOption>,
     /// The newest request's text (the banner body when `count == 1`).
     pub text: String,
     /// The newest request's origin Chat when it can be opened (banner click).
@@ -676,7 +677,13 @@ impl UserActionNotifier {
                     item_title: snapshot.item(&request.work_item_id)
                         .map(|item| item.title.clone()).unwrap_or_default(),
                     kind: request.effective_kind(),
-                    group: NeedsGroup::of(request.effective_kind(), request.priority),
+                    options: request.options.clone(),
+                    group: match request.priority {
+                        Some(mast_proto::work_outline_user_actions::UserActionPriority::Blocking) => NeedsGroup::Blocking,
+                        Some(mast_proto::work_outline_user_actions::UserActionPriority::Normal) => NeedsGroup::ReadyToMerge,
+                        Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi) => NeedsGroup::Fyi,
+                        None => NeedsGroup::of(request.effective_kind(), None),
+                    },
                     text: request.text.clone(),
                     chat_id: request.origin_chat_available.then(|| request.chat_id.clone())
                         .filter(|id| !id.is_empty()),

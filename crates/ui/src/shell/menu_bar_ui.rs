@@ -197,10 +197,10 @@ impl Shell {
                 let page = self.ensure_overview_page(cx);
                 page.update(cx, |overview, cx| overview.open_required_action(request_id, cx));
             }
-            MenuEvent::Action(MenuAction::DecideRequest { space_id: _, request_id, decision }) => {
+            MenuEvent::Action(MenuAction::DecideRequest { space_id: _, request_id, decision, via }) => {
                 if !matches!(self.route, Route::Overview) { self.open_overview(cx); }
                 let page = self.ensure_overview_page(cx);
-                page.update(cx, |overview, cx| overview.decide_required_action(request_id, decision, cx));
+                page.update(cx, |overview, cx| overview.decide_required_action(request_id, decision, via, cx));
             }
             MenuEvent::Action(MenuAction::RestartWhenIdle) => {
                 if self.pending_build().is_some() {

@@ -64,7 +64,8 @@ impl Shell {
                         None => notice.title(),
                     };
                     let target = crate::notify::request_target(&notice.space_id, &notice.request_id);
-                    crate::notify::post(&title, &notice.body(), Some(&target));
+                    let actions = crate::menu_bar::request_actions(notice.kind, &notice.options, notice.chat_id.is_some());
+                    crate::notify::post_request(&title, &notice.body(), &target, &actions);
                 }
             }
         }

@@ -1146,9 +1146,11 @@ fn menu_choice_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
     let list = open_global(&overview, vcx);
     list.update(vcx, |list, cx| {
-        list.menu_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), cx);
-        list.menu_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), cx);
+        list.external_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), "menu", cx);
+        list.external_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), "menu", cx);
     });
+    vcx.run_until_parked();
+    list.update(vcx, |list, cx| list.external_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), "menu", cx));
     vcx.run_until_parked();
     assert_eq!(sends(&calls).len(), 1);
     assert_eq!(resolves(&calls).len(), 1);

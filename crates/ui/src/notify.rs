@@ -34,7 +34,37 @@ pub fn post(title: &str, body: &str, chat_id: Option<&str>) {
     if std::env::var_os(DISABLE_ENV).is_some() {
         return;
     }
-    post_impl(title, body, chat_id);
+    post_impl(title, body, chat_id, &[]);
+}
+
+/// Post a request banner with platform-supported actions.
+pub(crate) fn post_request(title: &str, body: &str, target: &str, actions: &[(String, crate::menu_bar::RequestDecision)]) {
+    if std::env::var_os(DISABLE_ENV).is_none() {
+        post_impl(title, body, Some(target), actions);
+    }
+}
+
+fn decision_identifier(decision: &crate::menu_bar::RequestDecision) -> String {
+    use crate::menu_bar::RequestDecision;
+    match decision {
+        RequestDecision::Approve => serde_json::json!(["approve"]).to_string(),
+        RequestDecision::Decline => serde_json::json!(["decline"]).to_string(),
+        RequestDecision::Choose(id) => serde_json::json!(["choose", id]).to_string(),
+    }
+}
+
+pub(crate) fn parse_decision_target(value: &str) -> Option<(String, String, crate::menu_bar::RequestDecision)> {
+    use crate::menu_bar::RequestDecision;
+    let [target, identifier]: [String; 2] = serde_json::from_str(value.strip_prefix("decision:")?).ok()?;
+    let (space, request) = parse_request_target(&target)?;
+    let parts: Vec<String> = serde_json::from_str(&identifier).ok()?;
+    let decision = match parts.as_slice() {
+        [kind] if kind == "approve" => RequestDecision::Approve,
+        [kind] if kind == "decline" => RequestDecision::Decline,
+        [kind, id] if kind == "choose" => RequestDecision::Choose(id.clone()),
+        _ => return None,
+    };
+    Some((space, request, decision))
 }
 
 /// Encode a request target for the native notification callback.
@@ -59,8 +89,8 @@ pub fn on_click(handler: impl Fn(String) + 'static) {
 }
 
 #[cfg(target_os = "macos")]
-fn post_impl(title: &str, body: &str, chat_id: Option<&str>) {
-    if post_user_notification(title, body, chat_id) {
+fn post_impl(title: &str, body: &str, chat_id: Option<&str>, actions: &[(String, crate::menu_bar::RequestDecision)]) {
+    if post_user_notification(title, body, chat_id, actions) {
         return;
     }
     let script = format!(
@@ -95,7 +125,7 @@ const CHAT_ID_KEY: &std::ffi::CStr = c"chatId";
 /// no bundle (dev runs — `defaultUserNotificationCenter` is nil there) and
 /// the installed-app identity can't be adopted either.
 #[cfg(target_os = "macos")]
-fn post_user_notification(title: &str, body: &str, chat_id: Option<&str>) -> bool {
+fn post_user_notification(title: &str, body: &str, chat_id: Option<&str>, actions: &[(String, crate::menu_bar::RequestDecision)]) -> bool {
     use objc::runtime::{Class, Object};
     use objc::{class, msg_send, sel, sel_impl};
     // Defensive lookup (not `class!`, which panics if the class is ever
@@ -129,6 +159,18 @@ fn post_user_notification(title: &str, body: &str, chat_id: Option<&str>) -> boo
         let _: () = msg_send![note, setInformativeText: ns_body];
         if let Some(chat_id) = chat_id {
             tag_chat(note, &chat_id);
+        }
+        if let Some(action_class) = Class::get("NSUserNotificationAction") {
+            let array: *mut Object = msg_send![class!(NSMutableArray), array];
+            for (label, decision) in actions.iter().take(3) {
+                let Ok(label) = std::ffi::CString::new(label.replace('\0', "")) else { continue; };
+                let Ok(identifier) = std::ffi::CString::new(decision_identifier(decision)) else { continue; };
+                let ns_label: *mut Object = msg_send![class!(NSString), stringWithUTF8String: label.as_ptr()];
+                let ns_identifier: *mut Object = msg_send![class!(NSString), stringWithUTF8String: identifier.as_ptr()];
+                let action: *mut Object = msg_send![action_class, actionWithIdentifier: ns_identifier title: ns_label];
+                if !action.is_null() { let _: () = msg_send![array, addObject: action]; }
+            }
+            let _: () = msg_send![note, setAdditionalActions: array];
         }
         let _: () = msg_send![center, deliverNotification: note];
         let _: () = msg_send![note, release];
@@ -206,10 +248,19 @@ mod delegate {
             }
             CStr::from_ptr(utf8).to_string_lossy().into_owned()
         };
-        CLICK.with_borrow(|handler| {
-            if let Some(handler) = handler {
-                handler(chat_id);
+        let action = unsafe {
+            let action: *mut Object = msg_send![notification, additionalActivationAction];
+            if action.is_null() { None } else {
+                let identifier: *mut Object = msg_send![action, identifier];
+                if identifier.is_null() { None } else {
+                    let utf8: *const c_char = msg_send![identifier, UTF8String];
+                    if utf8.is_null() { None } else { Some(CStr::from_ptr(utf8).to_string_lossy().into_owned()) }
+                }
             }
+        };
+        let target = action.map_or(chat_id.clone(), |action| format!("decision:{}", serde_json::json!([chat_id, action])));
+        CLICK.with_borrow(|handler| {
+            if let Some(handler) = handler { handler(target); }
         });
     }
 
@@ -323,7 +374,7 @@ fn applescript_escape(text: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn post_impl(title: &str, body: &str, _chat_id: Option<&str>) {
+fn post_impl(title: &str, body: &str, _chat_id: Option<&str>, _actions: &[(String, crate::menu_bar::RequestDecision)]) {
     let (title, body) = (title.to_string(), body.to_string());
     std::thread::spawn(move || {
         // `--` ends option parsing: session titles are model-generated, so a
@@ -342,11 +393,23 @@ fn post_impl(title: &str, body: &str, _chat_id: Option<&str>) {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn post_impl(_title: &str, _body: &str, _chat_id: Option<&str>) {}
+fn post_impl(_title: &str, _body: &str, _chat_id: Option<&str>, _actions: &[(String, crate::menu_bar::RequestDecision)]) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_action_targets_round_trip() {
+        use crate::menu_bar::RequestDecision;
+        let target = request_target("space", "request");
+        for decision in [RequestDecision::Approve, RequestDecision::Decline, RequestDecision::Choose("choice/1".into())] {
+            let identifier = decision_identifier(&decision);
+            let encoded = format!("decision:{}", serde_json::json!([target, identifier]));
+            assert_eq!(parse_decision_target(&encoded), Some(("space".into(), "request".into(), decision)));
+        }
+        assert!(parse_decision_target("decision:[]").is_none());
+    }
 
     #[test]
     fn applescript_escaping() {

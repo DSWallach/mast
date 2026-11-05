@@ -313,17 +313,17 @@ impl RequiredActionsList {
         cx.notify();
     }
 
-    pub(crate) fn menu_decision(&mut self, request_id: String, decision: crate::menu_bar::RequestDecision, cx: &mut Context<Self>) {
+    pub(crate) fn external_decision(&mut self, request_id: String, decision: crate::menu_bar::RequestDecision, via: &'static str, cx: &mut Context<Self>) {
         use crate::menu_bar::RequestDecision;
         use mast_proto::work_outline_user_actions::UserActionKind;
         let Some(row) = self.open_row(&request_id) else { return; };
-        if !row.chat_available || row.system || self.in_flight.contains(&request_id) { return; }
+        if !row.chat_available || row.system || self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() { return; }
         let valid = match &decision {
             RequestDecision::Approve | RequestDecision::Decline => row.kind == UserActionKind::Approve,
             RequestDecision::Choose(id) => row.kind == UserActionKind::Choose && row.options.iter().any(|option| &option.id == id),
         };
         if !valid { return; }
-        self.resolution_via.insert(request_id.clone(), "menu".into());
+        self.resolution_via.insert(request_id.clone(), via.into());
         match decision {
             RequestDecision::Approve => self.decide(request_id, "approved".into(), String::new(), cx),
             RequestDecision::Decline => self.decide(request_id, "declined".into(), String::new(), cx),

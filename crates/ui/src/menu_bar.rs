@@ -392,7 +392,7 @@ impl Styled {
 pub enum MenuAction {
     OpenChat(String),
     OpenRequest { space_id: String, request_id: String },
-    DecideRequest { space_id: String, request_id: String, decision: RequestDecision },
+    DecideRequest { space_id: String, request_id: String, decision: RequestDecision, via: &'static str },
     OpenMast,
     RestartWhenIdle,
     ResumeAll(Vec<String>),
@@ -632,7 +632,7 @@ pub(crate) fn insert_requests(view: &mut MenuView, mut requests: Vec<RequestPrev
         });
         for (label, decision) in request.actions {
             items.push(Item::Action {
-                action: MenuAction::DecideRequest { space_id: request.space_id.clone(), request_id: request.request_id.clone(), decision },
+                action: MenuAction::DecideRequest { space_id: request.space_id.clone(), request_id: request.request_id.clone(), decision, via: "menu" },
                 label: format!("    {label}"),
             });
         }
