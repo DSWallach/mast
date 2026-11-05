@@ -284,8 +284,8 @@ impl DiffTargets {
         let changed = self
             .workspace
             .update_chat_diff_targets(chat_id, |row| {
-                if let Some(op) = operation_id {
-                    if row.ops.iter().any(|known| known == op) {
+                if let Some(op) = operation_id
+                    && row.ops.iter().any(|known| known == op) {
                         if is_own || row.targets.iter().any(|t| t.path == path_text) {
                             replayed = true;
                         } else {
@@ -296,7 +296,6 @@ impl DiffTargets {
                         }
                         return;
                     }
-                }
                 // At most one of the two selections is set.
                 row.selected_ref = None;
                 if is_own {

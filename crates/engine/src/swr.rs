@@ -113,13 +113,11 @@ where
     {
         let flight = {
             let mut state = self.lock();
-            if !force {
-                if let Some(entry) = state.entries.get(key) {
-                    if self.is_fresh(entry) {
+            if !force
+                && let Some(entry) = state.entries.get(key)
+                    && self.is_fresh(entry) {
                         return Ok(entry.clone());
                     }
-                }
-            }
             match state.inflight.get(key) {
                 Some((_, flight)) => flight.clone(),
                 None => {
