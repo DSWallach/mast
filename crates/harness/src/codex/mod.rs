@@ -1804,14 +1804,11 @@ async fn ask_yes_no(
     Some(match answers {
         Err(_) => Verdict::Gone,
         Ok(answers) => {
-            let accept = answers.iter().any(|a| {
-                a.question_id == question.id
-                    && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
-            });
-            if accept {
-                Verdict::Accept
-            } else {
-                Verdict::Decline
+            match answers.iter().find(|a| a.question_id == question.id)
+                .and_then(|a| a.labels.first()) {
+                Some(label) if label.eq_ignore_ascii_case("yes") => Verdict::Accept,
+                Some(label) if label.eq_ignore_ascii_case("no") => Verdict::Decline,
+                _ => Verdict::Gone,
             }
         }
     })

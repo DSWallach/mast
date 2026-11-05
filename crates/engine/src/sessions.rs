@@ -61,7 +61,7 @@ pub enum SteerOutcome {
     NotSteerable,
 }
 
-type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+type PendingInputs = Arc<Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>>;
 
 fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
@@ -1046,7 +1046,7 @@ impl SessionsEngine {
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
                 let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), tx);
+                lock(&pending).insert(request_id.clone(), (questions.clone(), tx));
                 let mut captured = Vec::new();
                 for question in &questions {
                     if let Some(approval) = friction_approval(question) {
@@ -1237,7 +1237,7 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         request_id: &str,
-        answers: Vec<UserInputAnswer>,
+        mut answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
@@ -1245,8 +1245,11 @@ impl SessionsEngine {
         let Some((pending, engine_tx)) = target else {
             return Ok(false);
         };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
+        let resolver = {
+            let mut pending = lock(&pending);
+            let Some((questions, _)) = pending.get(request_id) else { return Ok(false); };
+            mast_proto::validate_input_answers(questions, &mut answers).map_err(EngineError::Other)?;
+            pending.remove(request_id).expect("pending input exists").1
         };
         if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id) {
             if let Some(ws) = self.inner.workspace() {
@@ -3252,7 +3255,7 @@ async fn drive_run(
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
                         lock(&inner.friction_approvals).remove(request_id);
-                        if let Some(tx) = resolver {
+                        if let Some((_, tx)) = resolver {
                             let _ = tx.send(Vec::new());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
@@ -3524,7 +3527,7 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (request_id, tx) in lock(&pending).drain() {
+                for (request_id, (_, tx)) in lock(&pending).drain() {
                     lock(&inner.friction_approvals).remove(&request_id);
                     let _ = tx.send(Vec::new());
                 }

@@ -365,6 +365,40 @@ pub struct UserInputAnswer {
     pub labels: Vec<String>,
 }
 
+/// Validate answers before resolving an input request, preserving the request on error.
+pub fn validate_input_answers(
+    questions: &[UserInputQuestion],
+    answers: &mut [UserInputAnswer],
+) -> Result<(), String> {
+    let valid_questions = || questions.iter().map(|q| {
+        format!("{} ({}, options: {})", q.id, q.header, if q.options.is_empty() { "free text".to_string() } else { q.options.join(", ") })
+    }).collect::<Vec<_>>().join("; ");
+    if answers.is_empty() {
+        return Err(format!("answers is empty; valid questions: {}", valid_questions()));
+    }
+    if questions.len() == 1 && answers.len() == 1 && answers[0].question_id != questions[0].id {
+        answers[0].question_id = questions[0].id.clone();
+    }
+    for answer in answers.iter_mut() {
+        let question = questions.iter().find(|q| q.id == answer.question_id)
+            .ok_or_else(|| format!("unknown question id {:?}; valid questions: {}", answer.question_id, valid_questions()))?;
+        if !question.options.is_empty() {
+            if answer.labels.is_empty() {
+                return Err(format!("answer for {} requires an option: {}", question.id, question.options.join(", ")));
+            }
+            for label in &mut answer.labels {
+                let option = question.options.iter().find(|option| option.eq_ignore_ascii_case(label))
+                    .ok_or_else(|| format!("invalid option {:?} for {}; options: {}", label, question.id, question.options.join(", ")))?;
+                *label = option.clone();
+            }
+        }
+    }
+    if questions.iter().any(|q| !answers.iter().any(|a| a.question_id == q.id)) {
+        return Err(format!("an answer is required for every question; valid questions: {}", valid_questions()));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DoneStatus {
@@ -1220,6 +1254,12 @@ pub mod agent_tools {
             example: r#"{"summary": "Current work and next steps", "idempotencyKey": "orchestrator-handoff"}"#,
         },
         ToolUsage {
+            tool: "respond_to_input",
+            required: &[p("chat", "target chat"), p("answers", "labels and question_id; id may be omitted for one question")],
+            optional: &[p("request_id", "defaults to the pending request")],
+            example: r#"{"chat":"<chat id>","answers":[{"labels":["Yes"]}]}"#,
+        },
+        ToolUsage {
             tool: "create_chat",
             required: &[p("idempotencyKey", "inside a Mast chat; a stable string")],
             optional: &[
@@ -1491,7 +1531,7 @@ pub mod agent_tools {
         fn every_engine_tool_has_usage_with_its_required_and_optional_parameters() {
             let mut names: Vec<&str> = tools::WORK_OUTLINE.to_vec();
             names.extend(tools::ARTIFACTS);
-            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::HAND_OFF_ORCHESTRATOR, "create_chat"]);
+            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
             for name in names {
                 let usage = usage_text(name).unwrap_or_else(|| panic!("no usage for {name}"));
                 assert!(usage.contains(&format!("Usage of {name}:")), "{usage}");
