@@ -740,10 +740,11 @@ impl RegistryDoc {
             }
         }
         if let Some(via) = p.via.as_deref() {
-            if !["card", "chat", "agent"].contains(&via)
+            if !["card", "chat", "agent", "prMerged"].contains(&via)
                 || (via == "card" && actor.kind != WorkOutlineActorKind::User)
                 || (via == "chat" && p.answer.is_none())
                 || (via == "agent" && actor.kind != WorkOutlineActorKind::Agent)
+                || (via == "prMerged" && actor.kind != WorkOutlineActorKind::System)
             {
                 return Err(WorkOutlineError::new(
                     WorkOutlineErrorCode::Invalid,
@@ -786,6 +787,11 @@ impl RegistryDoc {
         if !request.is_open() {
             return Ok(());
         }
+        if p.via.as_deref() == Some("prMerged")
+            && request.kind != Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff)
+        {
+            return Err(WorkOutlineError::new(WorkOutlineErrorCode::Invalid, "Only handoffs may be resolved by a merged PR"));
+        }
         // An agent resolves only the members of the group it may resolve: its
         // own Chat's and, for a coordinator, its direct children's (the same
         // rule `authorize_agent_mutation` applies to the target). A duplicate
@@ -797,7 +803,9 @@ impl RegistryDoc {
             WorkOutlineActorKind::Agent => Some(actor.chat_id.clone().unwrap_or_default()),
             _ => None,
         };
-        let group: Vec<UserActionRequestView> = match &request.dedupe_key {
+        let group: Vec<UserActionRequestView> = if p.via.as_deref() == Some("prMerged") {
+            vec![request]
+        } else { match &request.dedupe_key {
             None => vec![request],
             Some(key) => self
                 .requests_of_item(&request.work_item_id)
@@ -811,7 +819,7 @@ impl RegistryDoc {
                             .is_none_or(|chat| self.agent_may_resolve_request(chat, r))
                 })
                 .collect(),
-        };
+        }};
         let plan = Self::plan_resolutions(
             &group,
             actor,

@@ -47,7 +47,7 @@ const KEYS_PER_SWEEP: usize = 3;
 
 /// `gh pr view --json` field set, matching `PR_VIEW_JSON_FIELDS` in
 /// `session_canvas_server.py:1399`.
-const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,headRefOid,mergeable,reviewRequests,author";
+const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,headRefOid,mergeable,reviewRequests,author,mergedAt";
 
 /// Checks-rollup summary, matching `summarize_checks` (`session_canvas_server.py:1377`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +75,8 @@ pub enum PrAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatus {
+    #[serde(default)]
+    pub merged_at: Option<String>,
     pub number: u64,
     pub url: Option<String>,
     pub state: String,
@@ -897,6 +899,7 @@ fn pr_json_to_status(data: &Value) -> PrStatus {
     reviewers.dedup();
 
     PrStatus {
+        merged_at: data.get("mergedAt").and_then(Value::as_str).map(str::to_owned),
         number: data.get("number").and_then(Value::as_u64).unwrap_or(0),
         url: data.get("url").and_then(Value::as_str).map(str::to_string),
         state: data
@@ -1329,6 +1332,7 @@ mod tests {
     #[test]
     fn action_reasons_matches_reference_classification() {
         let mut pr = PrStatus {
+            merged_at: None,
             number: 1,
             url: None,
             state: "open".into(),
@@ -1385,6 +1389,7 @@ mod tests {
             },
             Entry {
                 data: Some(PrStatus {
+                    merged_at: None,
                     number: 7,
                     url: None,
                     state: "open".into(),
@@ -1433,6 +1438,7 @@ mod tests {
             PrKey::Url(links[1].url.clone()),
             Entry {
                 data: Some(PrStatus {
+                    merged_at: None,
                     number: 8,
                     url: Some(links[1].url.clone()),
                     state: "open".into(),
@@ -1804,6 +1810,7 @@ mod tests {
             ("acme/widgets".to_string(), 1),
             Entry {
                 data: Some(PrStatus {
+                    merged_at: None,
                     number: 1,
                     url: Some("https://github.com/acme/widgets/pull/1".into()),
                     state: "open".into(),

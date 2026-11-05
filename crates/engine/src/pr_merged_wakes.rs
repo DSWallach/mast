@@ -87,6 +87,59 @@ impl PrMergedWakes {
         }
     }
 
+    fn resolve_merged_handoffs(&self, url: &str, status: &PrStatus) -> Result<(), String> {
+        use mast_proto::work_outline_user_actions::UserActionKind;
+        let merged_at = status.merged_at.as_deref().filter(|value| !value.is_empty());
+        let repo = url.strip_prefix("https://github.com/")
+            .and_then(|path| path.split_once("/pull/").map(|(repo, _)| repo))
+            .ok_or_else(|| "invalid merged PR URL".to_owned())?;
+        let chats = self.workspace.read_chats().map_err(|error| error.to_string())?;
+        for space in self.workspace.read_spaces().map_err(|error| error.to_string())? {
+            if space.device_id != self.workspace.device_id() { continue; }
+            let snapshot = mast_doc::materialize_work_outline(&space.id, &self.workspace.work_outline_inputs(&space.id));
+            if !snapshot.space_settings.resolve_merged_handoffs { continue; }
+            let explicit = crate::archivable::open_handoffs_for_pr(&snapshot, "", url);
+            let mut space_owns_pr = false;
+            for chat in chats.iter().filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str())) {
+                let links = self.workspace.chat_pr_links(&chat.id).map_err(|error| error.to_string())?;
+                if links.iter().any(|link| crate::archivable::owns_pr_link(link)
+                    && crate::chat_links::canonicalize_pr_url(&link.url) == url) {
+                    space_owns_pr = true;
+                    break;
+                }
+            }
+            for request in crate::archivable::open_handoffs_for_pr(&snapshot, status.branch.as_deref().unwrap_or(""), url) {
+                if request.kind != Some(UserActionKind::Handoff) { continue; }
+                let matches_pr = explicit.iter().any(|candidate| candidate.id == request.id);
+                if !matches_pr {
+                    let identifies_another_pr = request.links.iter().any(|link| match &link.target {
+                        mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { .. } => true,
+                        mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => crate::chat_links::canonicalize_pr_url(url).starts_with("https://github.com/") && url.contains("/pull/"),
+                        _ => false,
+                    })
+                        || request.facts.iter().any(|fact| fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request"));
+                    if identifies_another_pr { continue; }
+                    if !space_owns_pr { continue; }
+                }
+                let merged_at = merged_at.ok_or_else(|| "merged PR has no merge timestamp".to_owned())?;
+                let actor = mast_proto::WorkOutlineActor {
+                    kind: mast_proto::WorkOutlineActorKind::System,
+                    device_id: self.workspace.device_id().to_owned(), chat_id: None, message_id: None,
+                };
+                let mutation = mast_proto::WorkOutlineMutation::ResolveUserActionRequest(
+                    mast_proto::ResolveUserActionRequestParams {
+                        outcome: Some("done".into()), values: None, via: Some("prMerged".into()),
+                        user_action_request_id: request.id.clone(),
+                        note: Some(format!("Landed: {repo}#{} merged {merged_at}", status.number)),
+                        answer: None,
+                        operation_id: mast_proto::work_outline::derive_id(&request.id, "pr-merged"),
+                    });
+                self.workspace.work_outline_mutate(&mutation, &actor, &[]).map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Observe a successful URL refresh; failures never replace the last known state.
     pub(crate) async fn observe(&self, url: &str, status: &PrStatus) {
         let url = crate::chat_links::canonicalize_pr_url(url);
@@ -102,6 +155,10 @@ impl PrMergedWakes {
             .is_some_and(|state| state.eq_ignore_ascii_case("open"))
             && status.state.eq_ignore_ascii_case("merged")
         {
+            if let Err(error) = self.resolve_merged_handoffs(&url, status) {
+                tracing::warn!(%error, "failed to resolve merged PR handoffs");
+                return;
+            }
             let chats = match self.workspace.read_chats() {
                 Ok(chats) => chats,
                 Err(error) => {
@@ -275,6 +332,34 @@ mod tests {
                 .unwrap();
         }
         let url = "https://github.com/acme/repo/pull/42";
+        let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::System, device_id: "device".into(), chat_id: None, message_id: None };
+        let mutate = |mutation: mast_proto::WorkOutlineMutation| workspace.work_outline_mutate(&mutation, &actor, &[]).unwrap();
+        let mut requests = Vec::new();
+        for (space, enabled) in [("enabled-space", true), ("disabled-space", false)] {
+            workspace.create_space(space, "device", &format!("/tmp/{space}"), None, false).unwrap();
+            let item = mutate(mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
+                space_id: space.into(), parent_work_item_id: None, placement: Default::default(), title: "Work".into(), description: None, status: None, operation_id: format!("item-{space}"),
+            })).work_item_id.unwrap();
+            workspace.create_chat(&format!("worker-{space}"), Some(space), Some("device"), None, None).unwrap();
+            workspace.add_chat_pr_link(&format!("worker-{space}"), url, ChatLinkSource::CreatedInChat).unwrap();
+            if !enabled {
+                mutate(mast_proto::WorkOutlineMutation::SetResolveMergedHandoffs(mast_proto::work_outline::SetResolveMergedHandoffsParams { space_id: space.into(), enabled: false, operation_id: "setting-off".into() }));
+            }
+            for kind in [mast_proto::work_outline_user_actions::UserActionKind::Handoff, mast_proto::work_outline_user_actions::UserActionKind::Review] {
+                let operation_id = format!("request-{space}-{kind:?}");
+                let id = mutate(mast_proto::WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
+                    options: vec![], links: vec![mast_proto::work_outline_user_actions::RequestLink { label: "PR".into(), target: mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url: url.into() } }], facts: vec![], kind: Some(kind), priority: None, work_item_id: item.clone(),
+                    origin: mast_proto::UserActionRequestOrigin { kind: mast_proto::UserActionOriginKind::System, ..Default::default() }, text: "Action".into(), info: None, dedupe_key: Some("shared-key".into()), operation_id,
+                })).user_action_request_id.unwrap();
+                requests.push((space.to_owned(), kind, id));
+            }
+            let kind = mast_proto::work_outline_user_actions::UserActionKind::Handoff;
+            let id = mutate(mast_proto::WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
+                options: vec![], links: vec![], facts: vec![mast_proto::work_outline_user_actions::RequestFact { label: "Branch".into(), value: "feature/a".into() }], kind: Some(kind), priority: None, work_item_id: item,
+                origin: mast_proto::UserActionRequestOrigin { kind: mast_proto::UserActionOriginKind::System, ..Default::default() }, text: "Branch handoff".into(), info: None, dedupe_key: None, operation_id: format!("branch-{space}"),
+            })).user_action_request_id.unwrap();
+            requests.push((space.to_owned(), kind, id));
+        }
         for (chat, source) in [
             ("owned", ChatLinkSource::CreatedInChat),
             ("mention", ChatLinkSource::Mentioned),
@@ -315,6 +400,7 @@ mod tests {
         let path = directory.path().join("cache/pr-merged-wakes.json");
         let tracker = PrMergedWakes::new(path.clone(), workspace.clone(), wakes.clone());
         let mut status = PrStatus {
+            merged_at: None,
             number: 42,
             url: Some(url.into()),
             state: "OPEN".into(),
@@ -332,7 +418,18 @@ mod tests {
         assert!(wakes.status("orch").held.is_empty());
         let tracker = PrMergedWakes::new(path.clone(), workspace.clone(), wakes.clone());
         status.state = "MERGED".into();
+        status.merged_at = Some("2026-11-05T12:00:00Z".into());
         tracker.observe(url, &status).await;
+        for (space, kind, id) in &requests {
+            let snapshot = mast_doc::materialize_work_outline(space, &workspace.work_outline_inputs(space));
+            let request = snapshot.user_action_request(id).unwrap();
+            if space == "enabled-space" && *kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff {
+                let resolution = request.resolution.as_ref().unwrap();
+                assert_eq!(resolution.outcome.as_deref(), Some("done"));
+                assert_eq!(resolution.via.as_deref(), Some("prMerged"));
+                assert_eq!(resolution.note.as_deref(), Some("Landed: acme/repo#42 merged 2026-11-05T12:00:00Z"));
+            } else { assert!(request.is_open()); }
+        }
         let held = wakes.status("orch").held;
         assert_eq!(held.len(), 1);
         assert!(
@@ -341,9 +438,13 @@ mod tests {
                 .contains("acme/repo #42 Example (feature/a)")
         );
         assert!(wakes.status("off").held.is_empty());
+        let before = mast_doc::materialize_work_outline("enabled-space", &workspace.work_outline_inputs("enabled-space"));
+        let resolved_before = before.user_action_request(&requests[0].2).unwrap().resolution.clone();
         tracker.observe(url, &status).await;
         let reopened = PrMergedWakes::new(path, workspace, wakes.clone());
         reopened.observe(url, &status).await;
+        let after = mast_doc::materialize_work_outline("enabled-space", &reopened.workspace.work_outline_inputs("enabled-space"));
+        assert_eq!(after.user_action_request(&requests[0].2).unwrap().resolution, resolved_before);
         assert_eq!(wakes.status("orch").held.len(), 1);
     }
 }

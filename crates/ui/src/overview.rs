@@ -1116,6 +1116,7 @@ fn pr_number_from_url(url: &str) -> u64 {
 /// false "Needs reviewer" badge.
 fn placeholder_pr(url: &str) -> PrStatus {
     PrStatus {
+        merged_at: None,
         number: pr_number_from_url(url),
         url: Some(url.to_string()),
         state: "loading…".to_string(),

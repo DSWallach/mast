@@ -51,6 +51,34 @@ fn open_global(
     overview.read_with(vcx, |o, _| o.required_actions_panel().unwrap())
 }
 
+#[gpui::test]
+fn handoff_card_displays_cached_lifecycle(cx: &mut gpui::TestAppContext) {
+    use mast_proto::{PullRequestRef, PullRequestReviewDecision, PullRequestState, PullRequestStatusSummary};
+    use mast_proto::work_outline_user_actions::{RequestFact, UserActionKind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
+    request.kind = Some(UserActionKind::Handoff);
+    request.facts.push(RequestFact { label: "Branch".into(), value: "feature/a".into() });
+    let (overview, _, vcx) = m4_overview(cx, dir.path(), snapshot, reply_ok);
+    let state = overview.read_with(vcx, |overview, _| overview.state.clone());
+    let _list = open_global(&overview, vcx);
+    assert!(row_bounds(vcx, format!("required-actions-lifecycle-{}-Ready", m4::R_UI)).is_some());
+    let mut status = PullRequestStatusSummary { pr_ref: PullRequestRef::new("acme", "app", 7), head_ref_name: Some("feature/a".into()), ..Default::default() };
+    for (pr_state, review, label) in [
+        (PullRequestState::Open, Some(PullRequestReviewDecision::Approved), "Waiting to land"),
+        (PullRequestState::Merged, None, "Landed"),
+        (PullRequestState::Closed, None, "Closed"),
+    ] {
+        status.state = pr_state;
+        status.review_decision = review;
+        state.update(vcx, |state, cx| { state.github.set_ready_for_test(status.clone(), false); cx.notify(); });
+        vcx.run_until_parked();
+        draw(vcx);
+        assert!(row_bounds(vcx, format!("required-actions-lifecycle-{}-{label}", m4::R_UI)).is_some(), "{label}");
+    }
+}
+
 /// Global Required Actions: rows (duplicates folded), a missing origin Chat
 /// stays inspectable but cannot be opened, Resolve sends the note, history
 /// is collapsed, Open lands in the origin Chat.

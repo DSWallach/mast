@@ -99,12 +99,12 @@ pub fn open_handoffs_for_pr<'a>(
             fact.label.eq_ignore_ascii_case("branch") && fact.value.trim() == branch
         }));
         let pr_matches = !canonical.is_empty() && (request.links.iter().any(|link| {
-            matches!(&link.target, RequestLinkTarget::Pr { url } if crate::chat_links::canonicalize_pr_url(url) == canonical)
+            matches!(&link.target, RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } if crate::chat_links::canonicalize_pr_url(url) == canonical)
         }) || request.facts.iter().any(|fact| {
-            fact.label.eq_ignore_ascii_case("pr") && (crate::chat_links::canonicalize_pr_url(&fact.value) == canonical
+            (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && (crate::chat_links::canonicalize_pr_url(&fact.value) == canonical
                 || external_id.as_ref().is_some_and(|id| fact.value.trim().eq_ignore_ascii_case(id)))
         }));
-        request.is_unresolved() && request.effective_kind() == UserActionKind::Handoff
+        request.is_open() && request.effective_kind() == UserActionKind::Handoff
             && (branch_matches || pr_matches)
     }).collect()
 }

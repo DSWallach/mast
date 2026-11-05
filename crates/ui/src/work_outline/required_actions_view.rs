@@ -254,6 +254,7 @@ impl RequiredActionsList {
                     ComposerInputEvent::Edited => cx.notify(),
                     _ => {}
                 }),
+                cx.observe(&state, |_: &mut Self, _, cx| cx.notify()),
             ];
         Self {
             state,
@@ -903,6 +904,26 @@ impl RequiredActionsList {
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
         let busy = self.in_flight.contains(&id);
         let attention = chips::attention_color(theme);
+        if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff {
+            for link in &row.links {
+                if let mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } = &link.target {
+                    if let Some(pr) = required_actions::parse_handoff_pr(url) {
+                        crate::github::store::request_status(&self.state, &pr, false, cx);
+                    }
+                }
+            }
+            for fact in &row.facts {
+                if fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request") {
+                    if let Some(pr) = required_actions::parse_handoff_pr(&fact.value) {
+                        crate::github::store::request_status(&self.state, &pr, false, cx);
+                    }
+                }
+            }
+        }
+        let lifecycle = {
+            let state = self.state.read(cx);
+            required_actions::handoff_lifecycle(&row, state.github.ready_statuses())
+        };
         let age = required_actions::age_label(row.created_at, now);
         let chat_tip: SharedString = if row.system {
             "Raised by the PR review sync (no Chat). It resolves itself once you review, or \
@@ -1435,7 +1456,13 @@ impl RequiredActionsList {
                             // Two lines until Details expands the row.
                             .when(open && !info_open, |el| el.line_clamp(2))
                             .child(SharedString::from(row.text.clone())),
-                    ),
+                    )
+                    .when_some(lifecycle, |el, lifecycle| el.child(
+                        div().debug_selector({ let selector = format!("required-actions-lifecycle-{id}-{lifecycle}"); move || selector.clone() })
+                            .px(px(5.0)).rounded(px(4.0)).border_1().border_color(theme.border)
+                            .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
+                            .child(lifecycle)
+                    )),
             )
             .child(div().pl(px(12.0)).child(meta))
             .children(row.facts.iter().filter(|fact| row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests"))).chain(row.facts.iter().filter(|fact| row.kind != mast_proto::work_outline_user_actions::UserActionKind::Handoff || !(fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")))).map(|fact| {

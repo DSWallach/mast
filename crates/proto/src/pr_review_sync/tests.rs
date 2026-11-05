@@ -277,6 +277,7 @@ fn sync_state_and_work_outline_additions_are_pinned() {
             linear_enabled: false,
             pr_review_sync_work_item_id: Some("w".into()),
             linear_assigned_work_item_id: None,
+            ..Default::default()
         },
         ..Default::default()
     })

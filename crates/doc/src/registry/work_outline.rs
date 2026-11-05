@@ -885,6 +885,9 @@ impl RegistryDoc {
             WorkOutlineMutation::SetSpaceLinearEnabled(p) => {
                 self.set_space_linear_enabled(p, now_ms).map(|_| empty)
             }
+            WorkOutlineMutation::SetResolveMergedHandoffs(p) => {
+                self.set_resolve_merged_handoffs(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::CreateWorkItemFromLinear(p) => {
                 let (work_item_id, reference_id) =
                     self.create_work_item_from_linear(p, actor, now_ms)?;
