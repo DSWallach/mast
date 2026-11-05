@@ -443,82 +443,97 @@ impl Changes {
         let files = parsed.files.clone();
         let identities = parsed.hunk_identities.clone();
         let review_state = self.review_state.clone();
-        let entries = indices
+        let indices = indices
             .into_iter()
             .filter(|index| {
                 files
                     .get(*index)
                     .is_some_and(|file| file_matches_filter(file, &query))
             })
-            .map(|index| {
-                let file = &files[index];
-                let viewed = review_state.as_ref().is_some_and(|state| {
-                    if file.hunks.is_empty() {
-                        state.viewed_files.contains(&file.path)
-                    } else {
-                        identities[index]
-                            .iter()
-                            .all(|identity| state.viewed_hunks.contains(identity))
-                    }
-                });
-                let label = match &file.old_path {
-                    Some(old) if old != &file.path => format!("{old} → {}", file.path),
-                    _ => file.path.clone(),
-                };
-                div()
-                    .id(("changes-file-list-entry", index))
-                    .debug_selector(move || format!("changes-file-list-entry-{index}"))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.element_hover))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.jump_to_file(index, cx);
-                        window.focus(&this.diff_focus, cx);
-                    }))
-                    .child(
-                        div()
-                            .id(("changes-file-viewed", index))
-                            .cursor_pointer()
-                            .text_color(theme.text_muted)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.toggle_review_file(index, cx);
-                            }))
-                            .child(if review_state.is_none() {
-                                "–"
-                            } else if viewed {
-                                "☑"
-                            } else {
-                                "□"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_dim)
-                            .child(SharedString::from(label)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(add_color(theme))
-                            .child(SharedString::from(format!("+{}", file.additions))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(del_color(theme))
-                            .child(SharedString::from(format!("−{}", file.deletions))),
-                    )
-            })
             .collect::<Vec<_>>();
+        let count = indices.len();
+        let entity = cx.entity();
+        let row_theme = theme.clone();
+        let entries =
+            gpui::uniform_list("changes-file-list-entries", count, move |range, _, app| {
+                entity.update(app, |_this, cx| {
+                    let theme = &row_theme;
+                    range
+                        .filter_map(|position| indices.get(position).copied())
+                        .map(|index| {
+                            let file = &files[index];
+                            let viewed = review_state.as_ref().is_some_and(|state| {
+                                if file.hunks.is_empty() {
+                                    state.viewed_files.contains(&file.path)
+                                } else {
+                                    identities[index]
+                                        .iter()
+                                        .all(|identity| state.viewed_hunks.contains(identity))
+                                }
+                            });
+                            let label = match &file.old_path {
+                                Some(old) if old != &file.path => format!("{old} → {}", file.path),
+                                _ => file.path.clone(),
+                            };
+                            div()
+                                .id(("changes-file-list-entry", index))
+                                .debug_selector(move || format!("changes-file-list-entry-{index}"))
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .px(px(6.0))
+                                .py(px(4.0))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.element_hover))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.jump_to_file(index, cx);
+                                    window.focus(&this.diff_focus, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .id(("changes-file-viewed", index))
+                                        .cursor_pointer()
+                                        .text_color(theme.text_muted)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_review_file(index, cx);
+                                        }))
+                                        .child(if review_state.is_none() {
+                                            "–"
+                                        } else if viewed {
+                                            "☑"
+                                        } else {
+                                            "□"
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(11.0))
+                                        .text_color(theme.text_dim)
+                                        .child(SharedString::from(label)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(add_color(theme))
+                                        .child(SharedString::from(format!("+{}", file.additions))),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(del_color(theme))
+                                        .child(SharedString::from(format!("−{}", file.deletions))),
+                                )
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flex_1()
+            .min_h_0();
         div()
             .id("changes-file-list")
             .w(px(240.0))
@@ -532,14 +547,7 @@ impl Changes {
                 theme,
                 self.file_filter.clone().into_any_element(),
             ))
-            .child(
-                div()
-                    .id("changes-file-list-entries")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(entries),
-            )
+            .child(entries)
             .into_any_element()
     }
 }
@@ -735,6 +743,33 @@ mod navigation_tests {
                 DiffRow::FileHeader { file: 0 }
             ))
         });
+    }
+
+    #[gpui::test]
+    fn file_list_virtualizes_rows_and_filters_distant_files(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = crate::perf::data::unified_diff(300 * 210);
+            let (files, origins, submodules, layout) = parse_diff_tree(&patch, &[]);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch, files: Vec::new(), submodules: Vec::new(), additions: 0, deletions: 0, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 0, deletions: 0, file_count: files.len(), horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.reflatten(cx);
+        }));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
+        assert!(vcx.debug_bounds("changes-file-list-entry-299").is_none());
+        let filter = changes.read_with(vcx, |changes, _| changes.file_filter.clone());
+        filter.update(vcx, |input, cx| input.set_text("mod300.rs", cx));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-entry-299").is_some());
     }
 
     #[gpui::test]
