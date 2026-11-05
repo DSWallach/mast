@@ -163,6 +163,8 @@
 {"path": "crates/engine/tests/external_import_titles.rs", "line": "Some(value) => std::env::set_var(\"HOME\", value),", "occurrence": 1, "reason": "Test fixture or environment behavior uses the per-process isolated home."}
 {"path": "crates/engine/tests/external_import_titles.rs", "line": "None => std::env::remove_var(\"HOME\"),", "occurrence": 1, "reason": "Test fixture or environment behavior uses the per-process isolated home."}
 {"path": "crates/engine/tests/github_cli_login_shell.rs", "line": "std::env::set_var(\"HOME\", dir.path());", "occurrence": 1, "reason": "Test fixture or environment behavior uses the per-process isolated home."}
+{"path": "crates/engine/tests/local_import.rs", "line": ".env(\"HOME\", home.path())", "occurrence": 1, "reason": "Child process receives a dedicated tempfile home and worktree directory."}
+{"path": "crates/engine/tests/local_import.rs", "line": ".env(\"MAST_WORKTREES_DIR\", home.path().join(\"worktrees\"))", "occurrence": 1, "reason": "Child process receives a dedicated tempfile home and worktree directory."}
 {"path": "crates/engine/tests/m5_repos_diffs_terminals.rs", "line": "unsafe { std::env::set_var(\"MAST_WORKTREES_DIR\", tmp.path().join(\"worktrees\")) };", "occurrence": 1, "reason": "Test fixture or environment behavior uses the per-process isolated home."}
 {"path": "crates/engine/tests/m5_repos_diffs_terminals.rs", "line": "\"| tee .zeron-setup-env\"", "occurrence": 1, "reason": "Synthetic fixture under the isolated test home or a test-owned temporary directory."}
 {"path": "crates/engine/tests/m5_repos_diffs_terminals.rs", "line": ".join(\".zeron-setup-env\")", "occurrence": 1, "reason": "Synthetic fixture under the isolated test home or a test-owned temporary directory."}
