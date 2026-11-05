@@ -13,14 +13,14 @@ Mast is a native macOS app for running Claude Code and Codex (plus a few other a
 
 You already run several agent chats at once. Mast gives them a place to live, so you can see what is running, what needs you, and what is done.
 
-- **Spaces.** A Space is a project folder. Each Space has its own outline, instructions, accounts and settings.
+- **Spaces.** A Space is a folder you work in. Each Space has its own outline, instructions, accounts and settings.
 - **Work Outline.** Nest chats under work items: a workstream, a ticket, a PR, an investigation. An item holds instructions that its chats inherit (Space → parent items → this item), where its chats run, and a status. Keys work everywhere, and `⌘Z` undoes a move. See [the outline guide](docs/guide/work-outline.md).
 - **Required Actions.** When an agent needs a decision, an approval or missing information, it files a request on its item. The item shows it until you answer. Your reply goes back to the chat.
 - **Chats on Claude Code and Codex.** Each chat shows the model it actually ran on and the account it uses.
 - **Orchestrator and worker chats.** A coordinator chat can read its subtree, start worker chats on items below it, and collect their results through the Mast MCP tools. Workers finish with a "Ready to merge" action. See [orchestrating](docs/guide/orchestrating.md).
 - **Plans you can review.** Agents publish plans, diagrams and option comparisons. You read them in the app, answer questions inline (blocking questions become Required Actions), comment on parts, zoom, compare revisions visually and pick an option. See [plans and artifacts](docs/guide/plans-and-artifacts.md).
 - **PR and Linear sync.** A PR page buckets your PRs and review requests by what needs you. Review requests can appear as outline items on their own. Linear is opt-in per Space, read-only, and you add the tickets you want. See [GitHub and Linear](docs/guide/github-and-linear.md).
-- **Per-project accounts.** Use a different Claude Code or Codex login in each project, and run two at once. See [accounts](docs/guide/accounts.md).
+- **Per-Space accounts.** Use a different Claude Code or Codex login in each Space, and run two at once. See [accounts](docs/guide/accounts.md).
 - **Side browser.** Web and PR links open beside the chat.
 - **Agent tools.** Every chat gets the `mast-agent` MCP server. See [docs/mcp.md](docs/mcp.md).
 
@@ -67,10 +67,10 @@ It builds a debug binary and opens `Mast Dev.app` with its own data folder (`tar
 
 ## First run
 
-1. Open Mast. Add a project with `⇧⌘N`, or **New project…** in the project picker, and choose your repo folder.
-2. Make sure an agent is signed in. Run `claude` or `codex` once in a terminal, or add an account for the project (see [accounts](docs/guide/accounts.md)).
+1. Open Mast. Add a Space with `⇧⌘N`, or **New Space…** in the Space picker, and choose your repo folder.
+2. Make sure an agent is signed in. Run `claude` or `codex` once in a terminal, or add an account for the Space (see [accounts](docs/guide/accounts.md)).
 3. Open the Outline with `⇧⌘L`, create an item with `⇧⌘I`, and start a chat in it with `⌘↩`.
-4. Optional: for Linear, paste a personal API key in **Settings → Linear**, then switch on **Linear** in the project's Space details. See [GitHub and Linear](docs/guide/github-and-linear.md).
+4. Optional: for Linear, paste a personal API key in **Settings → Linear**, then switch on **Linear** in Space details. See [GitHub and Linear](docs/guide/github-and-linear.md).
 
 [Getting started](docs/guide/getting-started.md) walks through this with a first chat.
 
