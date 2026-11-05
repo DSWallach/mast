@@ -42,6 +42,41 @@ async fn hand_off_reparents_workers_and_moves_held_reports() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_reclaims_a_queued_worker_report() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("queued-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("queued-source", None), ("queued-successor", None), ("queued-worker", Some("queued-source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("queued-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    rig.wakes.note_user_activity("queued-successor", Some(true)).await;
+    rig.core.doc_host.queue_message("queued-source", "opening", Vec::new()).unwrap();
+    rig.wait_for(|| rig.core.sessions.turn_in_flight("queued-source"), "source turn").await;
+    let handle = rig.core.doc_host.open("queued-source").unwrap();
+    handle.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "queued-wake".into(), text: "Worker updates: queued report".into(), attachments: vec![],
+        hold_for_turn_end: true, issued_by: rig.core.device_id.clone(), issued_at: 1,
+        edited_at: None, delivery_gate: None,
+    }).unwrap();
+    rig.core.doc_host.event_turns().register("queued-source", "queued-wake".into(), vec![
+        mast_engine::orchestrator_wakes::WakeEvent {
+            id: "event-1".into(), key: "report-1".into(), worker_chat_id: "queued-worker".into(),
+            worker_title: None, kind: WakeEventKind::WorkerReport, summary: "queued report".into(),
+            report: Some("report body".into()), at_ms: 1,
+        }
+    ]);
+    rig.wakes.hand_off_orchestrator("queued-source", "queued-successor", "queued-source").await.unwrap();
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert!(rig.wakes.status("queued-source").held.is_empty());
+    assert_eq!(rig.wakes.status("queued-successor").held.len(), 1);
+    rig.wakes.note_user_activity("queued-successor", Some(false)).await;
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate("queued-successor", false).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("report body")), "transferred report").await;
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
 /// A turn that ends only when the test says so.
 struct HeldHarness {
     finish: tokio::sync::broadcast::Sender<()>,
