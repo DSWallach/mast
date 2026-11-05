@@ -836,7 +836,13 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 - Wave 2 (as wave 1 frees builds): PR dashboard file paging (#5, past the first 100 files, "partial" badge
   at ~3,000), rebindable outline/Team shortcuts (3b6f9919), first-run smoke audit on a temp data dir
   (headless, report only).
+- Also running: `perf-diff-navigation` (chat b3be1a11, item e5368f48; Mikey finds diff navigation slow:
+  measure first, fix top 2–4 low-risk hot spots with before/after numbers).
+- Wave 2 also: general perf sweep (item 561a9c07: startup, chat switching, transcript scroll, outline/Team
+  redraws) and cleanup sweep (item e71201b1: warnings/clippy, dead code, stale docs/scripts; no behavior
+  change). Mikey: "up until 8 am look for perf improvements and clean up opportunities".
 - Wave 3: Needs-you phase 4 (answer ask/choose on the card).
+- Ready, waiting for a release slot: `wake-label-fd-limit` (request c3270f71).
 - Release in batches of ≤3 branches; never run a release while 3 Terra builds are compiling.
 - Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
 
