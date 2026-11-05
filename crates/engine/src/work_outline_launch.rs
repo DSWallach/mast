@@ -382,6 +382,16 @@ impl WorkItemLaunchService {
             &chat_id,
             &prompt_request(&p.initial_prompt, p.config.as_ref(), ""),
         );
+        if !self.sessions.harness_installed(harness) {
+            let name = serde_json::to_value(harness)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| format!("{harness:?}"));
+            return Err(error(
+                WorkOutlineErrorCode::Capability,
+                format!("agent not installed: {name}"),
+            ));
+        }
         if deliver_instructions {
             self.require_instruction_support(harness)?;
         }

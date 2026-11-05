@@ -549,6 +549,10 @@ impl SessionsEngine {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
 
+    pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
+        self.inner.registry.installed_for(harness)
+    }
+
     /// Whether this harness takes a prompt *during* a turn, rather than only at
     /// the boundary between turns. The queue drain's central question: a
     /// mid-turn agent gets the message now, everything else holds it until the
