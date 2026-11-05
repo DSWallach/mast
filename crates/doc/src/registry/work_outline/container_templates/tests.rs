@@ -215,6 +215,7 @@ fn template_instructions_cannot_be_edited_but_can_be_muted() {
         .unwrap()
         .clone();
     assert!(row.template_instruction_id.is_some());
+    assert!(d.plan_instruction_text_update(&row, "mine", NOW).is_err());
     let edit = run(
         &mut d,
         WorkOutlineActorKind::User,

@@ -1140,6 +1140,11 @@ impl RegistryDoc {
             return Ok(instruction_id);
         }
         let instruction = self.live_instruction(&instruction_id)?;
+        if instruction.template_instruction_id.is_some() {
+            return Err(invalid(
+                "This instruction comes from the container's template. Edit the template, or add your own instruction",
+            ));
+        }
         let mut plan = Vec::new();
         let archived_already = instruction.archived();
         if proposal.is_stale_against(&instruction) && !archived_already && !p.allow_stale {
