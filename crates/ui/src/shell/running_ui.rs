@@ -1039,12 +1039,13 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let dot = match row.state {
-            RunState::Awaiting => theme.warning,
-            RunState::Errored | RunState::ToolFailed => theme.danger,
-            RunState::Working => theme.busy,
-            RunState::IdleBackground => theme.text_faint,
+        let state = match row.state {
+            RunState::Awaiting => crate::status_style::Status::Waiting,
+            RunState::Errored | RunState::ToolFailed => crate::status_style::Status::Errored,
+            RunState::Working => crate::status_style::Status::Working,
+            RunState::IdleBackground => crate::status_style::Status::Idle,
         };
+        let status = crate::status_style::status_style(state, theme.appearance);
         let meta = [
             row.item_path.clone(),
             row.account.clone(),
@@ -1082,10 +1083,10 @@ impl Shell {
             .child(
                 div()
                     .mt(px(5.0))
-                    .size(px(7.0))
                     .flex_none()
-                    .rounded_full()
-                    .bg(dot),
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(status.color)
+                    .child(status.glyph),
             )
             .child(
                 div()

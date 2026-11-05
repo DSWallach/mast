@@ -79,16 +79,6 @@ impl Shell {
             .clone()
     }
 
-    fn state_color(theme: &Theme, state: WorkerState) -> gpui::Hsla {
-        match state {
-            WorkerState::Waiting => theme.warning,
-            WorkerState::Errored => theme.danger,
-            WorkerState::Working => theme.accent,
-            WorkerState::Idle => theme.text_muted,
-            WorkerState::Done => theme.success,
-        }
-    }
-
     /// The sticky chip after "Item": present only while the chat has workers.
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
@@ -150,7 +140,13 @@ impl Shell {
         let team = self.team_facts(&chat_id, cx);
         let focus = self.team_panel_focus(cx);
         let mut col = div().flex().flex_col().gap(px(8.0));
-        if self.state.read(cx).chats.iter().any(|chat| chat.id == chat_id && chat.archived) {
+        if self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id && chat.archived)
+        {
             col = col.child(
                 div()
                     .debug_selector(|| "team-coordinator-archived".into())
@@ -316,7 +312,7 @@ impl Shell {
             .last_active
             .map(|at| mast_proto::view::format_time_ago(at, now))
             .unwrap_or_default();
-        let color = Self::state_color(theme, worker.state);
+        let status = crate::status_style::status_style(worker.state.into(), theme.appearance);
         let open_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
         let stalled = self.state.read(cx).session_for(&id).and_then(|session| {
@@ -348,7 +344,13 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().flex_none().size(px(7.0)).rounded_full().bg(color))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(status.color)
+                            .child(status.glyph),
+                    )
                     .child(
                         div()
                             .flex_1()
