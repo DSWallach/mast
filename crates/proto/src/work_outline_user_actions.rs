@@ -267,10 +267,22 @@ pub struct RequestFact {
     pub value: String,
 }
 
+/// A choice offered on a user action request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// One materialized `userActionRequests` row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserActionRequestView {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<RequestOption>,
     #[serde(default)]
     pub links: Vec<RequestLink>,
     #[serde(default)]
@@ -345,6 +357,8 @@ impl UserActionRequestView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateUserActionRequestParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<RequestOption>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<RequestLink>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

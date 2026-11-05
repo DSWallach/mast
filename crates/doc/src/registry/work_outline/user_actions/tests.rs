@@ -119,6 +119,7 @@ fn request_params(
     dedupe: Option<&str>,
 ) -> WorkOutlineMutation {
     WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        options: Vec::new(),
         links: Vec::new(),
         facts: Vec::new(),
         kind: None,
@@ -281,22 +282,42 @@ fn request_links_and_facts_round_trip_and_legacy_row() {
     let mut doc = doc_with_spaces("dev-a");
     let item_id = item(&mut doc, "links-item", None);
     let mut mutation = request_params("links-request", &item_id, "c1", None);
-    let link = RequestLink { label: "Plan".into(), target: RequestLinkTarget::Artifact { id: "artifact".into() } };
-    let fact = RequestFact { label: "Status".into(), value: "Ready".into() };
+    let link = RequestLink {
+        label: "Plan".into(),
+        target: RequestLinkTarget::Artifact {
+            id: "artifact".into(),
+        },
+    };
+    let fact = RequestFact {
+        label: "Status".into(),
+        value: "Ready".into(),
+    };
+    let option = mast_proto::work_outline_user_actions::RequestOption {
+        id: "a".into(),
+        label: "Option A".into(),
+        detail: Some("Details".into()),
+    };
     if let WorkOutlineMutation::CreateUserActionRequest(ref mut params) = mutation {
         params.links = vec![link.clone()];
         params.facts = vec![fact.clone()];
+        params.options = vec![option.clone()];
     }
-    let id = apply(&mut doc, mutation).unwrap().user_action_request_id.unwrap();
+    let id = apply(&mut doc, mutation)
+        .unwrap()
+        .user_action_request_id
+        .unwrap();
     let mut row = doc.overlay_row(KIND_USER_ACTION_REQUESTS, &id).unwrap();
     let decoded = decode_request(&row).unwrap().view;
     assert_eq!(decoded.links, vec![link]);
     assert_eq!(decoded.facts, vec![fact]);
+    assert_eq!(decoded.options, vec![option]);
     row.fields.remove("links");
     row.fields.remove("facts");
+    row.fields.remove("options");
     let legacy = decode_request(&row).unwrap().view;
     assert!(legacy.links.is_empty());
     assert!(legacy.facts.is_empty());
+    assert!(legacy.options.is_empty());
 }
 
 #[test]
@@ -1934,7 +1955,14 @@ fn agent_cannot_forge_user_decision_provenance() {
     let mut doc = doc_with_spaces("dev-a");
     let w = item(&mut doc, "provenance-item", None);
     let id = request(&mut doc, "provenance-request", &w, None);
-    for (index, (outcome, via)) in [("approved", "agent"), ("declined", "card"), ("answered", "chat")].iter().enumerate() {
+    for (index, (outcome, via)) in [
+        ("approved", "agent"),
+        ("declined", "card"),
+        ("answered", "chat"),
+    ]
+    .iter()
+    .enumerate()
+    {
         let mut mutation = resolve_params(&format!("forgery-{index}"), &id, None);
         if let WorkOutlineMutation::ResolveUserActionRequest(p) = &mut mutation {
             p.outcome = Some((*outcome).into());

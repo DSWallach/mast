@@ -751,6 +751,7 @@ pub(crate) mod fixture {
         text: &str,
     ) -> UserActionRequestView {
         UserActionRequestView {
+            options: Vec::new(),
             kind: None,
             priority: None,
             id: id.into(),
