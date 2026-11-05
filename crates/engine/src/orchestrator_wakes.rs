@@ -105,6 +105,7 @@ struct WakePersistence {
     retired_generations: HashMap<(String, String), (Arc<crate::chat_persistence::ChatPersistence>, u64)>,
     legacy_receipts: HashMap<(String, String), std::time::Instant>,
     legacy_retired: HashMap<(String, String), std::time::Instant>,
+    unavailable: HashSet<String>,
 }
 
 impl std::fmt::Debug for WakePersistence {
@@ -183,7 +184,13 @@ impl EventTurns {
     fn synchronize_held(&self, held: &HashMap<String, Vec<WakeEvent>>) -> Result<(), String> {
         if let Some(persistence) = lock(&self.persistence).as_mut() {
             persistence.prune();
-            persistence.store.synchronize_held(held);
+            let mut effective = held.clone();
+            for chat in &persistence.unavailable {
+                if let Some(entries) = persistence.store.orchestrators.get(chat) {
+                    effective.entry(chat.clone()).or_default().extend(entries.iter().filter(|entry| entry.message_id.is_none()).map(|entry| entry.event.clone()));
+                }
+            }
+            persistence.store.synchronize_held(&effective);
             persistence.write()?;
         }
         Ok(())
@@ -412,9 +419,16 @@ impl OrchestratorWakes {
             let mut generations = HashMap::new();
             let mut legacy_retired = HashMap::new();
             let mut legacy_receipts = HashMap::new();
+            let mut unavailable = HashSet::new();
             for chat in saved.orchestrators.keys().cloned().collect::<Vec<_>>() {
-                let Ok(handle) = doc_host.open(&chat) else { continue };
-                let queue: HashSet<String> = handle.doc().read_queue().unwrap_or_default().into_iter().map(|item| item.id).collect();
+                let handle = match doc_host.open(&chat) {
+                    Ok(handle) => handle,
+                    Err(error) => { tracing::warn!(%error, %chat, "could not open wake recipient during recovery"); unavailable.insert(chat); continue; }
+                };
+                let queue: HashSet<String> = match handle.doc().read_queue() {
+                    Ok(queue) => queue.into_iter().map(|item| item.id).collect(),
+                    Err(error) => { tracing::warn!(%error, %chat, "could not read wake recipient queue during recovery"); unavailable.insert(chat); continue; }
+                };
                 let transcript: HashSet<String> = handle.doc().recent_message_ids(50).into_iter().collect();
                 let mut removed = HashSet::new();
                 let mut cross_blocked = HashSet::new();
@@ -465,9 +479,10 @@ impl OrchestratorWakes {
                 }
                 let mut held = Vec::new();
                 let mut completed = Vec::new();
+                let mut blocked = false;
                 if let Some(events) = saved.orchestrators.get_mut(&chat) {
                     events.retain_mut(|entry| {
-                        if entry.retired_messages.iter().any(|retired| cross_blocked.contains(&(retired.chat_id.clone(), retired.message_id.clone()))) { return true; }
+                        if entry.retired_messages.iter().any(|retired| cross_blocked.contains(&(retired.chat_id.clone(), retired.message_id.clone()))) { blocked = true; return true; }
                         if let Some(id) = entry.message_id.clone() {
                             if transcript.contains(&id) {
                                 if removed.contains(&id) || !entry.retired_messages.is_empty() {
@@ -478,16 +493,17 @@ impl OrchestratorWakes {
                                 completed.push(entry.event.id.clone());
                                 return false;
                             }
-                            if queue.contains(&id) && !removed.contains(&id) { return true; }
+                            if queue.contains(&id) && !removed.contains(&id) { blocked = true; return true; }
                             if removed.contains(&id) { entry.retire(&chat, &id); }
                             entry.message_id = None;
                             entry.delivered = false;
                         }
-                        if entry.retired_messages.iter().any(|retired| retired.chat_id == chat && queue.contains(&retired.message_id) && !removed.contains(&retired.message_id)) { return true; }
+                        if entry.retired_messages.iter().any(|retired| retired.chat_id == chat && queue.contains(&retired.message_id) && !removed.contains(&retired.message_id)) { blocked = true; return true; }
                         held.push(entry.event.clone());
                         true
                     });
                 }
+                if blocked { unavailable.insert(chat.clone()); }
                 for id in completed { saved.remember_completed(&chat, &id); }
                 if !held.is_empty() { state.core.note_user_activity(&chat, clock(), None); }
                 state.core.restore_for_hand_off(&chat, held, clock());
@@ -511,7 +527,7 @@ impl OrchestratorWakes {
             if let Ok(Err(error)) = result {
                 tracing::warn!(%error, "could not save restored wakes");
             }
-            *lock(&event_turns.persistence) = Some(WakePersistence { path, store: saved, generations, retired_generations, legacy_receipts, legacy_retired });
+            *lock(&event_turns.persistence) = Some(WakePersistence { path, store: saved, generations, retired_generations, legacy_receipts, legacy_retired, unavailable });
             let pending: Vec<_> = lock(&event_turns.persistence).as_ref().map(|p| p.generations.keys().chain(p.legacy_receipts.keys()).cloned().collect()).unwrap_or_default();
             for (chat, message) in pending { event_turns.schedule_prune(&chat, &message); }
         }
@@ -735,6 +751,9 @@ impl OrchestratorWakes {
     fn hand_off_orchestrator_blocking(&self, from: &str, to: &str, actor: &str) -> Result<Vec<String>, String> {
         let workers = {
             let mut state = lock(&self.inner.state);
+            if lock(&self.inner.event_turns.persistence).as_ref().is_some_and(|persistence| persistence.unavailable.contains(from)) {
+                return Err("wake recovery is blocked for the source chat; restart and retry the hand-off".into());
+            }
             if state.handed_off_to.get(from).is_some_and(|existing| existing != to) {
                 return Err("source already handed off to another chat".into());
             }
