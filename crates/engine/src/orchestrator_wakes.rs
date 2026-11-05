@@ -116,11 +116,12 @@ impl std::fmt::Debug for WakePersistence {
 
 impl WakePersistence {
     fn prune(&mut self) {
-        let mut retired: Vec<_> = self.retired_generations.iter().filter_map(|(key, (snapshot, generation))| {
-            snapshot.has_saved(*generation).then(|| key.clone())
-        }).collect();
-        retired.extend(self.legacy_retired.iter().filter_map(|(key, at)|
-            (at.elapsed() >= std::time::Duration::from_secs(3)).then(|| key.clone())));
+        let mut retired: Vec<_> = self.retired_generations.iter()
+            .filter(|(_, (snapshot, generation))| snapshot.has_saved(*generation))
+            .map(|(key, _)| key.clone()).collect();
+        retired.extend(self.legacy_retired.iter()
+            .filter(|(_, at)| at.elapsed() >= std::time::Duration::from_secs(3))
+            .map(|(key, _)| key.clone()));
         for (chat, message) in retired {
             let mut referenced = false;
             for entries in self.store.orchestrators.values_mut() {
@@ -134,9 +135,9 @@ impl WakePersistence {
                 self.legacy_retired.remove(&(chat, message));
             }
         }
-        let saved: Vec<_> = self.generations.iter().filter_map(|(key, (snapshot, generation))| {
-            snapshot.has_saved(*generation).then(|| key.clone())
-        }).collect();
+        let saved: Vec<_> = self.generations.iter()
+            .filter(|(_, (snapshot, generation))| snapshot.has_saved(*generation))
+            .map(|(key, _)| key.clone()).collect();
         for (chat, message) in saved {
             let mut completed = Vec::new();
             if let Some(entries) = self.store.orchestrators.get_mut(&chat) {
@@ -150,8 +151,9 @@ impl WakePersistence {
             let retained = self.store.orchestrators.get(&chat).is_some_and(|entries| entries.iter().any(|entry| entry.delivered && entry.message_id.as_deref() == Some(&message)));
             if !retained { self.generations.remove(&(chat, message)); }
         }
-        let expired: Vec<_> = self.legacy_receipts.iter().filter_map(|(key, at)|
-            (at.elapsed() >= std::time::Duration::from_secs(3)).then(|| key.clone())).collect();
+        let expired: Vec<_> = self.legacy_receipts.iter()
+            .filter(|(_, at)| at.elapsed() >= std::time::Duration::from_secs(3))
+            .map(|(key, _)| key.clone()).collect();
         for (chat, message) in expired {
             let mut completed = Vec::new();
             if let Some(entries) = self.store.orchestrators.get_mut(&chat) {
