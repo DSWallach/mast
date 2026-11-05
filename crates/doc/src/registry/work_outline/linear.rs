@@ -71,6 +71,10 @@ pub(crate) fn decode_modified_fields(row: &RegistryRow) -> Vec<String> {
 /// The snapshot view of a Space's settings row (defaults when absent).
 pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpaceSettings {
     WorkOutlineSpaceSettings {
+        resolve_merged_handoffs: row
+            .and_then(|row| row.fields.get("resolveMergedHandoffs"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         linear_enabled: row
             .and_then(|row| row.fields.get("linearEnabled"))
             .and_then(Value::as_bool)
@@ -101,6 +105,37 @@ pub(crate) fn merge_modified_fields(current: &[String], add: &[&str]) -> Option<
 }
 
 impl RegistryDoc {
+    pub fn set_resolve_merged_handoffs(
+        &mut self,
+        p: &mast_proto::work_outline::SetResolveMergedHandoffsParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => {
+                if decode_space_settings(self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id).as_ref()).resolve_merged_handoffs == p.enabled {
+                    return Ok(());
+                }
+                Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
+                    ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]))
+            }
+            RowState::Absent => {
+                if p.enabled { return Ok(()); }
+                Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
+                    ("spaceId".to_owned(), json!(p.space_id)),
+                    ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                    ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                ]))
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
     /// Whether the Space has Linear turned on (its settings row says so).
     pub fn space_linear_enabled(&self, space_id: &str) -> bool {
         decode_space_settings(

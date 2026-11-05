@@ -27,7 +27,7 @@
 //! setup) keeps the request open instead of resolving it.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
@@ -54,6 +54,10 @@ use crate::theme::Theme;
 /// as accepted (a remote or offline host drains it later).
 const REPLY_PROBES: usize = 6;
 const REPLY_PROBE_DELAY: Duration = Duration::from_millis(500);
+
+fn handoff_pr_references(status: &mast_engine::pr_ticket_cache::ChatLinkStatus) -> Vec<mast_proto::PullRequestRef> {
+    status.pr_links.iter().filter_map(|link| required_actions::parse_handoff_pr(&link.url)).collect()
+}
 
 /// The composer's notion of a busy Chat: its message queues.
 fn chat_busy(state: &AppState, chat_id: &str) -> bool {
@@ -202,6 +206,9 @@ pub(crate) struct RequiredActionsList {
     note_input: Entity<ComposerInput>,
     reply_inputs: HashMap<String, Entity<ComposerInput>>,
     choice_focus: HashMap<String, FocusHandle>,
+    /// Complete PR links for chats relevant to a branch-only handoff.
+    handoff_chat_links: HashMap<String, (Instant, Vec<mast_proto::PullRequestRef>)>,
+    handoff_chat_links_pending: HashSet<String>,
     /// The request whose resolve note is open (one at a time).
     pub(crate) resolving: Option<String>,
     decision: Option<String>,
@@ -254,6 +261,7 @@ impl RequiredActionsList {
                     ComposerInputEvent::Edited => cx.notify(),
                     _ => {}
                 }),
+                cx.observe(&state, |_: &mut Self, _, cx| cx.notify()),
             ];
         Self {
             state,
@@ -264,6 +272,8 @@ impl RequiredActionsList {
             note_input,
             reply_inputs: HashMap::new(),
             choice_focus: HashMap::new(),
+            handoff_chat_links: HashMap::new(),
+            handoff_chat_links_pending: HashSet::new(),
             resolving: None,
             decision: None,
             info_open: HashSet::new(),
@@ -293,6 +303,32 @@ impl RequiredActionsList {
 
     pub(crate) fn rows(&self) -> RequiredActionRows {
         required_actions::collect_rows(&self.spaces, &self.chats, &self.scope)
+    }
+
+    fn ensure_handoff_chat_links(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.handoff_chat_links.get(&chat_id).is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(120))
+            || self.handoff_chat_links_pending.contains(&chat_id) { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
+        self.handoff_chat_links_pending.insert(chat_id.clone());
+        cx.spawn(async move |this, cx| {
+            let response = engine.client().call(mast_rpc::methods::CHAT_LINK_STATUS, serde_json::json!({"chatId": chat_id})).await;
+            this.update(cx, |this, cx| {
+                this.handoff_chat_links_pending.remove(&chat_id);
+                let references = response.ok()
+                    .and_then(|value| serde_json::from_value::<mast_engine::pr_ticket_cache::ChatLinkStatus>(value).ok())
+                    .map(|status| handoff_pr_references(&status))
+                    .or_else(|| this.handoff_chat_links.get(&chat_id).map(|(_, references)| references.clone()))
+                    .unwrap_or_default();
+                this.handoff_chat_links.insert(chat_id, (Instant::now(), references));
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_handoff_chat_links_for_test(&mut self, chat_id: &str, status: &mast_engine::pr_ticket_cache::ChatLinkStatus, cx: &mut Context<Self>) {
+        self.handoff_chat_links.insert(chat_id.to_owned(), (Instant::now(), handoff_pr_references(status)));
+        cx.notify();
     }
 
     /// Open the note field for `request_id`.
@@ -903,6 +939,68 @@ impl RequiredActionsList {
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
         let busy = self.in_flight.contains(&id);
         let attention = chips::attention_color(theme);
+        let mut relevant_chat_ids = Vec::new();
+        if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff {
+            let branches: Vec<&str> = row.links.iter().filter_map(|link| match &link.target {
+                mast_proto::work_outline_user_actions::RequestLinkTarget::Diff { branch: Some(branch) } => Some(branch.as_str()),
+                _ => None,
+            }).chain(row.facts.iter().filter(|fact| fact.label.eq_ignore_ascii_case("branch")).map(|fact| fact.value.trim())).collect();
+            let relevant_chats: Vec<String> = {
+                let state = self.state.read(cx);
+                state.chats.iter().filter(|chat| chat.space_id.as_deref() == Some(row.space_id.as_str())
+                    && (chat.id == row.chat_id || chat.branch.as_deref().is_some_and(|branch| branches.contains(&branch))))
+                    .map(|chat| chat.id.clone()).collect()
+            };
+            relevant_chat_ids = relevant_chats.clone();
+            if !branches.is_empty() {
+                for chat_id in &relevant_chats { self.ensure_handoff_chat_links(chat_id.clone(), cx); }
+            }
+            let branch_prs: Vec<_> = {
+                let state = self.state.read(cx);
+                state.chats.iter().filter(|chat| chat.space_id.as_deref() == Some(row.space_id.as_str())
+                    && chat.branch.as_deref().is_some_and(|branch| branches.contains(&branch)))
+                    .filter_map(|chat| chat.linked_pr_url.as_deref())
+                    .filter_map(required_actions::parse_handoff_pr).collect()
+            };
+            for pr in branch_prs {
+                crate::github::store::request_status(&self.state, &pr, false, cx);
+            }
+            for pr in relevant_chats.iter().filter_map(|id| self.handoff_chat_links.get(id)).flat_map(|(_, prs)| prs) {
+                crate::github::store::request_status(&self.state, pr, false, cx);
+            }
+            for link in &row.links {
+                if let mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } = &link.target {
+                    if let Some(pr) = required_actions::parse_handoff_pr(url) {
+                        crate::github::store::request_status(&self.state, &pr, false, cx);
+                    }
+                }
+            }
+            for fact in &row.facts {
+                if fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request") {
+                    if let Some(pr) = required_actions::parse_handoff_pr(&fact.value) {
+                        crate::github::store::request_status(&self.state, &pr, false, cx);
+                    }
+                }
+            }
+        }
+        let lifecycle = {
+            let state = self.state.read(cx);
+            let explicit_pr = row.links.iter().any(|link| match &link.target {
+                mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => required_actions::parse_handoff_pr(url).is_some(),
+                _ => false,
+            }) || row.facts.iter().any(|fact| (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && required_actions::parse_handoff_pr(&fact.value).is_some());
+            let mut space_prs: std::collections::HashSet<_> = state.chats.iter()
+                .filter(|chat| relevant_chat_ids.contains(&chat.id))
+                .filter_map(|chat| chat.linked_pr_url.as_deref())
+                .filter_map(required_actions::parse_handoff_pr).map(|pr| pr.key()).collect();
+            for chat in state.chats.iter().filter(|chat| relevant_chat_ids.contains(&chat.id)) {
+                if let Some((_, references)) = self.handoff_chat_links.get(&chat.id) {
+                    space_prs.extend(references.iter().map(|pr| pr.key()));
+                }
+            }
+            required_actions::handoff_lifecycle(&row, state.github.ready_statuses()
+                .filter(|status| explicit_pr || space_prs.contains(&status.pr_ref.key())))
+        };
         let age = required_actions::age_label(row.created_at, now);
         let chat_tip: SharedString = if row.system {
             "Raised by the PR review sync (no Chat). It resolves itself once you review, or \
@@ -1435,7 +1533,13 @@ impl RequiredActionsList {
                             // Two lines until Details expands the row.
                             .when(open && !info_open, |el| el.line_clamp(2))
                             .child(SharedString::from(row.text.clone())),
-                    ),
+                    )
+                    .when_some(lifecycle, |el, lifecycle| el.child(
+                        div().debug_selector({ let selector = format!("required-actions-lifecycle-{id}-{lifecycle}"); move || selector.clone() })
+                            .px(px(5.0)).rounded(px(4.0)).border_1().border_color(theme.border)
+                            .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
+                            .child(lifecycle)
+                    )),
             )
             .child(div().pl(px(12.0)).child(meta))
             .children(row.facts.iter().filter(|fact| row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests"))).chain(row.facts.iter().filter(|fact| row.kind != mast_proto::work_outline_user_actions::UserActionKind::Handoff || !(fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")))).map(|fact| {

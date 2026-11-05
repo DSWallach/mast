@@ -519,6 +519,38 @@ impl Shell {
         }
         if let Some(ready) = &worker.ready {
             let text = ready.text.clone();
+            let mut references = {
+                let state = self.state.read(cx);
+                state.work_outline(&ready.space_id).snapshot()
+                    .and_then(|snapshot| snapshot.user_action_request(&ready.request_id))
+                    .map(|request| {
+                        request.links.iter().filter_map(|link| match &link.target {
+                            mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => crate::work_outline::required_actions::parse_handoff_pr(url),
+                            _ => None,
+                        }).chain(request.facts.iter().filter(|fact| fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request"))
+                            .filter_map(|fact| crate::work_outline::required_actions::parse_handoff_pr(&fact.value))).collect::<Vec<_>>()
+                    }).unwrap_or_default()
+            };
+            if worker.branch.is_some() {
+                references.extend(worker.prs.iter().filter_map(|pr| crate::work_outline::required_actions::parse_handoff_pr(&pr.url)));
+            }
+            for pr in references {
+                crate::github::store::request_status(&self.state, &pr, false, cx);
+            }
+            let lifecycle = {
+                let state = self.state.read(cx);
+                state.work_outline(&ready.space_id).snapshot()
+                    .and_then(|snapshot| snapshot.user_action_request(&ready.request_id))
+                    .and_then(|request| {
+                        let explicit_pr = request.links.iter().any(|link| match &link.target {
+                            mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => crate::work_outline::required_actions::parse_handoff_pr(url).is_some(),
+                            _ => false,
+                        }) || request.facts.iter().any(|fact| (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && crate::work_outline::required_actions::parse_handoff_pr(&fact.value).is_some());
+                        let worker_prs: std::collections::HashSet<_> = worker.prs.iter().filter_map(|pr| crate::work_outline::required_actions::parse_handoff_pr(&pr.url)).map(|pr| pr.key()).collect();
+                        crate::work_outline::required_actions::handoff_lifecycle_parts(
+                            request.effective_kind(), &request.links, &request.facts, state.github.ready_statuses().filter(|status| explicit_pr || worker_prs.contains(&status.pr_ref.key())))
+                    })
+            };
             row = row.child(
                 div()
                     .pl(px(13.0))
@@ -534,6 +566,9 @@ impl Shell {
                             .text_color(theme.success)
                             .child(SharedString::from(text)),
                     )
+                    .when_some(lifecycle, |el, lifecycle| el.child(Self::chip(
+                        theme, format!("team-handoff-lifecycle-{id}"), lifecycle.to_owned(), ChipTone::Dim,
+                    )))
                     .child(
                         div()
                             .id(SharedString::from(format!("{prefix}-jump-{id}")))

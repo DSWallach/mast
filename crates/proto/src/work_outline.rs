@@ -446,9 +446,12 @@ impl WorkItemView {
 
 /// Per-Space Work Outline settings (registry kind `workOutlineSpaceSettings`,
 /// row id = Space id, LWW fields). A Space without a row has the defaults.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkOutlineSpaceSettings {
+    /// Resolve handoff requests when their pull request merges (default on).
+    #[serde(default = "default_resolve_merged_handoffs", skip_serializing_if = "is_true")]
+    pub resolve_merged_handoffs: bool,
     /// Linear integration is on for this Space (default off).
     #[serde(default)]
     pub linear_enabled: bool,
@@ -464,6 +467,17 @@ pub struct WorkOutlineSpaceSettings {
     /// Editable prompt templates for PR launches; absent on an unmigrated Space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_review_prompts: Option<PrReviewPrompts>,
+}
+
+fn default_resolve_merged_handoffs() -> bool { true }
+fn is_true(value: &bool) -> bool { *value }
+
+impl Default for WorkOutlineSpaceSettings {
+    fn default() -> Self {
+        Self { resolve_merged_handoffs: true, linear_enabled: false,
+            pr_review_sync_work_item_id: None, linear_assigned_work_item_id: None,
+            pr_review_prompts: None }
+    }
 }
 
 /// Space-scoped PR launch templates. Placeholders: {url}, {branch}, {location}.
@@ -1325,6 +1339,14 @@ pub struct SetSpaceLinearEnabledParams {
     pub operation_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetResolveMergedHandoffsParams {
+    pub space_id: String,
+    pub enabled: bool,
+    pub operation_id: String,
+}
+
 /// `createWorkItemFromLinear` (Linear integration): create a work item for a
 /// Linear issue and its `linear`/`issue` external reference in ONE batch.
 /// Title = [`crate::linear::linear_item_title`] (`"ENG-123 · title"`),
@@ -1426,6 +1448,7 @@ pub enum WorkOutlineMutation {
     RejectWorkItemInstructionProposal(RejectWorkItemInstructionProposalParams),
     // ── Linear integration ──
     SetSpaceLinearEnabled(SetSpaceLinearEnabledParams),
+    SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -1468,6 +1491,7 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(p) => &p.operation_id,
             Self::RejectWorkItemInstructionProposal(p) => &p.operation_id,
             Self::SetSpaceLinearEnabled(p) => &p.operation_id,
+            Self::SetResolveMergedHandoffs(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -1507,6 +1531,7 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(_) => "approveWorkItemInstructionProposal",
             Self::RejectWorkItemInstructionProposal(_) => "rejectWorkItemInstructionProposal",
             Self::SetSpaceLinearEnabled(_) => "setSpaceLinearEnabled",
+            Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",

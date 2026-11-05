@@ -277,6 +277,7 @@ fn sync_state_and_work_outline_additions_are_pinned() {
             linear_enabled: false,
             pr_review_sync_work_item_id: Some("w".into()),
             linear_assigned_work_item_id: None,
+            ..Default::default()
         },
         ..Default::default()
     })
@@ -287,6 +288,11 @@ fn sync_state_and_work_outline_additions_are_pinned() {
     );
     let defaults = serde_json::to_value(WorkOutlineSpaceSettings::default()).unwrap();
     assert_eq!(defaults, json!({"linearEnabled": false}));
+    let missing: WorkOutlineSpaceSettings = serde_json::from_value(json!({})).unwrap();
+    assert!(missing.resolve_merged_handoffs);
+    let disabled: WorkOutlineSpaceSettings = serde_json::from_value(json!({"resolveMergedHandoffs": false})).unwrap();
+    assert!(!disabled.resolve_merged_handoffs);
+    assert_eq!(serde_json::to_value(disabled).unwrap()["resolveMergedHandoffs"], false);
 
     let changes = WorkItemChanges {
         external_sync_state: Some(state.clone()),

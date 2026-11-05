@@ -523,6 +523,8 @@ impl WorkItemDetails {
         } else {
             theme.text_muted
         };
+        let resolve_merged = snapshot.space_settings.resolve_merged_handoffs;
+        let is_space_root = self.item_id == SPACE_ROOT_ITEM_ID;
         div()
             .debug_selector(|| "work-item-required-actions".into())
             .flex()
@@ -542,6 +544,32 @@ impl WorkItemDetails {
                 })),
             )
             .when(open, |el| el.child(self.required_actions.clone()))
+            .when(is_space_root, |el| el.child(
+                div()
+                    .id("resolve-merged-handoffs")
+                    .debug_selector(|| "resolve-merged-handoffs".into())
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .child(if resolve_merged { "☑ Resolve handoffs when their PR merges" } else { "☐ Resolve handoffs when their PR merges" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let task = this.state.read(cx).work_outline_actions().mutate(
+                            mast_proto::WorkOutlineMutation::SetResolveMergedHandoffs(
+                                mast_proto::work_outline::SetResolveMergedHandoffsParams {
+                                    space_id: this.space_id.clone(), enabled: !resolve_merged,
+                                    operation_id: crate::work_outline::actions::new_operation_id(),
+                                }
+                            )
+                        );
+                        cx.spawn(async move |this, cx| {
+                            let result = task.await;
+                            this.update(cx, |this, cx| {
+                                if let Err(error) = result { this.error = Some(error.message); }
+                                cx.notify();
+                            }).ok();
+                        }).detach();
+                    }))
+            ))
             .into_any_element()
     }
 

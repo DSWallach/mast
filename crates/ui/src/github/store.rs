@@ -150,6 +150,10 @@ impl GithubStore {
         self.statuses.get(&pr.key())
     }
 
+    pub(crate) fn ready_statuses(&self) -> impl Iterator<Item = &PullRequestStatusSummary> {
+        self.statuses.values().filter_map(PrEntry::ready)
+    }
+
     #[cfg(test)]
     pub(crate) fn ready(&self, pr: &PullRequestRef) -> Option<&PullRequestStatusSummary> {
         self.status(pr).and_then(PrEntry::ready)

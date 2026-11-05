@@ -199,3 +199,22 @@ fn open_handoffs_match_explicit_branch_references() {
     assert_eq!(ids, ["link", "fact"]);
     assert!(open_handoffs_for_branch(&snapshot, "").is_empty());
 }
+
+#[test]
+fn open_handoffs_match_pr_links_without_matching_other_kinds() {
+    let snapshot: WorkOutlineSnapshot = serde_json::from_value(json!({
+        "spaceId": "s",
+        "userActionRequests": [
+            {"id":"pr", "kind":"handoff", "state":"open", "links":[{"label":"PR", "target":{"type":"pr", "url":"https://github.com/acme/app/pull/42"}}]},
+            {"id":"fact", "kind":"handoff", "state":"open", "facts":[{"label":"PR", "value":"acme/app#42"}]},
+            {"id":"foreign-host", "kind":"handoff", "state":"open", "links":[{"label":"PR", "target":{"type":"url", "url":"https://evilgithub.com/acme/app/pull/42"}}]},
+            {"id":"other", "kind":"handoff", "state":"open", "links":[{"label":"PR", "target":{"type":"pr", "url":"https://github.com/acme/app/pull/43"}}]},
+            {"id":"review", "kind":"review", "state":"open", "links":[{"label":"PR", "target":{"type":"pr", "url":"https://github.com/acme/app/pull/42"}}]},
+            {"id":"resolved", "kind":"handoff", "state":"resolved", "links":[{"label":"PR", "target":{"type":"pr", "url":"https://github.com/acme/app/pull/42"}}]}
+        ]
+    })).unwrap();
+    let ids: Vec<_> = open_handoffs_for_pr(&snapshot, "", "https://github.com/acme/app/pull/42")
+        .iter().map(|request| request.id.as_str()).collect();
+    assert_eq!(ids, ["pr", "fact"]);
+    assert!(open_handoffs_for_pr(&snapshot, "", "").is_empty());
+}

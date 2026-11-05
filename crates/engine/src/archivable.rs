@@ -77,26 +77,40 @@ pub fn open_handoffs_for_branch<'a>(
     snapshot: &'a WorkOutlineSnapshot,
     branch: &str,
 ) -> Vec<&'a UserActionRequestView> {
+    open_handoffs_for_pr(snapshot, branch, "")
+}
+
+/// Open handoffs that explicitly identify this PR or its head branch.
+pub fn open_handoffs_for_pr<'a>(
+    snapshot: &'a WorkOutlineSnapshot,
+    branch: &str,
+    pr_url: &str,
+) -> Vec<&'a UserActionRequestView> {
     use mast_proto::work_outline_user_actions::{RequestLinkTarget, UserActionKind};
-    if branch.is_empty() {
-        return Vec::new();
-    }
-    snapshot
-        .user_action_requests
-        .iter()
-        .filter(|request| {
-            request.is_unresolved()
-                && request.effective_kind() == UserActionKind::Handoff
-                && (request.links.iter().any(|link| {
-                    matches!(
-                        &link.target,
-                        RequestLinkTarget::Diff { branch: Some(value) } if value == branch
-                    )
-                }) || request.facts.iter().any(|fact| {
-                    fact.label.eq_ignore_ascii_case("branch") && fact.value.trim() == branch
-                }))
-        })
-        .collect()
+    let canonical_link = |value: &str| {
+        value.trim().to_ascii_lowercase().starts_with("https://github.com/")
+            .then(|| crate::chat_links::canonicalize_pr_url(value))
+    };
+    let canonical = crate::chat_links::canonicalize_pr_url(pr_url);
+    let external_id = canonical
+        .strip_prefix("https://github.com/")
+        .and_then(|path| path.split_once("/pull/"))
+        .map(|(repo, number)| format!("{repo}#{number}"));
+    snapshot.user_action_requests.iter().filter(|request| {
+        let branch_matches = !branch.is_empty() && (request.links.iter().any(|link| {
+            matches!(&link.target, RequestLinkTarget::Diff { branch: Some(value) } if value == branch)
+        }) || request.facts.iter().any(|fact| {
+            fact.label.eq_ignore_ascii_case("branch") && fact.value.trim() == branch
+        }));
+        let pr_matches = !canonical.is_empty() && (request.links.iter().any(|link| {
+            matches!(&link.target, RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } if canonical_link(url).as_deref() == Some(canonical.as_str()))
+        }) || request.facts.iter().any(|fact| {
+            (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && (canonical_link(&fact.value).as_deref() == Some(canonical.as_str())
+                || external_id.as_ref().is_some_and(|id| fact.value.trim().eq_ignore_ascii_case(id)))
+        }));
+        request.is_open() && request.effective_kind() == UserActionKind::Handoff
+            && (branch_matches || pr_matches)
+    }).collect()
 }
 
 /// The requests a chat originated, from the outline snapshot.
