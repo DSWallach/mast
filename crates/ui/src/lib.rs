@@ -162,7 +162,8 @@ impl gpui::Global for ReopenState {}
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
     let data_dir = config.boot().data_dir.clone();
-    let ui_settings = settings::UiSettings::load(&data_dir);
+    let ui_settings = tracing::info_span!("startup_load_settings")
+        .in_scope(|| settings::UiSettings::load(&data_dir));
     // Retain ownership for the whole application lifetime. The bridge's
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
@@ -193,7 +194,8 @@ pub fn run_app(config: UiConfig) {
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
-        let font_availability = typography::register_fonts(cx);
+        let font_availability = tracing::info_span!("startup_register_fonts")
+            .in_scope(|| typography::register_fonts(cx));
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
         typography::init(
@@ -206,7 +208,8 @@ pub fn run_app(config: UiConfig) {
             font_availability,
             cx,
         );
-        theme_library::init(data_dir.clone(), cx);
+        tracing::info_span!("startup_load_themes")
+            .in_scope(|| theme_library::init(data_dir.clone(), cx));
         appearance::init(
             ui_settings.appearance,
             ui_settings.theme_selection,
@@ -281,7 +284,8 @@ pub fn run_app(config: UiConfig) {
             })
             .detach();
         }
-        open_main_window(state, config.boot(), cx);
+        tracing::info_span!("startup_open_window")
+            .in_scope(|| open_main_window(state, config.boot(), cx));
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         start_appshot_service(config.boot().data_dir, cx);
         // Native menu bar — macOS gets the standard app menu (About/Services/

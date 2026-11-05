@@ -4,6 +4,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
+    sync::{Arc, OnceLock},
 };
 
 use gpui::{App, Global, Rems, SharedString, Window, px, rems};
@@ -133,13 +134,68 @@ pub fn clamp_font_size(size: f32) -> f32 {
 }
 
 /// Which catalog families successfully registered during this process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct FontAvailability {
     geist: bool,
     geist_mono: bool,
+    catalog: Arc<FontCatalog>,
+}
+
+#[derive(Debug)]
+struct FontCatalog {
+    system_names: BTreeSet<String>,
+    scan: fn() -> BTreeMap<String, bool>,
+    entries: OnceLock<FontCatalogEntries>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FontCatalogEntries {
     choices: Vec<UiFontFamily>,
     fixed_width: Vec<UiFontFamily>,
 }
+
+impl FontCatalog {
+    fn entries(&self) -> &FontCatalogEntries {
+        self.entries.get_or_init(|| {
+            let metrics = (self.scan)();
+            let mut choices = vec![
+                UiFontFamily::Geist,
+                UiFontFamily::GeistMono,
+                UiFontFamily::System,
+            ];
+            let mut fixed_width = vec![UiFontFamily::GeistMono];
+            for name in &self.system_names {
+                if let Some(fixed) = metrics.get(name) {
+                    if *fixed {
+                        fixed_width.push(UiFontFamily::Installed(name.clone()));
+                    }
+                    choices.push(UiFontFamily::Installed(name.clone()));
+                }
+            }
+            FontCatalogEntries {
+                choices,
+                fixed_width,
+            }
+        })
+    }
+
+    fn preloaded(entries: FontCatalogEntries) -> Self {
+        Self {
+            system_names: BTreeSet::new(),
+            scan: installed_families_with_latin_metrics,
+            entries: OnceLock::from(entries),
+        }
+    }
+}
+
+impl PartialEq for FontAvailability {
+    fn eq(&self, other: &Self) -> bool {
+        self.geist == other.geist
+            && self.geist_mono == other.geist_mono
+            && self.catalog.entries() == other.catalog.entries()
+    }
+}
+impl Eq for FontAvailability {}
 
 impl FontAvailability {
     #[cfg(test)]
@@ -147,27 +203,29 @@ impl FontAvailability {
         Self {
             geist: true,
             geist_mono: true,
-            choices: vec![
-                UiFontFamily::Geist,
-                UiFontFamily::GeistMono,
-                UiFontFamily::System,
-                UiFontFamily::Installed("Arial".into()),
-                UiFontFamily::Installed("Menlo".into()),
-            ],
-            fixed_width: vec![
-                UiFontFamily::GeistMono,
-                UiFontFamily::Installed("Menlo".into()),
-            ],
+            catalog: Arc::new(FontCatalog::preloaded(FontCatalogEntries {
+                choices: vec![
+                    UiFontFamily::Geist,
+                    UiFontFamily::GeistMono,
+                    UiFontFamily::System,
+                    UiFontFamily::Installed("Arial".into()),
+                    UiFontFamily::Installed("Menlo".into()),
+                ],
+                fixed_width: vec![
+                    UiFontFamily::GeistMono,
+                    UiFontFamily::Installed("Menlo".into()),
+                ],
+            })),
         }
     }
 
     pub fn choices(&self) -> &[UiFontFamily] {
-        &self.choices
+        &self.catalog.entries().choices
     }
 
     /// Families whose glyph advances match the terminal renderer's cell grid.
     pub fn fixed_width_choices(&self) -> &[UiFontFamily] {
-        &self.fixed_width
+        &self.catalog.entries().fixed_width
     }
 
     pub fn is_available(&self, family: &UiFontFamily) -> bool {
@@ -175,12 +233,16 @@ impl FontAvailability {
             UiFontFamily::Geist => self.geist,
             UiFontFamily::GeistMono => self.geist_mono,
             UiFontFamily::System => true,
-            UiFontFamily::Installed(_) => self.choices.contains(family),
+            UiFontFamily::Installed(_) => self.choices().contains(family),
         }
     }
 
     pub fn is_fixed_width_available(&self, family: &UiFontFamily) -> bool {
-        self.is_available(family) && self.fixed_width.contains(family)
+        match family {
+            UiFontFamily::GeistMono => self.geist_mono,
+            UiFontFamily::Installed(_) => self.fixed_width_choices().contains(family),
+            UiFontFamily::Geist | UiFontFamily::System => false,
+        }
     }
 
     fn fallback(&self) -> UiFontFamily {
@@ -204,13 +266,15 @@ impl FontAvailability {
 
     #[cfg(test)]
     pub(crate) fn without(mut self, family: &UiFontFamily) -> Self {
+        let mut entries = self.catalog.entries().clone();
         match family {
             UiFontFamily::Geist => self.geist = false,
             UiFontFamily::GeistMono => self.geist_mono = false,
             UiFontFamily::System => {}
-            UiFontFamily::Installed(_) => self.choices.retain(|choice| choice != family),
+            UiFontFamily::Installed(_) => entries.choices.retain(|choice| choice != family),
         }
-        self.fixed_width.retain(|choice| choice != family);
+        entries.fixed_width.retain(|choice| choice != family);
+        self.catalog = Arc::new(FontCatalog::preloaded(entries));
         self
     }
 }
@@ -220,8 +284,10 @@ impl Default for FontAvailability {
         Self {
             geist: false,
             geist_mono: false,
-            choices: vec![UiFontFamily::System],
-            fixed_width: Vec::new(),
+            catalog: Arc::new(FontCatalog::preloaded(FontCatalogEntries {
+                choices: vec![UiFontFamily::System],
+                fixed_width: Vec::new(),
+            })),
         }
     }
 }
@@ -355,34 +421,23 @@ fn installed_families_with_latin_metrics() -> BTreeMap<String, bool> {
 pub fn register_fonts(cx: &App) -> FontAvailability {
     // Capture device fonts before adding ours so the Installed section only
     // contains families supplied by the OS/user, not our embedded assets.
-    let families_with_latin_metrics = installed_families_with_latin_metrics();
     let system_names: BTreeSet<_> = cx
         .text_system()
         .all_font_names()
         .into_iter()
         .filter(|name| !name.starts_with('.'))
         .filter(|name| name != "Geist" && name != "Geist Mono")
-        .filter(|name| families_with_latin_metrics.contains_key(name))
         .collect();
     let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
     let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
-    let mut choices = vec![
-        UiFontFamily::Geist,
-        UiFontFamily::GeistMono,
-        UiFontFamily::System,
-    ];
-    let mut fixed_width = vec![UiFontFamily::GeistMono];
-    for name in system_names {
-        if families_with_latin_metrics.get(&name) == Some(&true) {
-            fixed_width.push(UiFontFamily::Installed(name.clone()));
-        }
-        choices.push(UiFontFamily::Installed(name));
-    }
     FontAvailability {
         geist,
         geist_mono,
-        choices,
-        fixed_width,
+        catalog: Arc::new(FontCatalog {
+            system_names,
+            scan: installed_families_with_latin_metrics,
+            entries: OnceLock::new(),
+        }),
     }
 }
 
@@ -819,6 +874,53 @@ mod tests {
                 UiFontFamily::System
             ]
         );
+    }
+
+    #[test]
+    fn installed_catalog_is_lazy_shared_and_rebuilt_for_a_new_session() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        static SCANS: AtomicUsize = AtomicUsize::new(0);
+        static INSTALLED: AtomicBool = AtomicBool::new(true);
+        fn scan() -> BTreeMap<String, bool> {
+            SCANS.fetch_add(1, Ordering::SeqCst);
+            if INSTALLED.load(Ordering::SeqCst) {
+                BTreeMap::from([("Fixed".into(), true)])
+            } else {
+                BTreeMap::new()
+            }
+        }
+        fn availability() -> FontAvailability {
+            FontAvailability {
+                geist: true,
+                geist_mono: true,
+                catalog: Arc::new(FontCatalog {
+                    system_names: BTreeSet::from(["Fixed".into()]),
+                    scan,
+                    entries: OnceLock::new(),
+                }),
+            }
+        }
+        SCANS.store(0, Ordering::SeqCst);
+        INSTALLED.store(true, Ordering::SeqCst);
+        let first = availability();
+        assert!(first.is_available(&UiFontFamily::Geist));
+        assert!(first.is_fixed_width_available(&UiFontFamily::GeistMono));
+        assert_eq!(SCANS.load(Ordering::SeqCst), 0);
+        let fixed = UiFontFamily::Installed("Fixed".into());
+        assert!(first.is_fixed_width_available(&fixed));
+        assert!(first.clone().is_available(&fixed));
+        assert_eq!(SCANS.load(Ordering::SeqCst), 1);
+        INSTALLED.store(false, Ordering::SeqCst);
+        assert!(
+            first.is_available(&fixed),
+            "the session retains its catalog"
+        );
+        let next = availability();
+        assert_eq!(
+            resolve_effective_mono(&fixed, &next, true),
+            UiFontFamily::GeistMono
+        );
+        assert_eq!(SCANS.load(Ordering::SeqCst), 2);
     }
 
     #[test]

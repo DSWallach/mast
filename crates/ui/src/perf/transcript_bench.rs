@@ -219,6 +219,14 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         Cached(transcript)
     });
     let transcript = view.read_with(vcx, |view, _| view.0.clone());
+    let mut entries = long_chat(2000);
+    entries.last_mut().unwrap().status = Some(MessageStatus::Streaming);
+    let opening = mast_doc::TranscriptUpdate {
+        frame: mast_doc::TranscriptFrame::reset(&entries),
+        context_usage: None,
+        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
+    };
+    let started = std::time::Instant::now();
     state.update(vcx, |state, cx| {
         state.set_test_engine(crate::state::EngineHandle::from_test_client(
             mast_rpc::RpcClient::new(out, inbound),
@@ -233,13 +241,6 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         if request["method"] == mast_rpc::methods::WATCH_DOC_MESSAGES {
             break request["id"].clone();
         }
-    };
-    let mut entries = long_chat(2000);
-    entries.last_mut().unwrap().status = Some(MessageStatus::Streaming);
-    let opening = mast_doc::TranscriptUpdate {
-        frame: mast_doc::TranscriptFrame::reset(&entries),
-        context_usage: None,
-        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
     };
     let frame = |update: &mast_doc::TranscriptUpdate| {
         serde_json::json!({"id": request_id, "item": update}).to_string()
@@ -265,6 +266,39 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
     replies.try_send(frame(&opening)).unwrap();
     wait_for_revision(vcx, previous);
     draw(vcx);
+    eprintln!(
+        "BENCH transcript | selection through subscription replay and draw | ms={:.2}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    state.update(vcx, |state, cx| state.select_chat(None, cx));
+    let revisit = std::time::Instant::now();
+    state.update(vcx, |state, cx| state.select_chat(Some("chat".into()), cx));
+    assert!(
+        state.read_with(vcx, |state, _| state.transcript_replayed),
+        "revisit should restore cached transcript"
+    );
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | cached selection and draw | ms={:.2}",
+        revisit.elapsed().as_secs_f64() * 1000.0
+    );
+    // The selection starts a fresh watch. Reconnect the synthetic peer before
+    // measuring streaming, since the preceding watch was cancelled.
+    vcx.run_until_parked();
+    runtime.block_on(tokio::task::yield_now());
+    let request_id = loop {
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("revisit watch request")).unwrap();
+        if request["method"] == mast_rpc::methods::WATCH_DOC_MESSAGES {
+            break request["id"].clone();
+        }
+    };
+    let frame = |update: &mast_doc::TranscriptUpdate| {
+        serde_json::json!({"id": request_id, "item": update}).to_string()
+    };
+    let previous = state.read_with(vcx, |state, _| state.transcript_revision);
+    replies.try_send(frame(&opening)).unwrap();
+    wait_for_revision(vcx, previous);
     let retained = state.read_with(vcx, |state, _| {
         state.prepared_transcripts["chat"].rows["m0"].clone()
     });
@@ -309,4 +343,113 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         rendered < rows * updates.len(),
         "streaming must not render every transcript row per chunk"
     );
+}
+
+/// Selection through the embedded engine's local opening-tail and full replay.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_engine_chat_selection(cx: &mut gpui::TestAppContext) {
+    crate::perf::require_offline_executables();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let core = mast_engine::EngineCore::assemble(
+        dir.path(),
+        std::sync::Arc::new(mast_engine::HarnessRegistry::new()),
+        mast_proto::HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let doc = core.doc_host.open("selection-benchmark").unwrap();
+    for entry in long_chat(2000) {
+        doc.doc().push_message(&entry).unwrap();
+    }
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let state = cx.new(|_| AppState::new());
+    let (_view, vcx) = cx.add_window_view(|_, cx| {
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        Cached(transcript)
+    });
+    state.update(vcx, |state, _| {
+        state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
+    });
+    let start = std::time::Instant::now();
+    state.update(vcx, |state, cx| {
+        state.select_chat(Some("selection-benchmark".into()), cx)
+    });
+    loop {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if state.read_with(vcx, |state, _| !state.transcript.is_empty()) {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "opening frame did not arrive"
+        );
+        std::thread::yield_now();
+    }
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine selection to opening draw | ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    loop {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if state.read_with(vcx, |state, _| state.transcript_replayed) {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "full replay did not arrive"
+        );
+        std::thread::yield_now();
+    }
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine selection to full replay draw | ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    state.update(vcx, |state, cx| state.select_chat(None, cx));
+    let revisit = std::time::Instant::now();
+    state.update(vcx, |state, cx| {
+        state.select_chat(Some("selection-benchmark".into()), cx)
+    });
+    let previous_revision = state.read_with(vcx, |state, _| state.transcript_revision);
+    let hit = state.read_with(vcx, |state, _| state.transcript_replayed);
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine cached revisit draw | ms={:.2} | cache_hit={hit}",
+        revisit.elapsed().as_secs_f64() * 1000.0
+    );
+    loop {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if state.read_with(vcx, |state, _| {
+            state.transcript_revision > previous_revision
+        }) {
+            break;
+        }
+        assert!(
+            revisit.elapsed() < std::time::Duration::from_secs(60),
+            "revisit replay did not arrive"
+        );
+        std::thread::yield_now();
+    }
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine revisit to authoritative replay draw | ms={:.2}",
+        revisit.elapsed().as_secs_f64() * 1000.0
+    );
+    state.update(vcx, |state, cx| state.select_chat(None, cx));
+    vcx.run_until_parked();
 }

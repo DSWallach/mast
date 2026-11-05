@@ -9,6 +9,20 @@
 
 pub(crate) mod data;
 
+/// The embedded engine starts background PR discovery even in an offline
+/// profile. Require inert executables before starting it in a benchmark.
+pub(crate) fn require_offline_executables() {
+    for name in ["gh", "linear"] {
+        let executable = mast_harness::resolve_login_shell_executable(name)
+            .expect("benchmark requires offline gh and linear executables in PATH");
+        assert_eq!(
+            std::fs::read(&executable).expect("read benchmark executable"),
+            b"#!/bin/sh\nexit 1\n",
+            "benchmark refuses to start with a real {name} executable"
+        );
+    }
+}
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::Instant;

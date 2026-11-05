@@ -3897,6 +3897,20 @@ fn spawn_transcript_watch(
                     .get("historyPending")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                if history_pending {
+                    // A complete cached transcript is already on screen. The
+                    // opening tail cannot replace it and the following full
+                    // reset initializes the preparation worker on its own.
+                    let cached = this.update(cx, |state, _| {
+                        state.selected_chat.as_deref() == Some(chat_id.as_str())
+                            && state.transcript_replayed
+                    });
+                    match cached {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(_) => return,
+                    }
+                }
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
@@ -4877,6 +4891,77 @@ mod tests {
                 .apply_transcript_frame(TranscriptFrame::reset(&[]))
                 .unwrap();
             assert!(state.transcript.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn cached_transcript_skips_opening_tail_and_accepts_authoritative_reset(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.select_chat(Some("cached".into()), cx);
+            state.apply_transcript(vec![user_entry("cached-entry")]);
+            state.select_chat(None, cx);
+            state.set_test_engine(EngineHandle::from_test_client(RpcClient::new(out, inbound)));
+            state.select_chat(Some("cached".into()), cx);
+            assert_eq!(state.transcript[0].id, "cached-entry");
+        });
+        cx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+        let request_id = loop {
+            let request: serde_json::Value =
+                serde_json::from_str(&requests.try_recv().expect("watch request")).unwrap();
+            if request["method"] == methods::WATCH_DOC_MESSAGES {
+                break request["id"].clone();
+            }
+        };
+        // A malformed provisional body proves the cached watch does not
+        // decode the unused tail or restart before the authoritative reset.
+        replies
+            .try_send(
+                serde_json::json!({"id": request_id, "item": {"historyPending": true, "reset": "invalid"}}).to_string(),
+            )
+            .unwrap();
+        let entries = vec![user_entry("updated-entry")];
+        let update = mast_doc::TranscriptUpdate {
+            frame: TranscriptFrame::reset(&entries),
+            context_usage: None,
+            replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
+        };
+        replies
+            .try_send(serde_json::json!({"id": request_id, "item": update}).to_string())
+            .unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+            if state.read_with(cx, |state, _| {
+                state.transcript.first().is_some_and(|entry| entry.id == "updated-entry")
+            }) {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "authoritative reset did not arrive"
+            );
+            std::thread::yield_now();
+        }
+        state.update(cx, |state, cx| {
+            state.select_chat(None, cx);
+            state.select_chat(Some("cached".into()), cx);
+            assert_eq!(
+                state.transcript[0].id, "updated-entry",
+                "cache must retain the fresh reset"
+            );
+            state.select_chat(None, cx);
         });
     }
 
