@@ -283,6 +283,8 @@ struct UsageSnapshot {
 
 struct Inner {
     config: AgentAccountsConfig,
+    sign_in_cache: Mutex<HashMap<HarnessId, (LocalSignInStatus, Instant)>>,
+    sign_in_generation: std::sync::atomic::AtomicU64,
     http: reqwest::Client,
     flows: Mutex<HashMap<String, LoginFlow>>,
     /// `"{harness}:{accountKey}"` → cached usage windows.
@@ -308,6 +310,32 @@ pub struct AgentAccounts {
     inner: Arc<Inner>,
 }
 
+/// Presence of local sign-in material, without validating it over the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalSignInStatus {
+    SignedIn,
+    SignedOut,
+    Unknown,
+}
+
+pub fn inspect_sign_in_file(path: &Path, pointer: &str, alternative: Option<&str>) -> LocalSignInStatus {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return LocalSignInStatus::SignedOut,
+        Err(_) => return LocalSignInStatus::Unknown,
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return LocalSignInStatus::Unknown;
+    };
+    let present = |path| value.pointer(path).and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty());
+    if present(pointer) || alternative.is_some_and(present) {
+        LocalSignInStatus::SignedIn
+    } else {
+        LocalSignInStatus::SignedOut
+    }
+}
+
 impl AgentAccounts {
     pub fn new(config: AgentAccountsConfig) -> Self {
         // Startup sweep: a previous process that crashed mid-login leaves
@@ -329,6 +357,8 @@ impl AgentAccounts {
         Self {
             inner: Arc::new(Inner {
                 config,
+                sign_in_cache: Mutex::new(HashMap::new()),
+                sign_in_generation: std::sync::atomic::AtomicU64::new(0),
                 http,
                 flows: Mutex::new(HashMap::new()),
                 usage_cache: Mutex::new(HashMap::new()),
@@ -338,6 +368,46 @@ impl AgentAccounts {
                 last_active: Mutex::new(None),
             }),
         }
+    }
+
+    /// Inspect the configured local home. Errors and unsupported harnesses are unknown.
+    pub async fn local_sign_in_status(&self, harness: HarnessId) -> LocalSignInStatus {
+        let generation = self.inner.sign_in_generation.load(std::sync::atomic::Ordering::Acquire);
+        if let Some((status, checked)) = lock(&self.inner.sign_in_cache).get(&harness).copied()
+            && checked.elapsed() < Duration::from_secs(30)
+        {
+            return status;
+        }
+        let status = match harness {
+            HarnessId::Codex => inspect_sign_in_file(&self.inner.config.codex_auth_file(), "/tokens/id_token", Some("/OPENAI_API_KEY")),
+            HarnessId::ClaudeCode => {
+                let identity = inspect_sign_in_file(&self.inner.config.claude_config_file, "/oauthAccount/emailAddress", None);
+                if identity != LocalSignInStatus::SignedIn {
+                    identity
+                } else {
+                    let credentials = inspect_sign_in_file(&self.inner.config.claude_creds_file(), "/claudeAiOauth/accessToken", None);
+                    #[cfg(target_os = "macos")]
+                    if credentials == LocalSignInStatus::SignedOut {
+                        keychain::credential_presence().await
+                    } else { credentials }
+                    #[cfg(not(target_os = "macos"))]
+                    credentials
+                }
+            }
+            _ => LocalSignInStatus::Unknown,
+        };
+        let mut cache = lock(&self.inner.sign_in_cache);
+        if self.inner.sign_in_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+            return LocalSignInStatus::Unknown;
+        }
+        cache.insert(harness, (status, Instant::now()));
+        status
+    }
+
+    pub fn invalidate_local_sign_in_status(&self) {
+        let mut cache = lock(&self.inner.sign_in_cache);
+        self.inner.sign_in_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        cache.clear();
     }
 
     /// Point the Claude and Codex usage probes at other endpoints (fakes).
@@ -482,6 +552,7 @@ impl AgentAccounts {
                 )));
             }
         }
+        self.invalidate_local_sign_in_status();
         self.list(false).await
     }
 
@@ -1080,12 +1151,16 @@ impl AgentAccounts {
             promoted_to: None,
         })?;
         lock(&self.inner.flows).remove(login_id);
+        self.invalidate_local_sign_in_status();
         self.list(false).await
     }
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
         self.sweep_flows();
         if let Some(poll) = self.poll_task_login(login_id) {
+            if poll.status == AgentLoginStatus::Done {
+                self.invalidate_local_sign_in_status();
+            }
             return Ok(poll);
         }
         let (harness, home, exit, output) = match lock(&self.inner.flows).get(login_id) {
@@ -1130,6 +1205,7 @@ impl AgentAccounts {
                 self.write_cursor_auth(credentials)?;
             }
             self.cancel_login(login_id);
+            self.invalidate_local_sign_in_status();
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Done,
                 message: None,
@@ -1765,6 +1841,20 @@ mod keychain {
 
     const EXEC_TIMEOUT: Duration = Duration::from_secs(15);
 
+    pub(super) async fn credential_presence() -> LocalSignInStatus {
+        let mut command = tokio::process::Command::new("security");
+        command.args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        match tokio::time::timeout(Duration::from_secs(2), command.status()).await {
+            Ok(Ok(status)) if status.success() => LocalSignInStatus::SignedIn,
+            Ok(Ok(status)) if status.code() == Some(44) => LocalSignInStatus::SignedOut,
+            _ => LocalSignInStatus::Unknown,
+        }
+    }
+
     async fn exec(args: &[&str]) -> (bool, String, String) {
         let run = tokio::process::Command::new("security")
             .args(args)
@@ -2358,6 +2448,34 @@ pub(crate) fn write_file_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_sign_in_status_cache_is_invalidated() {
+        let home = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: home.path().join("data"),
+            claude_config_dir: home.path().join("claude"),
+            claude_config_file: home.path().join("claude.json"),
+            codex_home: home.path().join("codex"),
+            cursor_sdk_auth_file: home.path().join("cursor.json"),
+        };
+        std::fs::create_dir_all(&config.codex_home).unwrap();
+        let accounts = AgentAccounts::new(config.clone());
+        assert_eq!(accounts.local_sign_in_status(HarnessId::Codex).await, LocalSignInStatus::SignedOut);
+        std::fs::write(config.codex_auth_file(), r#"{"tokens":{"id_token":"fixture"}}"#).unwrap();
+        assert_eq!(accounts.local_sign_in_status(HarnessId::Codex).await, LocalSignInStatus::SignedOut);
+        accounts.invalidate_local_sign_in_status();
+        assert_eq!(accounts.local_sign_in_status(HarnessId::Codex).await, LocalSignInStatus::SignedIn);
+        std::fs::write(config.codex_auth_file(), "{").unwrap();
+        accounts.invalidate_local_sign_in_status();
+        assert_eq!(accounts.local_sign_in_status(HarnessId::Codex).await, LocalSignInStatus::Unknown);
+        assert_eq!(accounts.local_sign_in_status(HarnessId::ClaudeCode).await, LocalSignInStatus::SignedOut);
+        std::fs::create_dir_all(&config.claude_config_dir).unwrap();
+        std::fs::write(&config.claude_config_file, r#"{"oauthAccount":{"emailAddress":"fixture@example.test"}}"#).unwrap();
+        std::fs::write(config.claude_creds_file(), r#"{"claudeAiOauth":{"accessToken":"fixture"}}"#).unwrap();
+        accounts.invalidate_local_sign_in_status();
+        assert_eq!(accounts.local_sign_in_status(HarnessId::ClaudeCode).await, LocalSignInStatus::SignedIn);
+    }
 
     #[test]
     fn plan_labels() {

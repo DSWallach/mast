@@ -531,6 +531,13 @@ struct StartAgentLoginParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct LocalAgentSignInStatusParams {
+    harness: HarnessId,
+    account_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CreateManagedAccountParams {
     harness: HarnessId,
     label: String,
@@ -2182,6 +2189,7 @@ fn forwardable(method: &str) -> bool {
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
+            | methods::LOCAL_AGENT_SIGN_IN_STATUS
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
             | methods::START_AGENT_LOGIN
@@ -5195,6 +5203,21 @@ impl RpcService for EngineRpc {
                     .close(&p.terminal_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::LOCAL_AGENT_SIGN_IN_STATUS => {
+                let p: LocalAgentSignInStatusParams = parse_params(params)?;
+                let status = if let Some(id) = p.account_id {
+                    use crate::agent_accounts::LocalSignInStatus;
+                    self.managed_accounts.as_ref()
+                        .and_then(|accounts| accounts.snapshot().accounts.into_iter()
+                            .find(|account| account.id == id && account.harness == p.harness))
+                        .map_or(LocalSignInStatus::Unknown, |account| {
+                            if account.signed_in { LocalSignInStatus::SignedIn } else { LocalSignInStatus::SignedOut }
+                        })
+                } else {
+                    self.agent_accounts.local_sign_in_status(p.harness).await
+                };
+                RpcReply::value(&status)
             }
             methods::LIST_AGENT_ACCOUNTS => {
                 let p: ListAgentAccountsParams = parse_params(params)?;

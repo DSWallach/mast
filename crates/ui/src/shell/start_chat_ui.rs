@@ -75,6 +75,8 @@ pub(super) struct StartChatDialog {
     /// managed account). Pinned when the chat is created.
     pub(super) account_choice: Option<Option<String>>,
     pub(super) account_open: bool,
+    sign_in_status: std::collections::HashMap<mast_proto::HarnessId, (bool, std::time::Instant)>,
+    sign_in_request_id: uuid::Uuid,
     resolved: Option<ResolvedExecutionConfiguration>,
     pub(super) target: WorktreeTarget,
     /// Worktree choices of the target repository: `None` while describing.
@@ -296,6 +298,8 @@ impl Shell {
             focus_prompt_pending: false,
             account_choice: None,
             account_open: false,
+            sign_in_status: Default::default(),
+            sign_in_request_id: uuid::Uuid::new_v4(),
             resolved,
             target,
             worktrees: None,
@@ -318,6 +322,7 @@ impl Shell {
             .skills
             .update(cx, |skills, cx| skills.set_source(source, cx));
         self.begin_work_outline_modal(WorkOutlineModal::StartChat(dialog), cx);
+        self.load_start_chat_sign_in_status(cx);
         // The chip reads the owning device's managed accounts.
         let account_device = Some(device_id_for_accounts).filter(|id| !id.is_empty());
         self.state.update(cx, |state, cx| {
@@ -432,6 +437,8 @@ impl Shell {
             focus_prompt_pending: false,
             account_choice: None,
             account_open: false,
+            sign_in_status: Default::default(),
+            sign_in_request_id: uuid::Uuid::new_v4(),
             resolved: None,
             target: WorktreeTarget::None,
             worktrees: None,
@@ -450,6 +457,7 @@ impl Shell {
             _picker_observe: picker_observe,
         };
         self.begin_work_outline_modal(WorkOutlineModal::StartChat(dialog), cx);
+        self.load_start_chat_sign_in_status(cx);
         Ok(())
     }
 
@@ -614,6 +622,52 @@ impl Shell {
                 .harness
                 .unwrap_or(dialog.fallback_harness),
         )
+    }
+
+    fn load_start_chat_sign_in_status(&mut self, cx: &mut Context<Self>) {
+        let Some((device, item, request_id)) = self.start_chat_dialog().map(|d| { d.sign_in_request_id = uuid::Uuid::new_v4(); (d.device_id.clone(), d.item_id.clone(), d.sign_in_request_id) }) else { return; };
+        let rpc = self.state.read(cx).accounts_rpc((!device.is_empty()).then_some(device.as_str()));
+        cx.spawn(async move |this, cx| {
+            for harness in [mast_proto::HarnessId::ClaudeCode, mast_proto::HarnessId::Codex] {
+                let result = rpc.call(methods::LOCAL_AGENT_SIGN_IN_STATUS, serde_json::json!({"harness": harness})).await;
+                this.update(cx, |this, cx| {
+                    if let Some(dialog) = this.start_chat_dialog().filter(|d| d.item_id == item && d.device_id == device && d.sign_in_request_id == request_id) {
+                        dialog.sign_in_status.insert(harness, (result.ok().and_then(|v| v.as_str().map(str::to_owned)).as_deref() == Some("signed_out"), std::time::Instant::now()));
+                        cx.notify();
+                    }
+                }).ok();
+            }
+        }).detach();
+    }
+
+    fn start_chat_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some((harness, device, account, snapshot)) = self.start_chat_sign_in_selection(cx) else { return; };
+        if let Some(dialog) = self.start_chat_dialog() { dialog.sign_in_request_id = uuid::Uuid::new_v4(); dialog.sign_in_status.clear(); }
+        self.open_settings(SettingsSection::Agents, cx);
+        if self.accounts_page.is_none() {
+            let state = self.state.clone();
+            self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
+        }
+        let label = account.as_ref().and_then(|id| snapshot.accounts.iter().find(|a| &a.id == id)).map(|a| a.label.clone());
+        self.accounts_page.as_ref().unwrap().update(cx, |page, cx| page.sign_in_for_chat(device, harness, account, label, snapshot, cx));
+    }
+
+    fn start_chat_sign_in_selection(&self, cx: &App) -> Option<(mast_proto::HarnessId, String, Option<String>, mast_proto::ManagedAccountsSnapshot)> {
+        let Some(WorkOutlineModal::StartChat(dialog)) = self.work_outline_modal.as_ref() else { return None; };
+        let harness = dialog.pickers.read(cx).resolved(cx).harness.unwrap_or(dialog.fallback_harness);
+        if !crate::managed_accounts::supports_accounts(harness) { return None; }
+        let loaded = self.state.read(cx).managed_accounts_for((!dialog.device_id.is_empty()).then_some(dialog.device_id.as_str())).cloned();
+        if loaded.is_none() && !dialog.space_id.is_empty() { return None; }
+        let snapshot = loaded.unwrap_or_default();
+        let account = match &dialog.account_choice {
+            Some(choice) => choice.clone(),
+            None => crate::managed_accounts::project_account(&snapshot, &dialog.space_id, harness).map(|a| a.id.clone()),
+        };
+        let signed_out = match &account {
+            Some(id) => snapshot.accounts.iter().find(|a| &a.id == id && a.harness == harness).is_some_and(|a| !a.signed_in),
+            None => dialog.sign_in_status.get(&harness).is_some_and(|(signed_out, at)| *signed_out && at.elapsed() < std::time::Duration::from_secs(30)),
+        };
+        signed_out.then(|| (harness, dialog.device_id.clone(), account, snapshot))
     }
 
     pub(super) fn toggle_start_chat_account(&mut self, cx: &mut Context<Self>) {
@@ -1065,6 +1119,15 @@ pub(super) fn start_chat_card(
         .items_center()
         .child(dialog.pickers.clone());
     let account_chip = start_chat_account_chip(dialog, shell, theme, cx);
+    let sign_in_harness = shell.start_chat_sign_in_selection(cx).map(|selection| selection.0);
+    let sign_in_notice = sign_in_harness.map(|harness| {
+        let name = if harness == mast_proto::HarnessId::ClaudeCode { "Claude Code" } else { "Codex" };
+        div().debug_selector(|| "start-chat-sign-in-notice".into()).mt(px(6.0)).flex().items_center().gap(px(8.0))
+            .child(note("start-chat-sign-in-message", format!("{name} isn't signed in"), theme.warning))
+            .child(popover::btn_ghost(theme, "Sign in…", "start-chat-sign-in")
+                .id("start-chat-sign-in").debug_selector(|| "start-chat-sign-in".into())
+                .on_click(cx.listener(|this, _, _, cx| this.start_chat_sign_in(cx))))
+    });
 
     // Where it runs + validation.
     let mut execution = div().flex().flex_col().gap(px(2.0));
@@ -1401,6 +1464,8 @@ pub(super) fn start_chat_card(
         "Starting\u{2026}"
     } else if dialog.failure.is_some() || dialog.rejected.is_some() {
         "Retry"
+    } else if sign_in_harness.is_some() {
+        "Start anyway"
     } else {
         "Start Chat"
     };
@@ -1446,6 +1511,7 @@ pub(super) fn start_chat_card(
                 .child(section_label("Agent", theme))
                 .child(agents)
                 .when_some(account_chip, |el, chip| el.child(chip))
+                .when_some(sign_in_notice, |el, notice| el.child(notice))
                 .child(section_label("Runs in", theme))
                 .child(execution)
                 .when_some(worktree_unavailable, |el, unavailable| {
@@ -2628,6 +2694,99 @@ mod tests {
         cx.simulate_input(text);
         cx.simulate_keystrokes("enter");
         draw(cx);
+    }
+
+    #[gpui::test]
+    fn signed_out_account_notice_does_not_prevent_start(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let calls = seed(&shell, cx, execution_fixture::snapshot("s1"), true, validated_ok(), launched("chat-new"));
+        seed_composer_picker(&shell, cx);
+        seed_accounts(&shell, cx, false);
+        shell.update(cx, |shell, cx| shell.open_start_chat("s1", HOUSEKEEPING, cx)).unwrap();
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat-sign-in-notice").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.start_chat_dialog().unwrap().sign_in_status.insert(mast_proto::HarnessId::ClaudeCode, (false, std::time::Instant::now()));
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat-sign-in-notice").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.start_chat_dialog().unwrap().sign_in_status.insert(mast_proto::HarnessId::ClaudeCode, (true, std::time::Instant::now()));
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat-sign-in-notice").is_some());
+        assert!(cx.debug_bounds("start-chat-sign-in").is_some());
+        start_with_prompt(&shell, cx, "Proceed");
+        assert!(calls.lock().unwrap().iter().any(|(method, _)| method == mast_rpc::methods::CREATE_CHAT_FOR_WORK_ITEM));
+    }
+
+    #[gpui::test]
+    fn managed_signed_out_account_shows_notice(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, execution_fixture::snapshot("s1"), true, validated_ok(), launched("chat-new"));
+        seed_composer_picker(&shell, cx);
+        seed_accounts(&shell, cx, true);
+        shell.update(cx, |shell, cx| {
+            let mut snapshot = shell.state.read(cx).managed_accounts_for(Some("d")).unwrap().clone();
+            snapshot.accounts[0].signed_in = false;
+            shell.state.update(cx, |state, _| { state.set_managed_accounts(Some("d"), snapshot); });
+            shell.open_start_chat("s1", HOUSEKEEPING, cx).unwrap();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat-sign-in-notice").is_some());
+    }
+
+    #[gpui::test]
+    fn signed_out_notice_opens_sign_in_settings(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, execution_fixture::snapshot("s1"), true, validated_ok(), launched("chat-new"));
+        seed_composer_picker(&shell, cx);
+        seed_accounts(&shell, cx, false);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.accounts_rpc_override = Some(Arc::new(|method, _| {
+                    if method == methods::LOCAL_AGENT_SIGN_IN_STATUS { Ok(serde_json::json!("signed_out")) }
+                    else { Err("fixture".into()) }
+                }));
+            });
+            shell.open_start_chat("s1", HOUSEKEEPING, cx).unwrap();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat-sign-in").is_some());
+        set_prompt(&shell, cx, "Keep this draft");
+        click(cx, "start-chat-sign-in");
+        shell.read_with(cx, |shell, cx| {
+            assert!(matches!(shell.route, Route::Settings(SettingsSection::Agents)));
+            let Some(WorkOutlineModal::StartChat(dialog)) = &shell.work_outline_modal else { panic!("draft dialog"); };
+            assert_eq!(dialog.input.read(cx).text(), "Keep this draft");
+        });
+    }
+
+    #[gpui::test]
+    fn new_chat_composer_shows_sign_in_action(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, execution_fixture::snapshot("s1"), true, validated_ok(), launched("chat-new"));
+        seed_composer_picker(&shell, cx);
+        seed_accounts(&shell, cx, false);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.accounts_rpc_override = Some(Arc::new(|method, _| {
+                    if method == methods::LOCAL_AGENT_SIGN_IN_STATUS { Ok(serde_json::json!("signed_out")) }
+                    else { Err("fixture".into()) }
+                }));
+            });
+            shell.open_new_session_from_overview(cx);
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("composer-sign-in-notice").is_some());
+        click(cx, "composer-sign-in");
+        shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Settings(SettingsSection::Agents))));
     }
 
     /// The account chip names the project's default; picking another account

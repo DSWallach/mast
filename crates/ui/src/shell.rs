@@ -2037,6 +2037,15 @@ impl Shell {
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::SignIn { device, harness, account, snapshot } => {
+                    let label = account.as_ref().and_then(|id| snapshot.accounts.iter().find(|a| &a.id == id)).map(|a| a.label.clone());
+                    this.open_settings(SettingsSection::Agents, cx);
+                    if this.accounts_page.is_none() {
+                        let state = this.state.clone();
+                        this.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
+                    }
+                    this.accounts_page.as_ref().unwrap().update(cx, |page, cx| page.sign_in_for_chat(device.clone(), *harness, account.clone(), label, snapshot.clone(), cx));
+                }
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
@@ -5661,7 +5670,7 @@ impl Shell {
             || self.section_menu.is_some()
             || self.running.open
             || self.add_space.is_some()
-            || self.work_outline_modal.is_some()
+            || self.work_outline_modal_open()
             || self.work_outline_menu.is_open()
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
@@ -9150,7 +9159,7 @@ impl Shell {
         }
         if self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
-            || self.work_outline_modal.is_some()
+            || self.work_outline_modal_open()
             || self.delete_space_confirm.is_some()
             || self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()
