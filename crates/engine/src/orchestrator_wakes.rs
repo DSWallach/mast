@@ -135,6 +135,9 @@ impl WakePersistence {
                 self.legacy_retired.remove(&(chat, message));
             }
         }
+        for entries in self.store.orchestrators.values_mut() {
+            entries.retain(|entry| !entry.discarded || entry.message_id.is_some() || !entry.retired_messages.is_empty());
+        }
         let saved: Vec<_> = self.generations.iter()
             .filter(|(_, (snapshot, generation))| snapshot.has_saved(*generation))
             .map(|(key, _)| key.clone()).collect();
@@ -189,7 +192,7 @@ impl EventTurns {
             let mut effective = held.clone();
             for chat in &persistence.unavailable {
                 if let Some(entries) = persistence.store.orchestrators.get(chat) {
-                    effective.entry(chat.clone()).or_default().extend(entries.iter().filter(|entry| entry.message_id.is_none()).map(|entry| entry.event.clone()));
+                    effective.entry(chat.clone()).or_default().extend(entries.iter().filter(|entry| !entry.discarded && entry.message_id.is_none()).map(|entry| entry.event.clone()));
                 }
             }
             persistence.store.synchronize_held(&effective);
@@ -224,7 +227,7 @@ impl EventTurns {
         self.schedule_prune(chat_id, message_id);
     }
 
-    fn schedule_prune(self: &Arc<Self>, chat_id: &str, message_id: &str) {
+    pub(crate) fn schedule_prune(self: &Arc<Self>, chat_id: &str, message_id: &str) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
         let turns = Arc::downgrade(self);
         let chat = chat_id.to_owned();
@@ -246,7 +249,7 @@ impl EventTurns {
         let Some(persistence) = guard.as_mut() else { return true };
         let before = persistence.clone();
         persistence.prune();
-        let pending = persistence.store.orchestrators.get(chat_id).is_some_and(|entries| entries.iter().any(|entry| entry.message_id.as_deref() == Some(message_id)));
+        let pending = persistence.store.orchestrators.get(chat_id).is_some_and(|entries| entries.iter().any(|entry| entry.message_id.as_deref() == Some(message_id) || entry.retired_messages.iter().any(|retired| retired.chat_id == chat_id && retired.message_id == message_id)));
         if persistence.store == before.store { return !pending; }
         if let Err(error) = persistence.write() {
             tracing::warn!(%error, chat = %chat_id, "could not prune wake delivery receipt");
@@ -265,6 +268,51 @@ impl EventTurns {
                 started: false,
             },
         );
+    }
+
+    pub(crate) fn is_discarded_message(&self, chat_id: &str, message_id: &str) -> bool {
+        lock(&self.persistence).as_ref().is_some_and(|persistence| {
+            persistence.store.orchestrators.get(chat_id).is_some_and(|entries| {
+                entries.iter().any(|entry| entry.discarded && entry.message_id.as_deref() == Some(message_id))
+            })
+        })
+    }
+
+    pub(crate) fn discard_queued_message(&self, chat_id: &str, message_id: &str, snapshot: Option<&Arc<crate::chat_persistence::ChatPersistence>>) -> Result<(), String> {
+        let mut guard = lock(&self.persistence);
+        if let Some(persistence) = guard.as_mut() {
+            let before = persistence.clone();
+            if let Some(entries) = persistence.store.orchestrators.get_mut(chat_id) {
+                for entry in entries.iter_mut().filter(|entry| entry.message_id.as_deref() == Some(message_id)) {
+                    entry.discarded = true;
+                }
+            }
+            // Persist the discard before retiring the queue identity.
+            if let Err(error) = persistence.write() {
+                *persistence = before;
+                return Err(error);
+            }
+            if let Some(entries) = persistence.store.orchestrators.get_mut(chat_id) {
+                for entry in entries.iter_mut().filter(|entry| entry.message_id.as_deref() == Some(message_id)) {
+                    entry.retire(chat_id, message_id);
+                    entry.message_id = None;
+                }
+            }
+            if let Some(snapshot) = snapshot {
+                persistence.retired_generations.insert((chat_id.to_owned(), message_id.to_owned()), (snapshot.clone(), snapshot.generation()));
+            } else {
+                persistence.legacy_retired.insert((chat_id.to_owned(), message_id.to_owned()), std::time::Instant::now());
+            }
+            if let Err(error) = persistence.write() {
+                // The first write remains a valid discard receipt for retry.
+                *persistence = before;
+                if let Some(entries) = persistence.store.orchestrators.get_mut(chat_id) {
+                    for entry in entries.iter_mut().filter(|entry| entry.message_id.as_deref() == Some(message_id)) { entry.discarded = true; }
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     pub fn is_event_message(&self, message_id: &str) -> bool {
@@ -334,6 +382,8 @@ struct ChatInfo {
     ticket: Option<String>,
     pr_url: Option<String>,
     parent: Option<String>,
+    archived: bool,
+    last_active: i64,
 }
 
 struct TurnStart {
@@ -423,6 +473,19 @@ impl OrchestratorWakes {
             let mut legacy_receipts = HashMap::new();
             let mut unavailable = HashSet::new();
             for chat in saved.orchestrators.keys().cloned().collect::<Vec<_>>() {
+                let ineligible = workspace.chat(&chat).ok().flatten().is_some_and(|recipient| recipient.archived)
+                    || !state.core.settings(&chat).enabled;
+                if ineligible {
+                    if let Some(entries) = saved.orchestrators.get_mut(&chat) {
+                        for entry in entries { entry.discarded = true; }
+                    }
+                    if let Err(error) = saved.write(&path) {
+                        tracing::warn!(%error, %chat, "could not persist wake discard before recovery");
+                        unavailable.insert(chat);
+                        continue;
+                    }
+                    tracing::info!(%chat, "discarded wakes for archived or disabled coordinator during recovery");
+                }
                 let handle = match doc_host.open(&chat) {
                     Ok(handle) => handle,
                     Err(error) => { tracing::warn!(%error, %chat, "could not open wake recipient during recovery"); unavailable.insert(chat); continue; }
@@ -457,7 +520,7 @@ impl OrchestratorWakes {
                             }
                     }
                     let ids: HashSet<_> = events.iter().flat_map(|entry| entry.message_id.iter().chain(entry.retired_messages.iter().filter(|retired| retired.chat_id == chat).map(|retired| &retired.message_id))).filter(|id| queue.contains(*id)).cloned().collect();
-                    for id in events.iter().filter_map(|entry| entry.message_id.as_ref()).filter(|id| !queue.contains(*id) && !transcript.contains(*id)) {
+                    for id in events.iter().filter_map(|entry| entry.message_id.as_ref().filter(|id| entry.discarded || !transcript.contains(*id))).filter(|id| !queue.contains(*id)) {
                         if let Some(snapshot) = &handle.persistence {
                             retired_generations.insert((chat.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
                         } else {
@@ -492,6 +555,15 @@ impl OrchestratorWakes {
                 if let Some(events) = saved.orchestrators.get_mut(&chat) {
                     events.retain_mut(|entry| {
                         if entry.retired_messages.iter().any(|retired| cross_blocked.contains(&(retired.chat_id.clone(), retired.message_id.clone()))) { blocked = true; return true; }
+                        if entry.discarded {
+                            if let Some(id) = entry.message_id.clone() {
+                                if queue.contains(&id) && !removed.contains(&id) { blocked = true; return true; }
+                                entry.retire(&chat, &id);
+                                entry.message_id = None;
+                            }
+                            if entry.retired_messages.iter().any(|retired| retired.chat_id == chat && queue.contains(&retired.message_id) && !removed.contains(&retired.message_id)) { blocked = true; }
+                            return !entry.retired_messages.is_empty();
+                        }
                         if let Some(id) = entry.message_id.clone() {
                             if transcript.contains(&id) {
                                 let snapshot_pending = handle.persistence.as_ref().is_none_or(|snapshot| !snapshot.has_saved(snapshot.generation()));
@@ -538,7 +610,7 @@ impl OrchestratorWakes {
                 tracing::warn!(%error, "could not save restored wakes");
             }
             *lock(&event_turns.persistence) = Some(WakePersistence { path, store: saved, generations, retired_generations, legacy_receipts, legacy_retired, unavailable });
-            let pending: Vec<_> = lock(&event_turns.persistence).as_ref().map(|p| p.generations.keys().chain(p.legacy_receipts.keys()).cloned().collect()).unwrap_or_default();
+            let pending: Vec<_> = lock(&event_turns.persistence).as_ref().map(|p| p.generations.keys().chain(p.legacy_receipts.keys()).chain(p.retired_generations.keys()).chain(p.legacy_retired.keys()).cloned().collect()).unwrap_or_default();
             for (chat, message) in pending { event_turns.schedule_prune(&chat, &message); }
         }
         Self {
@@ -595,6 +667,23 @@ impl OrchestratorWakes {
     }
 
     pub(crate) fn spawn_watchers(&self) {
+        // The chat watch coalesces rapid changes. Discard while the chat is
+        // still archived, before a local unarchive can hide that transition.
+        let weak = Arc::downgrade(&self.inner);
+        self.inner.workspace.set_before_chat_unarchive(Arc::new(move |chat_id| {
+            if let Some(inner) = weak.upgrade() {
+                let wakes = OrchestratorWakes { inner };
+                wakes.evaluate_blocking(chat_id, false);
+                let state = lock(&wakes.inner.state);
+                let pending_discard = lock(&wakes.inner.event_turns.persistence).as_ref()
+                    .and_then(|persistence| persistence.store.orchestrators.get(chat_id))
+                    .is_some_and(|entries| entries.iter().any(|entry| !entry.discarded));
+                if state.core.has_held(chat_id) || pending_discard {
+                    return Err("could not discard archived wake events before unarchiving".into());
+                }
+            }
+            Ok(())
+        }));
         let mut signals = self.inner.sessions.watch_worker_signals();
         let this = self.clone();
         tokio::spawn(async move {
@@ -1092,7 +1181,7 @@ impl OrchestratorWakes {
                 worker_id: worker,
                 item_id: &item.id,
                 last_message_id: last_message_id.as_deref(),
-                enabled: settings.auto_continue,
+                enabled: settings.enabled && settings.auto_continue,
                 item_open: item.status != mast_proto::WorkItemStatus::Completed
                     && item.archived_at.is_none(),
                 action_open,
@@ -1158,6 +1247,7 @@ impl OrchestratorWakes {
     pub async fn ingest_chats(&self, chats: &[Chat]) {
         let now = self.now();
         let mut recorded: HashSet<String> = HashSet::new();
+        let mut archived = Vec::new();
         {
             let mut state = lock(&self.inner.state);
             let seeded = state.chats_seeded;
@@ -1167,8 +1257,13 @@ impl OrchestratorWakes {
                     ticket: firm_link(chat.linked_ticket_id.as_ref(), chat.linked_ticket_source),
                     pr_url: firm_link(chat.linked_pr_url.as_ref(), chat.linked_pr_source),
                     parent: chat.parent_chat_id.clone(),
+                    archived: chat.archived,
+                    last_active: chat.last_message_at.unwrap_or(chat.created_at).timestamp_millis(),
                 };
                 let prev = state.chats.insert(chat.id.clone(), info.clone());
+                if info.archived && prev.as_ref().is_none_or(|previous| !previous.archived) {
+                    archived.push(chat.id.clone());
+                }
                 if !seeded {
                     continue;
                 }
@@ -1193,6 +1288,9 @@ impl OrchestratorWakes {
             state.chats_seeded = true;
         }
         self.after_ingest(recorded).await;
+        for chat in archived {
+            self.evaluate(&chat, false).await;
+        }
     }
 
     /// Whether any current orchestrator has enabled PR-merged wakes.
@@ -1260,6 +1358,9 @@ impl OrchestratorWakes {
             .ok()
             .flatten()
             .ok_or("the parent chat no longer exists")?;
+        if parent.archived {
+            return Err("the parent chat is archived; hand off or unarchive it before reporting".into());
+        }
         if parent.space_id != worker.space_id {
             return Err("the parent chat is in another Space; reports never cross Spaces".into());
         }
@@ -1271,6 +1372,14 @@ impl OrchestratorWakes {
             );
         }
         let (report, truncated) = mast_proto::cap_worker_report(text);
+        if !state.core.settings(&parent_id).wakes_for(WakeEventKind::WorkerReport) {
+            return Ok(mast_proto::ReportToParentResult {
+                parent_chat_id: parent_id,
+                delivery: "parentReportsOff".into(),
+                held_reason: None,
+                truncated,
+            });
+        }
         let now = self.now();
         {
             let info = state.chats.entry(from.to_owned()).or_default();
@@ -1464,6 +1573,47 @@ impl OrchestratorWakes {
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        let archived = self.inner.workspace.chat(orch).ok().flatten().is_some_and(|chat| chat.archived);
+        if archived || !state.core.settings(orch).enabled {
+            {
+                let mut guard = lock(&self.inner.event_turns.persistence);
+                if let Some(persistence) = guard.as_mut() {
+                    let before = persistence.store.clone();
+                    if let Some(entries) = persistence.store.orchestrators.get_mut(orch) {
+                        for entry in entries { entry.discarded = true; }
+                    }
+                    if let Err(error) = persistence.write() {
+                        persistence.store = before;
+                        tracing::warn!(%error, chat = %orch, "could not persist wake discard");
+                        return;
+                    }
+                }
+            }
+            let pending = self.inner.event_turns.pending_message(orch);
+            self.inner.doc_host.pull_pending_event_message(orch);
+            let _ = self.inner.event_turns.take_cancelled(orch);
+            state.core.discard_held(orch);
+            state.timers.remove(orch);
+            if let Some(persistence) = lock(&self.inner.event_turns.persistence).as_mut() {
+                if let Some(entries) = persistence.store.orchestrators.get_mut(orch) {
+                    for entry in entries.iter_mut() {
+                        if pending.as_ref().is_some_and(|id| entry.message_id.as_ref() == Some(id))
+                            && !self.inner.event_turns.has_started(orch)
+                            && self.inner.event_turns.pending_message(orch).is_none() {
+                            let id = entry.message_id.take().unwrap();
+                            entry.retire(orch, &id);
+                        }
+                    }
+                    entries.retain(|entry| entry.message_id.is_some() || !entry.retired_messages.is_empty());
+                }
+                if let Err(error) = persistence.write() {
+                    tracing::warn!(%error, chat = %orch, "could not save wake discard receipt");
+                }
+            }
+            if let Some(id) = pending { self.inner.event_turns.schedule_prune(orch, &id); }
+            tracing::info!(chat = %orch, "discarded wakes for archived or disabled coordinator");
+            return;
+        }
         if state.hand_off_pending.contains(orch) {
             return;
         }
@@ -1640,43 +1790,37 @@ fn make_event(
 /// Orchestrators told about `worker`: its parent chat, and the chats whose
 /// project worker destination contains the worker's item.
 fn parents_of(state: &State, worker: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    if let Some(parent) = state.chats.get(worker).and_then(|c| c.parent.clone())
-        && parent != worker
-    {
-        out.push(parent);
-    }
-    for map in state.destination_parents.values() {
-        for orch in map.get(worker).into_iter().flatten() {
-            if orch != worker && !out.contains(orch) {
-                out.push(orch.clone());
+    let redirect = |candidate: &str| {
+        let mut current = candidate;
+        for _ in 0..state.handed_off_to.len() {
+            match state.handed_off_to.get(current) {
+                Some(next) => current = next,
+                None => break,
             }
         }
-    }
-    let mut redirected = Vec::new();
-    for mut parent in out {
-        let mut remaining = state.handed_off_to.len();
-        while remaining > 0 {
-            let Some(next) = state.handed_off_to.get(&parent) else { break };
-            parent = next.clone();
-            remaining -= 1;
-        }
-        if parent != worker && !redirected.contains(&parent) {
-            redirected.push(parent);
+        current.to_owned()
+    };
+    let live = |id: &str| state.chats.get(id).is_some_and(|chat| !chat.archived);
+    if let Some(parent) = state.chats.get(worker).and_then(|chat| chat.parent.as_deref()) {
+        let parent = redirect(parent);
+        if parent != worker && live(&parent) {
+            return if state.core.settings(&parent).enabled { vec![parent] } else { Vec::new() };
         }
     }
-    redirected
+    state.destination_parents.values()
+        .filter_map(|map| map.get(worker))
+        .flatten()
+        .map(|candidate| redirect(candidate))
+        .filter(|candidate| candidate != worker && live(candidate) && state.core.settings(candidate).enabled)
+        .max_by_key(|candidate| (state.chats[candidate].last_active, candidate.clone()))
+        .into_iter().collect()
 }
 
 fn is_orchestrator(state: &State, chat_id: &str) -> bool {
-    state
-        .chats
-        .values()
-        .any(|c| c.parent.as_deref() == Some(chat_id))
-        || state
-            .destination_parents
-            .values()
-            .any(|m| m.values().any(|orchs| orchs.iter().any(|o| o == chat_id)))
+    state.chats.get(chat_id).is_some_and(|chat| !chat.archived)
+        && state.core.settings(chat_id).enabled
+        && (state.chats.values().any(|chat| chat.parent.as_deref() == Some(chat_id))
+            || state.destination_parents.values().any(|map| map.values().any(|candidates| candidates.iter().any(|candidate| candidate == chat_id))))
 }
 
 /// Worker chat → orchestrators, for one Space: a chat on item X is the
@@ -1716,9 +1860,38 @@ mod hand_off_tests {
     use super::*;
 
     #[test]
+    fn destination_selects_most_recent_enabled_live_coordinator() {
+        let mut state = State::default();
+        state.chats.insert("worker".into(), ChatInfo::default());
+        state.chats.insert("first".into(), ChatInfo { last_active: 1, ..Default::default() });
+        state.chats.insert("second".into(), ChatInfo { last_active: 2, ..Default::default() });
+        state.destination_parents.entry("space".into()).or_default().insert("worker".into(), vec!["first".into(), "second".into()]);
+        assert_eq!(parents_of(&state, "worker"), vec!["second"]);
+        state.chats.get_mut("second").unwrap().archived = true;
+        assert_eq!(parents_of(&state, "worker"), vec!["first"]);
+        state.core.set_settings("first", WakeSettings { enabled: false, ..WakeSettings::default() });
+        assert!(parents_of(&state, "worker").is_empty());
+    }
+
+    #[test]
+    fn live_parent_precedes_destination_and_disabled_parent_does_not_fall_back() {
+        let mut state = State::default();
+        state.chats.insert("worker".into(), ChatInfo { parent: Some("parent".into()), ..Default::default() });
+        state.chats.insert("parent".into(), ChatInfo::default());
+        state.chats.insert("destination".into(), ChatInfo::default());
+        state.destination_parents.entry("space".into()).or_default().insert("worker".into(), vec!["destination".into()]);
+        assert_eq!(parents_of(&state, "worker"), vec!["parent"]);
+        state.core.set_settings("parent", WakeSettings { enabled: false, ..WakeSettings::default() });
+        assert!(parents_of(&state, "worker").is_empty());
+        state.chats.get_mut("parent").unwrap().archived = true;
+        assert_eq!(parents_of(&state, "worker"), vec!["destination"]);
+    }
+
+    #[test]
     fn hand_off_redirects_project_destination_wakes() {
         let mut state = State::default();
         state.chats.insert("worker".into(), ChatInfo { parent: Some("successor".into()), ..Default::default() });
+        state.chats.insert("successor".into(), ChatInfo::default());
         state.destination_parents.entry("space".into()).or_default().insert("worker".into(), vec!["source".into()]);
         state.handed_off_to.insert("source".into(), "successor".into());
         assert_eq!(parents_of(&state, "worker"), vec!["successor"]);

@@ -21,6 +21,93 @@ use mast_proto::{
 const ORCH: &str = "orch";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "discard this queued report").await.unwrap();
+    let path = rig.store.with_file_name("orchestrator-wake-events.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["orchestrators"][ORCH][0]["message_id"] = "discarded-row".into();
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let handle = rig.core.doc_host.open(ORCH).unwrap();
+    let row = mast_doc::QueuedMessage { id: "discarded-row".into(), text: "Worker updates".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None };
+    handle.doc().push_queued(&row).unwrap();
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert!(restarted.status(ORCH).held.is_empty());
+    // Simulate a crash before the removal reached the chat snapshot.
+    // Restore the persisted discard receipt from that crash boundary. The
+    // live test host may already have snapshotted and pruned the real one.
+    saved["orchestrators"][ORCH][0]["discarded"] = true.into();
+    saved["orchestrators"][ORCH][0]["message_id"] = serde_json::Value::Null;
+    saved["orchestrators"][ORCH][0]["retired_messages"] = serde_json::json!([{"chat_id": ORCH, "message_id": "discarded-row"}]);
+    handle.doc().push_queued(&row).unwrap();
+    rig.core.workspace.set_chat_archived(ORCH, false).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let tick = rig.clock.clone();
+    let restarted_again = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert!(restarted_again.status(ORCH).held.is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_coordinator_drops_durable_events_on_restore() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "discard disabled report").await.unwrap();
+    let path = rig.store.with_file_name("orchestrator-wake-events.json");
+    let saved = std::fs::read(&path).unwrap();
+    let mut settings = rig.wakes.settings(ORCH);
+    settings.enabled = false;
+    rig.wakes.set_settings(ORCH, settings).await;
+    // The event store may still reflect the state before settings were saved.
+    std::fs::write(&path, saved).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(restarted.status(ORCH).held.is_empty());
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_coordinator_does_not_receive_reports() {
+    let rig = Rig::new().await;
+    let mut settings = rig.wakes.settings(ORCH);
+    settings.enabled = false;
+    rig.wakes.set_settings(ORCH, settings).await;
+    let result = rig.wakes.report_to_parent("w1", "disabled report").await.unwrap();
+    assert_eq!(result.delivery, "parentReportsOff");
+    assert!(rig.wakes.status(ORCH).held.is_empty());
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archived_coordinator_drops_durable_report_on_restore() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "discarded report").await.unwrap();
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(restarted.status(ORCH).held.is_empty());
+    rig.core.workspace.set_chat_archived(ORCH, false).unwrap();
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_report_survives_service_restart_and_respects_draft() {
     let rig = Rig::new().await;
     rig.wakes.note_user_activity(ORCH, Some(true)).await;
@@ -192,6 +279,7 @@ async fn hand_off_reparents_workers_and_moves_held_reports() {
     let result = rig.wakes.report_to_parent("worker", "after hand-off").await.unwrap();
     assert_eq!(result.parent_chat_id, "successor");
     assert_eq!(rig.wakes.status("successor").held.len(), 2);
+    assert!(rig.wakes.status("source").held.is_empty());
     rig.core.shutdown().await;
 }
 
@@ -517,6 +605,20 @@ async fn auto_continue_finish(rig: &Rig, chat: &str) {
     let mut done = session(chat, SessionStatus::Idle);
     done.last_completed_turn = Some(format!("completed-{chat}"));
     rig.wakes.ingest_sessions(&[done]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_coordinator_does_not_auto_continue_workers() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "disabled-auto-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings {
+        enabled: false, auto_continue: true, ..WakeSettings::default()
+    }).await;
+    auto_continue_finish(&rig, "disabled-auto-worker").await;
+    let handle = rig.core.doc_host.open("disabled-auto-worker").unwrap();
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert!(rig.wakes.status(ORCH).held.is_empty());
+    rig.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1104,6 +1206,110 @@ async fn auto_continue_loads_legacy_wake_settings() {
     assert!(!settings.auto_continue);
     assert!(!settings.errors);
     assert!(settings.prs);
+    rig.core.shutdown().await;
+}
+
+fn project_snapshot(requests: serde_json::Value) -> WorkOutlineSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "spaceId": "project-space", "available": true, "synced": true,
+        "items": [
+            {"id": "project", "spaceId": "project-space", "isProject": true,
+             "workerDestinationId": "workers", "chatIds": [ORCH, "coordinator"]},
+            {"id": "workers", "spaceId": "project-space", "parentWorkItemId": "project"},
+            {"id": "worker-item", "spaceId": "project-space", "parentWorkItemId": "workers",
+             "chatIds": ["stranger", "w1"]}
+        ],
+        "userActionRequests": requests
+    })).unwrap()
+}
+
+async fn seed_project_routing(rig: &Rig, archive_coordinator: bool) {
+    rig.chat("coordinator", None);
+    if archive_coordinator {
+        rig.core.workspace.set_chat_archived("coordinator", true).unwrap();
+    }
+    let mut chats = rig.core.workspace.read_chats().unwrap();
+    for chat in &mut chats {
+        if chat.id == ORCH { chat.last_message_at = Some(chrono::DateTime::from_timestamp(1, 0).unwrap()); }
+        if chat.id == "coordinator" { chat.last_message_at = Some(chrono::DateTime::from_timestamp(2, 0).unwrap()); }
+    }
+    rig.wakes.ingest_chats(&chats).await;
+    rig.wakes.ingest_snapshot(&project_snapshot(serde_json::json!([]))).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_destination_wakes_only_the_most_recent_coordinator() {
+    let rig = Rig::new().await;
+    seed_project_routing(&rig, false).await;
+    rig.wakes.ingest_snapshot(&project_snapshot(serde_json::json!([request("r-project", "stranger", "ready", "open")]))).await;
+    assert!(rig.wakes.status(ORCH).held.is_empty());
+    assert_eq!(rig.wakes.status("coordinator").held.len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_destination_skips_archived_coordinator() {
+    let rig = Rig::new().await;
+    seed_project_routing(&rig, true).await;
+    rig.wakes.ingest_snapshot(&project_snapshot(serde_json::json!([request("r-archive", "stranger", "ready", "open")]))).await;
+    assert!(rig.wakes.status("coordinator").held.is_empty());
+    assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_parent_receives_wake_instead_of_project_coordinator() {
+    let rig = Rig::new().await;
+    seed_project_routing(&rig, false).await;
+    rig.wakes.ingest_snapshot(&project_snapshot(serde_json::json!([request("r-parent", "w1", "ready", "open")]))).await;
+    assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
+    assert!(rig.wakes.status("coordinator").held.is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn immediate_unarchive_does_not_replay_held_wakes() {
+    let rig = Rig::new().await;
+    let wakes = &rig.core.orchestrator_wakes;
+    wakes.note_user_activity(ORCH, Some(true)).await;
+    wakes.report_to_parent("w1", "discard before unarchive").await.unwrap();
+    assert_eq!(wakes.status(ORCH).held.len(), 1);
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    rig.core.workspace.set_chat_archived(ORCH, false).unwrap();
+    assert!(wakes.status(ORCH).held.is_empty());
+    wakes.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_wake_is_discarded_if_coordinator_is_archived_before_dispatch() {
+    let rig = Rig::new().await;
+    let handle = rig.core.doc_host.open(ORCH).unwrap();
+    handle.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "archive-queued-wake".into(), text: "Worker updates: queued report".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1,
+        edited_at: None, delivery_gate: None,
+    }).unwrap();
+    rig.core.doc_host.event_turns().register(ORCH, "archive-queued-wake".into(), vec![]);
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    rig.core.doc_host.drain_queue(&handle).await;
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archived_parent_does_not_receive_worker_wakes() {
+    let rig = Rig::new().await;
+    rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    rig.wakes.ingest_chats(&rig.core.workspace.read_chats().unwrap()).await;
+    rig.worker_errors("w1").await;
+    assert!(rig.wakes.status(ORCH).held.is_empty());
+    assert!(!rig.wakes.status(ORCH).is_orchestrator);
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
     rig.core.shutdown().await;
 }
 

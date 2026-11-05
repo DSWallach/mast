@@ -150,6 +150,15 @@ impl Shell {
         let team = self.team_facts(&chat_id, cx);
         let focus = self.team_panel_focus(cx);
         let mut col = div().flex().flex_col().gap(px(8.0));
+        if self.state.read(cx).chats.iter().any(|chat| chat.id == chat_id && chat.archived) {
+            col = col.child(
+                div()
+                    .debug_selector(|| "team-coordinator-archived".into())
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(theme.text_faint)
+                    .child("Coordinator archived — hand off or unarchive"),
+            );
+        }
         if team.is_empty() {
             col = col.child(
                 div()

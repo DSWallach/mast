@@ -176,6 +176,9 @@ struct WorkspaceHostInner {
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
     chats_tx: watch::Sender<Vec<Chat>>,
+    /// Runs before a locally archived chat is restored, while it is still archived.
+    before_chat_unarchive: Mutex<Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>>,
+    chat_archive_transition: Mutex<()>,
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
@@ -369,6 +372,8 @@ impl WorkspaceHost {
                 config,
                 reg: Arc::new(Mutex::new(doc)),
                 chats_tx,
+                before_chat_unarchive: Mutex::new(None),
+                chat_archive_transition: Mutex::new(()),
                 devices_tx,
                 sessions_tx,
                 spaces_tx,
@@ -1734,7 +1739,16 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_room_gen(chat_id, room_gen))?)
     }
 
+    pub(crate) fn set_before_chat_unarchive(&self, hook: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>) {
+        *lock(&self.inner.before_chat_unarchive) = Some(hook);
+    }
+
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        if !archived && self.chat(chat_id)?.is_some_and(|chat| chat.archived) {
+            let hook = lock(&self.inner.before_chat_unarchive).clone();
+            if let Some(hook) = hook { hook(chat_id).map_err(EngineError::Other)?; }
+        }
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 

@@ -35,6 +35,7 @@ mod tests {
             },
             message_id: None,
             delivered: false,
+            discarded: false,
             retired_messages: Vec::new(),
         }
     }
@@ -187,6 +188,9 @@ pub(super) struct StoredEvent {
     pub message_id: Option<String>,
     #[serde(default)]
     pub delivered: bool,
+    /// Discarded events retain queue identities until removal is durable.
+    #[serde(default)]
+    pub discarded: bool,
     /// Queue rows removed before their removal was durably snapshotted.
     #[serde(default)]
     pub retired_messages: Vec<RetiredMessage>,
@@ -233,7 +237,7 @@ impl WakeStore {
     pub fn synchronize_held(&mut self, held: &HashMap<String, Vec<WakeEvent>>) {
         for (chat, entries) in &mut self.orchestrators {
             entries.retain(|entry| {
-                entry.message_id.is_some()
+                entry.discarded || entry.message_id.is_some()
                     || held
                         .get(chat)
                         .is_some_and(|events| events.iter().any(|event| event.id == entry.event.id))
@@ -253,6 +257,7 @@ impl WakeStore {
                         event: event.clone(),
                         message_id: None,
                         delivered: false,
+                        discarded: false,
                         retired_messages: Vec::new(),
                     });
                 }
@@ -378,10 +383,14 @@ impl WakeStore {
     pub fn limit(&mut self) {
         for (chat, events) in &mut self.orchestrators {
             if events.len() > EVENT_CAP {
-                events.sort_by_key(|event| event.event.at_ms);
-                let count = events.len() - EVENT_CAP;
+                // Discard receipts protect queue removals across crashes and
+                // cannot be evicted until their snapshots are durable.
+                events.sort_by_key(|event| (event.discarded, event.event.at_ms));
+                let count = (events.len() - EVENT_CAP).min(events.iter().take_while(|event| !event.discarded).count());
                 events.drain(..count);
-                tracing::warn!(%chat, count, "discarded oldest pending wake events at capacity");
+                if count > 0 {
+                    tracing::warn!(%chat, count, "discarded oldest pending wake events at capacity");
+                }
             }
         }
         self.orchestrators.retain(|_, events| !events.is_empty());

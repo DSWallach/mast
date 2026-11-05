@@ -173,6 +173,13 @@ impl WakeCore {
         self.orchs.get(orch).is_some_and(|o| !o.held.is_empty())
     }
 
+    pub fn discard_held(&mut self, orch: &str) {
+        if let Some(state) = self.orchs.get_mut(orch) {
+            state.held.clear();
+            state.window_start_ms = None;
+        }
+    }
+
     /// Transfer undelivered events without reapplying settings or deduplication.
     /// The caller serializes this with delivery and copies settings separately.
     pub fn transfer_held(&mut self, from: &str, to: &str) {
