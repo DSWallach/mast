@@ -191,6 +191,7 @@ struct State {
     auto_continue_default: bool,
     settings_overrides: HashMap<String, WakeSettings>,
     handed_off_to: HashMap<String, String>,
+    hand_off_pending: HashSet<String>,
     chats: HashMap<String, ChatInfo>,
     chats_seeded: bool,
     /// Per Space: worker chat → orchestrators by project worker destination.
@@ -430,6 +431,13 @@ impl OrchestratorWakes {
 
     /// Hand off direct workers and their pending wakes to another orchestrator.
     pub async fn hand_off_orchestrator(&self, from: &str, to: &str, actor: &str) -> Result<Vec<String>, String> {
+        let workers = self.hand_off_orchestrator_without_delivery(from, to, actor)?;
+        self.finish_orchestrator_hand_off(to);
+        self.evaluate(to, false).await;
+        Ok(workers)
+    }
+
+    pub(crate) fn hand_off_orchestrator_without_delivery(&self, from: &str, to: &str, actor: &str) -> Result<Vec<String>, String> {
         let workers = {
             let mut state = lock(&self.inner.state);
             if state.handed_off_to.get(from).is_some_and(|existing| existing != to) {
@@ -445,6 +453,7 @@ impl OrchestratorWakes {
                 remaining -= 1;
             }
             let (workers, replayed) = self.inner.workspace.hand_off_chat_children(from, to, actor, self.now())?;
+            state.hand_off_pending.insert(to.to_owned());
             if !replayed {
                 self.transfer_wakes(&mut state, from, to);
                 for worker in &workers {
@@ -455,8 +464,11 @@ impl OrchestratorWakes {
             }
             workers
         };
-        self.evaluate(to, false).await;
         Ok(workers)
+    }
+
+    pub(crate) fn finish_orchestrator_hand_off(&self, to: &str) {
+        lock(&self.inner.state).hand_off_pending.remove(to);
     }
 
     fn persist(&self, state: &State) {
@@ -1081,6 +1093,9 @@ impl OrchestratorWakes {
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        if state.hand_off_pending.contains(orch) {
+            return;
+        }
         let cancelled = self.inner.event_turns.take_cancelled(orch);
         if !cancelled.is_empty() {
             state.core.restore(orch, cancelled, now);

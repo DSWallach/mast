@@ -839,6 +839,7 @@ pub mod agent_tools {
         pub const BIND_CHAT_WORKTREE: &str = "bind_chat_worktree";
         pub const REPORT_FRICTION: &str = "report_friction";
         pub const LIST_FRICTION: &str = "list_friction";
+        pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.
         pub const ARTIFACTS: [&str; 5] = [
@@ -1212,6 +1213,12 @@ pub mod agent_tools {
             example: r#"{"artifactId": "<artifact id>", "themes": ["light", "dark"]}"#,
         },
         ToolUsage {
+            tool: tools::HAND_OFF_ORCHESTRATOR,
+            required: &[p("summary", "context for the successor"), p("idempotencyKey", "stable key for this hand-off")],
+            optional: &[],
+            example: r#"{"summary": "Current work and next steps", "idempotencyKey": "orchestrator-handoff"}"#,
+        },
+        ToolUsage {
             tool: "create_chat",
             required: &[p("idempotencyKey", "inside a Mast chat; a stable string")],
             optional: &[
@@ -1263,6 +1270,7 @@ pub mod agent_tools {
             || tool == tools::BIND_CHAT_WORKTREE
             || tool == tools::REPORT_FRICTION
             || tool == tools::LIST_FRICTION
+            || tool == tools::HAND_OFF_ORCHESTRATOR
     }
 
     /// `snake_case` -> `camelCase`; other names unchanged.
@@ -1482,7 +1490,7 @@ pub mod agent_tools {
         fn every_engine_tool_has_usage_with_its_required_and_optional_parameters() {
             let mut names: Vec<&str> = tools::WORK_OUTLINE.to_vec();
             names.extend(tools::ARTIFACTS);
-            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, "create_chat"]);
+            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::HAND_OFF_ORCHESTRATOR, "create_chat"]);
             for name in names {
                 let usage = usage_text(name).unwrap_or_else(|| panic!("no usage for {name}"));
                 assert!(usage.contains(&format!("Usage of {name}:")), "{usage}");

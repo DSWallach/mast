@@ -136,6 +136,14 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
+            name: "hand_off_orchestrator",
+            description: "Start a successor on this work item with your harness, model and sandbox, and hand it your active workers and pending wakes. Supply a summary and a stable idempotency key. The first message includes the workers and their open Required Actions. Your chat remains active.",
+            input_schema: json!({"type":"object", "properties": {
+                "summary": {"type":"string", "description":"Context and next steps for the successor."},
+                "idempotencyKey": {"type":"string", "description":"Stable key for this hand-off; reuse on retry."}
+            }, "required":["summary", "idempotencyKey"]}),
+        },
+        ToolDef {
             name: "create_chat",
             description: "Create a chat in a project (or project-less on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
@@ -557,6 +565,7 @@ fn is_engine_agent_tool(name: &str) -> bool {
         || DIFF_TARGET_TOOLS.contains(&name)
         || name == agent_tool_names::REPORT_FRICTION
         || name == agent_tool_names::LIST_FRICTION
+        || name == agent_tool_names::HAND_OFF_ORCHESTRATOR
 }
 
 /// Split a render-check result into MCP content: every screenshot as an

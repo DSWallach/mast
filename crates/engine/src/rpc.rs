@@ -3385,6 +3385,16 @@ impl RpcService for EngineRpc {
                             Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
                             Err(e) => Err(RpcError::Failed(e.to_string())),
                         }
+                    } else if p.tool == mast_proto::agent_tools::tools::HAND_OFF_ORCHESTRATOR {
+                        match tokio::task::spawn_blocking(move || service.prepare_orchestrator_successor(&p)).await {
+                            Ok(Ok((launch, source))) => self.launch
+                                .create_orchestrator_successor(&launch, &self.orchestrator_wakes, &source)
+                                .await
+                                .map_err(|e| RpcError::Failed(e.to_wire_message()))
+                                .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string()))),
+                            Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
+                            Err(e) => Err(RpcError::Failed(e.to_string())),
+                        }
                     } else {
                         match tokio::task::spawn_blocking(move || service.call(&p)).await {
                             Ok(Ok(reply)) => Ok(reply),

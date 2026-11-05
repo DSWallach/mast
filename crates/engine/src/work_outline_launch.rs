@@ -273,6 +273,23 @@ impl WorkItemLaunchService {
         &self,
         p: &CreateChatForWorkItemParams,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+        self.launch_chat_for_work_item(p, None).await
+    }
+
+    pub(crate) async fn create_orchestrator_successor(
+        &self,
+        p: &CreateChatForWorkItemParams,
+        wakes: &crate::orchestrator_wakes::OrchestratorWakes,
+        source: &str,
+    ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+        self.launch_chat_for_work_item(p, Some((wakes, source))).await
+    }
+
+    async fn launch_chat_for_work_item(
+        &self,
+        p: &CreateChatForWorkItemParams,
+        hand_off: Option<(&crate::orchestrator_wakes::OrchestratorWakes, &str)>,
+    ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         if crate::work_outline::writes_disabled() {
             return Err(error(
                 WorkOutlineErrorCode::WritesDisabled,
@@ -393,7 +410,7 @@ impl WorkItemLaunchService {
             .validate_resolved(&resolved, ExecutionHostCapabilities::default())
             .await
             .map_err(|errors| validation_error(&errors))?;
-        let request = self.launch_request(p, &validated);
+        let mut request = self.launch_request(p, &validated);
         self.checkpoint(LaunchStep::Validated)?;
 
         // ── 3. Chat ──
@@ -426,6 +443,28 @@ impl WorkItemLaunchService {
             )?;
         }
         self.checkpoint(LaunchStep::BindingCaptured)?;
+
+        if let Some((wakes, source)) = hand_off {
+            let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source)
+                .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
+            let sessions = self.workspace.read_sessions().map_err(engine_error)?;
+            let current = mast_doc::materialize_work_outline(
+                &space_id, &self.workspace.work_outline_inputs(&space_id));
+            request.prompt.push_str("\n\n[Mast: reparented workers and their open Required Actions]");
+            if workers.is_empty() {
+                request.prompt.push_str("\nNo active workers.");
+            }
+            for worker in workers {
+                let chat = self.workspace.chat(&worker).map_err(engine_error)?;
+                let title = chat.as_ref().and_then(|c| c.title.as_deref()).unwrap_or("Untitled");
+                let status = sessions.iter().find(|s| s.chat_id == worker)
+                    .map(|s| format!("{:?}", s.status)).unwrap_or_else(|| "Unknown".into());
+                request.prompt.push_str(&format!("\n- {worker} | {title} | {status}"));
+                for action in current.user_action_requests.iter().filter(|a| a.chat_id == worker && a.is_unresolved()) {
+                    request.prompt.push_str(&format!("\n  - Required Action {}: {}", action.id, action.text));
+                }
+            }
+        }
 
         // ── 6. revision + launch application (only with instructions) ──
         let (revision_id, application_id, payload) = if deliver_instructions {
@@ -481,6 +520,10 @@ impl WorkItemLaunchService {
 
         // ── 7. first Turn, last ──
         self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
+        if let Some((wakes, _)) = hand_off {
+            wakes.finish_orchestrator_hand_off(&chat_id);
+            wakes.evaluate(&chat_id, false).await;
+        }
         self.checkpoint(LaunchStep::TurnQueued)?;
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
