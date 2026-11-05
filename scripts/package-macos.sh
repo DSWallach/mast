@@ -20,18 +20,33 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
-OUT_DIR="$ROOT/target/package"
+cd "$ROOT"
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+OUT_DIR="$TARGET_DIR/package"
 APP="$OUT_DIR/Mast.app"
 UPDATE_APP_DIRNAME="Zeron.app"
 DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 
-cd "$ROOT"
-cargo build --release -p mast
+BINARY="$(cargo build --release -p mast --message-format=json-render-diagnostics | python3 -c '
+import json, sys
+binary = None
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("reason") == "compiler-artifact" and message.get("target", {}).get("name") == "zeron" and message.get("executable"):
+        binary = message["executable"]
+if binary is None:
+    sys.exit("Cargo did not report a built zeron executable")
+print(binary)
+')"
+if [[ ! -f "$BINARY" ]]; then
+  echo "Cargo reported a missing zeron executable: $BINARY" >&2
+  exit 1
+fi
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
+install -m 755 "$BINARY" "$APP/Contents/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"

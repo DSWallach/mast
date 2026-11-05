@@ -192,6 +192,16 @@ async fn launch(
         .map_err(|e| outline_error(e.to_string()))
 }
 
+#[tokio::test]
+async fn missing_agent_is_rejected_before_creating_a_chat() {
+    let rig = rig_with(InstructionMockHarness::default(), false).await;
+    let mut request = params(&rig, "missing-agent", "Hello");
+    request.config.as_mut().unwrap().harness = HarnessId::Codex;
+    let error = launch(&rig, &request).await.unwrap_err();
+    assert_eq!(error.message, "agent not installed: codex");
+    assert!(rig.core.workspace.chat(&derive_id("missing-agent", roles::CHAT)).unwrap().is_none());
+}
+
 async fn continue_chat(rig: &Rig, chat: &str, op: &str, prompt: &str) -> Result<Value, String> {
     rig.client
         .call(

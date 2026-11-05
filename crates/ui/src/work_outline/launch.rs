@@ -319,6 +319,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_agent_failure_is_shown_without_rewriting() {
+        let failure = launch_failure(&WorkOutlineError::new(
+            WorkOutlineErrorCode::Capability,
+            "agent not installed: codex",
+        ));
+        assert_eq!(failure.message, "agent not installed: codex");
+        assert!(!failure.unknown_outcome);
+    }
+
+    #[test]
     fn last_launch_and_instruction_change() {
         let mut snapshot = execution_fixture::snapshot("s1");
         assert_eq!(last_launch_chat(&snapshot, API), Some(CHAT_API));

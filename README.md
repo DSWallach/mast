@@ -49,13 +49,13 @@ cargo build --profile installed -p mast   # optimised build, about 3 minutes the
 
 The binary is `target/installed/zeron`. The binary and some internal names still say `zeron`; the product is Mast.
 
-To get a normal app you can keep in `/Applications`, build the bundle and disk image:
+To get a normal app you can keep in `/Applications`, build the bundle and disk image. Packaging also needs Python 3, pip and the `dmgbuild` Python package. It builds the release profile separately, so the first packaging run compiles again:
 
 ```bash
 scripts/package-macos.sh
 ```
 
-It writes `target/package/Mast.app` and a `.dmg` next to it. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open. Release file names keep the `zeron-` prefix on purpose.
+The script attempts to install `dmgbuild` with pip if it is missing. It writes `target/package/Mast.app` and a `.dmg` next to it (or `package/` under `CARGO_TARGET_DIR` when set). Copy the app to `/Applications`. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open. Release file names keep the `zeron-` prefix on purpose.
 
 To try it without touching an installed Mast, run the isolated dev app:
 

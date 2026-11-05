@@ -1683,10 +1683,9 @@ impl UiSettings {
         self
     }
 
-    /// Load and persist the one-time profile migration before other startup code
-    /// creates the data directory.
+    /// Load and persist the one-time profile migration before engine startup.
     pub fn load_for_startup(data_dir: &Path) -> Self {
-        let profile = if data_dir.exists() || Self::path(data_dir).exists() {
+        let profile = if Self::path(data_dir).is_file() || has_prior_workspace(data_dir) {
             ProfileAtMigration::Existing
         } else {
             ProfileAtMigration::Fresh
@@ -1915,6 +1914,44 @@ impl UiSettings {
     }
 }
 
+fn has_prior_workspace(data_dir: &Path) -> bool {
+    fn contains_user_rows(path: &Path) -> bool {
+        let Ok(db) =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            return false;
+        };
+        let Ok(bytes) = db.query_row(
+            "SELECT bytes FROM snapshots WHERE doc_id = 'registry1'",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) else {
+            return false;
+        };
+        let Ok(registry) =
+            mast_doc::registry::RegistryDoc::from_bytes(&bytes, "settings-migration")
+        else {
+            return false;
+        };
+        registry.read_spaces().is_ok_and(|rows| !rows.is_empty())
+            || registry.read_chats().is_ok_and(|rows| !rows.is_empty())
+    }
+    let mut stores = vec![
+        data_dir.join("docs.sqlite3"),
+        data_dir.join("profiles/local/docs.sqlite3"),
+    ];
+    if let Ok(orgs) = std::fs::read_dir(data_dir.join("orgs")) {
+        for org in orgs.flatten() {
+            if let Ok(users) = std::fs::read_dir(org.path()) {
+                stores.extend(users.flatten().map(|user| user.path().join("docs.sqlite3")));
+            }
+        }
+    }
+    stores
+        .iter()
+        .any(|path| path.is_file() && contains_user_rows(path))
+}
+
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
@@ -1936,12 +1973,63 @@ pub use mast_proto::SidebarSection;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn migration_distinguishes_engine_files_from_prior_workspace() {
+        for prior_space in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("data");
+            let store = dir.join("profiles/local");
+            std::fs::create_dir_all(dir.join("logs")).unwrap();
+            std::fs::create_dir_all(&store).unwrap();
+            std::fs::write(dir.join("device-id"), "device").unwrap();
+            let mut registry = mast_doc::registry::RegistryDoc::new("device");
+            if prior_space {
+                registry
+                    .upsert_space(&mast_proto::Space {
+                        id: "space".into(),
+                        device_id: "device".into(),
+                        path: "/project".into(),
+                        name: None,
+                        git_detected: false,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        created_at: chrono::Utc::now(),
+                    })
+                    .unwrap();
+            }
+            let db = rusqlite::Connection::open(store.join("docs.sqlite3")).unwrap();
+            db.execute(
+                "CREATE TABLE snapshots (doc_id TEXT PRIMARY KEY, bytes BLOB NOT NULL)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO snapshots VALUES ('registry1', ?1)",
+                [&registry.to_bytes().unwrap()],
+            )
+            .unwrap();
+            drop(db);
+            let settings = UiSettings::load_for_startup(&dir);
+            assert_eq!(
+                settings.profile_at_migration,
+                Some(if prior_space {
+                    ProfileAtMigration::Existing
+                } else {
+                    ProfileAtMigration::Fresh
+                })
+            );
+            assert_eq!(settings.compact_single_chat, prior_space);
+            assert_eq!(settings.sound_enabled, prior_space);
+        }
+    }
+
+    #[test]
     fn compact_single_chat_migrates_and_persists() {
         for existing in [false, true] {
             let parent = tempfile::tempdir().unwrap();
             let dir = parent.path().join("profile");
             if existing {
                 std::fs::create_dir(&dir).unwrap();
+                std::fs::write(UiSettings::path(&dir), "{}").unwrap();
             }
             let mut settings = UiSettings::load_for_startup(&dir);
             assert_eq!(settings.compact_single_chat, existing);
@@ -2022,6 +2110,7 @@ mod tests {
             let data_dir = parent.path().join("profile");
             if existing {
                 std::fs::create_dir(&data_dir).unwrap();
+                std::fs::write(UiSettings::path(&data_dir), "{}").unwrap();
             }
             let expected = if existing {
                 ProfileAtMigration::Existing

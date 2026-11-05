@@ -239,7 +239,7 @@ impl HarnessRegistry {
     }
 
     /// Whether this device's CLI probe passes for `id` (no spawn, no resolve).
-    fn installed_for(&self, id: HarnessId) -> bool {
+    pub(crate) fn installed_for(&self, id: HarnessId) -> bool {
         match self.slots().get(&id) {
             Some(Slot::Ready(harness)) => harness.installed(),
             Some(Slot::Lazy { installed, .. }) => installed(),
