@@ -1039,13 +1039,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let state = match row.state {
-            RunState::Awaiting => crate::status_style::Status::Waiting,
-            RunState::Errored | RunState::ToolFailed => crate::status_style::Status::Errored,
-            RunState::Working => crate::status_style::Status::Working,
-            RunState::IdleBackground => crate::status_style::Status::Idle,
-        };
-        let status = crate::status_style::status_style(state, theme.appearance);
+        let status = crate::status_style::status_style(row.state.into(), theme.appearance);
         let meta = [
             row.item_path.clone(),
             row.account.clone(),

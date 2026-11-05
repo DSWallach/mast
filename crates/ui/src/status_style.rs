@@ -4,7 +4,7 @@ use crate::theme::Appearance;
 use mast_proto::ChatIndicator;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Status {
+pub enum Status {
     Working,
     Waiting,
     Errored,
@@ -38,8 +38,21 @@ impl From<crate::team::WorkerState> for Status {
     }
 }
 
+impl From<crate::running_chats::RunState> for Status {
+    fn from(value: crate::running_chats::RunState) -> Self {
+        use crate::running_chats::RunState;
+        match value {
+            RunState::Working => Self::Working,
+            RunState::Awaiting => Self::Waiting,
+            RunState::Errored | RunState::ToolFailed => Self::Errored,
+            RunState::IdleBackground => Self::Idle,
+        }
+    }
+}
+
 pub(crate) struct StatusStyle {
     pub color: gpui::Hsla,
+    pub rgb: [u8; 3],
     pub glyph: &'static str,
 }
 
@@ -60,6 +73,7 @@ pub(crate) fn status_style(status: Status, appearance: Appearance) -> StatusStyl
     };
     StatusStyle {
         color: gpui::rgb(color).into(),
+        rgb: [(color >> 16) as u8, (color >> 8) as u8, color as u8],
         glyph,
     }
 }
@@ -68,6 +82,18 @@ pub(crate) fn status_style(status: Status, appearance: Appearance) -> StatusStyl
 mod tests {
     use super::*;
     use crate::theme::{AccentColor, Theme};
+
+    fn luminance(rgb: [u8; 3]) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+    }
 
     #[test]
     fn status_pairs_are_distinct_for_every_accent_and_appearance() {
@@ -86,12 +112,29 @@ mod tests {
                     let style = status_style(*state, theme.appearance);
                     for other in &states[index + 1..] {
                         let other = status_style(*other, theme.appearance);
+                        assert_ne!((style.rgb, style.glyph), (other.rgb, other.glyph));
                         assert_ne!(style.glyph, other.glyph);
                     }
-                    let waiting = status_style(Status::Waiting, theme.appearance);
-                    let working = status_style(Status::Working, theme.appearance);
-                    assert!((working.color.h - waiting.color.h).abs() > 0.08);
+                    for background in if appearance.is_dark() {
+                        [[6; 3], [13; 3]]
+                    } else {
+                        [[255; 3], [246; 3]]
+                    } {
+                        let a = luminance(style.rgb);
+                        let b = luminance(background);
+                        let contrast = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                        assert!(contrast >= 2.9, "{state:?} on {background:?}: {contrast}");
+                    }
                 }
+                let waiting = status_style(Status::Waiting, theme.appearance).rgb;
+                let working = status_style(Status::Working, theme.appearance).rgb;
+                let distance = waiting
+                    .into_iter()
+                    .zip(working)
+                    .map(|(a, b)| (f64::from(a) - f64::from(b)).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                assert!(distance > 100.0, "{appearance:?} {accent:?}: {distance}");
             }
         }
     }

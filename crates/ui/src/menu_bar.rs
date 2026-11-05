@@ -351,6 +351,7 @@ pub enum Tone {
     Clover,
     Bromine,
     Cadmium,
+    Status(crate::status_style::Status),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,12 +484,9 @@ pub fn truncate_title(title: &str) -> String {
 
 fn chat_item(row: &Row) -> Item {
     let mut text = Styled::default();
-    let dot = match row.state {
-        RunState::Errored | RunState::ToolFailed => Tone::Cadmium,
-        RunState::Awaiting => Tone::Bromine,
-        RunState::Working | RunState::IdleBackground => Tone::Clover,
-    };
-    text.push("\u{25cf} ", Some(dot));
+    let state = crate::status_style::Status::from(row.state);
+    let style = crate::status_style::status_style(state, crate::theme::Appearance::Dark);
+    text.push(&format!("{} ", style.glyph), Some(Tone::Status(state)));
     text.push(&truncate_title(&row.title), None);
     if row.admin {
         // This chat can reshape its Space (a text tag: menu items are text).
@@ -1050,6 +1048,10 @@ mod platform {
                 let base: *mut Object = msg_send![class!(NSColor), secondaryLabelColor];
                 return msg_send![base, colorWithAlphaComponent: 0.35f64];
             },
+            (Some(Tone::Status(state)), _) => crate::status_style::status_style(
+                state,
+                if dark { crate::theme::Appearance::Dark } else { crate::theme::Appearance::Light },
+            ).rgb,
             // Clover / bromine / cadmium; on light: juniper and darker shades.
             (Some(Tone::Clover), true) => [0x38, 0xD0, 0x59],
             (Some(Tone::Clover), false) => [0x24, 0x5F, 0x31],
