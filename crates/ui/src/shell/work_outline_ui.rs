@@ -712,7 +712,7 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
 impl Shell {
     /// Whether a Work Outline modal is open.
     pub(super) fn work_outline_modal_open(&self) -> bool {
-        self.work_outline_modal.is_some()
+        self.work_outline_modal.is_some() && !(matches!(self.route, Route::Settings(SettingsSection::Agents)) && matches!(self.work_outline_modal, Some(WorkOutlineModal::StartChat(_))))
     }
 
     /// Escape inside a modal closes its open `/` skill popup or Start Chat's
@@ -1149,6 +1149,7 @@ impl Shell {
                 deliver_decision(superseded, false, window, cx)
             });
         }
+        if matches!(self.route, Route::Settings(SettingsSection::Agents)) && matches!(self.work_outline_modal, Some(WorkOutlineModal::StartChat(_))) { return None; }
         let theme = Theme::of(cx).for_popup();
         self.refresh_hand_off_details(cx);
         // Start Chat's picker closed (Esc / its chip): back to the prompt.

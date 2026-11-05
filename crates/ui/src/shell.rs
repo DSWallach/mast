@@ -5670,7 +5670,7 @@ impl Shell {
             || self.section_menu.is_some()
             || self.running.open
             || self.add_space.is_some()
-            || self.work_outline_modal.is_some()
+            || self.work_outline_modal_open()
             || self.work_outline_menu.is_open()
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
@@ -9159,7 +9159,7 @@ impl Shell {
         }
         if self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
-            || self.work_outline_modal.is_some()
+            || self.work_outline_modal_open()
             || self.delete_space_confirm.is_some()
             || self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()

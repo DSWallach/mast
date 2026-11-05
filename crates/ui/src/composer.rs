@@ -4572,12 +4572,17 @@ impl Composer {
         let harness = self.pickers.read(cx).resolved(cx).harness?;
         if !crate::managed_accounts::supports_accounts(harness) { return None; }
         let device = state.effective_device_id();
+        let missing_snapshot = state.managed_accounts_for(device.as_deref()).is_none();
+        let has_space = state.selected_space_row().is_some();
         let snapshot = state.managed_accounts_for(device.as_deref()).cloned().unwrap_or_default();
         let account = state.selected_space_row().and_then(|space| crate::managed_accounts::project_account(&snapshot, &space.id, harness)).map(|account| account.id.clone());
         let key = (device.clone(), harness, account.clone());
         let refresh = self.sign_in_check.as_ref().is_none_or(|(d, h, a, at, _)| (d, *h, a) != (&key.0, key.1, &key.2) || at.elapsed() >= Duration::from_secs(30));
         if refresh {
             let rpc = state.accounts_rpc(device.as_deref());
+            if missing_snapshot {
+                self.state.update(cx, |state, cx| state.load_managed_accounts(device.clone(), cx));
+            }
             let started = Instant::now();
             self.sign_in_check = Some((device.clone(), harness, account.clone(), started, false));
             let request_key = key.clone();
@@ -4594,6 +4599,7 @@ impl Composer {
             }).detach();
             return None;
         }
+        if missing_snapshot && has_space { return None; }
         self.sign_in_check.as_ref().is_some_and(|entry| entry.4).then(|| (device.unwrap_or_default(), harness, account, snapshot))
     }
     pub(crate) fn set_dock_frame(
@@ -8979,7 +8985,10 @@ impl Render for Composer {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.sign_in_check = None;
                         cx.emit(ComposerEvent::SignIn { device: device.clone(), harness, account: account.clone(), snapshot: snapshot.clone() });
-                    }))))
+                    })))
+                .child(crate::popover::btn_ghost(&theme, "Start anyway", "composer-start-anyway")
+                    .id("composer-start-anyway").debug_selector(|| "composer-start-anyway".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))))
         }).child(pill_surface);
 
         // The lower slot keeps a stable footprint for Git projects while its

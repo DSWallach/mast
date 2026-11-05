@@ -318,6 +318,15 @@ fn account_check(
         ),
     }
 }
+
+fn account_presence_check(name: &str, status: mast_engine::agent_accounts::LocalSignInStatus, login: &str) -> Check {
+    use mast_engine::agent_accounts::LocalSignInStatus;
+    match status {
+        LocalSignInStatus::SignedIn => Check::new(&format!("{name} account"), Status::Ok, "local sign-in detected (not validated online)", None),
+        LocalSignInStatus::SignedOut => Check::new(&format!("{name} account"), Status::Warning, "no local sign-in detected", Some(login)),
+        LocalSignInStatus::Unknown => Check::new(&format!("{name} account"), Status::Warning, "local sign-in could not be inspected", Some(login)),
+    }
+}
 fn account_checks(env: &impl Environment, data_dir: &Path, cursor: bool) -> Vec<Check> {
     let config = mast_engine::agent_accounts::AgentAccountsConfig::detect(data_dir);
     account_checks_for(env, &config, cursor)
@@ -327,17 +336,13 @@ fn account_checks_for(
     config: &mast_engine::agent_accounts::AgentAccountsConfig,
     cursor: bool,
 ) -> Vec<Check> {
-    let mut claude = account_check(
+    let mut claude = account_presence_check(
         "claude",
-        &config.claude_config_file,
-        |v| nonempty(v.pointer("/oauthAccount/emailAddress")),
+        mast_engine::agent_accounts::inspect_sign_in_file(&config.claude_config_file, "/oauthAccount/emailAddress", None),
         "Run claude auth status or connect an account in Mast",
     );
     if claude.status == Status::Ok {
-        let file_credentials = read_json(&config.claude_config_dir.join(".credentials.json"))
-            .ok()
-            .flatten()
-            .is_some_and(|v| nonempty(v.pointer("/claudeAiOauth/accessToken")));
+        let file_credentials = mast_engine::agent_accounts::inspect_sign_in_file(&config.claude_config_dir.join(".credentials.json"), "/claudeAiOauth/accessToken", None) == mast_engine::agent_accounts::LocalSignInStatus::SignedIn;
         #[cfg(target_os = "macos")]
         let keychain_credentials = env.executable("security").is_some_and(|security| {
             env.run(
@@ -361,10 +366,9 @@ fn account_checks_for(
     }
     let mut checks = vec![
         claude,
-        account_check(
+        account_presence_check(
             "codex",
-            &config.codex_home.join("auth.json"),
-            |v| nonempty(v.pointer("/tokens/id_token")) || nonempty(v.get("OPENAI_API_KEY")),
+            mast_engine::agent_accounts::inspect_sign_in_file(&config.codex_home.join("auth.json"), "/tokens/id_token", Some("/OPENAI_API_KEY")),
             "Run codex login or connect an account in Mast",
         ),
     ];

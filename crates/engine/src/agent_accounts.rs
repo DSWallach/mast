@@ -319,7 +319,7 @@ pub enum LocalSignInStatus {
     Unknown,
 }
 
-fn inspect_sign_in_file(path: &Path, pointer: &str, alternative: Option<&str>) -> LocalSignInStatus {
+pub fn inspect_sign_in_file(path: &Path, pointer: &str, alternative: Option<&str>) -> LocalSignInStatus {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return LocalSignInStatus::SignedOut,
