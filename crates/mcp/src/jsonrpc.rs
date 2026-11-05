@@ -36,7 +36,7 @@ Blocked decisions: if your chat has a work item \
 (`work_outline_read_current`) and is blocked on a decision, approval, or \
 missing information from the user, call \
 `work_outline_create_user_action_request` (one-line question, context in \
-`detail`, a `dedupeKey` per topic; optional `kind`, `options`, `links`, `facts`) as well \
+`detail`, a `dedupeKey` per topic; optional `kind`, `links`, `facts`) as well \
 as asking in chat; resolve it \
 with `work_outline_resolve_user_action_request` once answered. Use built-in questions for small clarifications.\n\
 \n\
