@@ -1,97 +1,107 @@
-//! Manual smoke test against REAL data on this machine for the exact bug
-//! reported live: `SCAN_CHAT_SUBAGENTS` never showed subagent rows for a chat
-//! Mast itself launched (as opposed to one adopted via
-//! `ExternalSessionImporter::import`), because the RPC handler only ever
-//! tried `ExternalSessionImporter::transcript_path_for` (which reads a
-//! per-chat import-cursor file that a live-launched chat never has) instead
-//! of also falling back to the chat's own recorded harness session id, the
-//! way `ContextUsageProvider::context_pct_for_chat` already did for context
-//! usage. Same `#[ignore]` convention as `external_import_real_smoke.rs`/
-//! `subagent_scan_real_smoke.rs` — depends on a real `~/.claude/projects`
-//! session on this machine, known (per the bug report) to have a
-//! `subagents/` directory sibling to its own transcript.
-//!
-//! Run with:
-//!   cargo test -p mast-engine --test subagent_scan_harness_session_real_smoke -- --ignored --nocapture
+//! CI-safe (synthetic, no real machine data) regression test for the
+//! `SCAN_CHAT_SUBAGENTS` bug: a chat Mast itself launched or resumed (via
+//! `WorkspaceHost::set_chat_harness_session`, never through
+//! `ExternalSessionImporter::import`) has no external-import cursor, so
+//! `ContextUsageProvider::transcript_path_for_chat` — the same two-source
+//! resolution the RPC handler now uses — must still resolve its transcript
+//! via the harness-session fallback, and `subagent_scan::scan_subagents` must
+//! then find whatever's on disk next to it. Same `$HOME`-redirection
+//! convention as `external_import_bulk_session_canvas.rs`.
 
 use std::sync::Arc;
 
 use mast_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
 
+fn assemble(profile: EngineProfile) -> EngineCore {
+    EngineCore::assemble_with_profile(profile, Arc::new(default_registry()), HarnessId::Mock, None)
+        .expect("assemble profile")
+}
+
 #[tokio::test]
-#[ignore = "depends on real ~/.claude/projects data on this machine"]
-async fn resolves_and_scans_subagents_for_a_harness_session_chat_never_imported() {
-    let real_session_id = "8de11ea8-2a2a-42a2-9784-81b4142b404d";
-    let real_cwd = "/Users/mikey/Projects/agent-mode-tools";
-    let real_transcript = std::path::Path::new(
-        "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/8de11ea8-2a2a-42a2-9784-81b4142b404d.jsonl",
-    );
-    assert!(
-        real_transcript.is_file(),
-        "expected real transcript at {real_transcript:?}"
-    );
+async fn resolves_and_scans_subagents_for_a_harness_session_only_chat() {
+    let fake_home = tempfile::tempdir().expect("fake home tempdir");
+    let previous_home = std::env::var_os("HOME");
+    // SAFETY: test-only, scoped to this one function, restored at the end —
+    // same justification as `external_import_bulk_session_canvas.rs`.
+    unsafe {
+        std::env::set_var("HOME", fake_home.path());
+    }
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let core = EngineCore::assemble_with_profile(
-        EngineProfile::development(dir.path(), "dev-org", "dev-user"),
-        Arc::new(default_registry()),
-        HarnessId::Mock,
-        None,
+    let session_id = "sess-live-launched";
+    let project_dir = fake_home
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("proj-1");
+    std::fs::create_dir_all(&project_dir).expect("project dir");
+    let transcript_path = project_dir.join(format!("{session_id}.jsonl"));
+    std::fs::write(
+        &transcript_path,
+        r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"do a thing"},"uuid":"u1","timestamp":"2026-01-01T00:00:01.000Z","cwd":"/work/project","sessionId":"sess-live-launched"}"#,
     )
-    .expect("assemble profile");
+    .expect("write transcript");
 
-    let chat_id = "harness-session-subagent-smoke-chat";
+    let subagents_dir = project_dir.join(session_id).join("subagents");
+    std::fs::create_dir_all(&subagents_dir).expect("subagents dir");
+    std::fs::write(
+        subagents_dir.join("agent-sub1.meta.json"),
+        r#"{"agentType":"fork","description":"Do a subtask"}"#,
+    )
+    .expect("write meta");
+    std::fs::write(subagents_dir.join("agent-sub1.jsonl"), "{}\n")
+        .expect("write subagent transcript");
+
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let core = assemble(EngineProfile::development(
+        data_dir.path(),
+        "dev-org",
+        "dev-user",
+    ));
+
+    let chat_id = "live-launched-chat";
     core.workspace
         .create_chat(
             chat_id,
             None,
             Some(&core.device_id),
             None,
-            Some(real_cwd.to_string()),
+            Some("/work/project".into()),
         )
         .expect("create chat");
-    // The live run loop's own path (`sessions.rs`) for stamping a chat with
-    // its harness session id — deliberately NOT going through
-    // `ExternalSessionImporter::import`, so no sync-cursor file exists for
-    // this chat. This is exactly the shape of every chat Mast itself
-    // launches or resumes.
+    // The live run loop's own path — deliberately NOT `external_import::import`,
+    // so this chat has no sync cursor at all.
     core.workspace
-        .set_chat_harness_session(chat_id, real_session_id, real_cwd);
+        .set_chat_harness_session(chat_id, session_id, "/work/project");
 
-    // Sanity: confirm there really is no import cursor for this chat, so the
-    // test actually exercises the fallback path and isn't accidentally
-    // passing via the cursor route.
     assert!(
         core.external_import
             .transcript_path_for(chat_id)
             .expect("transcript_path_for")
             .is_none(),
-        "this chat must have no external-import cursor for this test to mean anything"
+        "must have no import cursor for this test to exercise the fallback"
     );
 
     let resolved = core
         .context_usage
         .transcript_path_for_chat(&core.workspace, &core.external_import, chat_id)
-        .expect("transcript_path_for_chat");
-    eprintln!("resolved transcript path: {resolved:?}");
-    assert_eq!(
-        resolved.as_deref(),
-        Some(real_transcript),
-        "must resolve via the harness-session fallback, not just the import cursor"
-    );
+        .expect("transcript_path_for_chat")
+        .expect("must resolve via the harness-session fallback");
+    assert_eq!(resolved, transcript_path);
 
-    let subagents =
-        mast_engine::subagent_scan::scan_subagents(&resolved.unwrap()).expect("scan_subagents");
-    eprintln!("found {} subagents", subagents.len());
-    for s in &subagents {
-        eprintln!("{s:?}");
-    }
-    assert!(
-        !subagents.is_empty(),
-        "this session is known (per the live bug report) to have spawned subagents on disk"
-    );
+    let subagents = mast_engine::subagent_scan::scan_subagents(&resolved).expect("scan_subagents");
+    assert_eq!(subagents.len(), 1);
+    assert_eq!(subagents[0].agent_id, "sub1");
+    assert_eq!(subagents[0].description.as_deref(), Some("Do a subtask"));
 
     core.shutdown().await;
+
+    // SAFETY: restoring whatever HOME was before this test touched it.
+    unsafe {
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
 
 #[path = "../../../test_support/isolation.rs"]
