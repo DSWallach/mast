@@ -3917,12 +3917,12 @@ impl Shell {
                     .map(|pin| {
                         let account_id = pin.account_id.clone();
                         let label = account_id.as_ref().and_then(|id| snapshot.accounts.iter().find(|account| &account.id == id)).map(|account| account.label.clone());
-                        (account_id, label)
+                        (account_id, label, snapshot.clone())
                     })
                     .ok_or_else(|| "Could not find the account pinned to this chat.".to_string())
             });
             page.update(cx, |page, cx| match result {
-                Ok((account_id, label)) => page.sign_in_for_chat(device, harness, account_id, label, cx),
+                Ok((account_id, label, snapshot)) => page.sign_in_for_chat(device, harness, account_id, label, snapshot, cx),
                 Err(error) => page.sign_in_error(error, cx),
             });
         }).detach();

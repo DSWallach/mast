@@ -2044,6 +2044,7 @@ mod tests {
         cx.run_until_parked();
         assert!(accounts.lock().unwrap().iter().any(|(method, params)|
             method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN && params["accountId"] == "a1"));
+        assert!(cx.debug_bounds("managed-account-a1").is_some());
         shell.update(cx, |shell, cx| shell.sign_in_for_chat("chat-ui".into(), cx));
         cx.run_until_parked();
         assert!(accounts.lock().unwrap().iter().any(|(method, params)|
