@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Hand-off UI + wake labels + child file limit** (2026-11-05 overnight, `hand-off-ui`, `wake-label-fd-limit`,
+  Terra): "Hand off to new chat…" in chat context menus and header overflow (only with live children): sheet
+  with prefilled summary, worker list, optional archive of the source; selects the successor; the source shows
+  a linked "Handed off to …" line. Wake/report lines resolve the registry chat title at delivery (fallback
+  short id, never a model name). Harness child processes raise their RLIMIT_NOFILE soft limit to
+  min(hard, 8192). Release run: nextest 2345/2345, UI 2454/0.
 - **Space account re-sign-in, durable wakes, drop any file** (2026-11-05, `managed-account-reauth`,
   `durable-wakes`, `composer-drop-any-file`, Terra): Settings → Space accounts has **Sign in again** (same home
   and id, Claude and Codex); auth failures mark the pinned account signed out and the chat error offers
@@ -842,7 +848,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
   redraws) and cleanup sweep (item e71201b1: warnings/clippy, dead code, stale docs/scripts; no behavior
   change). Mikey: "up until 8 am look for perf improvements and clean up opportunities".
 - Wave 3: Needs-you phase 4 (answer ask/choose on the card).
-- Ready, waiting for a release slot: `wake-label-fd-limit` (request c3270f71).
+- Installed overnight: hand-off-ui, wake-label-fd-limit.
 - Release in batches of ≤3 branches; never run a release while 3 Terra builds are compiling.
 - Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
 
