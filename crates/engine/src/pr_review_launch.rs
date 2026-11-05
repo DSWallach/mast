@@ -234,7 +234,7 @@ fn resolve_repo(spaces: &[Space], slug: &str) -> Option<RepoMatch> {
             ))
         })
         .collect();
-    found.sort_by(|a, b| (a.0, a.1, a.2.space.created_at).cmp(&(b.0, b.1, b.2.space.created_at)));
+    found.sort_by_key(|a| (a.0, a.1, a.2.space.created_at));
     found.into_iter().next().map(|(_, _, m)| m)
 }
 
@@ -1022,8 +1022,8 @@ impl PrReviewLauncher {
                 mast_proto::ChatLinkSource::ReviewLauncher,
             )
             .map_err(engine)?;
-        if matches!(p.action, PrReviewAction::CodeReview) {
-            if let Some(targets) = &self.diff_targets {
+        if matches!(p.action, PrReviewAction::CodeReview)
+            && let Some(targets) = &self.diff_targets {
                 let base = head.base_ref_name.as_deref().unwrap_or("main");
                 if let Err(error) = targets.bind_launched_pr(
                     &chat_id, &found.repo_dir, p.number, &url, &branch, base,
@@ -1031,7 +1031,6 @@ impl PrReviewLauncher {
                     tracing::warn!(%error, %chat_id, "could not bind review PR diff target");
                 }
             }
-        }
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, op)?;
         }
