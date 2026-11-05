@@ -43,7 +43,7 @@ fn fake_codex(dir: &Path) -> PathBuf {
     } else {
         std::fs::write(
             &path,
-            format!("#!/bin/sh\necho \"open {FAKE_URL} in your browser\"\nsleep 30\n"),
+            format!("#!/bin/sh\necho \"open {FAKE_URL} in your browser\"\nexec /bin/sleep 30\n"),
         )
         .expect("fake codex");
         #[cfg(unix)]
