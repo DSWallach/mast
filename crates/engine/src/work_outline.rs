@@ -542,9 +542,15 @@ impl WorkOutlineService {
                 }
                 let workspace = state.workspace.clone();
                 let space_id = state.space_id.clone();
+                #[cfg(feature = "startup-bench")]
+                let queued = std::time::Instant::now();
                 let (marker, mut snapshot) = tokio::task::spawn_blocking(move || {
                     #[cfg(feature = "startup-bench")]
+                    eprintln!("BENCH phase | outline_blocking_queue | ms={:.3}", queued.elapsed().as_secs_f64() * 1000.0);
+                    #[cfg(feature = "startup-bench")]
                     let outline_started = std::time::Instant::now();
+                    #[cfg(feature = "startup-bench")]
+                    eprintln!("BENCH event | outline_build_start | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                     let (marker, inputs) = workspace.work_outline_inputs_marked(&space_id);
                     let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
                     #[cfg(feature = "startup-bench")]
@@ -563,7 +569,13 @@ impl WorkOutlineService {
                 }
                 state.revision += 1;
                 snapshot.revision = state.revision;
+                #[cfg(feature = "startup-bench")]
+                let serialization_started = std::time::Instant::now();
                 let value = serde_json::to_value(&snapshot).ok()?;
+                #[cfg(feature = "startup-bench")]
+                eprintln!("BENCH phase | outline_to_value | ms={:.3} bytes={}", serialization_started.elapsed().as_secs_f64() * 1000.0, serde_json::to_vec(&value).map_or(0, |bytes| bytes.len()));
+                #[cfg(feature = "startup-bench")]
+                eprintln!("BENCH event | outline_value_ready | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                 state.last = Some(snapshot);
                 return Some((value, state));
             }

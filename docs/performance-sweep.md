@@ -81,3 +81,32 @@ This benchmark starts inside an already running test process and cannot measure 
 The largest directly measured blocking work is snapshot read/decode and pending settlement; the synthetic registry deliberately contains 6,000 pending preview updates, so this result does not establish the same distribution for a compacted real profile. A candidate is to reduce registry history or make settlement and snapshot persistence cheaper. Deferring settlement or the boot save requires a durability and migration-order design: boot saves the migrated registry immediately so it survives a crash, and local settlement establishes authoritative state. Measure those alternatives with crash/restart and migration regressions before changing the ordering. A second investigation should instrument watch registration, RPC serialization/delivery and scheduler turns separately to explain the delayed outline milestone; do not assume the 75 ms coalescing timer is responsible. No startup behavior was changed in this follow-up.
 
 Reproduce after building with `cargo test -p mast-ui --lib --profile installed --features startup-bench --no-run`: run the resulting test executable five times with `bench_profile_startup --ignored --nocapture --test-threads=1`, `MAST_NO_LOGIN_SHELL=1`, and the inert `gh` and `linear` executables described above. `startup-bench` gates the engine instrumentation; the ignored UI benchmark supplies the milestone clocks.
+
+## Follow-up: startup watch scheduling (2026-11-05)
+
+Five serial installed-profile runs of `bench_profile_startup` on `perf-sweep-4`, based on `78e2fe7d6`, used the same guarded 53.3 MB synthetic profile. The test process uses a current-thread Tokio runtime and a headless GPUI scheduler; the measurements are not process-launch or production event-loop timings. The host process list was unavailable, so competing activity cannot be excluded. Event intervals below use wall-clock timestamps; each row is the median (minimum–maximum), milliseconds, and intervals overlap. The earlier table's core assembly is a duration whereas its chat and outline milestones are elapsed from before settings load; subtracting those values does not measure the time from the end of assembly.
+
+| Interval or duration | Median (min–max), ms |
+| --- | ---: |
+| Core assembly duration | 99.501 (89.299–108.120) |
+| Core assembled → runtime assembled | 0.773 (0.546–4.209) |
+| Runtime assembled → UI attachment | 0.785 (0.554–1.861) |
+| UI attachment → chats subscribe starts | 0.747 (0.669–2.176) |
+| Chats subscribe starts → frame received | 2.019 (1.854–3.325) |
+| Chats JSON value decode | 0.127 (0.097–0.184) |
+| Core assembled → chats applied | 4.524 (3.967–11.815) |
+| Chats applied → test observes loaded chats | 53.756 (52.021–79.318) |
+| Spaces frame received → outline watch spawned | 0.067 (0.039–0.147) |
+| Outline watch spawned → subscription starts | 52.058 (50.702–76.742) |
+| Outline subscription starts → snapshot construction starts | 0.330 (0.218–0.661) |
+| Outline blocking-pool queue | 0.016 (0.009–0.046) |
+| Outline snapshot construction | 1.549 (1.343–1.982) |
+| Outline snapshot to JSON value | 0.493 (0.333–0.573) |
+| Outline JSON value ready → checked subscription returns | 1.519 (0.819–85.400) |
+| Checked subscription returns → snapshot applied | 0.259 (0.209–3.254) |
+| Outline JSON value decode | 0.208 (0.156–0.324) |
+| Outline applied → test observes loaded outline | 25.070 (16.568–46.468) |
+
+The first snapshot is already published without the later 75 ms coalescing timer. `subscribe_checked` waits for the first item for this method, so its return includes snapshot generation and delivery; it is not a separate acknowledgement round-trip. The initial outline JSON value was approximately 179 KB. Measuring its encoded size performs an extra serialization in the instrumented build, so it adds overhead before the value-ready timestamp. The long watch-spawn interval and delayed observations occur within this test's GPUI scheduling and forced drawing; these measurements do not establish equivalent production delays or isolate a safe change to the UI scheduler. The value-ready-to-return interval is highly variable and includes RPC encoding, dispatch, decoding and scheduling. No startup behavior was changed on this evidence.
+
+The prior durability proposal remains: investigate reducing registry history or making settlement and snapshot persistence cheaper, but preserve boot migration persistence and authoritative settlement until crash/restart and migration ordering are designed and tested. Do not defer either operation solely on this synthetic profile.

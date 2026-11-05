@@ -447,14 +447,17 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
         state.read_with(vcx, |state, _| {
             if !connection_recorded && matches!(state.connection, crate::state::ConnectionStatus::Ready) {
                 eprintln!("BENCH milestone | engine_rpc_ready | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("BENCH event | ready_observed | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                 connection_recorded = true;
             }
             if !chats_recorded && state.chats.len() == 250 {
                 eprintln!("BENCH milestone | chats_loaded | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("BENCH event | chats_observed | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                 chats_recorded = true;
             }
             if !outline_recorded && state.work_outline("benchmark-space").snapshot().is_some_and(|snapshot| snapshot.items.len() == 300) {
                 eprintln!("BENCH milestone | outline_loaded | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("BENCH event | outline_observed | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                 outline_recorded = true;
             }
         });

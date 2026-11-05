@@ -1124,6 +1124,8 @@ impl Engine {
         };
         #[cfg(feature = "startup-bench")]
         eprintln!("BENCH phase | core_assembly | ms={:.3}", assembly_started.elapsed().as_secs_f64() * 1000.0);
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH event | core_assembled | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
         core.set_auth(auth.clone());
         // Stamp per-harness Work Outline instruction tokens once the CLI
         // probes (`claude --help`, `codex --version`) have run — blocking, so
