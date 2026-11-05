@@ -2181,6 +2181,69 @@ mod tests {
         outline.read_with(cx, |outline, _| outline.selected_key().map(str::to_owned))
     }
 
+    #[gpui::test]
+    fn outline_default_bindings_dispatch_expected_actions(cx: &mut gpui::TestAppContext) {
+        use crate::work_outline::outline_view::*;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, _, cx) = toggle_shell(cx, dir.path());
+        for (combo, key) in OUTLINE_NAVIGATION_KEYS {
+            let expected: Box<dyn gpui::Action> = match key {
+                OutlineNavKey::SelectNext => Box::new(SelectNext),
+                OutlineNavKey::SelectPrevious => Box::new(SelectPrevious),
+                OutlineNavKey::SelectFirst => Box::new(SelectFirst),
+                OutlineNavKey::SelectLast => Box::new(SelectLast),
+                OutlineNavKey::SelectNextSibling => Box::new(SelectNextSibling),
+                OutlineNavKey::SelectPreviousSibling => Box::new(SelectPreviousSibling),
+                OutlineNavKey::Expand => Box::new(Expand),
+                OutlineNavKey::Collapse => Box::new(Collapse),
+                OutlineNavKey::OpenSelected => Box::new(OpenSelected),
+                OutlineNavKey::OpenDetails => Box::new(OpenDetailsSelected),
+                OutlineNavKey::StartChat => Box::new(StartChatSelected),
+                OutlineNavKey::RenameSelected => Box::new(RenameSelected),
+                OutlineNavKey::CreateSibling => Box::new(CreateSibling),
+                OutlineNavKey::CreateChild => Box::new(CreateChild),
+                OutlineNavKey::MoveItemUp => Box::new(MoveItemUp),
+                OutlineNavKey::MoveItemDown => Box::new(MoveItemDown),
+                OutlineNavKey::IndentItem => Box::new(IndentItem),
+                OutlineNavKey::OutdentItem => Box::new(OutdentItem),
+                OutlineNavKey::GroupInto => Box::new(GroupSelected),
+                OutlineNavKey::Undo => Box::new(UndoChange),
+                OutlineNavKey::Redo => Box::new(RedoChange),
+                OutlineNavKey::ShowShortcuts => Box::new(RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts)),
+            };
+            let key = Keystroke::parse(&platform_combo(combo)).unwrap();
+            let bindings = cx.update(|_, cx| cx.all_bindings_for_input(&[key]));
+            assert!(bindings.iter().any(|binding| binding.action().partial_eq(expected.as_ref())
+                && binding.predicate().is_some_and(|p| p.to_string() == OUTLINE_NAVIGATION_CONTEXT)), "{combo}");
+        }
+    }
+
+    #[gpui::test]
+    fn outline_rebind_replaces_default_and_editing_excludes_navigation(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, outline, cx) = toggle_shell(cx, dir.path());
+        let mut keymap = KeymapConfig::default();
+        keymap.set(OutlineNavKey::SelectNext.shortcut_id(), "x".into());
+        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        cx.update(|_, cx| crate::shell::apply_keymap(cx, &restored, Default::default()));
+        redraw(cx);
+        let before = outline_selection(&outline, cx);
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        assert_eq!(outline_selection(&outline, cx), before);
+        cx.simulate_keystrokes("x");
+        redraw(cx);
+        let selected = outline_selection(&outline, cx);
+        assert_ne!(selected, before);
+        cx.simulate_keystrokes("n");
+        redraw(cx);
+        outline.read_with(cx, |outline, _| assert!(outline.is_editing()));
+        cx.simulate_keystrokes("x");
+        redraw(cx);
+        assert_eq!(outline_selection(&outline, cx), selected);
+        outline.read_with(cx, |outline, _| assert!(outline.is_editing()));
+    }
+
     /// Enter on a Chat row opens it beside the Outline with the composer
     /// focused; the toggle key (through `apply_keymap`, from the focused
     /// composer) jumps to that Chat's row, expanding its collapsed ancestor,

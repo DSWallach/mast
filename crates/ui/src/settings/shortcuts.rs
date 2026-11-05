@@ -1090,6 +1090,24 @@ mod tests {
     }
 
     #[test]
+    fn outline_and_team_groups_include_their_shortcuts_and_aliases_conflict() {
+        use crate::shell::work_outline_ui::OutlineNavKey;
+        assert!(GROUP_ORDER.contains(&"Outline"));
+        assert!(GROUP_ORDER.contains(&"Team"));
+        for key in OutlineNavKey::ALL { assert_eq!(group(key.shortcut_id()), "Outline"); }
+        assert_eq!(group(ShortcutId::OpenTeamTab), "Team");
+        assert_eq!(group(ShortcutId::OpenTeamTabFromPanel), "Team");
+        let mut keymap = KeymapConfig::default();
+        let indent = OutlineNavKey::IndentItem.shortcut_id();
+        assert!(keymap.combos(indent).contains(&"tab"));
+        assert_eq!(conflict_owner(&keymap, OutlineNavKey::SelectNext.shortcut_id(), "tab"), Some(indent));
+        keymap.set(indent, "x".into());
+        assert_eq!(keymap.combos(indent), vec!["x"]);
+        keymap.reset(indent);
+        assert!(keymap.combos(indent).contains(&"tab"));
+    }
+
+    #[test]
     fn every_shortcut_lands_in_a_rendered_group() {
         // The page renders GROUP_ORDER's cards and nothing else — a group()
         // arm returning a name missing from GROUP_ORDER would silently drop
