@@ -1066,8 +1066,8 @@ fn the_item_tab_stays_readable_with_maximal_data(cx: &mut TestAppContext) {
         let bounds = vcx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}"));
         assert!(bounds.right() <= tab.right(), "{selector} {bounds:?} in {tab:?}");
     }
-    let long = vcx.debug_bounds("required-actions-row-r-more-0").unwrap();
-    assert!(long.size.height < px(120.0), "clamped to two lines: {:?}", long.size);
+    let long = vcx.debug_bounds("required-actions-text-r-more-0").unwrap();
+    assert!(long.size.height < px(40.0), "clamped to two lines: {:?}", long.size);
     // The team block keeps to the roll-up and three workers.
     let shown = (0..15).filter(|i| has(vcx, Box::leak(format!("chat-item-worker-w-{i}").into_boxed_str()))).count();
     assert_eq!(shown, 3);

@@ -96,6 +96,11 @@ pub(crate) fn decode_request(row: &RegistryRow) -> Result<DecodedRequest, WorkOu
         resolution.is_some() || row.fields.get("state").and_then(Value::as_str) == Some("resolved");
     Ok(DecodedRequest {
         view: UserActionRequestView {
+            options: row
+                .fields
+                .get("options")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default(),
             links: row
                 .fields
                 .get("links")
@@ -559,8 +564,33 @@ impl RegistryDoc {
         if p.links.iter().any(|link| link.label.chars().count() > 40) {
             return Err(invalid("A link label exceeds 40 characters"));
         }
-        if p.facts.iter().any(|fact| fact.label.chars().count() > 40 || fact.value.chars().count() > 120) {
+        if p.facts
+            .iter()
+            .any(|fact| fact.label.chars().count() > 40 || fact.value.chars().count() > 120)
+        {
             return Err(invalid("A fact label or value exceeds its character limit"));
+        }
+        if p.options.iter().any(|option| {
+                option.id.trim().is_empty()
+                    || option.id.chars().count() > 120
+                    || option.label.trim().is_empty()
+                    || option.label.chars().count() > 120
+                    || option
+                        .detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.chars().count() > 1000)
+            })
+        {
+            return Err(invalid(
+                "Options require an id and label and must fit within their limits",
+            ));
+        }
+        let mut option_ids = std::collections::HashSet::new();
+        if p.options
+            .iter()
+            .any(|option| !option_ids.insert(&option.id))
+        {
+            return Err(invalid("Option ids must be unique"));
         }
         let system_origin = p.origin.kind == UserActionOriginKind::System;
         if system_origin {
@@ -640,6 +670,9 @@ impl RegistryDoc {
             ("inputsHash".to_owned(), json!(hash)),
             ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
         ]);
+        if !p.options.is_empty() {
+            set.insert("options".to_owned(), json!(p.options));
+        }
         set.insert("links".to_owned(), json!(p.links));
         set.insert("facts".to_owned(), json!(p.facts));
         set.insert("kind".to_owned(), json!(p.kind.unwrap_or_default()));
@@ -1216,7 +1249,9 @@ impl RegistryDoc {
                 if tree.items.get(&id).is_some_and(|item| item.is_project) {
                     return Some(id);
                 }
-                if remaining == 0 { break; }
+                if remaining == 0 {
+                    break;
+                }
                 remaining -= 1;
                 cursor = tree.parent.get(&id).cloned().flatten();
             }

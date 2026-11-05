@@ -318,7 +318,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::CREATE_USER_ACTION_REQUEST,
-            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Use kind to distinguish ask, review, approve, choose, handoff (finished work), and notice (FYI); optional priority is blocking, normal, or fyi. Optional: kind, priority, links, facts, detail, dedupeKey, toolCallId. Links target artifact, file, diff, pr, chat, or https url; at most eight links and eight facts.",
+            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Use kind to distinguish ask, review, approve, choose, handoff (finished work), and notice (FYI); optional priority is blocking, normal, or fyi. Optional: kind, priority, options, links, facts, detail, dedupeKey, toolCallId. Options have an id, label, and optional detail. Links target artifact, file, diff, pr, chat, or https url; at most eight links and eight facts.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -333,6 +333,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                         { "properties": { "type": { "const": "chat" }, "id": { "type": "string" } }, "required": ["type", "id"] },
                         { "properties": { "type": { "const": "url" }, "url": { "type": "string" } }, "required": ["type", "url"] }
                     ] } } } },
+                    "options": { "type": "array", "items": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string", "maxLength": 120 }, "label": { "type": "string", "maxLength": 120 }, "detail": { "type": "string", "maxLength": 1000 } } } },
                     "facts": { "type": "array", "maxItems": 8, "items": { "type": "object", "required": ["label", "value"], "properties": { "label": { "type": "string", "maxLength": 40 }, "value": { "type": "string", "maxLength": 120 } } } },
                     "detail": { "type": "string" },
                     "dedupeKey": { "type": "string", "description": "Equivalent open requests with the same key are not repeated. With a dedupeKey, idempotencyKey is optional." },
@@ -3695,6 +3696,8 @@ mod tests {
     fn request_link_and_fact_schema() {
         let defs = work_outline_catalog();
         let request = defs.iter().find(|def| def.name == agent_tool_names::CREATE_USER_ACTION_REQUEST).unwrap();
+        assert!(request.description.contains("options"));
+        assert_eq!(request.input_schema["properties"]["options"]["items"]["required"], json!(["id", "label"]));
         for name in ["links", "facts"] {
             assert_eq!(request.input_schema["properties"][name]["maxItems"], 8);
             assert!(request.description.contains(name));

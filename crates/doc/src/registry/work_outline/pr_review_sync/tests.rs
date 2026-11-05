@@ -221,10 +221,11 @@ fn only_the_system_writes_the_sync_record() {
 
 fn system_request(item: &str, op: &str, dedupe: &str) -> WorkOutlineMutation {
     WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
-            links: Vec::new(),
-            facts: Vec::new(),
-            kind: None,
-            priority: None,
+        options: Vec::new(),
+        links: Vec::new(),
+        facts: Vec::new(),
+        kind: None,
+        priority: None,
         work_item_id: item.into(),
         origin: UserActionRequestOrigin {
             kind: UserActionOriginKind::System,

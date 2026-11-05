@@ -1063,6 +1063,7 @@ pub mod agent_tools {
                 p("priority", "blocking, normal, or fyi"),
                 p("links", "up to eight labeled targets"),
                 p("facts", "up to eight labeled values"),
+                p("options", "choices with id, label, and optional detail"),
                 p("detail", "context for the user"),
                 p(
                     "dedupeKey",
@@ -1505,6 +1506,7 @@ pub mod agent_tools {
             let request_usage = usage_text(tools::CREATE_USER_ACTION_REQUEST).unwrap();
             assert!(request_usage.contains("links ("), "{request_usage}");
             assert!(request_usage.contains("facts ("), "{request_usage}");
+            assert!(request_usage.contains("options ("), "{request_usage}");
             let text = with_usage(
                 tools::SET_STATUS,
                 "invalid arguments: missing field `status`",

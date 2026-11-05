@@ -470,6 +470,8 @@ struct SetStatusArgs {
 #[serde(rename_all = "camelCase")]
 struct CreateUserActionRequestArgs {
     #[serde(default)]
+    options: Vec<mast_proto::work_outline_user_actions::RequestOption>,
+    #[serde(default)]
     links: Vec<mast_proto::RequestLink>,
     #[serde(default)]
     facts: Vec<mast_proto::RequestFact>,
@@ -1624,6 +1626,7 @@ impl AgentToolsService {
                 let priority = serde_json::to_string(&args.priority).unwrap_or_default();
                 let links = serde_json::to_string(&args.links).unwrap_or_default();
                 let facts = serde_json::to_string(&args.facts).unwrap_or_default();
+                let options = serde_json::to_string(&args.options).unwrap_or_default();
                 let mut inputs = vec![
                     work_item_id.as_str(),
                     dedupe_key.as_str(),
@@ -1637,6 +1640,7 @@ impl AgentToolsService {
                 if !args.links.is_empty() || !args.facts.is_empty() {
                     inputs.extend([links.as_str(), facts.as_str()]);
                 }
+                if !args.options.is_empty() { inputs.push(options.as_str()); }
                 Ok(agent_tools::derived_idempotency_key(
                     tools::CREATE_USER_ACTION_REQUEST,
                     &inputs,
@@ -1646,6 +1650,7 @@ impl AgentToolsService {
         };
         let mutation =
             WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+                options: args.options,
                 links: args.links,
                 facts: args.facts,
                 kind: args.kind.or_else(|| {
@@ -2411,6 +2416,7 @@ impl SubtreeWalk<'_> {
                     "id": r.id,
                     "links": r.links,
                     "facts": r.facts,
+                    "options": r.options,
                     "text": r.text,
                     "detail": r.info.as_deref().map(|d| d.chars().take(MAX_SUBTREE_DETAIL_CHARS).collect::<String>()),
                     "detailTruncated": r.info.as_deref().is_some_and(|d| d.chars().count() > MAX_SUBTREE_DETAIL_CHARS),

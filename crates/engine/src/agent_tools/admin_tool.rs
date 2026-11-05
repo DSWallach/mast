@@ -842,6 +842,7 @@ impl AgentToolsService {
         let reply = self.apply(
             context,
             &WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            options: Vec::new(),
             links: Vec::new(),
             facts: Vec::new(),
             kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Approve),
