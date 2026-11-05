@@ -76,6 +76,29 @@ mod tests {
         assert_eq!(store.orchestrators["destination"].len(), 1);
         assert!(store.orchestrators["destination"][0].message_id.is_none());
     }
+
+    #[test]
+    fn synchronization_retains_queued_events_and_removes_cancelled_held_events() {
+        let mut store = WakeStore::default();
+        let held = HashMap::from([("chat".into(), vec![event(1).event, event(2).event])]);
+        store.synchronize_held(&held);
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message");
+        store.synchronize_held(&HashMap::new());
+        let entries = &store.orchestrators["chat"];
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event.id, "1");
+        assert_eq!(entries[0].message_id.as_deref(), Some("message"));
+    }
+
+    #[test]
+    fn restored_event_clears_queue_receipt() {
+        let mut store = WakeStore::default();
+        let held = HashMap::from([("chat".into(), vec![event(1).event])]);
+        store.synchronize_held(&held);
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message");
+        store.synchronize_held(&held);
+        assert!(store.orchestrators["chat"][0].message_id.is_none());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +109,33 @@ pub(super) struct StoredEvent {
 }
 
 impl WakeStore {
+    /// Update held events while retaining queue receipts until acknowledged.
+    pub fn synchronize_held(&mut self, held: &HashMap<String, Vec<WakeEvent>>) {
+        for (chat, entries) in &mut self.orchestrators {
+            entries.retain(|entry| entry.message_id.is_some()
+                || held.get(chat).is_some_and(|events| events.iter().any(|event| event.id == entry.event.id)));
+        }
+        for (chat, events) in held {
+            let entries = self.orchestrators.entry(chat.clone()).or_default();
+            for event in events {
+                if let Some(entry) = entries.iter_mut().find(|entry| entry.event.id == event.id) {
+                    entry.message_id = None;
+                } else {
+                    entries.push(StoredEvent { event: event.clone(), message_id: None });
+                }
+            }
+        }
+        self.limit();
+    }
+
+    pub fn mark_queued(&mut self, chat: &str, event_ids: &HashSet<String>, message_id: &str) {
+        if let Some(entries) = self.orchestrators.get_mut(chat) {
+            for entry in entries.iter_mut().filter(|entry| event_ids.contains(&entry.event.id)) {
+                entry.message_id = Some(message_id.to_owned());
+            }
+        }
+    }
+
     /// Reconcile receipts before restoring held events. Queue entries remain
     /// durable until their corresponding transcript entry appears.
     pub fn reconcile(&mut self, chat: &str, queue: &HashSet<String>, transcript: &HashSet<String>) -> Vec<WakeEvent> {

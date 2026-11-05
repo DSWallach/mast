@@ -3062,7 +3062,7 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
-        self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true)
+        self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true, None)
     }
 
     /// Queue an orchestrator wake message. It is not a user message: it never
@@ -3073,7 +3073,28 @@ impl DocHost {
         chat_id: &str,
         text: &str,
     ) -> Result<String, EngineError> {
-        self.queue_message_inner(chat_id, text, Vec::new(), false, false)
+        self.queue_message_inner(chat_id, text, Vec::new(), false, false, None)
+    }
+
+    /// Reconcile and enqueue while excluding the queue drain, which removes
+    /// a row before writing its transcript entry.
+    pub(crate) async fn queue_event_message_with_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+        message_id: &str,
+        events: Vec<crate::orchestrator_wakes::WakeEvent>,
+    ) -> Result<Option<String>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        if handle.doc.read_entries()?.iter().any(|entry| entry.id == message_id) {
+            return Ok(None);
+        }
+        if !handle.doc.read_queue()?.iter().any(|item| item.id == message_id) {
+            self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))?;
+        }
+        self.inner.event_turns.register(chat_id, message_id.to_owned(), events);
+        Ok(Some(message_id.to_owned()))
     }
 
     fn queue_message_inner(
@@ -3083,6 +3104,7 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
         from_user: bool,
+        message_id: Option<&str>,
     ) -> Result<String, EngineError> {
         if from_user {
             // User first: a wake still waiting in the queue is pulled back
@@ -3093,7 +3115,7 @@ impl DocHost {
             self.spawn_interrupt_event_turn(chat_id);
         }
         let handle = self.open(chat_id)?;
-        let id = new_id();
+        let id = message_id.map(str::to_owned).unwrap_or_else(new_id);
         // Capture at queue time (acceptance 10): the row is delivered with the
         // revision the Chat had selected when the user queued it, even if a
         // newer one is applied before it drains.
