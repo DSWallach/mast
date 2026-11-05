@@ -77,6 +77,21 @@ async fn hand_off_reclaims_a_queued_worker_report() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_retry_finishes_after_registry_write() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("retry-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("retry-source", None), ("retry-successor", None), ("retry-worker", Some("retry-source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("retry-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    rig.wakes.report_to_parent("retry-worker", "pending report").await.unwrap();
+    rig.core.workspace.hand_off_chat_children("retry-source", "retry-successor", "retry-source", 1).unwrap();
+    rig.wakes.hand_off_orchestrator("retry-source", "retry-successor", "retry-source").await.unwrap();
+    assert!(rig.wakes.status("retry-source").held.is_empty());
+    assert_eq!(rig.wakes.status("retry-successor").held.len(), 1);
+    rig.core.shutdown().await;
+}
+
 /// A turn that ends only when the test says so.
 struct HeldHarness {
     finish: tokio::sync::broadcast::Sender<()>,

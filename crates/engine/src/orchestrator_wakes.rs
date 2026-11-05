@@ -454,7 +454,9 @@ impl OrchestratorWakes {
             }
             let (workers, replayed) = self.inner.workspace.hand_off_chat_children(from, to, actor, self.now())?;
             state.hand_off_pending.insert(to.to_owned());
-            if !replayed {
+            // Registry and wake settings use separate stores. If a process
+            // stopped after the registry write, complete the transfer on retry.
+            if !replayed || state.handed_off_to.get(from).map(String::as_str) != Some(to) {
                 self.transfer_wakes(&mut state, from, to);
                 for worker in &workers {
                     if let Some(info) = state.chats.get_mut(worker) {

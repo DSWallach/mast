@@ -2141,6 +2141,20 @@ async fn project_rig(rig: &Rig) -> ProjectRig {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hand_off_refuses_different_projects_in_the_same_space() {
+    let rig = rig().await;
+    let projects = project_rig(&rig).await;
+    assign_chat(&rig, "handoff-project-a", CHAT, &projects.planning).await;
+    assign_chat(&rig, "handoff-project-b", OTHER_CHAT, &projects.other_tickets).await;
+    let wakes = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(), None, Arc::new(|| 1_000_000),
+    );
+    let error = wakes.hand_off_orchestrator(CHAT, OTHER_CHAT, CHAT).await.unwrap_err();
+    assert!(error.contains("same project"), "{error}");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn project_destination_worker_prompt_wakes_without_watcher_delay() {
     let rig = rig().await;
     let project = project_rig(&rig).await;
