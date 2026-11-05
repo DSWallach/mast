@@ -122,9 +122,9 @@ impl DashTabState {
                 }
                 self.me = reply.me;
                 self.rows = reply.rows;
-                self.error = reply.error;
+                self.error = reply.error.map(dashboard_error_text);
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => self.error = Some(dashboard_error_text(error)),
         }
     }
 
@@ -160,6 +160,20 @@ impl DashTabState {
     pub(crate) fn fresh(&self) -> bool {
         self.fetched_at
             .is_some_and(|at| at.elapsed() < DASH_FRESH_WINDOW)
+    }
+}
+
+fn dashboard_error_text(error: String) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("gh auth login")
+        || lower.contains("http 401")
+        || lower.contains("bad credentials")
+    {
+        "The GitHub CLI isn't signed in. Run `gh auth login`, then refresh.".into()
+    } else if lower.contains("github cli (gh) was not found") {
+        "Install the GitHub CLI (gh), then run `gh auth login` and refresh.".into()
+    } else {
+        error
     }
 }
 
@@ -562,6 +576,23 @@ mod tests {
     const T1: &str = "2026-10-20T10:00:00Z";
     const T2: &str = "2026-10-21T10:00:00Z";
     const T3: &str = "2026-10-22T10:00:00Z";
+
+    #[test]
+    fn dashboard_authentication_errors_include_next_steps() {
+        for error in [
+            "To get started, run: gh auth login",
+            "HTTP 401: Bad credentials",
+        ] {
+            assert_eq!(
+                dashboard_error_text(error.into()),
+                "The GitHub CLI isn't signed in. Run `gh auth login`, then refresh."
+            );
+        }
+        assert!(
+            dashboard_error_text("the GitHub CLI (gh) was not found".into())
+                .contains("Install the GitHub CLI")
+        );
+    }
 
     fn stored(fetched_at: String) -> PrDashReply {
         PrDashReply {

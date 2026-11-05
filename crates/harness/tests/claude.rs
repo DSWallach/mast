@@ -93,6 +93,15 @@ async fn run_to_end(
 }
 
 #[tokio::test]
+async fn signed_out_cli_emits_actionable_authentication_error() {
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("scenario:signed-out"), controls).await;
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::Error { message } if message == "Authentication failed — sign in to Claude again."
+    )), "events: {events:?}");
+}
+
+#[tokio::test]
 async fn happy_path_normalizes_events_and_tags_subagents() {
     let (controls, _steer, _token) = controls("A");
     let events = run_to_end(&harness(), request("scenario:happy"), controls).await;
