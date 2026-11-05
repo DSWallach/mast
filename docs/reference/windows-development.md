@@ -1,8 +1,8 @@
 # Windows development
 
-Windows supports native x64 source builds and portable release ZIPs. Release
-packages offer in-app updates through GitHub; keep `mast-update.json` beside
-`zeron.exe`. Installers and background services are not supported yet.
+Windows is outside Mast’s current macOS-only release scope. The notes below
+describe the retained upstream source support; Mast does not provide Windows
+packages or in-app updates.
 
 ## Build and run
 
@@ -65,18 +65,7 @@ cargo test --locked -p mast-engine --test codex_catalog --test codex_login_resol
 ```
 
 Fixtures use synthetic agents, so these tests do not establish authenticated
-provider compatibility. GUI probes are optional CI dispatch checks and can
-also run on an interactive Windows desktop after building the release app:
-
-```powershell
-cargo build --release --locked -p mast-ui --example windows-render-fixture --features windows-render-fixture
-./scripts/test-windows-lifecycle.ps1 -Runs 5
-./scripts/test-windows-rendering.ps1
-```
-
-The lifecycle probe uses isolated data and provider homes. The renderer probe
-captures only its synthetic window. Results go to ignored
-`target/windows-lifecycle-*` and `target/windows-render-*` directories.
+provider compatibility.
 
 Remaining acceptance work includes authenticated provider runs and shutdown,
 broader GPU/DPI coverage, accessibility, native browser and cross-device parity,
