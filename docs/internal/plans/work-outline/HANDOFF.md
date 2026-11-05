@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Needs-you phase 4** (2026-11-05 overnight, `needs-you-phase-4`, Terra): optional `options: [{id, label,
+  detail?}]` on create_user_action_request (MCP, proto, registry; old requests unchanged). Cards everywhere offer
+  choice buttons + "Other…", an inline reply for `ask` (⌘Enter), and 1–9 picks on a focused card; each relays via
+  the phase-2 `Re: "…"` format and resolves once. Coordinator fix 2c514432: dropped `options` from the MCP server
+  instructions (6 chars over the 1900 budget; the tool description documents it). Release run: nextest
+  2352/2353 (that budget test, fixed), UI passed.
 - **First-run follow-up** (2026-11-05 overnight, `first-run-followup`, Terra): PR dashboard no longer shows raw
   `gh` auth output or "No pull requests" after a failed fetch; common auth and missing-CLI errors get a clear
   next step; signed-out fake-Claude harness test added; findings appended to docs/internal/first-run-audit.md.
@@ -872,7 +878,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
