@@ -359,7 +359,7 @@ fn chat_item_group(mac: bool, keymap: &KeymapConfig) -> ShortcutGroup {
             },
             ShortcutRow {
                 label: "Open the Team tab from the side panel (not in a text field)",
-                keys: Some("T".to_owned()),
+                keys: shortcut_combo(keymap, ShortcutId::OpenTeamTabFromPanel).map(|combo| key_label_on(mac, &combo)),
             },
             ShortcutRow {
                 label: "Pin or release the context card",

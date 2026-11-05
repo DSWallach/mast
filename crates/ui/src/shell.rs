@@ -128,6 +128,7 @@ actions!(
         OpenPrReviewChats,
         OpenItemTab,
         OpenTeamTab,
+        OpenTeamTabFromPanel,
         ToggleItemCard,
         ToggleRunningChats
     ]
@@ -519,6 +520,13 @@ pub fn apply_keymap(
             &valid_or_default(&keymap.open_team_tab, ShortcutId::OpenTeamTab.default_combo()),
             OpenTeamTab,
             None,
+        )]);
+    }
+    if !keymap.open_team_tab_from_panel.is_empty() {
+        cx.bind_keys([KeyBinding::new(
+            &valid_or_default(&keymap.open_team_tab_from_panel, ShortcutId::OpenTeamTabFromPanel.default_combo()),
+            OpenTeamTabFromPanel,
+            Some("TeamPanel && !Composer && !MessageComposer && !PaletteSearch"),
         )]);
     }
     crate::browser::bind_keys(cx, keymap);

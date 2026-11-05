@@ -231,7 +231,7 @@ impl ShortcutsPage {
                     cx.stop_propagation();
                     return;
                 }
-                if !matches!(recording, ShortcutId::Outline(_)) && send_combo_is_reserved(self.composer_send_behavior, &combo) {
+                if !matches!(recording, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel) && send_combo_is_reserved(self.composer_send_behavior, &combo) {
                     self.conflict_notice = Some(
                         format!("{} is reserved for the composer.", display_combo(&combo)).into(),
                     );
@@ -455,7 +455,7 @@ impl popover::ScrollRailHost for ShortcutsPage {
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
     ShortcutId::ALL
         .into_iter()
-        .find(|&other| other.available() && other != id && keymap.combos(other).contains(&combo))
+        .find(|&other| other.available() && other != id && crate::settings::shortcut_contexts_overlap(id, other) && keymap.combos(other).contains(&combo))
 }
 
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
@@ -523,7 +523,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::OutdentWorkItem
         | ShortcutId::ShowOutlineShortcuts
         | ShortcutId::OpenLinear => "Work Outline",
-        ShortcutId::OpenTeamTab => "Team",
+        ShortcutId::OpenTeamTab | ShortcutId::OpenTeamTabFromPanel => "Team",
         ShortcutId::Outline(_) => "Outline",
         ShortcutId::JumpSession(_) => "Jump to session",
     }
@@ -601,6 +601,7 @@ fn description(id: ShortcutId) -> &'static str {
              Overview (including the chat panel) it focuses the panel's search."
         }
         ShortcutId::OpenTeamTab => "Open the Team tab for a chat with workers.",
+        ShortcutId::OpenTeamTabFromPanel => "Open the Team tab while the side panel has focus.",
         ShortcutId::Outline(_) => "Available when the Outline has focus.",
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.
