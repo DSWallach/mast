@@ -9019,6 +9019,36 @@ mod logic_tests {
             vcx.debug_bounds("overview-expanded-detail").is_some(),
             "expanded content returns after scrolling back"
         );
+        let (boundary, before, after) = overview.read_with(vcx, |o, _| {
+            let boundary = o
+                .list_order
+                .windows(2)
+                .position(|pair| pair[1].1 > pair[0].1 + 1)
+                .unwrap();
+            (
+                boundary,
+                o.list_order[boundary].0.clone(),
+                o.list_order[boundary + 1].0.clone(),
+            )
+        });
+        overview.update(vcx, |o, cx| o.select_list_row(boundary, cx));
+        vcx.update(|window, cx| {
+            let focus = overview.read(cx).body_focus.clone();
+            window.focus(&focus, cx);
+        });
+        draw(vcx);
+        vcx.simulate_keystrokes("down");
+        draw(vcx);
+        assert_eq!(
+            overview.read_with(vcx, |o, _| o.list_selected.clone()),
+            Some(after)
+        );
+        vcx.simulate_keystrokes("up");
+        draw(vcx);
+        assert_eq!(
+            overview.read_with(vcx, |o, _| o.list_selected.clone()),
+            Some(before)
+        );
     }
 
     /// List mode with more rows than fit on screen: each row keeps its full
