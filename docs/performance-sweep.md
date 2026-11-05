@@ -51,3 +51,33 @@ Run `bench_profile_startup` as described above, adding `MAST_BENCH_SIDEBAR=1` fo
 Skipping jump-slot ordering while jump hints are hidden avoids a second chat sort and grouping pass on those renders. In one instrumented run before the change, 13 populated renders averaged 0.115 ms preparation and 1.512 ms construction; after, 12 averaged 0.125 ms and 1.482 ms, respectively. The after run overlapped a clean UI build, so this 0.030 ms difference does not establish a speedup. Cumulative startup was 328.12 → 423.21 ms and the final forced draw 9.47 → 9.66 ms in these noisy runs. When hints are visible the original ordering calculation still runs; navigation always retains its existing calculation.
 
 A repeat after the UI suite was still highly variable: cumulative startup 1,012.49 ms, final forced draw 16.48 ms, and 11 populated renders at 1.783 ms mean construction. This reinforces that these shared-host single runs do not demonstrate a latency improvement.
+
+## Follow-up: startup phases (2026-11-05)
+
+Five serial runs of the guarded installed-profile `bench_profile_startup`, with the `startup-bench` feature, using the same 53.3 MB synthetic registry and empty PR/Linear caches. The instrumented build completed before the runs. A process-list check was unavailable for this batch, so other system activity cannot be excluded. Table values are median (minimum–maximum), milliseconds. Engine phase timings are durations; UI milestones are elapsed from immediately before settings loading. They overlap and must not be added. The test's GPUI scheduler can coalesce frames and delay observation of milestones.
+
+| Phase or milestone | Median (min–max), ms |
+| --- | ---: |
+| Settings and keymap load | 0.028 (0.023–0.080) |
+| Initial shell draw milestone | 95.660 (88.760–173.090) |
+| Model registry setup | 0.037 (0.031–0.134) |
+| Registry store open | 0.336 (0.288–1.321) |
+| Registry snapshot read | 12.199 (11.903–13.388) |
+| Registry decode | 20.639 (20.042–21.894) |
+| Local pending-update settlement | 22.287 (21.982–23.632) |
+| Registry materialization (`read_all`) | 0.117 (0.112–0.135) |
+| Registry save | 8.735 (8.338–9.314) |
+| Linear cache setup (empty cache) | 0.010 (0.008–0.016) |
+| Engine core assembly, inclusive | 84.770 (80.739–97.464) |
+| Engine/RPC ready milestone | 188.193 (178.512–287.199) |
+| Chats loaded milestone | 242.461 (218.808–328.466) |
+| Outline snapshot construction | 1.285 (1.245–1.509) |
+| Outline loaded milestone | 316.794 (277.921–388.751) |
+| Final forced draw duration | 9.590 (9.550–10.810) |
+| Loaded draw milestone | 326.460 (287.850–413.940) |
+
+This benchmark starts inside an already running test process and cannot measure process launch. It registers lazy harnesses but does not measure actual model discovery; that work is not awaited by the core assembly. The PR dashboard opens its cache on first dashboard RPC, which this fixture does not request. The Linear cache files are absent, so their setup timing is not representative of warm populated cache reads. The loaded milestone is a forced draw after both chats and an explicitly declared outline arrive; it is not a verified first visible populated frame. The watch is started only after the corresponding Space appears, and scheduler/RPC/frame delivery are included in the gap between chat and outline milestones. The 75 ms watch coalescing delay applies to subsequent changes, not the first snapshot. The data do not isolate the gap sufficiently to attribute it to a single operation.
+
+The largest directly measured blocking work is snapshot read/decode and pending settlement; the synthetic registry deliberately contains 6,000 pending preview updates, so this result does not establish the same distribution for a compacted real profile. A candidate is to reduce registry history or make settlement and snapshot persistence cheaper. Deferring settlement or the boot save requires a durability and migration-order design: boot saves the migrated registry immediately so it survives a crash, and local settlement establishes authoritative state. Measure those alternatives with crash/restart and migration regressions before changing the ordering. A second investigation should instrument watch registration, RPC serialization/delivery and scheduler turns separately to explain the delayed outline milestone; do not assume the 75 ms coalescing timer is responsible. No startup behavior was changed in this follow-up.
+
+Reproduce after building with `cargo test -p mast-ui --lib --profile installed --features startup-bench --no-run`: run the resulting test executable five times with `bench_profile_startup --ignored --nocapture --test-threads=1`, `MAST_NO_LOGIN_SHELL=1`, and the inert `gh` and `linear` executables described above. `startup-bench` gates the engine instrumentation; the ignored UI benchmark supplies the milestone clocks.

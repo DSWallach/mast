@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+startup-bench = ["mast-engine/startup-bench"]
 project-palette-fixture = []
 
 browser-fixture = []
