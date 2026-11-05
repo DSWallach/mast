@@ -3480,6 +3480,8 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 };
                 #[cfg(feature = "startup-bench")]
                 eprintln!("BENCH phase | chats_decode | ms={:.3}", decode_started.elapsed().as_secs_f64() * 1000.0);
+                #[cfg(feature = "startup-bench")]
+                let update_span = crate::startup_measurement::MeasurementSpan::new("chats_update");
                 let alive = this.update(cx, |state, cx| {
                     #[cfg(feature = "startup-bench")]
                     startup_trace("chats_apply");
@@ -3491,6 +3493,8 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     state.reconcile_work_outline_watches(cx);
                     cx.notify();
                 });
+                #[cfg(feature = "startup-bench")]
+                drop(update_span);
                 if alive.is_err() {
                     return;
                 }
@@ -3609,6 +3613,8 @@ fn spawn_work_outline_watch(
                     continue;
                 }
                 newest_revision = snapshot.revision;
+                #[cfg(feature = "startup-bench")]
+                let update_span = crate::startup_measurement::MeasurementSpan::new("outline_update");
                 let alive = this.update(cx, |state, cx| {
                     #[cfg(feature = "startup-bench")]
                     startup_trace("outline_apply");
@@ -3616,6 +3622,8 @@ fn spawn_work_outline_watch(
                         cx.notify();
                     }
                 });
+                #[cfg(feature = "startup-bench")]
+                drop(update_span);
                 if alive.is_err() {
                     return;
                 }
@@ -3842,6 +3850,8 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                         continue;
                     }
                 };
+                #[cfg(feature = "startup-bench")]
+                let update_span = crate::startup_measurement::MeasurementSpan::new(method);
                 let alive = this.update(cx, |state, cx| {
                     let changed = apply(state, parsed);
                     state.apply_pending_deep_link(cx);
@@ -3855,6 +3865,8 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                         cx.notify();
                     }
                 });
+                #[cfg(feature = "startup-bench")]
+                drop(update_span);
                 if alive.is_err() {
                     return;
                 }

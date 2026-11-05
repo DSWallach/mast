@@ -235,6 +235,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("chat_header");
         let chat_id = self.state.read(cx).selected_chat.clone()?;
         self.ensure_chat_header_links(chat_id.clone(), cx);
         if self.chat_item_card_chat != chat_id {

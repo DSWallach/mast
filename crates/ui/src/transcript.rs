@@ -8746,6 +8746,8 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("transcript");
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
