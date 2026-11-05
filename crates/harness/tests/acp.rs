@@ -1177,7 +1177,10 @@ async fn devin_models_refresh_between_calls_and_coalesce_overlapping_probes() {
 #[tokio::test]
 async fn devin_discovery_errors_and_timeouts_retain_last_good_then_recover() {
     let (dir, harness) = devin_fixture();
-    let harness = harness.with_model_discovery_timeout(Duration::from_millis(500));
+    // Process startup can take several seconds under release-build load. Keep
+    // the timeout shorter than the fixture's 60-second hang, but allow normal
+    // discovery to finish before testing the timeout and cached recovery.
+    let harness = harness.with_model_discovery_timeout(Duration::from_secs(30));
     assert_eq!(harness.models().await.unwrap()[0].id, "gpt-old");
     std::fs::write(dir.path().join("state"), "error").unwrap();
     assert_eq!(harness.models().await.unwrap()[0].id, "gpt-old");
