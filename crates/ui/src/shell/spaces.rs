@@ -4339,6 +4339,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
+        #[cfg(test)]
+        let measurement_started = std::time::Instant::now();
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
@@ -4543,6 +4545,8 @@ impl Shell {
             }
         }
 
+        #[cfg(test)]
+        let preparation_elapsed = measurement_started.elapsed();
         let selected = self.state.read(cx).selected_chat.clone();
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
@@ -4825,6 +4829,19 @@ impl Shell {
                 .child(body)
                 .into_any_element();
             rendered.push((format!("g:{collapse_key}"), height, element));
+        }
+        #[cfg(test)]
+        if std::env::var_os("MAST_BENCH_SIDEBAR").is_some() {
+            eprintln!(
+                "BENCH sidebar | rows={} preparation_ms={:.3} construction_ms={:.3}",
+                base_ids.len(),
+                preparation_elapsed.as_secs_f64() * 1000.0,
+                measurement_started
+                    .elapsed()
+                    .saturating_sub(preparation_elapsed)
+                    .as_secs_f64()
+                    * 1000.0
+            );
         }
         SidebarSessionRows {
             custom_count,

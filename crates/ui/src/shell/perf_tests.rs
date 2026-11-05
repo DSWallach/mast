@@ -432,9 +432,13 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
     state.update(vcx, |state, cx| {
         state.declare_work_outline_visible(vec!["benchmark-space".into()], cx)
     });
+    let readiness_started = std::time::Instant::now();
+    let mut scheduler_time = std::time::Duration::ZERO;
     loop {
         runtime.block_on(tokio::task::yield_now());
+        let scheduler_started = std::time::Instant::now();
         vcx.run_until_parked();
+        scheduler_time += scheduler_started.elapsed();
         if state.read_with(vcx, |state, _| {
             state.chats.len() == 250
                 && state
@@ -450,10 +454,20 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
         );
         std::thread::yield_now();
     }
+    eprintln!(
+        "BENCH startup | readiness wait | ms={:.2} scheduler_ms={:.2}",
+        readiness_started.elapsed().as_secs_f64() * 1000.0,
+        scheduler_time.as_secs_f64() * 1000.0
+    );
+    let draw_started = std::time::Instant::now();
     vcx.update(|window, cx| {
         window.refresh();
         window.draw(cx).clear();
     });
+    eprintln!(
+        "BENCH startup | forced draw alone | ms={:.2}",
+        draw_started.elapsed().as_secs_f64() * 1000.0
+    );
     eprintln!(
         "BENCH startup | loaded sidebar draw | ms={:.2}",
         started.elapsed().as_secs_f64() * 1000.0
