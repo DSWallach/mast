@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Stale coordinator wakes** (2026-11-05, `stale-coordinator-wakes`, Terra): worker events go to one eligible
+  coordinator: a live explicit parent wins; otherwise one non-archived, wake-enabled chat on the project item (latest
+  hand-off target or most recently active), never every chat on the item. Archived and wake-disabled coordinators get
+  nothing (auto-continue and durable restore included); sending to an archived coordinator unarchives it. Known
+  follow-up: a cross-device archive→unarchive race can let one held wake through. Release run: nextest 1242/1242,
+  UI 2481/0.
 - **Talk/decision metrics** (2026-11-05, `talk-metrics`, Terra; plan rev 3 phase 0): `tools/mast-metrics` reads an
   immutable copy of the profile (sqlite `.backup` of docs.sqlite3 + copied journals, never the live store) and writes
   aggregate JSON/Markdown with `--since/--until` and `--compare <old.json>`. Snapshots and reports live in
