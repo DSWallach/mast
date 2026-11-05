@@ -1597,6 +1597,8 @@ struct SidebarPane {
 
 impl Render for SidebarPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("sidebar");
         crate::transcript::record_view_frame("sidebar");
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
@@ -7951,6 +7953,8 @@ impl Shell {
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("chat_sidebar");
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -10509,6 +10513,8 @@ impl Shell {
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
     /// an embedded terminal, or the surface picker when no tabs exist.
     fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("side_panel");
         let theme = Theme::of(cx).clone();
         let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
         {
@@ -12015,6 +12021,8 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("shell");
         self.render_time = Some(std::time::Instant::now());
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()

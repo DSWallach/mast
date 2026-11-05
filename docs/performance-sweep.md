@@ -124,3 +124,27 @@ The first outline watch uses GPUI `cx.spawn`, not `tokio::spawn`. This fixture c
 A second five-run batch replaced the GPUI drain with the equivalent loop of individual test-executor `tick()` calls and timed each tick. Spawn to first poll was 41.304 ms median (37.261–52.628). All five intervals were contained in one GPUI drain; in each, a tick overlapping the spawn took 24.983–30.997 ms, followed by one or two ticks taking 10.425–11.233 ms each. The test executor runs queued foreground and background runnables serially. The timing therefore demonstrates delay in this headless test's GPUI scheduling and work, not a Tokio worker blocked by registry startup during that interval. It does not identify the individual runnable or prove that equivalent GPUI work cannot delay a real application. No blocking work was moved and no production behavior changed. The tick instrumentation adds clock reads and output, so its values are not a before/after optimization comparison.
 
 Follow-up verification: both five-run scheduler batches passed, and `cargo test -p mast-ui --lib -- --test-threads=1` passed 2,473 tests (13 ignored). No engine behavior or engine tests changed in this follow-up.
+
+### Follow-up: startup view and watch-update attribution
+
+Five serial installed-profile runs on `c36de32fb` with `startup-bench` and `MAST_BENCH_RENDER=1` used the same guarded fixture. The spans measure synchronous element construction and watch state updates, including any nested effects; they do not time individual GPUI layout, shaping, or paint operations. The span and tick clocks and diagnostic output add overhead. Other host activity could not be checked because the sandbox denied process listing. These are headless test-process results, not production startup measurements.
+
+The tick containing the outline watch spawn was the `WatchSpaces` state update in all five runs: update median 29.474 ms (27.466–34.907), tick median 29.523 ms (27.510–34.967). Two shell/sidebar construction passes occurred inside that update in each run. The next tick was the `AuthStatus` update: update median 12.478 ms (11.621–13.097), tick median 12.524 ms (11.699–13.164). A third tick, median 11.645 ms (10.832–13.144), also contained a shell/sidebar pass, but its originating runnable was not identified. These timings overlap and are not additive. The watch first poll followed those ticks in all five runs.
+
+The table reports the median across the five runs of the **largest individual construction span** for each view during those ticks, not the sum of repeated renders or the cost of a complete frame. Sidebar includes chat-sidebar construction. Shell includes the side-panel and header construction calls; nested spans must not be added.
+
+| View or nested operation | Median (min–max), ms |
+| --- | ---: |
+| Shell | 0.214 (0.169–0.246) |
+| Sidebar | 2.592 (2.211–3.023) |
+| Chat sidebar | 2.515 (2.186–2.969) |
+| Chat header | 0.017 (0.017–0.083) |
+| Transcript | 0.006 (0.005–0.013) |
+| Side panel | 0.002 (0.001–0.004) |
+| Outline | Not rendered in this interval |
+
+GPUI's `App::flush_effects` under `test-support` draws dirty windows synchronously while flushing an update, and repeats the loop while effects remain. This accounts for why drawing can occur inside these watch updates and why the first update can contain two construction passes. The measured construction spans do not account for the full ticks; they do not distinguish layout, text shaping, painting, or other effect processing. The test scheduler and forced draws can therefore explain the observed scheduling relationship, but these measurements do not establish the cost or necessity of any specific layout operation in production. In particular, the third runnable and the remainder of each draw remain unattributed. No behavior change or performance improvement is claimed; no low-risk optimization was established from these measurements.
+
+Reproduce with the installed-profile build and offline executables described above, adding `MAST_BENCH_RENDER=1` to each of five serial benchmark runs. Compare `BENCH render` span wall times with `BENCH scheduler | gpui_tick` and outline spawn/subscribe timestamps. The additional watch spans name state-update intervals, not the entire asynchronous task lifetime.
+
+Verification: all five benchmark runs passed; `cargo test -p mast-ui --lib --profile installed --features startup-bench -- --test-threads=1` passed 2,481 tests (13 ignored). The requested default-profile command was not run; the clean installed-profile target and the required 100 GiB free-space floor left insufficient confirmed headroom for a second clean profile. The timing gate was unset for the suite.

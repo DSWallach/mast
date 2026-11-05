@@ -3917,6 +3917,8 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme)
 
 impl Render for OutlineView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("outline");
         let theme = Theme::of(cx).clone();
         let editing = self.is_editing();
         // A drag released outside a row (or cancelled) leaves no indicator.

@@ -63,6 +63,8 @@ pub mod overview_grouping;
 pub mod overview_positions;
 #[cfg(test)]
 mod perf;
+#[cfg(feature = "startup-bench")]
+mod startup_measurement;
 pub mod pickers;
 pub mod popover;
 pub(crate) mod pr_page;
