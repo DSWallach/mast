@@ -406,7 +406,7 @@ fn plans_with_fewer_than_three_headings_get_no_index(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_index_can_collapse_to_a_strip_and_back(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
-    let (tab, _probe, vcx) = open(cx, ArtifactKind::Markdown, PLAN_MD);
+    let (_tab, _probe, vcx) = open(cx, ArtifactKind::Markdown, PLAN_MD);
     let open_width = vcx.debug_bounds("artifact-index").expect("rail").size.width;
     let toggle = vcx.debug_bounds("artifact-index-toggle").expect("toggle");
     vcx.simulate_click(toggle.center(), gpui::Modifiers::default());

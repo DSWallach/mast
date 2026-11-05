@@ -52,10 +52,10 @@ impl ArtifactTab {
         if self.loading {
             return Vec::new();
         }
-        if let Some((generation, questions)) = &self.questions.cached {
-            if *generation == self.generation {
-                return questions.clone();
-            }
+        if let Some((generation, questions)) = &self.questions.cached
+            && *generation == self.generation
+        {
+            return questions.clone();
         }
         let questions = self
             .shown_text()
