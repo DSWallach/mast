@@ -55,7 +55,7 @@ To get a normal app you can keep in `/Applications`, build the bundle and disk i
 scripts/package-macos.sh
 ```
 
-The script attempts to install `dmgbuild` with pip if it is missing. Use Cargo's default target directory when packaging: the script expects the release binary under `target/release`. It writes `target/package/Mast.app` and a `.dmg` next to it. Copy the app to `/Applications`. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open. Release file names keep the `zeron-` prefix on purpose.
+The script attempts to install `dmgbuild` with pip if it is missing. It writes `target/package/Mast.app` and a `.dmg` next to it (or `package/` under `CARGO_TARGET_DIR` when set). Copy the app to `/Applications`. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open. Release file names keep the `zeron-` prefix on purpose.
 
 To try it without touching an installed Mast, run the isolated dev app:
 
