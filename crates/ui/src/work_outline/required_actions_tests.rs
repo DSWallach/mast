@@ -1065,3 +1065,61 @@ fn typed_action_button_sets_follow_request_kind(cx: &mut gpui::TestAppContext) {
         assert!(row_bounds(vcx, format!("required-actions-resolve-{}", m4::R_UI)).is_some(), "{kind:?}");
     }
 }
+
+#[gpui::test]
+fn choice_button_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
+    use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
+    request.kind = Some(UserActionKind::Choose);
+    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None }];
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
+    let list = open_global(&overview, vcx);
+    click(vcx, format!("required-actions-option-{}-0", m4::R_UI));
+    vcx.run_until_parked();
+    list.update(vcx, |list, cx| list.choose_option(m4::R_UI.into(), "b".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(sends(&calls).len(), 1);
+    assert!(sends(&calls)[0]["prompt"]["text"].as_str().unwrap().contains("Palette B"));
+    assert_eq!(resolves(&calls).len(), 1);
+    assert_eq!(resolves(&calls)[0]["outcome"], "done");
+    assert_eq!(resolves(&calls)[0]["values"]["optionId"], "b");
+}
+
+#[gpui::test]
+fn inline_ask_reply_relays_and_resolves(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), reply_started);
+    let list = open_global(&overview, vcx);
+    let input = list.read_with(vcx, |list, _| list.inline_reply_input(m4::R_UI).unwrap());
+    input.update(vcx, |input, cx| input.set_text("Palette B", cx));
+    draw(vcx);
+    click(vcx, format!("required-actions-inline-submit-{}", m4::R_UI));
+    vcx.run_until_parked();
+    assert_eq!(sends(&calls).len(), 1);
+    assert!(sends(&calls)[0]["prompt"]["text"].as_str().unwrap().contains("Palette B"));
+    assert_eq!(resolves(&calls).len(), 1);
+}
+
+#[gpui::test]
+fn focused_choice_card_accepts_number_key(cx: &mut gpui::TestAppContext) {
+    use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
+    request.kind = Some(UserActionKind::Choose);
+    request.options = vec![
+        RequestOption { id: "a".into(), label: "Palette A".into(), detail: None },
+        RequestOption { id: "b".into(), label: "Palette B".into(), detail: None },
+    ];
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
+    let list = open_global(&overview, vcx);
+    let focus = list.read_with(vcx, |list, _| list.choice_focus(m4::R_UI).unwrap());
+    vcx.update(|window, cx| { window.activate_window(); window.focus(&focus, cx); });
+    draw(vcx);
+    vcx.simulate_keystrokes("2");
+    vcx.run_until_parked();
+    assert_eq!(sends(&calls).len(), 1);
+    assert_eq!(resolves(&calls)[0]["values"]["optionId"], "b");
+}

@@ -333,7 +333,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                         { "properties": { "type": { "const": "chat" }, "id": { "type": "string" } }, "required": ["type", "id"] },
                         { "properties": { "type": { "const": "url" }, "url": { "type": "string" } }, "required": ["type", "url"] }
                     ] } } } },
-                    "options": { "type": "array", "maxItems": 9, "items": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string", "maxLength": 120 }, "label": { "type": "string", "maxLength": 120 }, "detail": { "type": "string", "maxLength": 1000 } } } },
+                    "options": { "type": "array", "items": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string", "maxLength": 120 }, "label": { "type": "string", "maxLength": 120 }, "detail": { "type": "string", "maxLength": 1000 } } } },
                     "facts": { "type": "array", "maxItems": 8, "items": { "type": "object", "required": ["label", "value"], "properties": { "label": { "type": "string", "maxLength": 40 }, "value": { "type": "string", "maxLength": 120 } } } },
                     "detail": { "type": "string" },
                     "dedupeKey": { "type": "string", "description": "Equivalent open requests with the same key are not repeated. With a dedupeKey, idempotencyKey is optional." },

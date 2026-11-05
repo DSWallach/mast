@@ -2416,6 +2416,7 @@ impl SubtreeWalk<'_> {
                     "id": r.id,
                     "links": r.links,
                     "facts": r.facts,
+                    "options": r.options,
                     "text": r.text,
                     "detail": r.info.as_deref().map(|d| d.chars().take(MAX_SUBTREE_DETAIL_CHARS).collect::<String>()),
                     "detailTruncated": r.info.as_deref().is_some_and(|d| d.chars().count() > MAX_SUBTREE_DETAIL_CHARS),

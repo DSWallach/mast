@@ -144,6 +144,7 @@ pub(crate) struct ReplyIntent {
     pub note: String,
     pub message: String,
     pub outcome: String,
+    pub option_id: Option<String>,
     /// The host accepted the send (queued or written).
     pub sent: bool,
 }
@@ -199,6 +200,8 @@ pub(crate) struct RequiredActionsList {
     spaces: Vec<SpaceSnapshot>,
     chats: Arc<Vec<OutlineChat>>,
     note_input: Entity<ComposerInput>,
+    reply_inputs: HashMap<String, Entity<ComposerInput>>,
+    choice_focus: HashMap<String, FocusHandle>,
     /// The request whose resolve note is open (one at a time).
     pub(crate) resolving: Option<String>,
     decision: Option<String>,
@@ -259,6 +262,8 @@ impl RequiredActionsList {
             spaces: Vec::new(),
             chats: Arc::default(),
             note_input,
+            reply_inputs: HashMap::new(),
+            choice_focus: HashMap::new(),
             resolving: None,
             decision: None,
             info_open: HashSet::new(),
@@ -328,6 +333,16 @@ impl RequiredActionsList {
         self.resolving = None;
         self.decision = None;
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn choice_focus(&self, id: &str) -> Option<FocusHandle> {
+        self.choice_focus.get(id).cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline_reply_input(&self, id: &str) -> Option<Entity<ComposerInput>> {
+        self.reply_inputs.get(id).cloned()
     }
 
     #[cfg(test)]
@@ -425,6 +440,7 @@ impl RequiredActionsList {
             operation_id,
             None,
             Some("dismissed".into()),
+            None,
             cx,
         );
     }
@@ -439,7 +455,7 @@ impl RequiredActionsList {
         note: String,
         cx: &mut Context<Self>,
     ) {
-        if self.in_flight.contains(&request_id) {
+        if self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() {
             return;
         }
         let pending = self.replies.get(&request_id).cloned();
@@ -470,6 +486,7 @@ impl RequiredActionsList {
                         &note,
                     ),
                     outcome: outcome.into(),
+                    option_id: None,
                     note,
                     sent: false,
                 }
@@ -484,6 +501,33 @@ impl RequiredActionsList {
         } else {
             self.send_reply(request_id, intent, cx);
         }
+    }
+
+    pub(crate) fn choose_option(&mut self, request_id: String, option_id: String, cx: &mut Context<Self>) {
+        if self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() { return; }
+        if let Some(intent) = self.replies.get(&request_id).filter(|intent| intent.sent).cloned() {
+            self.in_flight.insert(request_id.clone());
+            self.resolve_reply(request_id, intent, cx);
+            return;
+        }
+        let Some(row) = self.open_row(&request_id) else { return; };
+        if !row.chat_available || row.system { return; }
+        let Some(option) = row.options.iter().find(|option| option.id == option_id) else { return; };
+        let note = option.label.clone();
+        let intent = self.replies.get(&request_id).filter(|intent| intent.option_id.as_deref() == Some(option_id.as_str())).cloned().unwrap_or_else(|| ReplyIntent {
+            operation_id: super::actions::new_operation_id(),
+            chat_id: row.chat_id.clone(),
+            message: required_actions::decision_message(&row.text, &request_id, "chosen", &note),
+            note,
+            outcome: "done".into(),
+            option_id: Some(option_id),
+            sent: false,
+        });
+        self.replies.insert(request_id.clone(), intent.clone());
+        self.in_flight.insert(request_id.clone());
+        self.clear_error();
+        cx.notify();
+        self.send_reply(request_id, intent, cx);
     }
 
     fn decide(
@@ -513,6 +557,7 @@ impl RequiredActionsList {
                 operation_id,
                 None,
                 Some(outcome),
+                None,
                 cx,
             );
             return;
@@ -533,6 +578,7 @@ impl RequiredActionsList {
                 ),
                 note,
                 outcome,
+                option_id: None,
                 sent: false,
             });
         self.replies.insert(request_id.clone(), intent.clone());
@@ -608,6 +654,7 @@ impl RequiredActionsList {
             operation_id,
             Some(replied),
             Some(intent.outcome),
+            intent.option_id,
             cx,
         );
     }
@@ -620,11 +667,15 @@ impl RequiredActionsList {
         operation_id: String,
         replied: Option<RepliedRequest>,
         outcome: Option<String>,
+        option_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let values = outcome
             .as_ref()
-            .map(|action| serde_json::json!({ "action": action }));
+            .map(|action| match option_id {
+                Some(option_id) => serde_json::json!({ "action": action, "optionId": option_id }),
+                None => serde_json::json!({ "action": action }),
+            });
         let task = self
             .state
             .read(cx)
@@ -839,7 +890,7 @@ impl RequiredActionsList {
     }
 
     fn render_row(
-        &self,
+        &mut self,
         row: RequiredActionRow,
         now: chrono::DateTime<chrono::Utc>,
         theme: &Theme,
@@ -1063,7 +1114,7 @@ impl RequiredActionsList {
                         el = el.child(
                             Self::button(
                                 SharedString::from(format!("required-actions-reply-{id}")),
-                                "Reply",
+                                if row.kind == UserActionKind::Choose && !row.options.is_empty() { "Other…" } else { "Reply" },
                                 !busy && row.chat_available,
                                 theme,
                             )
@@ -1098,6 +1149,38 @@ impl RequiredActionsList {
                     )
                 })
         });
+        let inline_reply = if open && !row.system && row.chat_available && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Ask && !resolving {
+            let input = if let Some(input) = self.reply_inputs.get(&id) {
+                input.clone()
+            } else {
+                let input = cx.new(|cx| ComposerInput::new("Reply…", cx).with_text_metrics(12.0, 18.0).with_auto_grow());
+                let request_id = id.clone();
+                let subscription = cx.subscribe(&input, move |this: &mut Self, input, event, cx| {
+                    match event {
+                        ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
+                            let note = input.read(cx).text().trim().chars().take(mast_proto::user_action_limits::MAX_NOTE_CHARS).collect();
+                            this.reply_and_resolve(request_id.clone(), note, cx);
+                        }
+                        ComposerInputEvent::Edited => cx.notify(),
+                        _ => {}
+                    }
+                });
+                self._subscriptions.push(subscription);
+                self.reply_inputs.insert(id.clone(), input.clone());
+                input
+            };
+            let request_id = id.clone();
+            let submit_selector = format!("required-actions-inline-submit-{id}");
+            let note = input.read(cx).text().trim().to_owned();
+            let enabled = !busy && !note.is_empty();
+            Some(div().flex().gap(px(4.0)).pl(px(12.0))
+                .child(div().flex_1().min_w_0().px(px(6.0)).py(px(3.0)).rounded(px(4.0)).border_1().border_color(theme.border).child(input))
+                .child(Self::button(SharedString::from(submit_selector.clone()), "Send", enabled, theme)
+                    .debug_selector(move || submit_selector.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if enabled { this.reply_and_resolve(request_id.clone(), note.clone(), cx); }
+                    }))))
+        } else { None };
         let resolve_form = resolving.then(|| {
             div()
                 .flex()
@@ -1247,6 +1330,28 @@ impl RequiredActionsList {
         } else {
             format!("required-actions-history-row-{id}")
         };
+        let choices = if open && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose && !row.options.is_empty() {
+            let mut choices = div().flex().flex_wrap().gap(px(4.0)).pl(px(12.0));
+            for (index, option) in row.options.iter().enumerate() {
+                let request_id = id.clone();
+                let option_id = option.id.clone();
+                let label = option.label.clone();
+                let detail = option.detail.clone();
+                let button_id = format!("required-actions-option-{id}-{index}");
+                choices = choices.child(Self::button(SharedString::from(button_id.clone()), "", !busy && row.chat_available, theme)
+                    .child(SharedString::from(label))
+                    .when_some(detail, |el, detail| el.tooltip(move |_, cx| cx.new(|_| TextTooltip(detail.clone().into())).into()))
+                    .debug_selector(move || button_id.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_option(request_id.clone(), option_id.clone(), cx))));
+            }
+            Some(choices)
+        } else { None };
+        let keyboard_id = id.clone();
+        let keyboard_options = row.options.clone();
+        let keyboard_enabled = open && !resolving && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose && row.chat_available;
+        let choice_focus = if keyboard_enabled && !keyboard_options.is_empty() {
+            Some(self.choice_focus.entry(id.clone()).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone())
+        } else { None };
         let artifact_links = self.render_artifact_links(&id, &row, theme, cx);
         let request_links = self.render_request_links(&id, &row, theme, cx);
         let detail = row.info.as_deref().map(|source| {
@@ -1281,6 +1386,18 @@ impl RequiredActionsList {
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
+            .when_some(choice_focus, |el, focus| el.track_focus(&focus))
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if !keyboard_enabled || event.is_held || event.keystroke.modifiers != gpui::Modifiers::default() { return; }
+                if let Ok(index) = event.keystroke.key.parse::<usize>() {
+                    if (1..=9).contains(&index) {
+                        if let Some(option) = keyboard_options.get(index - 1) {
+                            this.choose_option(keyboard_id.clone(), option.id.clone(), cx);
+                            cx.stop_propagation();
+                        }
+                    }
+                }
+            }))
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -1310,6 +1427,7 @@ impl RequiredActionsList {
                     )
                     .child(
                         div()
+                            .debug_selector({ let selector = format!("required-actions-text-{id}"); move || selector.clone() })
                             .flex_1()
                             .min_w_0()
                             .text_size(crate::typography::ui_rems(12.0))
@@ -1344,6 +1462,8 @@ impl RequiredActionsList {
             .when_some(resolution, |el, line| {
                 el.child(div().pl(px(12.0)).child(line))
             })
+            .when_some(choices, |el, choices| el.child(choices))
+            .when_some(inline_reply, |el, reply| el.child(reply))
             .when_some(actions, |el, actions| el.child(actions))
             .when_some(resolve_form, |el, form| {
                 el.child(div().pl(px(12.0)).child(form))
@@ -1510,7 +1630,7 @@ impl RequiredActionsList {
 
     /// The list body: open rows, then the collapsed history.
     fn render_body(
-        &self,
+        &mut self,
         rows: RequiredActionRows,
         theme: &Theme,
         window: &Window,

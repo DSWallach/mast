@@ -570,8 +570,7 @@ impl RegistryDoc {
         {
             return Err(invalid("A fact label or value exceeds its character limit"));
         }
-        if p.options.len() > 9
-            || p.options.iter().any(|option| {
+        if p.options.iter().any(|option| {
                 option.id.trim().is_empty()
                     || option.id.chars().count() > 120
                     || option.label.trim().is_empty()
