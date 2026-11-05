@@ -159,7 +159,7 @@ impl PrMergedWakes {
                         space,
                         &self.workspace.work_outline_inputs(space),
                     );
-                    for request in crate::archivable::open_handoffs_for_branch(&snapshot, branch) {
+                    for request in crate::archivable::open_handoffs_for_pr(&snapshot, status.branch.as_deref().unwrap_or(""), &url) {
                         detail
                             .push_str(&format!("; handoff request {} can be resolved", request.id));
                     }
