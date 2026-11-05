@@ -39,7 +39,6 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use mast_proto::GitHistoryCommit;

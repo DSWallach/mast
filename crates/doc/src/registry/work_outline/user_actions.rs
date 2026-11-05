@@ -1290,7 +1290,7 @@ impl RegistryDoc {
     /// item itself counts as a project).
     fn item_in_agent_reach(&self, space: &str, root: &str, item: &str) -> bool {
         let tree = self.outline_tree(space);
-        if (item == root || tree.descendants(root).iter().any(|id| id == item)) {
+        if item == root || tree.descendants(root).iter().any(|id| id == item) {
             return true;
         }
         let mut cursor = Some(root.to_owned());

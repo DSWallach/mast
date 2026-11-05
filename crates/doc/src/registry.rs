@@ -993,7 +993,7 @@ impl RegistryDoc {
     /// Visit every live row of `kind` (overlay applied). Reads stored rows in
     /// place when nothing queued touches the kind, else falls back to
     /// [`Self::overlay_rows`]; row order is unspecified.
-    fn visit_rows(&self, kind: &str, mut visit: impl FnMut(&RegistryRow)) {
+    fn visit_rows(&self, kind: &str, visit: impl FnMut(&RegistryRow)) {
         let queued = self
             .pending
             .iter()
