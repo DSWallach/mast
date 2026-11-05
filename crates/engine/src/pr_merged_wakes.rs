@@ -107,7 +107,7 @@ impl PrMergedWakes {
                     && crate::chat_links::canonicalize_pr_url(&link.url) == url) {
                     space_owns_pr = true;
                 }
-                if status.branch.as_deref().is_some_and(|branch| chat.branch.as_deref().is_none_or(|chat_branch| chat_branch == branch))
+                if status.branch.as_deref().is_some_and(|branch| chat.branch.as_deref() == Some(branch))
                     && links.iter().any(|link| crate::archivable::owns_pr_link(link)
                         && crate::chat_links::canonicalize_pr_url(&link.url) != url) {
                     branch_ambiguous = true;
