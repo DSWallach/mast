@@ -332,7 +332,7 @@ fn save_validates_project_space_and_names() {
         WorkOutlineErrorCode::NotFound
     );
     // The same name is fine in another Space.
-    let mut other_doc_item = |doc: &mut RegistryDoc| {
+    let other_doc_item = |doc: &mut RegistryDoc| {
         let p = item(doc, OTHER, "op2", None, "P");
         update(
             doc,

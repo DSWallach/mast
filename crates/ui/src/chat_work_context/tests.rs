@@ -1,29 +1,14 @@
 //! Work-context resolver tests. Every store is filled by hand; nothing reaches
 //! GitHub or Linear.
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::time::Instant;
-
-use chrono::{TimeZone, Utc};
-use gpui::{
-    AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
-    VisualTestContext, Window, div, px,
-};
 use mast_engine::pr_ticket_cache::{ChatLinkStatus, PrLinkStatus};
 use mast_proto::{
-    ArtifactKind, ChatLinkSource, PullRequestCiStatus, PullRequestMyReviewState, PullRequestRef,
-    PullRequestReviewDecision, PullRequestState, WorkOutlineSnapshot,
+    ArtifactKind, ChatLinkSource, PullRequestRef, WorkOutlineSnapshot,
 };
 
 use super::*;
 use crate::artifacts::tests::{artifact, id as artifact_id, snapshot as artifacts_snapshot};
 use crate::github::fixture as gf;
-use crate::github::row_icons::Tone;
-use crate::github::store::PrEntry;
 use crate::linear::fixture as lf;
-use crate::linear::store::IssueEntry;
-use crate::theme::Theme;
 use crate::work_outline::store::{fixture_ids::*, fixture_snapshot};
 
 // ----------------------------------------------------------------------

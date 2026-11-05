@@ -323,7 +323,7 @@ pub(crate) fn check_results(
     let many = outputs.len() > 1;
     let mut result = ArtifactRenderCheckResult::default();
     let mut layout_dropped = false;
-    let mut add = |list: &mut Vec<String>, text: String| {
+    let add = |list: &mut Vec<String>, text: String| {
         if !list.contains(&text) {
             list.push(text);
         }
