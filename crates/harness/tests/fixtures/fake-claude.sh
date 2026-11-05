@@ -13,6 +13,11 @@ emit() { printf '%s\n' "$1"; }
 
 case "$first" in
 
+*scenario:signed-out*)
+  emit '{"type":"assistant","error":"authentication_failed","message":{"content":[]}}'
+  exit 1
+  ;;
+
 *scenario:title*)
   tools_off=false
   system_set=false
