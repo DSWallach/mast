@@ -181,3 +181,21 @@ fn the_log_numbers_entries_and_serves_since() {
     let after = log.since(1);
     assert_eq!(after.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
 }
+
+#[test]
+fn open_handoffs_match_explicit_branch_references() {
+    let snapshot: WorkOutlineSnapshot = serde_json::from_value(json!({
+        "spaceId": "s",
+        "userActionRequests": [
+            {"id":"link", "kind":"handoff", "state":"open", "links":[{"label":"Diff", "target":{"type":"diff", "branch":"feature/a"}}]},
+            {"id":"fact", "kind":"handoff", "state":"open", "facts":[{"label":"Branch", "value":"feature/a"}]},
+            {"id":"other", "kind":"handoff", "state":"open", "facts":[{"label":"Branch", "value":"feature/ab"}]},
+            {"id":"review", "kind":"review", "state":"open", "facts":[{"label":"Branch", "value":"feature/a"}]},
+            {"id":"resolved", "kind":"handoff", "state":"resolved", "facts":[{"label":"Branch", "value":"feature/a"}]}
+        ]
+    })).unwrap();
+    let ids: Vec<_> = open_handoffs_for_branch(&snapshot, "feature/a")
+        .iter().map(|request| request.id.as_str()).collect();
+    assert_eq!(ids, ["link", "fact"]);
+    assert!(open_handoffs_for_branch(&snapshot, "").is_empty());
+}
