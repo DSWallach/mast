@@ -616,6 +616,14 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **First-run audit fixes** (2026-11-05 overnight, `first-run-audit`, Terra): report at
+  docs/internal/first-run-audit.md (6 findings). Fixed: profile classification (fresh vs existing) now uses
+  saved settings or real Space/chat registry data before either startup mode, so headless-first startup no
+  longer marks a fresh profile existing; packaging uses the binary Cargo reports (CARGO_TARGET_DIR-aware) and
+  fails clearly when missing; launch returns "agent not installed: <harness>" up front instead of "started";
+  docs no longer present gh as required; PR repository error lost its Cofactr wording. Open from the audit:
+  signed-out-but-installed agent flow, sign-in gate and no-auth tab states not yet checked. Release run:
+  nextest 2401/2401, UI 2459/0.
 - **PR file paging** (2026-11-05 overnight, `pr-files-paging`, Terra): PR files fetched page by page up to 3,000;
   partial results kept on failures and rate limits; scores reused for an unchanged head sha; "partial" badge
   with "Scored from the first N of M files". Release run: nextest 2350/2350, UI passed.
@@ -858,7 +866,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
   redraws) and cleanup sweep (item e71201b1: warnings/clippy, dead code, stale docs/scripts; no behavior
   change). Mikey: "up until 8 am look for perf improvements and clean up opportunities".
 - Wave 3: Needs-you phase 4 (answer ask/choose on the card).
-- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging.
+- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging, first-run-audit.
 - Release in batches of ≤3 branches; never run a release while 3 Terra builds are compiling.
 - Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
 
