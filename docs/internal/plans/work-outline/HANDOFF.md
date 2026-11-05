@@ -859,22 +859,15 @@ models to save Anthropic usage). Workers report to it (parentChatId). `hand_off_
 exists to move workers to a fresh coordinator; the UI menu item is a later slice. Release runs go
 DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n 4096`).
 
-**Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h):**
-- Wave 1 running: `hand-off-ui` (chat 1dad5051, item 89136ef9), `wake-label-fd-limit` (chat fd03a9e0, item
-  461cf800: registry-title wake labels + raise child RLIMIT_NOFILE), `friction-import` (chat 72192da1, item
-  af739bc7: import the old agent-friction-log.md format; Mikey runs the import himself).
-- Wave 2 (as wave 1 frees builds): PR dashboard file paging (#5, past the first 100 files, "partial" badge
-  at ~3,000), rebindable outline/Team shortcuts (3b6f9919), first-run smoke audit on a temp data dir
-  (headless, report only).
-- Also running: `perf-diff-navigation` (chat b3be1a11, item e5368f48; Mikey finds diff navigation slow:
-  measure first, fix top 2–4 low-risk hot spots with before/after numbers).
-- Wave 2 also: general perf sweep (item 561a9c07: startup, chat switching, transcript scroll, outline/Team
-  redraws) and cleanup sweep (item e71201b1: warnings/clippy, dead code, stale docs/scripts; no behavior
-  change). Mikey: "up until 8 am look for perf improvements and clean up opportunities".
-- Wave 3: Needs-you phase 4 (answer ask/choose on the card).
-- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging, first-run-audit, perf-sweep.
-- Release in batches of ≤3 branches; never run a release while 3 Terra builds are compiling.
+**Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
+- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
+  first-run-audit, perf-sweep (List virtualization).
+- Running (01:50): `rebindable-outline-shortcuts` (chat d4606323, item 3b6f9919), `cleanup-sweep` (chat edf8933b,
+  item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
+  item d0be64b2: answer ask/choose on the card, optional `options` field).
+- Release in batches; never run a release while 3 Terra builds compile.
 - Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
+- Open from first-run audit: signed-out-but-installed agent flow, sign-in gate and no-auth tab states.
 
 **Queued after overnight:** Needs-you phases 5–6, PR review phase 4 (walkthrough), data/binary rename
 migration, item-tab artifact surfacing (171cde5a), container templates phases 2+.
