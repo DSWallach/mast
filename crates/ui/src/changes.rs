@@ -8876,6 +8876,7 @@ index 1111111..2222222 160000
                 false,
             ),
         ];
+        candidates[0].bound = true;
         candidates[3].bound = true;
         candidates
     }
