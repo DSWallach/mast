@@ -455,7 +455,7 @@ impl popover::ScrollRailHost for ShortcutsPage {
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
     ShortcutId::ALL
         .into_iter()
-        .find(|&other| other.available() && other != id && crate::settings::shortcut_contexts_overlap(id, other) && keymap.combos(other).contains(&combo))
+        .find(|&other| other.available() && other != id && crate::settings::shortcut_contexts_overlap(id, other) && keymap.combos(other).into_iter().any(|other_combo| crate::settings::shortcut_combos_conflict(combo, other_combo)))
 }
 
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {

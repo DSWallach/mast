@@ -1565,12 +1565,21 @@ pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
         | (ShortcutId::OpenTeamTabFromPanel, ShortcutId::Outline(_)))
 }
 
+/// Compare physical keystrokes so aliases such as ctrl and mod conflict off macOS.
+pub fn shortcut_combos_conflict(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() { return false; }
+    match (gpui::Keystroke::parse(&platform_combo(left)), gpui::Keystroke::parse(&platform_combo(right))) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 /// Shortcut ids whose combos collide with another shortcut (conflict detection).
 pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
     ShortcutId::ALL.into_iter().filter(|&id| {
         id.available() && keymap.combos(id).into_iter().any(|combo| {
             ShortcutId::ALL.into_iter().any(|other| {
-                other.available() && other != id && shortcut_contexts_overlap(id, other) && keymap.combos(other).contains(&combo)
+                other.available() && other != id && shortcut_contexts_overlap(id, other) && keymap.combos(other).into_iter().any(|other_combo| shortcut_combos_conflict(combo, other_combo))
             })
         })
     }).collect()
