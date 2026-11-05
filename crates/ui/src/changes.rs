@@ -1947,6 +1947,10 @@ struct CommentDraft {
 /// The Changes pane entity. Lazy: no RPC until [`Changes::ensure_watch`] runs
 /// (the shell calls it when the pane first opens).
 pub struct Changes {
+    #[cfg(test)]
+    benchmark_render_count: usize,
+    #[cfg(test)]
+    benchmark_highlight_count: usize,
     state: Entity<AppState>,
     /// Immutable owner identity plus the latest authoritative target for that
     /// owner. This is deliberately independent of AppState's global selection.
@@ -2185,6 +2189,10 @@ impl Changes {
             if matches!(event, ComposerInputEvent::Edited) { cx.notify(); }
         });
         Self {
+            #[cfg(test)]
+            benchmark_render_count: 0,
+            #[cfg(test)]
+            benchmark_highlight_count: 0,
             state,
             owner,
             mode,
@@ -4139,6 +4147,8 @@ impl Changes {
             );
             return None;
         }
+        #[cfg(test)]
+        { self.benchmark_highlight_count += 1; }
         let path = file.path.clone();
         let fetch_origin = origin.clone();
         let excerpt_file = file.clone();
@@ -6716,6 +6726,8 @@ fn render_file_body_upto(
 
 impl Render for Changes {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        { self.benchmark_render_count += 1; }
         if self.scope == DiffScope::History {
             let history = self.history_pane(cx);
             history.update(cx, |history, cx| history.ensure_loaded(cx));
