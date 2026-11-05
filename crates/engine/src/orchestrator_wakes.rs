@@ -97,48 +97,70 @@ pub struct EventTurns {
     persistence: Mutex<Option<WakePersistence>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WakePersistence {
     path: PathBuf,
     store: store::WakeStore,
-    generations: HashMap<(String, String), (std::sync::Weak<crate::chat_persistence::ChatPersistence>, u64)>,
-    retired_generations: HashMap<(String, String), (std::sync::Weak<crate::chat_persistence::ChatPersistence>, u64)>,
+    generations: HashMap<(String, String), (Arc<crate::chat_persistence::ChatPersistence>, u64)>,
+    retired_generations: HashMap<(String, String), (Arc<crate::chat_persistence::ChatPersistence>, u64)>,
     legacy_receipts: HashMap<(String, String), std::time::Instant>,
+    legacy_retired: HashMap<(String, String), std::time::Instant>,
+}
+
+impl std::fmt::Debug for WakePersistence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("WakePersistence").field("path", &self.path).finish_non_exhaustive()
+    }
 }
 
 impl WakePersistence {
     fn prune(&mut self) {
-        let retired: Vec<_> = self.retired_generations.iter().filter_map(|(key, (snapshot, generation))| {
-            snapshot.upgrade().filter(|snapshot| snapshot.has_saved(*generation)).map(|_| key.clone())
+        let mut retired: Vec<_> = self.retired_generations.iter().filter_map(|(key, (snapshot, generation))| {
+            snapshot.has_saved(*generation).then(|| key.clone())
         }).collect();
+        retired.extend(self.legacy_retired.iter().filter_map(|(key, at)|
+            (at.elapsed() >= std::time::Duration::from_secs(3)).then(|| key.clone())));
         for (chat, message) in retired {
-            for (destination, entries) in &mut self.store.orchestrators {
+            let mut referenced = false;
+            for entries in self.store.orchestrators.values_mut() {
                 for entry in entries {
-                    if entry.retired_message_id.as_deref() == Some(&message)
-                        && entry.retired_chat_id.as_deref().unwrap_or(destination) == chat {
-                        entry.retired_message_id = None;
-                        entry.retired_chat_id = None;
-                    }
+                    if entry.message_id.as_deref() == Some(&message) { referenced = true; }
+                    entry.retired_messages.retain(|retired| retired.chat_id != chat || retired.message_id != message);
                 }
             }
-            self.retired_generations.remove(&(chat, message));
+            if !referenced {
+                self.retired_generations.remove(&(chat.clone(), message.clone()));
+                self.legacy_retired.remove(&(chat, message));
+            }
         }
         let saved: Vec<_> = self.generations.iter().filter_map(|(key, (snapshot, generation))| {
-            snapshot.upgrade().filter(|snapshot| snapshot.has_saved(*generation)).map(|_| key.clone())
+            snapshot.has_saved(*generation).then(|| key.clone())
         }).collect();
         for (chat, message) in saved {
+            let mut completed = Vec::new();
             if let Some(entries) = self.store.orchestrators.get_mut(&chat) {
-                entries.retain(|entry| !(entry.delivered && entry.retired_message_id.is_none() && entry.message_id.as_deref() == Some(&message)));
+                entries.retain(|entry| {
+                    let prune = entry.delivered && entry.retired_messages.is_empty() && entry.message_id.as_deref() == Some(&message);
+                    if prune { completed.push(entry.event.id.clone()); }
+                    !prune
+                });
             }
+            for id in completed { self.store.remember_completed(&chat, &id); }
             let retained = self.store.orchestrators.get(&chat).is_some_and(|entries| entries.iter().any(|entry| entry.delivered && entry.message_id.as_deref() == Some(&message)));
             if !retained { self.generations.remove(&(chat, message)); }
         }
         let expired: Vec<_> = self.legacy_receipts.iter().filter_map(|(key, at)|
             (at.elapsed() >= std::time::Duration::from_secs(3)).then(|| key.clone())).collect();
         for (chat, message) in expired {
+            let mut completed = Vec::new();
             if let Some(entries) = self.store.orchestrators.get_mut(&chat) {
-                entries.retain(|entry| !(entry.delivered && entry.retired_message_id.is_none() && entry.message_id.as_deref() == Some(&message)));
+                entries.retain(|entry| {
+                    let prune = entry.delivered && entry.retired_messages.is_empty() && entry.message_id.as_deref() == Some(&message);
+                    if prune { completed.push(entry.event.id.clone()); }
+                    !prune
+                });
             }
+            for id in completed { self.store.remember_completed(&chat, &id); }
             let retained = self.store.orchestrators.get(&chat).is_some_and(|entries| entries.iter().any(|entry| entry.delivered && entry.message_id.as_deref() == Some(&message)));
             if !retained { self.legacy_receipts.remove(&(chat, message)); }
         }
@@ -150,8 +172,12 @@ impl WakePersistence {
 
 impl EventTurns {
     pub(crate) fn note_retired(&self, chat_id: &str, message_id: &str, snapshot: Option<&Arc<crate::chat_persistence::ChatPersistence>>) {
-        if let (Some(persistence), Some(snapshot)) = (lock(&self.persistence).as_mut(), snapshot) {
-            persistence.retired_generations.insert((chat_id.to_owned(), message_id.to_owned()), (Arc::downgrade(snapshot), snapshot.generation()));
+        if let Some(persistence) = lock(&self.persistence).as_mut() {
+            if let Some(snapshot) = snapshot {
+                persistence.retired_generations.insert((chat_id.to_owned(), message_id.to_owned()), (snapshot.clone(), snapshot.generation()));
+            } else {
+                persistence.legacy_retired.insert((chat_id.to_owned(), message_id.to_owned()), std::time::Instant::now());
+            }
         }
     }
     fn synchronize_held(&self, held: &HashMap<String, Vec<WakeEvent>>) -> Result<(), String> {
@@ -178,7 +204,7 @@ impl EventTurns {
             if !exists { return; }
             persistence.store.mark_delivered(chat_id, message_id);
             if let Some(snapshot) = snapshot {
-                persistence.generations.insert((chat_id.to_owned(), message_id.to_owned()), (Arc::downgrade(snapshot), snapshot.generation()));
+                persistence.generations.insert((chat_id.to_owned(), message_id.to_owned()), (snapshot.clone(), snapshot.generation()));
             } else {
                 persistence.legacy_receipts.insert((chat_id.to_owned(), message_id.to_owned()), std::time::Instant::now());
             }
@@ -384,36 +410,51 @@ impl OrchestratorWakes {
             let mut saved = store::WakeStore::read(&path);
             let mut retired_generations = HashMap::new();
             let mut generations = HashMap::new();
+            let mut legacy_retired = HashMap::new();
+            let mut legacy_receipts = HashMap::new();
             for chat in saved.orchestrators.keys().cloned().collect::<Vec<_>>() {
                 let Ok(handle) = doc_host.open(&chat) else { continue };
                 let queue: HashSet<String> = handle.doc().read_queue().unwrap_or_default().into_iter().map(|item| item.id).collect();
-                let transcript: HashSet<String> = handle.doc().read_opening_tail(50).unwrap_or_default()
-                    .into_iter().map(|entry| entry.id).collect();
+                let transcript: HashSet<String> = handle.doc().recent_message_ids(50).into_iter().collect();
                 let mut removed = HashSet::new();
-                let mut cross_removed = HashSet::new();
                 let mut cross_blocked = HashSet::new();
                 if let Some(events) = saved.orchestrators.get(&chat) {
-                    for entry in events {
-                        if let (Some(source), Some(id)) = (&entry.retired_chat_id, &entry.retired_message_id) && source != &chat {
-                            match doc_host.open(source).and_then(|source_handle| {
-                                let removed = source_handle.doc().take_queued(id)?;
-                                if removed.is_some() && let Some(snapshot) = &source_handle.persistence {
-                                    retired_generations.insert((source.clone(), id.clone()), (Arc::downgrade(snapshot), snapshot.generation()));
+                    let cross: HashSet<_> = events.iter().flat_map(|entry| entry.retired_messages.iter())
+                        .filter(|retired| retired.chat_id != chat).map(|retired| (retired.chat_id.clone(), retired.message_id.clone())).collect();
+                    for (source, id) in cross {
+                            match doc_host.open(&source).and_then(|source_handle| {
+                                let present = source_handle.doc().read_queue()?.iter().any(|item| item.id == id);
+                                let removed = source_handle.doc().take_queued(&id)?;
+                                if !present || removed.is_some() {
+                                    if let Some(snapshot) = &source_handle.persistence {
+                                        retired_generations.insert((source.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
+                                    } else {
+                                        legacy_retired.insert((source.clone(), id.clone()), std::time::Instant::now());
+                                    }
                                 }
-                                Ok(removed)
+                                Ok((present, removed))
                             }) {
-                                Ok(Some(_)) => { cross_removed.insert(entry.event.id.clone()); },
-                                Ok(None) => {},
-                                Err(error) => { cross_blocked.insert(entry.event.id.clone()); tracing::warn!(%error, chat = %source, "could not reclaim transferred wake row"); },
+                                Ok((_, Some(_))) => {},
+                                Ok((true, None)) => { cross_blocked.insert((source.clone(), id.clone())); },
+                                Ok((false, None)) => {},
+                                Err(error) => { cross_blocked.insert((source.clone(), id.clone())); tracing::warn!(%error, chat = %source, "could not reclaim transferred wake row"); },
                             }
+                    }
+                    let ids: HashSet<_> = events.iter().flat_map(|entry| entry.message_id.iter().chain(entry.retired_messages.iter().filter(|retired| retired.chat_id == chat).map(|retired| &retired.message_id))).filter(|id| queue.contains(*id)).cloned().collect();
+                    for retired in events.iter().flat_map(|entry| entry.retired_messages.iter()).filter(|retired| retired.chat_id == chat && !queue.contains(&retired.message_id)) {
+                        if let Some(snapshot) = &handle.persistence {
+                            retired_generations.insert((chat.clone(), retired.message_id.clone()), (snapshot.clone(), snapshot.generation()));
+                        } else {
+                            legacy_retired.insert((chat.clone(), retired.message_id.clone()), std::time::Instant::now());
                         }
                     }
-                    let ids: HashSet<_> = events.iter().flat_map(|entry| [entry.message_id.clone(), if entry.retired_chat_id.as_ref().is_none_or(|source| source == &chat) { entry.retired_message_id.clone() } else { None }]).flatten().filter(|id| queue.contains(id)).collect();
                     for id in ids {
                         match handle.doc().take_queued(&id) {
                             Ok(Some(_)) => {
                                 if let Some(snapshot) = &handle.persistence {
-                                    retired_generations.insert((chat.clone(), id.clone()), (Arc::downgrade(snapshot), snapshot.generation()));
+                                    retired_generations.insert((chat.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
+                                } else {
+                                    legacy_retired.insert((chat.clone(), id.clone()), std::time::Instant::now());
                                 }
                                 removed.insert(id);
                             },
@@ -423,43 +464,54 @@ impl OrchestratorWakes {
                     }
                 }
                 let mut held = Vec::new();
+                let mut completed = Vec::new();
                 if let Some(events) = saved.orchestrators.get_mut(&chat) {
                     events.retain_mut(|entry| {
-                        if cross_blocked.contains(&entry.event.id) { return true; }
-                        if let Some(id) = &entry.message_id {
-                            if transcript.contains(id) {
-                                if removed.contains(id) || cross_removed.contains(&entry.event.id) || entry.retired_message_id.as_ref().is_some_and(|retired| removed.contains(retired)) {
+                        if entry.retired_messages.iter().any(|retired| cross_blocked.contains(&(retired.chat_id.clone(), retired.message_id.clone()))) { return true; }
+                        if let Some(id) = entry.message_id.clone() {
+                            if transcript.contains(&id) {
+                                if removed.contains(&id) || !entry.retired_messages.is_empty() {
                                     entry.delivered = true;
-                                    if removed.contains(id) { entry.retired_message_id = Some(id.clone()); }
+                                    if removed.contains(&id) { entry.retire(&chat, &id); }
                                     return true;
                                 }
+                                completed.push(entry.event.id.clone());
                                 return false;
                             }
-                            if queue.contains(id) && !removed.contains(id) { return true; }
-                            if removed.contains(id) { entry.retired_message_id = Some(id.clone()); entry.retired_chat_id = Some(chat.clone()); }
+                            if queue.contains(&id) && !removed.contains(&id) { return true; }
+                            if removed.contains(&id) { entry.retire(&chat, &id); }
                             entry.message_id = None;
                             entry.delivered = false;
                         }
-                        if entry.retired_message_id.as_ref().is_some_and(|id| queue.contains(id) && !removed.contains(id)) { return true; }
+                        if entry.retired_messages.iter().any(|retired| retired.chat_id == chat && queue.contains(&retired.message_id) && !removed.contains(&retired.message_id)) { return true; }
                         held.push(entry.event.clone());
                         true
                     });
                 }
+                for id in completed { saved.remember_completed(&chat, &id); }
                 state.core.restore_for_hand_off(&chat, held, clock());
                 if let (Some(snapshot), Some(events)) = (&handle.persistence, saved.orchestrators.get(&chat)) {
                     for entry in events.iter().filter(|entry| entry.delivered) {
                         if let Some(id) = &entry.message_id {
-                            generations.insert((chat.clone(), id.clone()), (Arc::downgrade(snapshot), snapshot.generation()));
+                            generations.insert((chat.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
                         }
                     }
                 }
+                if handle.persistence.is_none() && let Some(events) = saved.orchestrators.get(&chat) {
+                    for entry in events.iter().filter(|entry| entry.delivered) {
+                        if let Some(id) = &entry.message_id { legacy_receipts.insert((chat.clone(), id.clone()), std::time::Instant::now()); }
+                    }
+                }
+            }
+            for (chat, ids) in &saved.completed_ids {
+                for id in ids { state.core.remember_delivered_id(chat, id, clock()); }
             }
             let result = std::thread::scope(|scope| scope.spawn(|| saved.write(&path)).join());
             if let Ok(Err(error)) = result {
                 tracing::warn!(%error, "could not save restored wakes");
             }
-            *lock(&event_turns.persistence) = Some(WakePersistence { path, store: saved, generations, retired_generations, legacy_receipts: HashMap::new() });
-            let pending: Vec<_> = lock(&event_turns.persistence).as_ref().map(|p| p.generations.keys().cloned().collect()).unwrap_or_default();
+            *lock(&event_turns.persistence) = Some(WakePersistence { path, store: saved, generations, retired_generations, legacy_receipts, legacy_retired });
+            let pending: Vec<_> = lock(&event_turns.persistence).as_ref().map(|p| p.generations.keys().chain(p.legacy_receipts.keys()).cloned().collect()).unwrap_or_default();
             for (chat, message) in pending { event_turns.schedule_prune(&chat, &message); }
         }
         Self {
@@ -491,6 +543,24 @@ impl OrchestratorWakes {
     /// Stop the watchers so a retired engine graph can be freed.
     pub fn shutdown(&self) {
         self.inner.cancel.cancel();
+    }
+
+    /// Prune receipts after the document host's graceful snapshot flush.
+    pub async fn flush_receipts(&self) {
+        let turns = self.inner.event_turns.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            let mut guard = lock(&turns.persistence);
+            if let Some(persistence) = guard.as_mut() {
+                let before = persistence.clone();
+                persistence.prune();
+                if persistence.store != before.store && let Err(error) = persistence.write() {
+                    *persistence = before;
+                    tracing::warn!(%error, "could not save wake receipts during shutdown");
+                }
+            }
+        }).await {
+            tracing::warn!(%error, "wake receipt shutdown worker failed");
+        }
     }
 
     fn now(&self) -> i64 {
@@ -637,9 +707,10 @@ impl OrchestratorWakes {
         });
         state.core.set_settings_preserving_held(to, settings);
         state.settings_overrides.insert(to.to_owned(), settings);
+        let held_ids: HashSet<String> = state.core.held_events().remove(from).unwrap_or_default().into_iter().map(|event| event.id).collect();
         state.core.transfer_held(from, to);
         if let Some(persistence) = lock(&self.inner.event_turns.persistence).as_mut() {
-            persistence.store.transfer(from, to);
+            persistence.store.transfer(from, to, &held_ids);
         }
         state.handed_off_to.insert(from.to_owned(), to.to_owned());
         state.timers.remove(from);

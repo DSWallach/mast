@@ -63,6 +63,15 @@ async fn restart_reclaims_only_wake_rows() {
     let queue = handle.doc().read_queue().unwrap();
     assert_eq!(queue.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), vec!["user-row"]);
     assert_eq!(restarted.status(ORCH).held.len(), 1);
+    // The first removal might not have reached the session snapshot before a
+    // second crash; recovery must reclaim the same old row again.
+    handle.doc().push_queued(&mast_doc::QueuedMessage { id: "wake-row".into(), text: "Worker updates".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None }).unwrap();
+    let tick = rig.clock.clone();
+    let restarted_again = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert_eq!(handle.doc().read_queue().unwrap().iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), vec!["user-row"]);
+    assert_eq!(restarted_again.status(ORCH).held.len(), 1);
     rig.core.shutdown().await;
 }
 
@@ -92,6 +101,12 @@ async fn graceful_restart_does_not_replay_a_delivered_report() {
     rig.advance(2 * USER_QUIET_MS);
     rig.wakes.evaluate(ORCH, false).await;
     rig.wait_for(|| rig.wake_prompts().iter().any(|prompt| prompt.contains("delivered report")), "delivered report").await;
+    let handle = rig.core.doc_host.open(ORCH).unwrap();
+    handle.doc().push_message(&mast_doc::SessionMessageEntry {
+        id: "large-assistant-message".into(), role: mast_doc::MessageRole::Assistant,
+        parts: (0..60).map(|number| mast_doc::MessagePart::Text { id: format!("part-{number}"), text: "text".into() }).collect(),
+        created_at: 1, device_id: rig.core.device_id.clone(), status: None, continuation_of: None,
+    }).unwrap();
     let tick = rig.clock.clone();
     let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
         rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
@@ -116,6 +131,35 @@ async fn hand_off_moves_report_restored_after_restart() {
     restarted.hand_off_orchestrator("restore-source", "restore-destination", "restore-source").await.unwrap();
     assert!(restarted.status("restore-source").held.is_empty());
     assert_eq!(restarted.status("restore-destination").held.len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_reclaims_a_source_row_that_returns_after_restart() {
+    let rig = Rig::new().await;
+    rig.core.workspace.create_space("retired-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for (id, parent) in [("retired-source", None), ("retired-destination", None), ("retired-worker", Some("retired-source"))] {
+        rig.core.workspace.create_chat_with_parent(id, Some("retired-space"), Some(&rig.core.device_id), None, None, parent.map(str::to_owned)).unwrap();
+    }
+    rig.wakes.report_to_parent("retired-worker", "retired report").await.unwrap();
+    let path = rig.store.with_file_name("orchestrator-wake-events.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["orchestrators"]["retired-source"][0]["message_id"] = "retired-row".into();
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let handle = rig.core.doc_host.open("retired-source").unwrap();
+    let queued = mast_doc::QueuedMessage { id: "retired-row".into(), text: "Worker updates".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None };
+    handle.doc().push_queued(&queued).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(),
+        Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    restarted.hand_off_orchestrator("retired-source", "retired-destination", "retired-source").await.unwrap();
+    handle.doc().push_queued(&queued).unwrap();
+    let tick = rig.clock.clone();
+    let restarted_again = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(),
+        Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert_eq!(restarted_again.status("retired-destination").held.len(), 1);
     rig.core.shutdown().await;
 }
 

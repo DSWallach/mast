@@ -119,6 +119,14 @@ impl WakeCore {
         crate::new_id()
     }
 
+    pub fn remember_delivered_id(&mut self, orch: &str, id: &str, now: i64) {
+        let ids = &mut self.orchs.entry(orch.to_owned()).or_default().delivered_ids;
+        ids.insert(id.to_owned(), now);
+        if ids.len() > 500 && let Some(oldest) = ids.iter().min_by_key(|(_, at)| *at).map(|(id, _)| id.clone()) {
+            ids.remove(&oldest);
+        }
+    }
+
     pub fn settings(&self, orch: &str) -> WakeSettings {
         self.orchs.get(orch).map(|o| o.settings).unwrap_or_default()
     }
@@ -201,7 +209,6 @@ impl WakeCore {
     pub fn record(&mut self, orch: &str, event: WakeEvent, now: i64) -> bool {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         o.delivered_keys.retain(|_, at| now - *at < DEDUPE_TTL_MS);
-        o.delivered_ids.retain(|_, at| now - *at < DEDUPE_TTL_MS);
         if o.held.iter().any(|e| e.id == event.id || e.key == event.key)
             || o.delivered_ids.contains_key(&event.id) || o.delivered_keys.contains_key(&event.key) {
             return false;
@@ -334,6 +341,9 @@ impl WakeCore {
         for event in &batch.events {
             o.delivered_keys.insert(event.key.clone(), now);
             o.delivered_ids.insert(event.id.clone(), now);
+            if o.delivered_ids.len() > 500 && let Some(oldest) = o.delivered_ids.iter().min_by_key(|(_, at)| *at).map(|(id, _)| id.clone()) {
+                o.delivered_ids.remove(&oldest);
+            }
             if let Some(entry) = o.log.iter_mut().find(|l| l.event.id == event.id) {
                 entry.delivered = true;
             }

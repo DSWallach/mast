@@ -406,6 +406,27 @@ impl SessionDoc {
             .collect())
     }
 
+    /// Read only the identifiers of the last `limit` messages, without
+    /// materializing their potentially large streaming parts.
+    pub fn recent_message_ids(&self, limit: usize) -> Vec<String> {
+        let messages = self.doc.get_list("messages");
+        (messages.len().saturating_sub(limit)..messages.len())
+            .filter_map(|index| {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                    messages.get(index)
+                else {
+                    return None;
+                };
+                match map.get("id") {
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(id))) => {
+                        Some(id.as_str().to_owned())
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Read a bounded suffix directly from the containers, without expanding
     /// the full messages tree. For first paint only: the full watch must follow.
     /// Limits count parts rather than joined messages (one turn can have tens
