@@ -3069,7 +3069,7 @@ impl OutlineView {
                         self.external_chips(&key, item, row.depth, other_width, theme, cx);
                     let compact_chat = item.compact_chat.as_ref().map(|chat| {
                         let drift = self.drift_chip(&key, chat, theme, cx);
-                        compact_chat_segment(&key, chat, drift, theme)
+                        compact_chat_segment(&key, chat, drift, theme, cx)
                     });
                     // A compact row's status glyph opens the item's details
                     // (the rest of the row opens the Chat).
@@ -3108,7 +3108,7 @@ impl OutlineView {
             }
             OutlineRowKind::Chat(chat) => {
                 let chip = self.drift_chip(&key, chat, theme, cx);
-                chat_body(&key, chat, chip, theme)
+                chat_body(&key, chat, chip, theme, cx)
             }
         };
         // Row action: Start Chat on the selected, live work item.
@@ -3775,9 +3775,11 @@ fn compact_chat_segment(
     row: &ChatRow,
     drift: Option<AnyElement>,
     theme: &Theme,
+    cx: &mut Context<OutlineView>,
 ) -> AnyElement {
     let chat = &row.chat;
     let status = crate::status_style::Status::from(chat.status);
+    let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-compact-status-{key}"), cx.entity_id(), cx);
     let tip: SharedString = format!("Chat: {}", chat.title).into();
     div()
         .flex_none()
@@ -3792,7 +3794,7 @@ fn compact_chat_segment(
                     move || selector.clone()
                 })
                 .flex_none()
-                .child(crate::status_style::indicator(status, theme.appearance))
+                .child(indicator)
                 .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
         )
         .when_some(drift, |el, drift| el.child(drift))
@@ -3813,7 +3815,7 @@ fn compact_chat_segment(
         .into_any_element()
 }
 
-fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme) -> AnyElement {
+fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme, cx: &mut Context<OutlineView>) -> AnyElement {
     let chat = &row.chat;
     if row.dangling {
         let tip: SharedString = format!(
@@ -3845,13 +3847,14 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme)
             .into_any_element();
     }
     let status = crate::status_style::Status::from(chat.status);
+    let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-chat-status-{key}"), cx.entity_id(), cx);
     div()
         .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .gap(px(6.0))
-        .child(crate::status_style::indicator(status, theme.appearance))
+        .child(indicator)
         .child(
             div()
                 .flex_1()

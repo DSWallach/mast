@@ -1635,7 +1635,9 @@ impl Render for WorkItemDetails {
             let chat = self.chats.iter().find(|chat| &chat.id == chat_id);
             let label =
                 chat.map_or_else(|| format!("Missing chat · {chat_id}"), |c| c.title.clone());
-            let status = chat.map(|c| crate::status_style::Status::from(c.status));
+            let indicator = chat.map(|c| crate::status_style::animated_indicator(
+                c.status.into(), theme.appearance, format!("work-item-chat-status-{ix}"), cx.entity_id(), cx,
+            ));
             let open_id = chat_id.clone();
             let remove_id = chat_id.clone();
             let missing = chat.is_none();
@@ -1649,9 +1651,7 @@ impl Render for WorkItemDetails {
                 .px(px(4.0))
                 .rounded(px(4.0))
                 .hover(|el| el.bg(theme.element_hover))
-                .when_some(status, |el, status| {
-                    el.child(crate::status_style::indicator(status, theme.appearance))
-                })
+                .when_some(indicator, |el, indicator| el.child(indicator))
                 .child(
                     div()
                         .id(("work-item-chat-open", ix))

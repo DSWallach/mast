@@ -2,7 +2,9 @@
 
 use crate::theme::Appearance;
 use gpui::prelude::FluentBuilder;
-use gpui::{Div, ParentElement, Styled, div, px};
+use gpui::{
+    AnyElement, App, Div, EntityId, IntoElement, ParentElement, SharedString, Styled, div, px,
+};
 use mast_proto::ChatIndicator;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +110,28 @@ pub(crate) fn indicator(status: Status, appearance: Appearance) -> Div {
                 .text_color(gpui::rgb(0x183028))
         })
         .child(style.glyph)
+}
+
+/// Animate working markers with the shared, throttled activity loader.
+pub(crate) fn animated_indicator(
+    status: Status,
+    appearance: Appearance,
+    key: impl Into<SharedString>,
+    view: EntityId,
+    cx: &mut App,
+) -> AnyElement {
+    if status == Status::Working {
+        crate::loaders::mini_mono_spinner(
+            key,
+            1.5,
+            status_style(status, appearance).color,
+            view,
+            cx,
+        )
+        .into_any_element()
+    } else {
+        indicator(status, appearance).into_any_element()
+    }
 }
 
 #[cfg(test)]
