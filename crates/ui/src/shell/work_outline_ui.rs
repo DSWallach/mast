@@ -2235,7 +2235,9 @@ mod tests {
         redraw(cx);
         let selected = outline_selection(&outline, cx);
         assert_ne!(selected, before);
-        cx.simulate_keystrokes("n");
+        outline.update(cx, |outline, cx| outline.select(&crate::work_outline::model::row_key::item("s1", crate::work_outline::store::fixture_ids::LAUNCH), cx));
+        let selected = outline_selection(&outline, cx);
+        cx.simulate_keystrokes("r");
         redraw(cx);
         outline.read_with(cx, |outline, _| assert!(outline.is_editing()));
         cx.simulate_keystrokes("x");
