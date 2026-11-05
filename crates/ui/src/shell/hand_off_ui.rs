@@ -53,11 +53,44 @@ impl Shell {
             input.set_text(summary, cx);
             input
         });
+        if !details_available {
+            // Selecting the source makes its Space's outline watch active.
+            self.open_chat(chat_id.clone(), cx);
+        }
         self.begin_work_outline_modal(WorkOutlineModal::HandOff(HandOffDialog {
             chat_id, input, workers, details_available, archive: false, submitting: false,
             error: (!details_available).then(|| "Work item details are unavailable. Open the chat and try again.".into()),
             operation: OperationSlot::default(),
         }), cx);
+    }
+
+    pub(super) fn refresh_hand_off_details(&mut self, cx: &mut Context<Self>) {
+        let Some(WorkOutlineModal::HandOff(dialog)) = self.work_outline_modal.as_ref() else { return };
+        if dialog.details_available { return; }
+        let chat_id = dialog.chat_id.clone();
+        let state = self.state.read(cx);
+        let Some(space_id) = state.chats.iter().find(|chat| chat.id == chat_id).and_then(|chat| chat.space_id.as_deref()) else { return };
+        let load = state.work_outline(space_id);
+        let Some(snapshot) = load.snapshot() else { return };
+        let Some(item) = crate::work_outline::instructions::assigned_chats(snapshot).remove(&chat_id).and_then(|id| snapshot.item(&id)) else { return };
+        let summary = format!("Continue as coordinator for {}. Read the work item, its instructions, and the worker list below.", item.title);
+        let workers = state.chats.iter().filter(|worker| !worker.archived && worker.parent_chat_id.as_deref() == Some(chat_id.as_str())).map(|worker| {
+            let status = state.sessions.iter().find(|session| session.chat_id == worker.id).map(|session| match session.status {
+                mast_proto::SessionStatus::Idle => "Idle", mast_proto::SessionStatus::Working => "Working",
+                mast_proto::SessionStatus::AwaitingInput => "Awaiting input", mast_proto::SessionStatus::Errored => "Errored",
+            }).unwrap_or("Unknown");
+            let requests = snapshot.user_action_requests.iter().filter(|request| request.chat_id == worker.id && request.is_unresolved() && !request.deduped).count();
+            format!("{} · {} · {} open requests", worker.title.as_deref().unwrap_or("Untitled"), status, requests)
+        }).collect();
+        let Some(WorkOutlineModal::HandOff(dialog)) = self.work_outline_modal.as_mut() else { return };
+        dialog.workers = workers;
+        dialog.details_available = true;
+        dialog.error = None;
+        dialog.input.update(cx, |input, cx| {
+            if input.text() == "Continue as coordinator for this work item. Read the work item, its instructions, and the worker list below." {
+                input.set_text(summary, cx);
+            }
+        });
     }
 
     fn submit_hand_off(&mut self, cx: &mut Context<Self>) {
@@ -143,6 +176,26 @@ mod tests {
             assert!(dialog.workers[0].contains("Title of"));
             assert!(dialog.workers[0].contains("0 open requests"));
             assert!(!dialog.archive);
+        });
+    }
+
+    #[gpui::test]
+    fn dialog_refreshes_after_outline_arrives(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().parent_chat_id = Some(CHAT_API.into());
+                state.set_work_outline_for_test(mast_proto::WorkOutlineSnapshot::unavailable("s1", false, 0));
+            });
+            shell.open_hand_off(CHAT_API.into(), cx);
+            let Some(WorkOutlineModal::HandOff(dialog)) = &shell.work_outline_modal else { panic!() };
+            assert!(!dialog.details_available);
+            shell.state.update(cx, |state, _| state.set_work_outline_for_test(crate::work_outline::store::fixture_snapshot("s1")));
+            shell.refresh_hand_off_details(cx);
+            let Some(WorkOutlineModal::HandOff(dialog)) = &shell.work_outline_modal else { panic!() };
+            assert!(dialog.details_available);
+            assert!(dialog.error.is_none());
+            assert!(dialog.workers[0].contains("0 open requests"));
         });
     }
 

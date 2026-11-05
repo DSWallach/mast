@@ -1083,6 +1083,7 @@ impl Shell {
             });
         }
         let theme = Theme::of(cx).for_popup();
+        self.refresh_hand_off_details(cx);
         // Start Chat's picker closed (Esc / its chip): back to the prompt.
         if let Some(WorkOutlineModal::StartChat(dialog)) = self.work_outline_modal.as_mut()
             && std::mem::take(&mut dialog.focus_prompt_pending)
