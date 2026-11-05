@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Start Chat sign-in preflight** (2026-11-05, `start-chat-signin-preflight`, Terra): read-only cached (≈30 s) local
+  sign-in detection (the doctor detectors) → `signed_in | signed_out | unknown`; the new-chat composer and work-item
+  Start Chat show a nonblocking "isn't signed in" notice with Sign in… (Default → Settings → Agents; managed → Space
+  accounts, using the signed-out flag) and Start anyway; unknown shows nothing. Release run: nextest 1274/1274, UI
+  2485/0.
 - **Stale coordinator wakes** (2026-11-05, `stale-coordinator-wakes`, Terra): worker events go to one eligible
   coordinator: a live explicit parent wins; otherwise one non-archived, wake-enabled chat on the project item (latest
   hand-off target or most recently active), never every chat on the item. Archived and wake-disabled coordinators get
@@ -978,8 +983,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 - Open from first-run audit: signed-out-but-installed agent flow, sign-in gate and no-auth tab states.
 
 **Queued (2026-11-05):** distribution rename running (`rename-for-distribution`: binary `mast`, bundle id
-computer.mikey.mast(.dev), `mast://`, `~/.mast` for new installs with `~/.zeron` kept, Keychain fallback); Start Chat sign-in
-preflight running. After the rename: retire the agent-mode-tools wrapper (Space root → plain mast clone, move artifact
+computer.mikey.mast(.dev), `mast://`, `~/.mast` for new installs with `~/.zeron` kept, Keychain fallback); After the rename: retire the agent-mode-tools wrapper (Space root → plain mast clone, move artifact
 folders, update instructions/HANDOFF/memory; quiet window, no workers). Workflow pack (export Mikey's setup) not started.
 
 **Queued after overnight:** Needs-you phases 5–6, PR review phase 4 (walkthrough), data/binary rename
