@@ -508,7 +508,7 @@ impl Call {
         self.query.contains("reviewThreads")
     }
     fn is_retry(&self) -> bool {
-        self.query.contains("repository(owner") && !self.is_batch()
+        self.query.contains("repository(owner") && !self.is_batch() && self.query != FILES_QUERY
     }
 }
 
