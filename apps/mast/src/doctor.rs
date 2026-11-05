@@ -667,7 +667,7 @@ fn toolchain_check(
                 "Rust toolchain",
                 Status::Warning,
                 "no rust-toolchain file found from the current directory",
-                Some("Run zeron doctor from the Mast checkout to compare its toolchain"),
+                Some("Run mast doctor from the Mast checkout to compare its toolchain"),
             );
         }
         Err(_) => {

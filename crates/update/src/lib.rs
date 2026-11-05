@@ -411,6 +411,28 @@ fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
 // Managed (symlink) installs — the daemon/VPS path
 // ---------------------------------------------------------------------------
 
+fn has_distribution_binary(directory: &Path) -> bool {
+    ["mast", "zeron"]
+        .iter()
+        .any(|name| directory.join(name).is_file())
+}
+
+#[cfg(unix)]
+fn ensure_headless_binary_aliases(directory: &Path) -> anyhow::Result<()> {
+    for (alias, target) in [("mast", "zeron"), ("zeron", "mast")] {
+        if !directory.join(alias).exists() && directory.join(target).is_file() {
+            if let Err(error) = std::os::unix::fs::symlink(target, directory.join(alias)) {
+                if error.kind() != std::io::ErrorKind::AlreadyExists
+                    || !directory.join(alias).is_file()
+                {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Download + unpack the headless tarball into `app_root/<ver>` (idempotent —
 /// an already-staged version is reused). Returns the versioned dir.
 pub async fn stage_headless(
@@ -422,7 +444,9 @@ pub async fn stage_headless(
     require_managed_update_platform()?;
     let version = &manifest.version;
     let dest = app_root.join(version);
-    if dest.join("zeron").exists() {
+    if has_distribution_binary(&dest) {
+        #[cfg(unix)]
+        ensure_headless_binary_aliases(&dest)?;
         return Ok(dest);
     }
     let file = headless_artifact(version);
@@ -446,13 +470,18 @@ pub async fn stage_headless(
                 "--strip-components=1",
             ],
         )?;
-        if !unpacked.join("zeron").is_file() {
-            bail!("tarball {file} did not contain a zeron binary");
+        if !has_distribution_binary(&unpacked) {
+            bail!("tarball {file} did not contain a mast or zeron binary");
         }
+        #[cfg(unix)]
+        ensure_headless_binary_aliases(&unpacked)?;
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("zeron").exists() => {}
+            Err(_) if has_distribution_binary(&dest) => {
+                #[cfg(unix)]
+                ensure_headless_binary_aliases(&dest)?;
+            }
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -470,9 +499,10 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let target = app_root.join(version);
-        if !target.join("zeron").exists() {
+        if !has_distribution_binary(&target) {
             bail!("{} is not a staged install", target.display());
         }
+        ensure_headless_binary_aliases(&target)?;
         let tmp = app_root.join(format!(".current-{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         std::os::unix::fs::symlink(&target, &tmp).context("creating current symlink")?;
@@ -520,7 +550,7 @@ pub async fn stage_mac_app(
     let version = &manifest.version;
     let dir = data_dir.join("updates").join(version);
     let staged = dir.join("Zeron.app");
-    if staged.join("Contents/MacOS/zeron").exists() {
+    if has_distribution_binary(&staged.join("Contents/MacOS")) {
         return Ok(staged);
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -538,7 +568,7 @@ pub async fn stage_mac_app(
         ],
     )?;
     std::fs::remove_file(&tarball).ok();
-    if !staged.join("Contents/MacOS/zeron").exists() {
+    if !has_distribution_binary(&staged.join("Contents/MacOS")) {
         bail!("app tarball {file} did not contain Zeron.app");
     }
     Ok(staged)
@@ -845,6 +875,29 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn distribution_binary_accepts_both_names() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!super::has_distribution_binary(dir.path()));
+        std::fs::write(dir.path().join("zeron"), "legacy").unwrap();
+        assert!(super::has_distribution_binary(dir.path()));
+        std::fs::remove_file(dir.path().join("zeron")).unwrap();
+        std::fs::write(dir.path().join("mast"), "current").unwrap();
+        assert!(super::has_distribution_binary(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_binary_alias_keeps_both_names_available() {
+        for name in ["mast", "zeron"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(name), "binary").unwrap();
+            super::ensure_headless_binary_aliases(dir.path()).unwrap();
+            super::ensure_headless_binary_aliases(dir.path()).unwrap();
+            assert_eq!(std::fs::read(dir.path().join("mast")).unwrap(), b"binary");
+            assert_eq!(std::fs::read(dir.path().join("zeron")).unwrap(), b"binary");
+        }
+    }
     use super::*;
 
     #[tokio::test]

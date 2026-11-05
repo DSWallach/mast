@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Mast</string>
     <key>CFBundleExecutable</key>
-    <string>zeron</string>
+    <string>mast</string>
     <key>CFBundleIconFile</key>
     <string>mast.icns</string>
     <key>CFBundleIdentifier</key>

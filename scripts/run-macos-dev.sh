@@ -14,7 +14,8 @@ CONTENTS="$APP/Contents"
 DATA_DIR="${MAST_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${MAST_DEV_IPC_PORT:-49777}"
 
-if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
+if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1 || \
+   pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Mast Dev is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi
@@ -23,7 +24,8 @@ cd "$ROOT"
 cargo build -p mast
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
-install -m 755 "$ROOT/target/debug/zeron" "$CONTENTS/MacOS/zeron"
+install -m 755 "$ROOT/target/debug/mast" "$CONTENTS/MacOS/mast"
+ln -sfn mast "$CONTENTS/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.MAST_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.MAST_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
@@ -54,7 +56,7 @@ else
 fi
 
 echo "running Mast Dev (bundle sh.zeron.app.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
-# LaunchServices must own the process. Launching Contents/MacOS/zeron directly
+# LaunchServices must own the process. Launching Contents/MacOS/mast directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the
 # isolated data directory (`target/macos-dev/data/logs/mast-headed.log`).

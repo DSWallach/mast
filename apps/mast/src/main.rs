@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "zeron",
+    name = "mast",
     version,
     about = "Multi-device controller for coding agents"
 )]

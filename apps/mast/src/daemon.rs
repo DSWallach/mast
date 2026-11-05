@@ -36,7 +36,16 @@ const CAPTURED_ENV: &[&str] = &[
 ];
 
 pub fn install(data_dir: &Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe().context("resolving the zeron executable path")?;
+    let mut exe = std::env::current_exe().context("resolving the Mast executable path")?;
+    if exe.file_name().is_some_and(|name| name == "zeron") {
+        exe.set_file_name("mast");
+        if !exe.is_file() {
+            bail!(
+                "Mast executable not found at {}; install mast before running daemon install",
+                exe.display()
+            );
+        }
+    }
     let env = captured_env();
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
@@ -172,6 +181,7 @@ pub fn restart() -> anyhow::Result<()> {
 
 pub fn status() -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
+        report_legacy_executable(&launchd_plist_path()?);
         let output = Command::new("launchctl")
             .args(["print", &launchd_service_target()?])
             .output()
@@ -201,6 +211,7 @@ pub fn status() -> anyhow::Result<()> {
         }
         Ok(())
     } else if cfg!(target_os = "linux") {
+        report_legacy_executable(&systemd_unit_path()?);
         // Passthrough; `status` exits nonzero for inactive units, which is not an
         // error for us to report — the output already says it.
         let _ = Command::new("systemctl")
@@ -211,6 +222,24 @@ pub fn status() -> anyhow::Result<()> {
     } else {
         bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
+}
+
+fn report_legacy_executable(path: &Path) {
+    if std::fs::read_to_string(path).is_ok_and(|unit| has_legacy_executable(&unit)) {
+        println!("This service points to zeron; run `mast daemon install` to update it.");
+    }
+}
+
+fn has_legacy_executable(unit: &str) -> bool {
+    unit.lines().any(|line| {
+        let line = line.trim();
+        (line.starts_with("ExecStart=")
+            && line
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| word.ends_with("/zeron")))
+            || (line.starts_with("<string>") && line.ends_with("/zeron</string>"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +282,7 @@ fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
         .map(|home| home.join(".zeron/app"))
         .is_some_and(|app_root| exe.starts_with(app_root));
     if installed {
-        "%h/.zeron/app/current/zeron".to_string()
+        "%h/.zeron/app/current/mast".to_string()
     } else {
         format!("{}", exe.display())
     }
@@ -378,6 +407,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identifies_legacy_service_executables() {
+        assert!(has_legacy_executable("ExecStart=/usr/bin/zeron headless\n"));
+        assert!(has_legacy_executable(
+            "<string>/Applications/Mast.app/Contents/MacOS/zeron</string>"
+        ));
+        assert!(!has_legacy_executable(
+            "ExecStart=/usr/bin/mast headless\nEnvironment=FOO=/zeron"
+        ));
+    }
+
+    #[test]
     fn systemd_unit_shape() {
         let unit = render_systemd_unit(
             Path::new("/usr/local/bin/zeron"),
@@ -410,7 +450,7 @@ mod tests {
                 Path::new("/home/u/.zeron/app/0.3.0/zeron"),
                 Some(Path::new("/home/u")),
             ),
-            "%h/.zeron/app/current/zeron"
+            "%h/.zeron/app/current/mast"
         );
         // Source build: literal path.
         assert_eq!(
