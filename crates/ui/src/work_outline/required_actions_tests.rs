@@ -59,7 +59,7 @@ fn handoff_card_displays_cached_lifecycle(cx: &mut gpui::TestAppContext) {
     let mut snapshot = m4::snapshot("s1");
     let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
     request.kind = Some(UserActionKind::Handoff);
-    request.facts.push(RequestFact { label: "Branch".into(), value: "feature/a".into() });
+    request.facts.push(RequestFact { label: "PR".into(), value: "acme/app#7".into() });
     let (overview, _, vcx) = m4_overview(cx, dir.path(), snapshot, reply_ok);
     let state = overview.read_with(vcx, |overview, _| overview.state.clone());
     let _list = open_global(&overview, vcx);

@@ -107,7 +107,7 @@ impl PrMergedWakes {
                     && crate::chat_links::canonicalize_pr_url(&link.url) == url) {
                     space_owns_pr = true;
                 }
-                if status.branch.as_deref().is_some_and(|branch| chat.branch.as_deref() == Some(branch))
+                if status.branch.as_deref().is_some_and(|branch| chat.branch.as_deref().is_none_or(|chat_branch| chat_branch == branch))
                     && links.iter().any(|link| crate::archivable::owns_pr_link(link)
                         && crate::chat_links::canonicalize_pr_url(&link.url) != url) {
                     branch_ambiguous = true;
@@ -340,6 +340,7 @@ mod tests {
         let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::System, device_id: "device".into(), chat_id: None, message_id: None };
         let mutate = |mutation: mast_proto::WorkOutlineMutation| workspace.work_outline_mutate(&mutation, &actor, &[]).unwrap();
         let mut requests = Vec::new();
+        let mut unlinked_request = String::new();
         for (space, enabled) in [("enabled-space", true), ("disabled-space", false)] {
             workspace.create_space(space, "device", &format!("/tmp/{space}"), None, false).unwrap();
             let item = mutate(mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
@@ -360,10 +361,16 @@ mod tests {
             }
             let kind = mast_proto::work_outline_user_actions::UserActionKind::Handoff;
             let id = mutate(mast_proto::WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
-                options: vec![], links: vec![], facts: vec![mast_proto::work_outline_user_actions::RequestFact { label: "Branch".into(), value: "feature/a".into() }], kind: Some(kind), priority: None, work_item_id: item,
+                options: vec![], links: vec![], facts: vec![mast_proto::work_outline_user_actions::RequestFact { label: "Branch".into(), value: "feature/a".into() }], kind: Some(kind), priority: None, work_item_id: item.clone(),
                 origin: mast_proto::UserActionRequestOrigin { kind: mast_proto::UserActionOriginKind::System, ..Default::default() }, text: "Branch handoff".into(), info: None, dedupe_key: None, operation_id: format!("branch-{space}"),
             })).user_action_request_id.unwrap();
             requests.push((space.to_owned(), kind, id));
+            if enabled {
+                unlinked_request = mutate(mast_proto::WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
+                    options: vec![], links: vec![], facts: vec![mast_proto::work_outline_user_actions::RequestFact { label: "Branch".into(), value: "local-only".into() }], kind: Some(kind), priority: None, work_item_id: item,
+                    origin: mast_proto::UserActionRequestOrigin { kind: mast_proto::UserActionOriginKind::System, ..Default::default() }, text: "Local branch".into(), info: None, dedupe_key: None, operation_id: "local-only-request".into(),
+                })).user_action_request_id.unwrap();
+            }
         }
         for (chat, source) in [
             ("owned", ChatLinkSource::CreatedInChat),
@@ -435,6 +442,8 @@ mod tests {
                 assert_eq!(resolution.note.as_deref(), Some("Landed: acme/repo#42 merged 2026-11-05T12:00:00Z"));
             } else { assert!(request.is_open()); }
         }
+        let snapshot = mast_doc::materialize_work_outline("enabled-space", &workspace.work_outline_inputs("enabled-space"));
+        assert!(snapshot.user_action_request(&unlinked_request).unwrap().is_open());
         let held = wakes.status("orch").held;
         assert_eq!(held.len(), 1);
         assert!(

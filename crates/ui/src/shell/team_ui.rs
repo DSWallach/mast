@@ -541,8 +541,15 @@ impl Shell {
                 let state = self.state.read(cx);
                 state.work_outline(&ready.space_id).snapshot()
                     .and_then(|snapshot| snapshot.user_action_request(&ready.request_id))
-                    .and_then(|request| crate::work_outline::required_actions::handoff_lifecycle_parts(
-                        request.effective_kind(), &request.links, &request.facts, state.github.ready_statuses()))
+                    .and_then(|request| {
+                        let explicit_pr = request.links.iter().any(|link| match &link.target {
+                            mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => crate::work_outline::required_actions::parse_handoff_pr(url).is_some(),
+                            _ => false,
+                        }) || request.facts.iter().any(|fact| (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && crate::work_outline::required_actions::parse_handoff_pr(&fact.value).is_some());
+                        let worker_prs: std::collections::HashSet<_> = worker.prs.iter().filter_map(|pr| crate::work_outline::required_actions::parse_handoff_pr(&pr.url)).map(|pr| pr.key()).collect();
+                        crate::work_outline::required_actions::handoff_lifecycle_parts(
+                            request.effective_kind(), &request.links, &request.facts, state.github.ready_statuses().filter(|status| explicit_pr || worker_prs.contains(&status.pr_ref.key())))
+                    })
             };
             row = row.child(
                 div()

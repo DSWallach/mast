@@ -936,7 +936,16 @@ impl RequiredActionsList {
         }
         let lifecycle = {
             let state = self.state.read(cx);
-            required_actions::handoff_lifecycle(&row, state.github.ready_statuses())
+            let explicit_pr = row.links.iter().any(|link| match &link.target {
+                mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => required_actions::parse_handoff_pr(url).is_some(),
+                _ => false,
+            }) || row.facts.iter().any(|fact| (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && required_actions::parse_handoff_pr(&fact.value).is_some());
+            let space_prs: std::collections::HashSet<_> = state.chats.iter()
+                .filter(|chat| chat.space_id.as_deref() == Some(row.space_id.as_str()))
+                .filter_map(|chat| chat.linked_pr_url.as_deref())
+                .filter_map(required_actions::parse_handoff_pr).map(|pr| pr.key()).collect();
+            required_actions::handoff_lifecycle(&row, state.github.ready_statuses()
+                .filter(|status| explicit_pr || space_prs.contains(&status.pr_ref.key())))
         };
         let age = required_actions::age_label(row.created_at, now);
         let chat_tip: SharedString = if row.system {
