@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **local_import flake fix** (2026-11-05 overnight, `flaky-local-import`, Terra; test code only): each local_import
+  test runs in its own process with a private HOME and data dir. Root cause: background external-session adoption
+  read the real HOME's sessions and raced the fixtures. Stress 1/20 → 20/20. Release run: nextest 1223/1224; the 1 =
+  `linear_assigned::an_untouched_child_is_archived_when_its_ticket_leaves` (assertion at tests/linear_assigned.rs:504,
+  "Canceled in Linear" not yet set: a settle race under load; the binary passed 9/9 three times alone). **New flaky:
+  linear_assigned.** UI 2475/0. A test HOME isolation guard is in progress (`test-home-isolation`).
 - **Perf sweep 4: startup gaps** (2026-11-05 overnight, `perf-sweep-4`, Terra; gated instrumentation only): chats are
   applied ~4.5 ms after core assembly; outline wire encoding 0.11 ms for a 179 KB frame; the 37–52 ms watch
   spawn-to-first-poll interval sits inside one headless GPUI test-executor drain (a 25–31 ms tick plus ~11 ms
@@ -928,7 +934,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2, cleanup-sweep-3, perf-sweep-3, cleanup-sweep-4, perf-sweep-4.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2, cleanup-sweep-3, perf-sweep-3, cleanup-sweep-4, perf-sweep-4, flaky-local-import.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
