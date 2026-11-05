@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Distinct status indicators** (2026-11-05, `status-indicator-distinct`, Terra): one accent-independent state style
+  (colour + glyph) shared by Team, running chats, sidebar, outline, item details, Overview, review chats, menu rows
+  and Needs-you markers: Working clover/juniper spinner, Waiting bromine "!" badge, Errored cadmium ✕, Ready cobalt →,
+  Done fir ✓, Idle silicon/steel ○. Previously Working used the user's accent and could match Waiting's amber. Light
+  fir on the sidebar is ~2.95:1 (glyph + label carry it). Release run passed, UI 2488/0.
 - **Start Chat sign-in preflight** (2026-11-05, `start-chat-signin-preflight`, Terra): read-only cached (≈30 s) local
   sign-in detection (the doctor detectors) → `signed_in | signed_out | unknown`; the new-chat composer and work-item
   Start Chat show a nonblocking "isn't signed in" notice with Sign in… (Default → Settings → Agents; managed → Space
