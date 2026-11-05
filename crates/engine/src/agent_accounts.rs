@@ -310,7 +310,8 @@ pub struct AgentAccounts {
 }
 
 /// Presence of local sign-in material, without validating it over the network.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LocalSignInStatus {
     SignedIn,
     SignedOut,
@@ -2460,6 +2461,11 @@ mod tests {
         accounts.invalidate_local_sign_in_status();
         assert_eq!(accounts.local_sign_in_status(HarnessId::Codex).await, LocalSignInStatus::Unknown);
         assert_eq!(accounts.local_sign_in_status(HarnessId::ClaudeCode).await, LocalSignInStatus::SignedOut);
+        std::fs::create_dir_all(&config.claude_config_dir).unwrap();
+        std::fs::write(&config.claude_config_file, r#"{"oauthAccount":{"emailAddress":"fixture@example.test"}}"#).unwrap();
+        std::fs::write(config.claude_creds_file(), r#"{"claudeAiOauth":{"accessToken":"fixture"}}"#).unwrap();
+        accounts.invalidate_local_sign_in_status();
+        assert_eq!(accounts.local_sign_in_status(HarnessId::ClaudeCode).await, LocalSignInStatus::SignedIn);
     }
 
     #[test]

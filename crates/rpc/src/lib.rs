@@ -578,6 +578,7 @@ pub mod methods {
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
+    pub const LOCAL_AGENT_SIGN_IN_STATUS: &str = "LocalAgentSignInStatus";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
