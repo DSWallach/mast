@@ -649,3 +649,20 @@ fn request_choices_are_limited_to_three_and_require_an_available_chat() {
     assert!(request_actions(UserActionKind::Choose, &options, false).is_empty());
     assert_eq!(request_actions(UserActionKind::Approve, &[], true).len(), 2);
 }
+
+#[test]
+fn chat_rows_use_shared_status_styles() {
+    for state in [RunState::Working, RunState::Awaiting, RunState::Errored, RunState::IdleBackground] {
+        let inputs = [input("status", state, 1, None)];
+        let snapshot = snapshot(&inputs);
+        let view = menu(&snapshot, None, None);
+        let text = view.items.iter().find_map(|item| match item {
+            Item::Chat { text, .. } => Some(text),
+            _ => None,
+        }).expect("chat row");
+        let status = crate::status_style::Status::from(state);
+        let style = crate::status_style::status_style(status, crate::theme::Appearance::Dark);
+        assert!(text.text.starts_with(style.glyph));
+        assert_eq!(text.spans.first().unwrap().tone, Tone::Status(status));
+    }
+}

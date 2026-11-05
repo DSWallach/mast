@@ -83,6 +83,7 @@ static COUNTING_ALLOC: perf::CountingAlloc = perf::CountingAlloc;
 pub mod sound;
 pub mod state;
 pub mod status_light;
+mod status_style;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;

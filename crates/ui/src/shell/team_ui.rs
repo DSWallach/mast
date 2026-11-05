@@ -79,16 +79,6 @@ impl Shell {
             .clone()
     }
 
-    fn state_color(theme: &Theme, state: WorkerState) -> gpui::Hsla {
-        match state {
-            WorkerState::Waiting => theme.warning,
-            WorkerState::Errored => theme.danger,
-            WorkerState::Working => theme.accent,
-            WorkerState::Idle => theme.text_muted,
-            WorkerState::Done => theme.success,
-        }
-    }
-
     /// The sticky chip after "Item": present only while the chat has workers.
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
@@ -133,14 +123,23 @@ impl Shell {
                     el.child(
                         div()
                             .debug_selector(|| "right-surface-team-dot".into())
-                            .flex_none()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme.warning),
+                            .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance)),
                     )
                 })
                 .into_any_element(),
         )
+    }
+
+    fn render_team_summary(team: &TeamFacts, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let parts = team.roll_up_parts();
+        if parts.is_empty() { return div().child("No active workers").into_any_element(); }
+        let mut summary = div().flex().items_center().gap(px(4.0));
+        for (index, (status, label)) in parts.into_iter().enumerate() {
+            if index > 0 { summary = summary.child("·"); }
+            let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("team-summary-{index}"), cx.entity_id(), cx);
+            summary = summary.child(indicator).child(SharedString::from(label));
+        }
+        summary.into_any_element()
     }
 
     /// The Team tab's body: roll-up line, then one row per worker.
@@ -150,7 +149,13 @@ impl Shell {
         let team = self.team_facts(&chat_id, cx);
         let focus = self.team_panel_focus(cx);
         let mut col = div().flex().flex_col().gap(px(8.0));
-        if self.state.read(cx).chats.iter().any(|chat| chat.id == chat_id && chat.archived) {
+        if self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id && chat.archived)
+        {
             col = col.child(
                 div()
                     .debug_selector(|| "team-coordinator-archived".into())
@@ -174,7 +179,7 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from(team.roll_up())),
+                    .child(Self::render_team_summary(&team, &theme, cx)),
             );
             col = col.child(self.render_team_wake_header(&chat_id, &theme, cx));
             col = col.child(self.render_team_archive_block(&chat_id, &team, &theme, cx));
@@ -240,10 +245,9 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .hover(|el| el.text_color(theme.accent))
-                    .child(SharedString::from(format!(
-                        "Team \u{b7} {}",
-                        team.roll_up()
-                    )))
+                    .flex().items_center().gap(px(4.0))
+                    .child("Team ·")
+                    .child(Self::render_team_summary(team, theme, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
         for worker in team.live().take(ITEM_TAB_WORKERS) {
@@ -316,12 +320,17 @@ impl Shell {
             .last_active
             .map(|at| mast_proto::view::format_time_ago(at, now))
             .unwrap_or_default();
-        let color = Self::state_color(theme, worker.state);
+        let status = crate::status_style::status_style(worker.state.into(), theme.appearance);
+        let indicator = if worker.state == WorkerState::Working {
+            crate::loaders::mini_mono_spinner(format!("{prefix}-status-{id}"), 1.5, status.color, cx.entity_id(), cx).into_any_element()
+        } else {
+            crate::status_style::indicator(worker.state.into(), theme.appearance).into_any_element()
+        };
         let open_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
         let stalled = self.state.read(cx).session_for(&id).and_then(|session| {
             if session.status == mast_proto::SessionStatus::AwaitingInput {
-                Some(("waiting for input".to_owned(), theme.warning))
+                Some(("waiting for input".to_owned(), crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color))
             } else {
                 session
                     .last_turn_tool_failures
@@ -348,7 +357,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().flex_none().size(px(7.0)).rounded_full().bg(color))
+                    .child(div().flex_none().child(indicator))
                     .child(
                         div()
                             .flex_1()
@@ -397,7 +406,7 @@ impl Shell {
                         div()
                             .flex_none()
                             .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(color)
+                            .text_color(status.color)
                             .child(SharedString::from(worker.state.label())),
                     )
                     .child(
@@ -652,6 +661,7 @@ impl Shell {
                         )
                     })
             };
+            let ready_color = crate::status_style::status_style(crate::status_style::Status::Ready, theme.appearance).color;
             row = row.child(
                 div()
                     .pl(px(13.0))
@@ -664,8 +674,8 @@ impl Shell {
                             .min_w_0()
                             .truncate()
                             .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.success)
-                            .child(SharedString::from(text)),
+                            .text_color(ready_color)
+                            .child(SharedString::from(format!("→ {text}"))),
                     )
                     .when_some(lifecycle, |el, lifecycle| {
                         el.child(Self::chip(
@@ -686,11 +696,11 @@ impl Shell {
                             .px(px(6.0))
                             .rounded(px(4.0))
                             .border_1()
-                            .border_color(theme.success.opacity(0.5))
+                            .border_color(ready_color.opacity(0.5))
                             .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.success)
+                            .text_color(ready_color)
                             .cursor_pointer()
-                            .hover(|el| el.bg(theme.success.opacity(0.12)))
+                            .hover(|el| el.bg(ready_color.opacity(0.12)))
                             .child("Jump")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();

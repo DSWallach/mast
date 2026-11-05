@@ -186,36 +186,34 @@ impl TeamFacts {
         self.count(|w| w.ready.is_some() && w.state != WorkerState::Done)
     }
 
-    /// "4 working · 1 waiting on you · 2 ready to merge" (parts at zero are
-    /// left out; "No active workers" when none shows).
-    pub(crate) fn roll_up(&self) -> String {
+    /// Nonzero counts in the order shown by the Team summary.
+    pub(crate) fn roll_up_parts(&self) -> Vec<(crate::status_style::Status, String)> {
+        use crate::status_style::Status;
         let mut parts = Vec::new();
-        let working = self.working();
-        if working > 0 {
-            parts.push(format!("{working} working"));
-        }
-        let waiting = self.waiting();
-        if waiting > 0 {
-            parts.push(format!("{waiting} waiting on you"));
-        }
-        let ready = self.ready();
-        if ready > 0 {
-            parts.push(format!("{ready} ready to merge"));
-        }
-        let errored = self.count(|w| w.state == WorkerState::Errored);
-        if errored > 0 {
-            parts.push(format!("{errored} errored"));
+        for (status, count, label) in [
+            (Status::Working, self.working(), "working"),
+            (Status::Waiting, self.waiting(), "waiting on you"),
+            (Status::Ready, self.ready(), "ready to merge"),
+            (Status::Errored, self.count(|w| w.state == WorkerState::Errored), "errored"),
+        ] {
+            if count > 0 { parts.push((status, format!("{count} {label}"))); }
         }
         if parts.is_empty() {
             let done = self.count(|w| w.state == WorkerState::Done);
-            return if done > 0 && done == self.live().count() {
-                format!("{done} done")
-            } else {
-                "No active workers".to_owned()
-            };
+            if done > 0 && done == self.live().count() {
+                parts.push((Status::Done, format!("{done} done")));
+            }
         }
-        parts.join(" \u{b7} ")
+        parts
     }
+
+    #[cfg(test)]
+    pub(crate) fn roll_up(&self) -> String {
+        let parts = self.roll_up_parts();
+        if parts.is_empty() { return "No active workers".to_owned(); }
+        parts.into_iter().map(|(status, label)| format!("{} {label}", crate::status_style::glyph(status))).collect::<Vec<_>>().join(" · ")
+    }
+
 }
 
 /// Everything [`team`] reads.
@@ -461,8 +459,8 @@ mod tests {
             (Idle, true),
             (Done, true),
         ]);
-        assert_eq!(team.roll_up(), "4 working \u{b7} 1 waiting on you \u{b7} 2 ready to merge");
-        assert_eq!(facts_of(&[(Done, false)]).roll_up(), "1 done");
+        assert_eq!(team.roll_up(), "◌ 4 working \u{b7} ! 1 waiting on you \u{b7} → 2 ready to merge");
+        assert_eq!(facts_of(&[(Done, false)]).roll_up(), "✓ 1 done");
         assert_eq!(facts_of(&[(Idle, false)]).roll_up(), "No active workers");
     }
 

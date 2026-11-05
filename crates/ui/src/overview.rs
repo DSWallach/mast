@@ -127,11 +127,12 @@ enum SubagentStatus {
 impl SubagentStatus {
     /// Reuses the reference status palette: running = `--accent` (the
     /// working color), done = `--status-good`.
-    fn color(self) -> gpui::Hsla {
-        match self {
-            SubagentStatus::Running => reference_status_color(ChatIndicator::Working),
-            SubagentStatus::Done => reference_status_color(ChatIndicator::Completed),
-        }
+    fn color(self, appearance: crate::theme::Appearance) -> gpui::Hsla {
+        let status = match self {
+            SubagentStatus::Running => crate::status_style::Status::Working,
+            SubagentStatus::Done => crate::status_style::Status::Done,
+        };
+        crate::status_style::status_style(status, appearance).color
     }
 
     fn label(self) -> &'static str {
@@ -480,43 +481,17 @@ fn hash_color(key: &str) -> gpui::Hsla {
     gpui::rgb(HASH_COLOR_PALETTE[idx]).into()
 }
 
-/// Exact `--status-*` hex values from `session_canvas.html`'s `:root` CSS
-/// (`~20-22`) and `STATUS_STYLES` (`~837-846`) — replaces the app theme's
-/// own approximation so status colors genuinely match the
-/// reference instead of merely resembling it.
-fn reference_status_color(status: ChatIndicator) -> gpui::Hsla {
-    match status {
-        ChatIndicator::Working => gpui::rgb(0x3987e5).into(), // --accent (working/running)
-        // Reference's `needs_input` is --status-critical (red), not a
-        // distinct blue — a real semantic difference from this app's prior
-        // theme-based choice, ported faithfully rather than kept.
-        ChatIndicator::AwaitingInput => gpui::rgb(0xd03b3b).into(),
-        ChatIndicator::Errored => gpui::rgb(0xd03b3b).into(), // --status-critical (blocked)
-        ChatIndicator::Completed => gpui::rgb(0x0ca30c).into(), // --status-good (done)
-        ChatIndicator::Idle => gpui::rgb(0x898781).into(),    // --text-muted
-    }
-}
-
-/// `STATUS_STYLES` icon + label (`session_canvas.html:892-905`) mapped from
-/// Mast's real `ChatIndicator` vocabulary. What Mast can and can't produce:
-/// - `pending_approval` (#fab219 "⚡"): no equivalent. `SessionStatus` has no
-///   permission-wait state — an `InputRequested` event (the only "blocked on
-///   the human" signal) maps to `AwaitingInput`, which is the web's
-///   `needs_input`. Not invented here.
-/// - `blocked` ("✕"): Mast's `Errored` (an unseen failed run) — labeled
-///   "error", which is what it actually is.
-/// - `not_running` ("○"): no equivalent. It marked an externally imported
-///   session with no live run, which needed its import classification;
-///   without that every `Idle` chat is "idle" ("–").
-/// - `running`/`unknown`: aliases/fallbacks with no distinct Mast source.
+/// Shared chat status glyph and descriptive label.
 fn status_style(status: ChatIndicator) -> (&'static str, &'static str) {
-    match status {
-        ChatIndicator::Working => ("●", "working"),
-        ChatIndicator::AwaitingInput => ("●", "needs input"),
-        ChatIndicator::Errored => ("✕", "error"),
-        ChatIndicator::Completed => ("✓", "done"),
-        ChatIndicator::Idle => ("–", "idle"),
-    }
+    let glyph = crate::status_style::status_style(status.into(), crate::theme::Appearance::Dark).glyph;
+    let label = match status {
+        ChatIndicator::Working => "working",
+        ChatIndicator::AwaitingInput => "needs input",
+        ChatIndicator::Errored => "error",
+        ChatIndicator::Completed => "done",
+        ChatIndicator::Idle => "idle",
+    };
+    (glyph, label)
 }
 
 /// `CHECKS_META` (`session_canvas.html:912-916`): color + icon per checks
@@ -3295,7 +3270,12 @@ impl Overview {
             .iter()
             .take(visible_count)
             .map(|sub| {
-                let color = sub.status.color();
+                let color = sub.status.color(theme.appearance);
+                let indicator = if sub.status == SubagentStatus::Running {
+                    crate::loaders::mini_mono_spinner(format!("overview-subagent-status-{chat_id}-{}", sub.agent_id), 1.5, color, cx.entity_id(), cx).into_any_element()
+                } else {
+                    crate::status_style::indicator(crate::status_style::Status::Done, theme.appearance).into_any_element()
+                };
                 let name = sub.display_name();
                 let peeking = self
                     .subagent_peek
@@ -3336,7 +3316,7 @@ impl Overview {
                         this.open_subagent_peek(click_chat.clone(), &click_sub, window, cx);
                     }))
                     .tooltip(move |_, cx| cx.new(|_| LinkSourceTooltip(tooltip.clone())).into())
-                    .child(div().flex_none().size(px(8.0)).rounded_full().bg(color))
+                    .child(indicator)
                     .child(
                         div()
                             .flex_1()
@@ -5251,7 +5231,7 @@ impl Overview {
             .iter()
             .map(|&status| {
                 let (icon, label) = status_style(status);
-                swatch_row(reference_status_color(status), format!("{icon} {label}"))
+                swatch_row(crate::status_style::status_style(status.into(), theme.appearance).color, format!("{icon} {label}"))
             })
             .collect();
         status_rows.push(
@@ -5285,7 +5265,7 @@ impl Overview {
             "\"Group by\" toggles combine — the first becomes the top-level headers, each further one nests beneath it. Turn all off for the flat list.",
             "Click a row = expand for branch/worktree, PR (reviewers, checks, review decision), ticket, last message, archive.",
             "\"View full chat →\" = live chat side panel: read and reply without leaving the overview (the chat becomes the selected one). \"Open full chat →\" there jumps to the chat itself.",
-            "Small rows under a chat = its subagents (dot: blue running, green done). Rows show three plus a remainder count; hover the row to reveal the full stack. Hover a row for its full name; click one to peek at its transcript in a read-only side panel (a subagent can't be continued). ✕ or Escape closes it.",
+            "Small rows under a chat = its subagents (ring: running, check: done). Rows show three plus a remainder count; hover the row to reveal the full stack. Hover a row for its full name; click one to peek at its transcript in a read-only side panel (a subagent can't be continued). ✕ or Escape closes it.",
             "Archive hides a chat from the default view (same as the sidebar's archive). \"Show archived\" brings archived chats back, dimmed.",
             "\"Repos\" hides whole repos everywhere (list, grouping, search). Search matches title, branch, last message, folder, ticket id and PR title.",
         ];
@@ -5675,7 +5655,12 @@ impl Overview {
             .map(|at| format_time_ago(at, now))
             .unwrap_or_else(|| format_time_ago(row.chat.created_at, now))
             .into();
-        let dot = reference_status_color(row.status);
+        let dot = crate::status_style::status_style(row.status.into(), theme.appearance).color;
+        let indicator = if row.status == ChatIndicator::Working {
+            crate::loaders::mini_mono_spinner(format!("overview-status-{chat_id}"), 1.5, dot, cx.entity_id(), cx).into_any_element()
+        } else {
+            crate::status_style::indicator(row.status.into(), theme.appearance).into_any_element()
+        };
         let (icon, label) = status_style(row.status);
         let unread = is_unread_done(
             &self.acknowledged_done,
@@ -5787,7 +5772,7 @@ impl Overview {
                         this.toggle_expanded(&toggle_id, cx);
                         cx.notify();
                     }))
-                    .child(div().flex_none().size(px(7.0)).rounded_full().bg(dot))
+                    .child(indicator)
                     .child(
                         div()
                             .flex_1()
@@ -7491,12 +7476,12 @@ mod logic_tests {
         assert_eq!(decoded[2].status, SubagentStatus::Done);
         assert_eq!(decoded[3].status, SubagentStatus::Done);
         assert_eq!(
-            SubagentStatus::Running.color(),
-            reference_status_color(ChatIndicator::Working)
+            SubagentStatus::Running.color(crate::theme::Appearance::Dark),
+            crate::status_style::status_style(crate::status_style::Status::Working, crate::theme::Appearance::Dark).color
         );
         assert_eq!(
-            SubagentStatus::Done.color(),
-            reference_status_color(ChatIndicator::Completed)
+            SubagentStatus::Done.color(crate::theme::Appearance::Dark),
+            crate::status_style::status_style(crate::status_style::Status::Done, crate::theme::Appearance::Dark).color
         );
     }
 
@@ -8396,11 +8381,11 @@ mod logic_tests {
     fn status_style_maps_zeron_indicators_to_reference_vocabulary() {
         assert_eq!(
             status_style(ChatIndicator::AwaitingInput),
-            ("●", "needs input")
+            ("!", "needs input")
         );
         assert_eq!(status_style(ChatIndicator::Completed), ("✓", "done"));
-        assert_eq!(status_style(ChatIndicator::Idle), ("–", "idle"));
-        assert_eq!(status_style(ChatIndicator::Working), ("●", "working"));
+        assert_eq!(status_style(ChatIndicator::Idle), ("○", "idle"));
+        assert_eq!(status_style(ChatIndicator::Working), ("◌", "working"));
         assert_eq!(status_style(ChatIndicator::Errored), ("✕", "error"));
     }
 

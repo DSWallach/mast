@@ -1,9 +1,7 @@
 //! Shared element builders for work-item metadata on List rows,
 //! Outline rows, and Work Item Details.
 //!
-//! Attention ("User Action Required") uses the sidebar's theme vocabulary —
-//! `theme.accent`, the color the sidebar gives an Awaiting Input Chat — not
-//! the Overview's hardcoded critical red (m0-contract §7).
+//! Attention ("User Action Required") uses the shared waiting status style.
 use gpui::{AnyElement, Render, SharedString, Window, div, prelude::*, px};
 
 use super::filter::WorkItemPathLabel;
@@ -32,7 +30,7 @@ impl Render for TextTooltip {
 
 /// The attention color: sidebar Awaiting Input.
 pub(crate) fn attention_color(theme: &Theme) -> gpui::Hsla {
-    theme.accent
+    crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color
 }
 
 /// Compact work-item path chip. `id` must be unique per frame (tooltips are
@@ -89,7 +87,7 @@ pub(crate) fn attention_indicator(
             .text_size(crate::typography::ui_rems(9.5))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(color)
-            .child(div().flex_none().size(px(6.0)).rounded_full().bg(color))
+            .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance))
             .when(count > 1, |el| {
                 el.child(SharedString::from(count.to_string()))
             })
@@ -185,7 +183,7 @@ pub(crate) fn status_style(
         WorkItemEffectiveStatus::Pending => ("○", "Pending", theme.text_muted),
         WorkItemEffectiveStatus::Active => ("◐", "Active", theme.busy),
         WorkItemEffectiveStatus::UserActionRequired => {
-            ("●", "User Action Required", attention_color(theme))
+            (crate::status_style::glyph(crate::status_style::Status::Waiting), "User Action Required", attention_color(theme))
         }
         WorkItemEffectiveStatus::Completed => ("✓", "Completed", theme.success),
     }
@@ -204,12 +202,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attention_uses_the_theme_accent_not_the_overview_red() {
+    fn attention_uses_the_waiting_status_color() {
         let theme = Theme::default();
-        assert_eq!(attention_color(&theme), theme.accent);
+        assert_eq!(attention_color(&theme), crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color);
         let (_, label, color) = status_style(WorkItemEffectiveStatus::UserActionRequired, &theme);
         assert_eq!(label, "User Action Required");
-        assert_eq!(color, theme.accent);
+        assert_eq!(color, attention_color(&theme));
         let critical: gpui::Hsla = gpui::rgb(0xd03b3b).into();
         assert_ne!(color, critical);
     }

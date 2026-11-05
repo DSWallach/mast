@@ -1002,7 +1002,7 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(if urgent {
-                        theme.warning
+                        crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color
                     } else {
                         theme.text_faint
                     })
@@ -1039,11 +1039,12 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let dot = match row.state {
-            RunState::Awaiting => theme.warning,
-            RunState::Errored | RunState::ToolFailed => theme.danger,
-            RunState::Working => theme.busy,
-            RunState::IdleBackground => theme.text_faint,
+        let status = crate::status_style::Status::from(row.state);
+        let indicator = if status == crate::status_style::Status::Working {
+            let color = crate::status_style::status_style(status, theme.appearance).color;
+            crate::loaders::mini_mono_spinner(format!("running-status-{}", row.chat_id), 1.5, color, cx.entity_id(), cx).into_any_element()
+        } else {
+            crate::status_style::indicator(status, theme.appearance).into_any_element()
         };
         let meta = [
             row.item_path.clone(),
@@ -1080,12 +1081,7 @@ impl Shell {
                 }),
             )
             .child(
-                div()
-                    .mt(px(5.0))
-                    .size(px(7.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(dot),
+                div().mt(px(5.0)).child(indicator),
             )
             .child(
                 div()
@@ -1108,9 +1104,9 @@ impl Shell {
                             )
                             .when(row.state == RunState::Awaiting || failed, |el| {
                                 let (label, color) = if row.state == RunState::Awaiting {
-                                    ("waiting for input", theme.warning)
+                                    ("waiting for input", crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color)
                                 } else {
-                                    ("tool calls failed", theme.danger)
+                                    ("tool calls failed", crate::status_style::status_style(crate::status_style::Status::Errored, theme.appearance).color)
                                 };
                                 el.child(
                                     div()

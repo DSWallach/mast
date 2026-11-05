@@ -715,10 +715,7 @@ impl Shell {
                 el.child(
                     div()
                         .debug_selector(|| "right-surface-item-dot".into())
-                        .flex_none()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(theme.warning),
+                        .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance)),
                 )
             })
             .into_any_element()

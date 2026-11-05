@@ -1152,7 +1152,7 @@ fn the_team_tab_lists_a_worker_per_row_with_state_activity_and_a_roll_up(cx: &mu
     });
     let facts = shell.update(vcx, |shell, cx| shell.team_facts(CHAT_API, cx));
     assert_eq!(facts.workers.len(), 4);
-    assert_eq!(facts.roll_up(), "1 working \u{b7} 1 waiting on you \u{b7} 1 ready to merge");
+    assert_eq!(facts.roll_up(), "◌ 1 working \u{b7} ! 1 waiting on you \u{b7} → 1 ready to merge");
     // Waiting first, then ready to merge, working, idle.
     let ids: Vec<_> = facts.workers.iter().map(|w| w.chat_id.as_str()).collect();
     assert_eq!(ids, ["w-1", "w-2", "w-0", "w-3"]);
