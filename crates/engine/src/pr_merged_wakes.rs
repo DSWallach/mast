@@ -34,6 +34,25 @@ impl Observations {
                 .is_some_and(|previous| previous.eq_ignore_ascii_case("open"))
             && !self.notified.contains(&(chat.to_owned(), url.to_owned()))
     }
+
+    fn reserve_notification(
+        &mut self,
+        path: &Path,
+        url: &str,
+        state: &str,
+        chat: &str,
+        owned: bool,
+        enabled: bool,
+    ) -> std::io::Result<bool> {
+        if !self.should_notify(url, state, chat, owned, enabled) {
+            return Ok(false);
+        }
+        let mut updated = self.clone();
+        updated.notified.insert((chat.to_owned(), url.to_owned()));
+        save(path, &updated)?;
+        *self = updated;
+        Ok(true)
+    }
 }
 
 #[derive(Clone)]
@@ -83,31 +102,47 @@ impl PrMergedWakes {
             .is_some_and(|state| state.eq_ignore_ascii_case("open"))
             && status.state.eq_ignore_ascii_case("merged")
         {
-            for chat in self.workspace.read_chats().unwrap_or_default() {
-                let owned = self
-                    .workspace
-                    .chat_pr_links(&chat.id)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|link| {
-                        crate::archivable::owns_pr_link(link)
-                            && crate::chat_links::canonicalize_pr_url(&link.url) == url
-                    });
+            let chats = match self.workspace.read_chats() {
+                Ok(chats) => chats,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to read chats for PR merged wake");
+                    return;
+                }
+            };
+            let mut retry = false;
+            for chat in chats {
+                let links = match self.workspace.chat_pr_links(&chat.id) {
+                    Ok(links) => links,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to read PR links for merged wake");
+                        retry = true;
+                        continue;
+                    }
+                };
+                let owned = links.iter().any(|link| {
+                    crate::archivable::owns_pr_link(link)
+                        && crate::chat_links::canonicalize_pr_url(&link.url) == url
+                });
                 let enabled = self.wakes.accepts_pr_merged(&chat.id);
-                let key = (chat.id.clone(), url.clone());
                 {
                     let mut observations =
                         self.observations.lock().unwrap_or_else(|e| e.into_inner());
-                    if !observations.should_notify(&url, &status.state, &chat.id, owned, enabled) {
-                        continue;
+                    match observations.reserve_notification(
+                        &self.path,
+                        &url,
+                        &status.state,
+                        &chat.id,
+                        owned,
+                        enabled,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to save PR merged wake marker");
+                            retry = true;
+                            continue;
+                        }
                     }
-                    let mut updated = observations.clone();
-                    updated.notified.insert(key);
-                    if let Err(error) = save(&self.path, &updated) {
-                        tracing::warn!(%error, "failed to save PR merged wake marker");
-                        continue;
-                    }
-                    *observations = updated;
                 }
                 let branch = status.branch.as_deref().unwrap_or("unknown branch");
                 let repo = url
@@ -130,6 +165,9 @@ impl PrMergedWakes {
                     }
                 }
                 self.wakes.note_pr_merged(&chat.id, &url, &detail).await;
+            }
+            if retry {
+                return;
             }
         }
         let mut observations = self.observations.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,32 +201,148 @@ mod tests {
             url: url.into(),
             source: ChatLinkSource::Mentioned,
         };
-        assert!(!observations.should_notify(
-            url,
-            "MERGED",
-            "worker",
-            crate::archivable::owns_pr_link(&mention),
-            true
-        ));
-        assert!(!observations.should_notify(
-            url,
-            "MERGED",
-            "worker",
-            crate::archivable::owns_pr_link(&owned),
-            false
-        ));
-        assert!(observations.should_notify(
-            url,
-            "MERGED",
-            "worker",
-            crate::archivable::owns_pr_link(&owned),
-            true
-        ));
-        observations.notified.insert(("worker".into(), url.into()));
-        save(&path, &observations).unwrap();
-        assert!(!observations.should_notify(url, "MERGED", "worker", true, true));
-        let loaded: Observations = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert!(!loaded.should_notify(url, "MERGED", "worker", true, true));
-        assert!(loaded.should_notify(url, "MERGED", "another", true, true));
+        let mut emitted = Vec::new();
+        for (chat, link, enabled) in [
+            ("mentioned", &mention, true),
+            ("disabled", &owned, false),
+            ("worker", &owned, true),
+            ("worker", &owned, true),
+        ] {
+            if observations
+                .reserve_notification(
+                    &path,
+                    url,
+                    "MERGED",
+                    chat,
+                    crate::archivable::owns_pr_link(link),
+                    enabled,
+                )
+                .unwrap()
+            {
+                emitted.push(chat);
+            }
+        }
+        assert_eq!(emitted, ["worker"]);
+        let mut loaded: Observations =
+            serde_json::from_slice(&std::fs::read(path.clone()).unwrap()).unwrap();
+        assert!(
+            !loaded
+                .reserve_notification(&path, url, "MERGED", "worker", true, true)
+                .unwrap()
+        );
+        assert!(
+            loaded
+                .reserve_notification(&path, url, "MERGED", "another", true, true)
+                .unwrap()
+        );
+    }
+    #[tokio::test]
+    async fn refresh_queues_only_owned_enabled_pr_once_across_reload() {
+        use crate::workspace_host::WorkspaceHostConfig;
+        use crate::{DocHost, DocHostConfig, HarnessRegistry, RunJournal, SessionsEngine};
+        use mast_proto::{HarnessId, WakeSettings};
+        use mast_sync::DocsStore;
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(directory.path()).unwrap());
+        let workspace = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "device".into(),
+                device_name: "test".into(),
+                platform: "test".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        for (id, parent) in [
+            ("orch", None),
+            ("off", None),
+            ("owned", Some("orch")),
+            ("mention", Some("orch")),
+            ("disabled", Some("off")),
+        ] {
+            workspace
+                .create_chat_with_parent(
+                    id,
+                    None,
+                    Some("device"),
+                    None,
+                    None,
+                    parent.map(str::to_owned),
+                )
+                .unwrap();
+        }
+        let url = "https://github.com/acme/repo/pull/42";
+        for (chat, source) in [
+            ("owned", ChatLinkSource::CreatedInChat),
+            ("mention", ChatLinkSource::Mentioned),
+            ("disabled", ChatLinkSource::CreatedInChat),
+        ] {
+            workspace.add_chat_pr_link(chat, url, source).unwrap();
+        }
+        let sessions = SessionsEngine::new(
+            "device".into(),
+            Arc::new(RunJournal::open(directory.path().join("journal")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let doc_host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "device".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let wakes = OrchestratorWakes::new(
+            sessions,
+            doc_host,
+            workspace.clone(),
+            None,
+            Arc::new(|| 1_000_000),
+        );
+        wakes.ingest_chats(&workspace.read_chats().unwrap()).await;
+        wakes
+            .set_settings(
+                "orch",
+                WakeSettings {
+                    prs: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        let path = directory.path().join("cache/pr-merged-wakes.json");
+        let tracker = PrMergedWakes::new(path.clone(), workspace.clone(), wakes.clone());
+        let mut status = PrStatus {
+            number: 42,
+            url: Some(url.into()),
+            state: "OPEN".into(),
+            is_draft: false,
+            review_decision: None,
+            reviewers: vec![],
+            checks: None,
+            title: Some("Example".into()),
+            branch: Some("feature/a".into()),
+            head_sha: None,
+            mergeable: "unknown".into(),
+            has_reviewer_requested: false,
+        };
+        tracker.observe(url, &status).await;
+        assert!(wakes.status("orch").held.is_empty());
+        status.state = "MERGED".into();
+        tracker.observe(url, &status).await;
+        let held = wakes.status("orch").held;
+        assert_eq!(held.len(), 1);
+        assert!(
+            held[0]
+                .summary
+                .contains("acme/repo #42 Example (feature/a)")
+        );
+        assert!(wakes.status("off").held.is_empty());
+        tracker.observe(url, &status).await;
+        let reopened = PrMergedWakes::new(path, workspace, wakes.clone());
+        reopened.observe(url, &status).await;
+        assert_eq!(wakes.status("orch").held.len(), 1);
     }
 }
