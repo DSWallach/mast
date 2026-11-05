@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **respond_to_input validation** (2026-11-05 overnight, `respond-to-input-validation`, Terra): answers are checked
+  against the pending request's question ids and option labels before queuing and again before resolving; a
+  single unknown or omitted id maps to the only question; otherwise an error lists valid ids/options and nothing
+  is sent. An unmatched answer can no longer become a Codex approval denial (friction 4a607d99). Release run:
+  nextest 2354/2354, UI 2471/0.
 - **Flaky test fixes** (2026-11-05 overnight, `flaky-tests`, Terra; test code only): Devin discovery startup
   deadline 500 ms → 30 s (test now ~94 s by design); device-relay fixture no longer writes the live
   `~/.zeron/worktrees` (per-engine temp worktree root); Codex override login fake keeps running via /bin/sleep
@@ -888,7 +893,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
