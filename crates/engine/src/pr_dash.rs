@@ -167,7 +167,7 @@ impl GhRunner for RealGh {
         args.push("-f".into());
         args.push(format!("query={query}"));
         for (key, value) in vars {
-            args.push("-f".into());
+            args.push(if *key == "number" { "-F" } else { "-f" }.into());
             args.push(format!("{key}={value}"));
         }
         let output = run_gh(args).await?;
@@ -437,15 +437,17 @@ const FILES_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!,
   } }
 }";
 
-async fn fetch_files(gh: &dyn GhRunner, pr: &mut Value) {
+async fn fetch_files(gh: &dyn GhRunner, pr: &mut Value) -> bool {
     let full = str_field(&pr["repository"], "nameWithOwner").to_string();
     let Some((owner, name)) = full.split_once('/') else {
-        return;
+        pr["files"] = serde_json::json!({"nodes": [], "partial": true});
+        return false;
     };
     let number = pr["number"].as_u64().unwrap_or(0).to_string();
     let mut files = Vec::new();
     let mut after: Option<String> = None;
     let mut partial = false;
+    let mut rate_limited = false;
     loop {
         let mut vars = vec![
             ("owner", owner),
@@ -456,15 +458,23 @@ async fn fetch_files(gh: &dyn GhRunner, pr: &mut Value) {
             vars.push(("after", cursor));
         }
         let response = gh.graphql(FILES_QUERY, &vars).await;
-        let Ok(body) = response else {
-            partial = true;
-            break;
+        let body = match response {
+            Ok(body) => body,
+            Err(error) => {
+                rate_limited = error.to_lowercase().contains("rate limit");
+                partial = true;
+                break;
+            }
         };
         if body
             .get("errors")
             .and_then(Value::as_array)
             .is_some_and(|e| !e.is_empty())
         {
+            rate_limited = body["errors"]
+                .to_string()
+                .to_lowercase()
+                .contains("rate limit");
             partial = true;
             break;
         }
@@ -499,6 +509,7 @@ async fn fetch_files(gh: &dyn GhRunner, pr: &mut Value) {
         after = cursor;
     }
     pr["files"] = serde_json::json!({"nodes": files, "partial": partial});
+    rate_limited
 }
 
 /// Fetch, normalize, stack and classify one tab's rows (no chat links).
@@ -522,13 +533,18 @@ async fn fetch_rows_cached(
     let mut prs = read_prs(gh, cfg, &hits).await?;
     resolve_mergeable(gh, cfg, &mut prs).await;
     let mut rows = Vec::new();
+    let mut rate_limited = false;
     for mut pr in prs {
         let sha = str_field(&pr, "headRefOid");
         let previous = cached
             .iter()
             .find(|row| !sha.is_empty() && row.head_sha == sha && row.url == str_field(&pr, "url"));
         if previous.is_none() {
-            fetch_files(gh, &mut pr).await;
+            if rate_limited {
+                pr["files"] = serde_json::json!({"nodes": [], "partial": true});
+            } else {
+                rate_limited = fetch_files(gh, &mut pr).await;
+            }
         }
         let mut row = normalize(&pr, me, tab);
         if let Some(previous) = previous {
