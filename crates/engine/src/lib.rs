@@ -289,7 +289,11 @@ impl EngineCore {
         // This device's harness enablement (Settings → Agents) rides the
         // engine data dir — per-device, like the CLI installs it gates.
         registry.load_prefs(data_dir);
+        #[cfg(feature = "startup-bench")]
+        let store_started = std::time::Instant::now();
         let store = Arc::new(DocsStore::open(profile.store_root())?);
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | registry_store_open | ms={:.3}", store_started.elapsed().as_secs_f64() * 1000.0);
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
@@ -478,7 +482,11 @@ impl EngineCore {
             store_for_import.clone(),
         ));
         let linear = linear::LinearService::default();
+        #[cfg(feature = "startup-bench")]
+        let cache_started = std::time::Instant::now();
         linear.set_cache_dir(&data_dir.join("cache"));
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | linear_cache_setup | ms={:.3}", cache_started.elapsed().as_secs_f64() * 1000.0);
         linear::sync::spawn_sync_loop(
             linear.clone(),
             workspace.clone(),
@@ -1090,9 +1098,15 @@ impl Engine {
         });
 
         let preview_org = profile.org_id().to_string();
+        #[cfg(feature = "startup-bench")]
+        let registry_started = std::time::Instant::now();
         let registry = Arc::new(registry::profile_registry(
             profile.store_root().join("model-discovery"),
         ));
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | model_registry_setup | ms={:.3}", registry_started.elapsed().as_secs_f64() * 1000.0);
+        #[cfg(feature = "startup-bench")]
+        let assembly_started = std::time::Instant::now();
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
@@ -1108,6 +1122,8 @@ impl Engine {
                 edge.clone(),
             )?,
         };
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | core_assembly | ms={:.3}", assembly_started.elapsed().as_secs_f64() * 1000.0);
         core.set_auth(auth.clone());
         // Stamp per-harness Work Outline instruction tokens once the CLI
         // probes (`claude --help`, `codex --version`) have run — blocking, so

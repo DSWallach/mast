@@ -374,7 +374,9 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
     );
     drop((bytes, registry, store));
     let started = std::time::Instant::now();
+    let settings_started = std::time::Instant::now();
     let settings = settings::UiSettings::load(dir.path());
+    eprintln!("BENCH phase | settings_keymap | ms={:.3}", settings_started.elapsed().as_secs_f64() * 1000.0);
     cx.update(|cx| {
         gpui_tokio::init_from_handle(cx, runtime.handle().clone());
         gpui_base::init(cx);
@@ -432,9 +434,30 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
     state.update(vcx, |state, cx| {
         state.declare_work_outline_visible(vec!["benchmark-space".into()], cx)
     });
+    let readiness_started = std::time::Instant::now();
+    let mut scheduler_time = std::time::Duration::ZERO;
+    let mut connection_recorded = false;
+    let mut chats_recorded = false;
+    let mut outline_recorded = false;
     loop {
         runtime.block_on(tokio::task::yield_now());
+        let scheduler_started = std::time::Instant::now();
         vcx.run_until_parked();
+        scheduler_time += scheduler_started.elapsed();
+        state.read_with(vcx, |state, _| {
+            if !connection_recorded && matches!(state.connection, crate::state::ConnectionStatus::Ready) {
+                eprintln!("BENCH milestone | engine_rpc_ready | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                connection_recorded = true;
+            }
+            if !chats_recorded && state.chats.len() == 250 {
+                eprintln!("BENCH milestone | chats_loaded | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                chats_recorded = true;
+            }
+            if !outline_recorded && state.work_outline("benchmark-space").snapshot().is_some_and(|snapshot| snapshot.items.len() == 300) {
+                eprintln!("BENCH milestone | outline_loaded | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                outline_recorded = true;
+            }
+        });
         if state.read_with(vcx, |state, _| {
             state.chats.len() == 250
                 && state
@@ -450,10 +473,20 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
         );
         std::thread::yield_now();
     }
+    eprintln!(
+        "BENCH startup | readiness wait | ms={:.2} scheduler_ms={:.2}",
+        readiness_started.elapsed().as_secs_f64() * 1000.0,
+        scheduler_time.as_secs_f64() * 1000.0
+    );
+    let draw_started = std::time::Instant::now();
     vcx.update(|window, cx| {
         window.refresh();
         window.draw(cx).clear();
     });
+    eprintln!(
+        "BENCH startup | forced draw alone | ms={:.2}",
+        draw_started.elapsed().as_secs_f64() * 1000.0
+    );
     eprintln!(
         "BENCH startup | loaded sidebar draw | ms={:.2}",
         started.elapsed().as_secs_f64() * 1000.0

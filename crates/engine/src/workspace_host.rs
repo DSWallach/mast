@@ -230,7 +230,14 @@ impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
-        let mut doc = match store.load_snapshot(REGISTRY_DOC_ID)? {
+        #[cfg(feature = "startup-bench")]
+        let snapshot_started = std::time::Instant::now();
+        let snapshot = store.load_snapshot(REGISTRY_DOC_ID)?;
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | registry_snapshot_read | ms={:.3}", snapshot_started.elapsed().as_secs_f64() * 1000.0);
+        #[cfg(feature = "startup-bench")]
+        let materialize_started = std::time::Instant::now();
+        let mut doc = match snapshot {
             Some(bytes) => RegistryDoc::from_bytes(&bytes, &config.device_id)
                 .map_err(|e| EngineError::Other(format!("registry snapshot load failed: {e}")))?,
             None => {
@@ -277,6 +284,8 @@ impl WorkspaceHost {
                 doc
             }
         };
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | registry_decode | ms={:.3}", materialize_started.elapsed().as_secs_f64() * 1000.0);
         // Destructive-break hygiene: the pre-spaces row stays unreachable.
         store.delete_snapshot(LEGACY_WORKSPACE_DOC_ID).ok();
 
@@ -322,11 +331,19 @@ impl WorkspaceHost {
             tracing::warn!(%error, "PR prompt migration failed");
         }
 
+        #[cfg(feature = "startup-bench")]
+        let settle_started = std::time::Instant::now();
         let local_authority = config.edge.is_none();
         if local_authority && doc.settle_pending_locally() {
             tracing::info!("settled the local registry's queued writes");
         }
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | registry_settle | ms={:.3}", settle_started.elapsed().as_secs_f64() * 1000.0);
+        #[cfg(feature = "startup-bench")]
+        let read_started = std::time::Instant::now();
         let state = doc.read_all()?;
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | registry_materialize | ms={:.3}", read_started.elapsed().as_secs_f64() * 1000.0);
         let (chats_tx, _) = watch::channel(state.chats);
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
@@ -370,7 +387,11 @@ impl WorkspaceHost {
         // Persist immediately: after this boot the migration source is never
         // read again, so the registry snapshot must exist even if the process
         // dies before the first debounced save.
+        #[cfg(feature = "startup-bench")]
+        let save_started = std::time::Instant::now();
         host.inner.save_snapshot();
+        #[cfg(feature = "startup-bench")]
+        eprintln!("BENCH phase | registry_save | ms={:.3}", save_started.elapsed().as_secs_f64() * 1000.0);
         host.join_room();
         tokio::spawn(workspace_task(Arc::downgrade(&host.inner), changed_rx));
         if host.inner.config.edge.is_some() {

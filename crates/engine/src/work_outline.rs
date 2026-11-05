@@ -543,11 +543,13 @@ impl WorkOutlineService {
                 let workspace = state.workspace.clone();
                 let space_id = state.space_id.clone();
                 let (marker, mut snapshot) = tokio::task::spawn_blocking(move || {
+                    #[cfg(feature = "startup-bench")]
+                    let outline_started = std::time::Instant::now();
                     let (marker, inputs) = workspace.work_outline_inputs_marked(&space_id);
-                    (
-                        marker,
-                        mast_doc::materialize_work_outline(&space_id, &inputs),
-                    )
+                    let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
+                    #[cfg(feature = "startup-bench")]
+                    eprintln!("BENCH phase | outline_snapshot | ms={:.3}", outline_started.elapsed().as_secs_f64() * 1000.0);
+                    (marker, snapshot)
                 })
                 .await
                 .ok()?;
