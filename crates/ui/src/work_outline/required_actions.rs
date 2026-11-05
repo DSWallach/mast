@@ -707,7 +707,7 @@ impl UserActionNotifier {
             if !first && previous == 0 && fresh {
                 let newest = requests
                     .iter()
-                     .max_by(|a, b| {
+                    .max_by(|a, b| {
                         let eligible = |r: &&UserActionRequestView| {
                             NeedsGroup::of(r.effective_kind(), r.priority) != NeedsGroup::Fyi
                         };

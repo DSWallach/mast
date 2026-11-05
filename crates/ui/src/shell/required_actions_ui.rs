@@ -52,7 +52,11 @@ impl Shell {
                 }
                 if banner && notice.allows_banner() {
                     let chat_title = notice.chat_id.as_deref().and_then(|id| {
-                        state.read(cx).chats.iter().find(|chat| chat.id == id)
+                        state
+                            .read(cx)
+                            .chats
+                            .iter()
+                            .find(|chat| chat.id == id)
                             .and_then(|chat| chat.title.clone())
                     });
                     let title = match chat_title.filter(|title| !title.trim().is_empty()) {
