@@ -170,7 +170,9 @@ fn bench_prepared_transcript_open(cx: &mut gpui::TestAppContext) {
         replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
     };
     let prepared = measure("transcript", "prepare 2000 entries", || {
-        crate::transcript::TranscriptPreparation::default().prepare(&update).unwrap()
+        crate::transcript::TranscriptPreparation::default()
+            .prepare(&update)
+            .unwrap()
     });
     let state = cx.new(|_| AppState::new());
     let (view, vcx) = cx.add_window_view(|_, cx| {
@@ -191,4 +193,120 @@ fn bench_prepared_transcript_open(cx: &mut gpui::TestAppContext) {
         });
         draw(vcx);
     });
+}
+
+/// A wire frame traverses the real RPC subscription, background preparation,
+/// AppState notification, transcript sync and headless GPUI draw.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+    let state = cx.new(|_| AppState::new());
+    let (view, vcx) = cx.add_window_view(|_, cx| {
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        Cached(transcript)
+    });
+    let transcript = view.read_with(vcx, |view, _| view.0.clone());
+    state.update(vcx, |state, cx| {
+        state.set_test_engine(crate::state::EngineHandle::from_test_client(
+            mast_rpc::RpcClient::new(out, inbound),
+        ));
+        state.select_chat(Some("chat".into()), cx);
+    });
+    vcx.run_until_parked();
+    runtime.block_on(tokio::task::yield_now());
+    let request_id = loop {
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("transcript watch request")).unwrap();
+        if request["method"] == mast_rpc::methods::WATCH_DOC_MESSAGES {
+            break request["id"].clone();
+        }
+    };
+    let mut entries = long_chat(2000);
+    entries.last_mut().unwrap().status = Some(MessageStatus::Streaming);
+    let opening = mast_doc::TranscriptUpdate {
+        frame: mast_doc::TranscriptFrame::reset(&entries),
+        context_usage: None,
+        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
+    };
+    let frame = |update: &mast_doc::TranscriptUpdate| {
+        serde_json::json!({"id": request_id, "item": update}).to_string()
+    };
+    let wait_for_revision = |vcx: &mut gpui::VisualTestContext, previous: u64| {
+        let started = std::time::Instant::now();
+        loop {
+            runtime.block_on(tokio::task::yield_now());
+            vcx.run_until_parked();
+            if state.read_with(vcx, |state, _| {
+                state.transcript_revision > previous && state.transcript_replayed
+            }) {
+                break;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "transcript watch did not deliver the frame"
+            );
+            std::thread::yield_now();
+        }
+    };
+    let previous = state.read_with(vcx, |state, _| state.transcript_revision);
+    replies.try_send(frame(&opening)).unwrap();
+    wait_for_revision(vcx, previous);
+    draw(vcx);
+    let retained = state.read_with(vcx, |state, _| {
+        state.prepared_transcripts["chat"].rows["m0"].clone()
+    });
+    let mut updates = Vec::new();
+    for _ in 0..30 {
+        let before = entries.clone();
+        if let Some(MessagePart::Text { text, .. }) = entries.last_mut().unwrap().parts.last_mut() {
+            text.push_str(" chunk");
+        } else {
+            panic!("last part must be text");
+        }
+        let update = mast_doc::TranscriptUpdate {
+            frame: mast_doc::diff_transcript(&before, &entries),
+            context_usage: None,
+            replay_baseline: None,
+        };
+        updates.push(frame(&update));
+    }
+    RENDERED_ROW_COUNT.with(|count| count.set(0));
+    measure_n(
+        "transcript",
+        "subscription chunk through preparation and draw",
+        updates.len(),
+        |index| {
+            let previous = state.read_with(vcx, |state, _| state.transcript_revision);
+            replies.try_send(updates[index].clone()).unwrap();
+            wait_for_revision(vcx, previous);
+            draw(vcx);
+        },
+    );
+    let rendered = RENDERED_ROW_COUNT.with(|count| count.get());
+    let rows = transcript.read_with(vcx, |transcript, _| transcript.rows.len());
+    let reused = state.read_with(vcx, |state, _| {
+        std::sync::Arc::ptr_eq(&retained, &state.prepared_transcripts["chat"].rows["m0"])
+    });
+    eprintln!(
+        "BENCH transcript | rows={rows} rendered_row_calls={rendered} chunks={} unchanged_entry_reused={reused}",
+        updates.len()
+    );
+    assert!(reused, "unchanged entry rows remain cached");
+    assert!(
+        rendered < rows * updates.len(),
+        "streaming must not render every transcript row per chunk"
+    );
 }
