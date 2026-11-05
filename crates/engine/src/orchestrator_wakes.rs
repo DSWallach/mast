@@ -867,13 +867,20 @@ impl OrchestratorWakes {
         self.after_ingest(recorded).await;
     }
 
-    /// A worker's PR merged (fed by whoever learns PR state).
-    pub async fn note_pr_merged(&self, worker_chat_id: &str, pr_url: &str) {
+    /// Whether any current orchestrator has enabled PR-merged wakes.
+    pub fn accepts_pr_merged(&self, worker_chat_id: &str) -> bool {
+        let state = lock(&self.inner.state);
+        parents_of(&state, worker_chat_id).iter().any(|orch|
+            state.core.settings(orch).wakes_for(WakeEventKind::PrMerged))
+    }
+
+    /// Queue a worker's merged PR for its orchestrators.
+    pub async fn note_pr_merged(&self, worker_chat_id: &str, pr_url: &str, detail: &str) {
         let now = self.now();
         let mut recorded = HashSet::new();
         {
             let mut state = lock(&self.inner.state);
-            let line = format!("{} — PR merged: {pr_url}", label(&state, worker_chat_id));
+            let line = format!("{} — PR merged: {detail}", label(&state, worker_chat_id));
             for orch in parents_of(&state, worker_chat_id) {
                 let event = make_event(
                     &mut state,

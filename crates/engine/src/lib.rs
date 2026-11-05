@@ -49,6 +49,7 @@ pub mod pr_review_launch;
 pub mod review_sidecar;
 pub mod pr_review_sync;
 pub mod pr_ticket_cache;
+mod pr_merged_wakes;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -479,7 +480,6 @@ impl EngineCore {
         );
         let pr_ticket_cache = pr_ticket_cache::PrTicketCache::new();
         pr_ticket_cache.set_linear(linear.clone(), workspace.clone());
-        pr_ticket_cache.spawn_sweep_loop();
         pr_review_sync.spawn_sync_loop();
         // Same reasoning as the four repairs above (ticket 0xx design item
         // 6): backfill durable PR/ticket links for chats whose transcript
@@ -603,6 +603,10 @@ impl EngineCore {
             workspace.clone(),
             Some(data_dir.join("orchestrator-wakes.json")),
         );
+        pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
+            data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
+        ));
+        pr_ticket_cache.spawn_sweep_loop();
         Ok(Self {
             sessions,
             doc_host,

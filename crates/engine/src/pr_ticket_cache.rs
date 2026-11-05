@@ -272,6 +272,7 @@ impl<T> Entry<T> {
 }
 
 struct Inner {
+    merged_wakes: Mutex<Option<crate::pr_merged_wakes::PrMergedWakes>>,
     pr_cache: Mutex<HashMap<PrKey, Entry<PrStatus>>>,
     ticket_cache: Mutex<HashMap<String, Entry<TicketStatus>>>,
     pending_pr: Mutex<HashSet<PrKey>>,
@@ -319,6 +320,7 @@ impl PrTicketCache {
         let (my_prs_ready, _) = tokio::sync::watch::channel(false);
         Self {
             inner: Arc::new(Inner {
+                merged_wakes: Mutex::new(None),
                 pr_cache: Mutex::new(HashMap::new()),
                 ticket_cache: Mutex::new(HashMap::new()),
                 pending_pr: Mutex::new(HashSet::new()),
@@ -335,6 +337,10 @@ impl PrTicketCache {
                 linear_tickets: Mutex::new(HashSet::new()),
             }),
         }
+    }
+
+    pub(crate) fn set_merged_wakes(&self, wakes: crate::pr_merged_wakes::PrMergedWakes) {
+        *lock(&self.inner.merged_wakes) = Some(wakes);
     }
 
     /// Attach the Linear API client (engine assembly).
@@ -634,6 +640,16 @@ impl PrTicketCache {
             })
             .await
             .unwrap_or(None);
+            let wakes = lock(&inner.merged_wakes).clone();
+            if let (Some(wakes), Some(status)) = (&wakes, &data) {
+                let url = match &key {
+                    PrKey::Url(url) => Some(url.as_str()),
+                    PrKey::Branch { .. } => status.url.as_deref(),
+                };
+                if let Some(url) = url {
+                    wakes.observe(url, status).await;
+                }
+            }
             lock(&inner.pr_cache).insert(
                 key,
                 Entry {
