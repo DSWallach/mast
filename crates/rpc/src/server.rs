@@ -69,11 +69,24 @@ async fn handle_request(
     method: String,
     params: serde_json::Value,
 ) {
+    #[cfg(feature = "startup-bench")]
+    let trace_outline = method == crate::methods::WATCH_WORK_OUTLINE;
     let send = |frame: ServerFrame| {
         let out = out.clone();
         async move {
+            #[cfg(feature = "startup-bench")]
+            let serialization_started = std::time::Instant::now();
+            #[cfg(feature = "startup-bench")]
+            let trace_frame = trace_outline && frame.item.is_some();
             match serde_json::to_string(&frame) {
-                Ok(json) => out.send(json).await.map_err(|_| RpcError::Closed),
+                Ok(json) => {
+                    #[cfg(feature = "startup-bench")]
+                    if trace_frame {
+                        eprintln!("BENCH phase | outline_wire_encode | ms={:.3} bytes={}", serialization_started.elapsed().as_secs_f64() * 1000.0, json.len());
+                        eprintln!("BENCH event | outline_wire_send | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+                    }
+                    out.send(json).await.map_err(|_| RpcError::Closed)
+                },
                 Err(err) => {
                     tracing::error!(error = %err, "rpc: failed to serialize server frame");
                     Err(RpcError::Closed)
