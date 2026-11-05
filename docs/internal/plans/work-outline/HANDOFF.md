@@ -999,10 +999,14 @@ unknown ids instead of denying.
 
 **Running:** none.
 
+**Observing (minimal-talk phase 0, approved 2026-11-05):** item 9516dd7c, worker chat 4ccb0a0d (Codex Terra, idle).
+Baseline for the warehouse dashboard, with Basedash, Kit Line and StockLot as comparisons, is in the observation log
+(mast-artifact:0b48afa290246f61b51f8ca21765e793), rev 2. Window 2026-11-05 → 11-12. Around 11-12, take a fresh
+read-only snapshot and APFS-clone it into `.worktrees/phase0-data/` (gitignored; Codex asks approval for every read
+outside its workspace). Then have a worker follow the log's re-run steps and produce the go/no-go. Still unmeasured:
+worker runtime status and PR/Linear sync visibility. Delete `.worktrees/phase0-data/` after.
+
 **Waiting on Mikey:**
-- Plan rev 3 for minimal-talk / visual harness (mast-artifact:37a6c5c807eb8fe30aa1b56044a8749a): approve the
-  observe-first order and confirm the warehouse dashboard as the pilot. Baseline metrics are taken (talk-metrics);
-  re-run around 2026-11-12 with `tools/mast-metrics` (fresh read-only snapshot, `--compare`).
 - Active-checkout tracking design (Needs-you, parked item 40377ea3). PR review brief (unlocks PR review phase 4).
 - Proposed instruction edit on Mast Dev (install step → install script, proposal acd9f3ef): accept it.
 - Cofactr: accept Space-root proposal 8838b1f4; admin-chat follow-ups (Q-7, archive the old Project Template copy,
@@ -1061,7 +1065,7 @@ Prompt, to adjust with Mikey:
 > be undoable from Recent Changes.
 
 **Waiting on Mikey (Required Actions open):** PR review brief (mast-artifact:3e12f5d0be4cb1de57ed6b0f8be58992),
-minimal-talk research (held until the admin chat runs stage 0), active-checkout design
+active-checkout design
 (mast-artifact:679f61de127b3519c16de37f8d90f99b), `mast-doctor` Ready to merge.
 
 **Coordinator lessons from this session:**
