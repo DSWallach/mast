@@ -391,8 +391,12 @@ impl EngineHandle {
                 }
             };
 
+            #[cfg(feature = "startup-bench")]
+            startup_trace("runtime_assembly_start");
             match Engine::assemble_runtime_with_lock(&engine_config, auth, profile, lock).await {
                 Ok(engine_runtime) => {
+                    #[cfg(feature = "startup-bench")]
+                    startup_trace("runtime_assembled");
                     let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
                     *runtime_for_boot.lock().await = Some(engine_runtime);
                     if service_for_boot.set(service).is_err() {
@@ -2795,6 +2799,8 @@ impl AppState {
             if self.work_outline_tasks.contains_key(&space_id) {
                 continue;
             }
+            #[cfg(feature = "startup-bench")]
+            startup_trace("outline_watch_spawn");
             let task = spawn_work_outline_watch(cx, handle.clone(), space_id.clone());
             self.work_outline_tasks.insert(space_id, task);
         }
@@ -2963,6 +2969,8 @@ impl AppState {
             s.data_dir = Some(data_dir);
             cx.notify();
         });
+        #[cfg(feature = "startup-bench")]
+        startup_trace("bootstrap_spawn");
         let boot = Tokio::spawn(cx, EngineHandle::bootstrap(config));
         cx.spawn(async move |cx| {
             let outcome = match boot.await {
@@ -2989,6 +2997,8 @@ impl AppState {
     /// Methods the engine doesn't serve yet (chats/devices/auth land with the
     /// workspace doc in M4) fail their subscribe and are skipped gracefully.
     fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
+        #[cfg(feature = "startup-bench")]
+        startup_trace("attach_engine");
         // The attachment notification precedes the first connectivity frame.
         // Make that bootstrap gap explicit so the shell resets its alert
         // baseline instead of comparing the new runtime with the old one.
@@ -3424,6 +3434,13 @@ fn spawn_deferred_engine_watch(
 /// Chats watch. Boot selection is the shell's job (it lands on the first
 /// restored open tab, device-local state this entity can't see); this task
 /// only pumps frames.
+
+#[cfg(feature = "startup-bench")]
+fn startup_trace(event: &str) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    eprintln!("BENCH event | {event} | us={}", now.as_micros());
+}
+
 fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
     cx.spawn(async move |this, cx| {
         // Resubscribe loop (same contract as the transcript watch): a daemon
@@ -3432,6 +3449,8 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
         // from every device silently stopped arriving.
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         loop {
+            #[cfg(feature = "startup-bench")]
+            startup_trace("chats_subscribe_start");
             let mut rx = match handle
                 .client()
                 .subscribe(methods::WATCH_CHATS, serde_json::json!({}))
@@ -3448,6 +3467,10 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 }
             };
             while let Some(value) = rx.recv().await {
+                #[cfg(feature = "startup-bench")]
+                startup_trace("chats_frame_received");
+                #[cfg(feature = "startup-bench")]
+                let decode_started = std::time::Instant::now();
                 let parsed: Vec<Chat> = match serde_json::from_value(value) {
                     Ok(parsed) => parsed,
                     Err(err) => {
@@ -3455,7 +3478,11 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                         continue;
                     }
                 };
+                #[cfg(feature = "startup-bench")]
+                eprintln!("BENCH phase | chats_decode | ms={:.3}", decode_started.elapsed().as_secs_f64() * 1000.0);
                 let alive = this.update(cx, |state, cx| {
+                    #[cfg(feature = "startup-bench")]
+                    startup_trace("chats_apply");
                     state.apply_chats(parsed);
                     state.apply_pending_deep_link(cx);
                     state.reconcile_change_request_watches(cx);
@@ -3520,6 +3547,8 @@ fn spawn_work_outline_watch(
     cx.spawn(async move |this, cx| {
         let mut attempt: u32 = 0;
         loop {
+            #[cfg(feature = "startup-bench")]
+            startup_trace("outline_subscribe_start");
             let params = serde_json::json!({ "spaceId": space_id });
             let mut subscription = match handle
                 .client()
@@ -3555,11 +3584,17 @@ fn spawn_work_outline_watch(
                     continue;
                 }
             };
+            #[cfg(feature = "startup-bench")]
+            startup_trace("outline_subscribe_ack");
             attempt = 0;
             // Revisions are per stream; a stale frame is one older than the
             // newest already applied from this subscription.
             let mut newest_revision: u64 = 0;
             while let Some(value) = subscription.recv().await {
+                #[cfg(feature = "startup-bench")]
+                startup_trace("outline_frame_received");
+                #[cfg(feature = "startup-bench")]
+                let decode_started = std::time::Instant::now();
                 let snapshot: mast_proto::WorkOutlineSnapshot = match serde_json::from_value(value)
                 {
                     Ok(snapshot) => snapshot,
@@ -3568,11 +3603,15 @@ fn spawn_work_outline_watch(
                         continue;
                     }
                 };
+                #[cfg(feature = "startup-bench")]
+                eprintln!("BENCH phase | outline_decode | ms={:.3}", decode_started.elapsed().as_secs_f64() * 1000.0);
                 if snapshot.revision < newest_revision {
                     continue;
                 }
                 newest_revision = snapshot.revision;
                 let alive = this.update(cx, |state, cx| {
+                    #[cfg(feature = "startup-bench")]
+                    startup_trace("outline_apply");
                     if state.apply_work_outline_frame(&space_id, snapshot) {
                         cx.notify();
                     }
@@ -3794,6 +3833,8 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 }
             };
             while let Some(value) = rx.recv().await {
+                #[cfg(feature = "startup-bench")]
+                if method == methods::WATCH_SPACES { startup_trace("spaces_frame_received"); }
                 let parsed: T = match serde_json::from_value(value) {
                     Ok(parsed) => parsed,
                     Err(err) => {

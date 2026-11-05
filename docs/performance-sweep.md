@@ -81,3 +81,46 @@ This benchmark starts inside an already running test process and cannot measure 
 The largest directly measured blocking work is snapshot read/decode and pending settlement; the synthetic registry deliberately contains 6,000 pending preview updates, so this result does not establish the same distribution for a compacted real profile. A candidate is to reduce registry history or make settlement and snapshot persistence cheaper. Deferring settlement or the boot save requires a durability and migration-order design: boot saves the migrated registry immediately so it survives a crash, and local settlement establishes authoritative state. Measure those alternatives with crash/restart and migration regressions before changing the ordering. A second investigation should instrument watch registration, RPC serialization/delivery and scheduler turns separately to explain the delayed outline milestone; do not assume the 75 ms coalescing timer is responsible. No startup behavior was changed in this follow-up.
 
 Reproduce after building with `cargo test -p mast-ui --lib --profile installed --features startup-bench --no-run`: run the resulting test executable five times with `bench_profile_startup --ignored --nocapture --test-threads=1`, `MAST_NO_LOGIN_SHELL=1`, and the inert `gh` and `linear` executables described above. `startup-bench` gates the engine instrumentation; the ignored UI benchmark supplies the milestone clocks.
+
+## Follow-up: startup watch scheduling (2026-11-05)
+
+Five serial installed-profile runs of `bench_profile_startup` on `perf-sweep-4`, based on `78e2fe7d6`, used the same guarded 53.3 MB synthetic profile. The test process uses a current-thread Tokio runtime and a headless GPUI scheduler; the measurements are not process-launch or production event-loop timings. The host process list was unavailable, so competing activity cannot be excluded. Event intervals below use wall-clock timestamps; each row is the median (minimum–maximum), milliseconds, and intervals overlap. The earlier table's core assembly is a duration whereas its chat and outline milestones are elapsed from before settings load; subtracting those values does not measure the time from the end of assembly.
+
+| Interval or duration | Median (min–max), ms |
+| --- | ---: |
+| Core assembly duration | 99.501 (89.299–108.120) |
+| Core assembled → runtime assembled | 0.773 (0.546–4.209) |
+| Runtime assembled → UI attachment | 0.785 (0.554–1.861) |
+| UI attachment → chats subscribe starts | 0.747 (0.669–2.176) |
+| Chats subscribe starts → frame received | 2.019 (1.854–3.325) |
+| Chats JSON value decode | 0.127 (0.097–0.184) |
+| Core assembled → chats applied | 4.524 (3.967–11.815) |
+| Chats applied → test observes loaded chats | 53.756 (52.021–79.318) |
+| Spaces frame received → outline watch spawned | 0.067 (0.039–0.147) |
+| Outline watch spawned → subscription starts | 52.058 (50.702–76.742) |
+| Outline subscription starts → snapshot construction starts | 0.330 (0.218–0.661) |
+| Outline blocking-pool queue | 0.016 (0.009–0.046) |
+| Outline snapshot construction | 1.549 (1.343–1.982) |
+| Outline snapshot to JSON value | 0.493 (0.333–0.573) |
+| Outline JSON value ready → checked subscription returns | 1.519 (0.819–85.400) |
+| Checked subscription returns → snapshot applied | 0.259 (0.209–3.254) |
+| Outline JSON value decode | 0.208 (0.156–0.324) |
+| Outline applied → test observes loaded outline | 25.070 (16.568–46.468) |
+
+The first snapshot is already published without the later 75 ms coalescing timer. `subscribe_checked` waits for the first item for this method, so its return includes snapshot generation and delivery; it is not a separate acknowledgement round-trip. The initial outline JSON value was approximately 179 KB. Measuring its encoded size performs an extra serialization in the instrumented build, so it adds overhead before the value-ready timestamp. The long watch-spawn interval and delayed observations occur within this test's GPUI scheduling and forced drawing; these measurements do not establish equivalent production delays or isolate a safe change to the UI scheduler. The value-ready-to-return interval is highly variable and includes RPC encoding, dispatch, decoding and scheduling. No startup behavior was changed on this evidence.
+
+The prior durability proposal remains: investigate reducing registry history or making settlement and snapshot persistence cheaper, but preserve boot migration persistence and authoritative settlement until crash/restart and migration ordering are designed and tested. Do not defer either operation solely on this synthetic profile.
+
+A second five-run serial batch added a gated RPC server timing point. The 178,736-byte outline server frame took 0.114 ms median (0.109–0.124) to encode; JSON value ready to wire send was 0.141 ms (0.133–0.145), and wire send to checked-subscription return was 47.879 ms (0.702–63.569). That last interval includes the in-memory channel, client frame parsing and routing, Tokio and GPUI scheduling; it does not isolate any of them. Watch spawn to subscribe was 50.252 ms (38.163–57.352), core assembled to chats applied 3.984 ms (3.134–13.012), and chats applied to observation 51.225 ms (39.304–61.201). These are a separate batch, not before/after performance results. The additional encoded-size measurement described above remains enabled.
+
+A next investigation should timestamp RPC client receive, frame parse and routing, and instrument GPUI foreground task polling and drawing during this fixture. Compare against a representative production startup trace before changing scheduler priority or moving UI work: the test drives a current-thread runtime with `run_until_parked`, so its scheduler delays may not transfer to a running app. Any scheduler change needs evidence that it retains notification ordering and loaded content, plus regression coverage and serial before/after timings.
+
+Verification: `cargo test -p mast-ui --lib -- --test-threads=1` passed 2,473 tests (13 ignored); `cargo test -p mast-engine --lib work_outline -- --test-threads=1` passed 10; `cargo test -p mast-rpc --lib -- --test-threads=1` passed 19. Both five-run installed-profile benchmark batches passed. Tests used a clean target directory, temporary profiles, inert `gh` and `linear`, and `MAST_NO_LOGIN_SHELL=1`.
+
+### Follow-up: scheduler attribution
+
+The first outline watch uses GPUI `cx.spawn`, not `tokio::spawn`. This fixture creates a current-thread Tokio runtime and explicitly alternates `runtime.block_on(yield_now())` with the GPUI test executor's `run_until_parked`. Five serial runs with timestamps around both calls placed the entire watch-spawn-to-first-poll interval inside one GPUI drain in every run: median 37.464 ms (36.538–51.418). No explicit Tokio pump overlapped that interval. Registry decode, settlement and save completed during core assembly, before the watch was spawned; Linear's empty cache setup also precedes core assembly completion. Model discovery is not awaited there. The PR sweep dispatches GitHub fetches to `spawn_blocking`, the Linear sync loop initially sleeps, and preview scanning uses `spawn_blocking`. These observations do not audit every possible synchronous filesystem or JSON operation in the application.
+
+A second five-run batch replaced the GPUI drain with the equivalent loop of individual test-executor `tick()` calls and timed each tick. Spawn to first poll was 41.304 ms median (37.261–52.628). All five intervals were contained in one GPUI drain; in each, a tick overlapping the spawn took 24.983–30.997 ms, followed by one or two ticks taking 10.425–11.233 ms each. The test executor runs queued foreground and background runnables serially. The timing therefore demonstrates delay in this headless test's GPUI scheduling and work, not a Tokio worker blocked by registry startup during that interval. It does not identify the individual runnable or prove that equivalent GPUI work cannot delay a real application. No blocking work was moved and no production behavior changed. The tick instrumentation adds clock reads and output, so its values are not a before/after optimization comparison.
+
+Follow-up verification: both five-run scheduler batches passed, and `cargo test -p mast-ui --lib -- --test-threads=1` passed 2,473 tests (13 ignored). No engine behavior or engine tests changed in this follow-up.

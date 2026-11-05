@@ -440,21 +440,44 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
     let mut chats_recorded = false;
     let mut outline_recorded = false;
     loop {
+        let tokio_started = std::time::Instant::now();
+        let tokio_wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
         runtime.block_on(tokio::task::yield_now());
+        let tokio_elapsed = tokio_started.elapsed();
+        if tokio_elapsed.as_millis() >= 1 {
+            eprintln!("BENCH scheduler | tokio | start_us={tokio_wall} duration_us={}", tokio_elapsed.as_micros());
+        }
         let scheduler_started = std::time::Instant::now();
-        vcx.run_until_parked();
-        scheduler_time += scheduler_started.elapsed();
+        let scheduler_wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        loop {
+            let tick_started = std::time::Instant::now();
+            let tick_wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+            let progressed = vcx.executor().tick();
+            let tick_elapsed = tick_started.elapsed();
+            if tick_elapsed.as_millis() >= 1 {
+                eprintln!("BENCH scheduler | gpui_tick | start_us={tick_wall} duration_us={}", tick_elapsed.as_micros());
+            }
+            if !progressed { break; }
+        }
+        let scheduler_elapsed = scheduler_started.elapsed();
+        if scheduler_elapsed.as_millis() >= 1 {
+            eprintln!("BENCH scheduler | gpui | start_us={scheduler_wall} duration_us={}", scheduler_elapsed.as_micros());
+        }
+        scheduler_time += scheduler_elapsed;
         state.read_with(vcx, |state, _| {
             if !connection_recorded && matches!(state.connection, crate::state::ConnectionStatus::Ready) {
                 eprintln!("BENCH milestone | engine_rpc_ready | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("BENCH event | ready_observed | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                 connection_recorded = true;
             }
             if !chats_recorded && state.chats.len() == 250 {
                 eprintln!("BENCH milestone | chats_loaded | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("BENCH event | chats_observed | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                 chats_recorded = true;
             }
             if !outline_recorded && state.work_outline("benchmark-space").snapshot().is_some_and(|snapshot| snapshot.items.len() == 300) {
                 eprintln!("BENCH milestone | outline_loaded | ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("BENCH event | outline_observed | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
                 outline_recorded = true;
             }
         });
