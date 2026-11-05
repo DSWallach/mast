@@ -228,6 +228,84 @@ fn planning_template_propagation_does_not_write() {
 }
 
 #[test]
+fn template_proposals_propagate_or_add_an_own_instruction() {
+    use mast_proto::work_outline_user_actions::ProposalTargetScope;
+    let mut d = doc();
+    let projects = create(&mut d, "proposal-projects", None, "Projects");
+    set_rules(&mut d, "proposal-rules", &projects, Some(projects_rules()));
+    let first = create(&mut d, "proposal-first", Some(&projects), "First");
+    let second = create(&mut d, "proposal-second", Some(&projects), "Second");
+    let first_plan = child_titled(&snap(&d), &first, "Planning").id.clone();
+    let second_plan = child_titled(&snap(&d), &second, "Planning").id.clone();
+    let row = snap(&d).instructions.iter().find(|i| i.work_item_id.as_deref() == Some(&first_plan)).unwrap().clone();
+    // A child row may already have drifted due to the original approval bug.
+    d.commit(vec![super::super::Planned::update(super::super::KIND_WORK_ITEM_INSTRUCTIONS, &row.id,
+        std::collections::BTreeMap::from([("text".into(), serde_json::json!("Drifted"))]))], &[]).unwrap();
+    let propose = |d: &mut RegistryDoc, op: &str, action, instruction_id: Option<String>, target, text: &str| {
+        d.apply_work_outline_mutation(&WorkOutlineMutation::ProposeWorkItemInstruction(ProposeWorkItemInstructionParams {
+            space_id: Some(SPACE.into()), target, origin: InstructionProposalOrigin::default(),
+            text: text.into(), action, instruction_id, rationale: None, operation_id: op.into(),
+        }), &actor(WorkOutlineActorKind::User), NOW).unwrap().proposal_id.unwrap()
+    };
+    let approve = |d: &mut RegistryDoc, id: String, op: &str, text: &str, project_only| {
+        run(d, WorkOutlineActorKind::User, WorkOutlineMutation::ApproveWorkItemInstructionProposal(
+            ApproveWorkItemInstructionProposalParams { proposal_id: id, approved_text: text.into(), placement: None,
+                allow_stale: false, project_only, operation_id: op.into() },
+        )).unwrap();
+    };
+    let edit = propose(&mut d, "proposal-edit", ProposalAction::Edit, Some(row.id.clone()), InstructionProposalTarget::default(), "Plan carefully");
+    assert_eq!(d.instruction_proposal(&edit).unwrap().target.scope, ProposalTargetScope::ChildTemplate);
+    assert_eq!(d.instruction_proposal(&edit).unwrap().instruction_id.as_deref(), Some("i-plan"));
+    assert_eq!(d.instruction_proposal(&edit).unwrap().base_text.as_deref(), Some("Plan first"));
+    approve(&mut d, edit, "approve-edit", "Plan carefully", false);
+    assert_eq!(live_instructions(&snap(&d), &first_plan), vec!["Plan carefully"]);
+    assert_eq!(live_instructions(&snap(&d), &second_plan), vec!["Plan carefully"]);
+    let local = propose(&mut d, "proposal-local", ProposalAction::Edit, Some(row.id.clone()), InstructionProposalTarget::default(), "Local detail");
+    let before_local = snap(&d).item(&projects).unwrap().container_template.clone();
+    approve(&mut d, local, "approve-local", "Local detail", true);
+    assert_eq!(snap(&d).item(&projects).unwrap().container_template, before_local);
+    assert_eq!(live_instructions(&snap(&d), &first_plan), vec!["Plan carefully", "Local detail"]);
+    assert_eq!(live_instructions(&snap(&d), &second_plan), vec!["Plan carefully"]);
+    let add = propose(&mut d, "proposal-add", ProposalAction::Add, None, InstructionProposalTarget {
+        scope: ProposalTargetScope::ChildTemplate, work_item_id: Some(first.clone()),
+        rule_node_path: vec!["Planning".into()], ..Default::default()
+    }, "Review plans");
+    approve(&mut d, add, "approve-add", "Review plans", false);
+    assert!(live_instructions(&snap(&d), &second_plan).contains(&"Review plans".to_owned()));
+    let remove = propose(&mut d, "proposal-remove", ProposalAction::Remove, Some(row.id), InstructionProposalTarget::default(), "");
+    approve(&mut d, remove, "approve-remove", "", false);
+    let s = snap(&d);
+    assert!(!live_instructions(&s, &second_plan).contains(&"Plan carefully".to_owned()));
+    assert!(live_instructions(&s, &first_plan).contains(&"Local detail".to_owned()));
+}
+
+#[test]
+fn legacy_proposal_cannot_write_a_followed_instruction() {
+    use std::collections::BTreeMap;
+    use serde_json::json;
+    let mut d = doc();
+    let projects = create(&mut d, "legacy-projects", None, "Projects");
+    set_rules(&mut d, "legacy-rules", &projects, Some(projects_rules()));
+    let project = create(&mut d, "legacy-child", Some(&projects), "Project");
+    let planning = child_titled(&snap(&d), &project, "Planning").id.clone();
+    let row = snap(&d).instructions.iter().find(|i| i.work_item_id.as_deref() == Some(&planning)).unwrap().clone();
+    for (op, action, text) in [("legacy-edit", ProposalAction::Edit, "Changed"), ("legacy-remove", ProposalAction::Remove, "")] {
+        let proposal = d.apply_work_outline_mutation(&WorkOutlineMutation::ProposeWorkItemInstruction(ProposeWorkItemInstructionParams {
+            space_id: Some(SPACE.into()), target: InstructionProposalTarget::default(), origin: InstructionProposalOrigin::default(),
+            text: text.into(), action, instruction_id: Some(row.id.clone()), rationale: None, operation_id: op.into(),
+        }), &actor(WorkOutlineActorKind::User), NOW).unwrap().proposal_id.unwrap();
+        // Simulate the row shape written before template-aware proposals.
+        d.commit(vec![super::super::Planned::update(super::super::user_actions::KIND_WORK_ITEM_INSTRUCTION_PROPOSALS, &proposal,
+            BTreeMap::from([("target".into(), json!(InstructionProposalTarget::work_item(&planning))), ("instructionId".into(), json!(row.id))]))], &[]).unwrap();
+        let result = run(&mut d, WorkOutlineActorKind::User, WorkOutlineMutation::ApproveWorkItemInstructionProposal(
+            ApproveWorkItemInstructionProposalParams { proposal_id: proposal, approved_text: text.into(), placement: None,
+                allow_stale: true, project_only: false, operation_id: format!("approve-{op}") }));
+        assert!(result.is_err());
+        assert_eq!(live_instructions(&snap(&d), &planning), vec!["Plan first"]);
+    }
+}
+
+#[test]
 fn removing_a_node_keeps_its_instructions_on_the_detached_item() {
     let mut d = doc();
     let projects = create(&mut d, "op-projects", None, "Projects");
@@ -273,8 +351,7 @@ fn template_instructions_cannot_be_edited_but_can_be_muted() {
         ),
     );
     assert!(edit.is_err());
-    // Proposals created before template-aware proposals must not mutate the
-    // followed row when approved, whether they request an edit or removal.
+    // Proposals update the rules instead of writing the followed row directly.
     for (operation, action, text) in [
         ("edit", ProposalAction::Edit, "changed"),
         ("remove", ProposalAction::Remove, ""),
@@ -302,12 +379,17 @@ fn template_instructions_cannot_be_edited_but_can_be_muted() {
                     approved_text: text.into(),
                     placement: None,
                     allow_stale: false,
+                    project_only: false,
                     operation_id: format!("approve-{operation}"),
                 },
             ),
         );
-        assert!(approval.is_err());
-        assert_eq!(live_instructions(&snap(&d), &planning), vec!["Plan first"]);
+        assert!(approval.is_ok());
+        if action == ProposalAction::Edit {
+            assert_eq!(live_instructions(&snap(&d), &planning), vec!["changed"]);
+        } else {
+            assert!(live_instructions(&snap(&d), &planning).is_empty());
+        }
     }
     // A user's own instruction can be added next to it.
     run(
@@ -323,7 +405,7 @@ fn template_instructions_cannot_be_edited_but_can_be_muted() {
         }),
     )
     .unwrap();
-    assert_eq!(live_instructions(&snap(&d), &planning).len(), 2);
+    assert_eq!(live_instructions(&snap(&d), &planning), vec!["mine"]);
 }
 
 #[test]

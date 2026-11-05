@@ -79,6 +79,18 @@ pub(crate) fn standing(
     if proposal.action == ProposalAction::Add {
         return Standing::Current;
     }
+    if proposal.target.scope == mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate {
+        let text = proposal.target.container_work_item_id.as_deref()
+            .and_then(|id| snapshot.item(id))
+            .and_then(|item| item.container_template.as_ref())
+            .and_then(|template| proposal.target.rule_node_id.as_deref().and_then(|id| template.root.find(id)))
+            .and_then(|node| node.instructions.iter().find(|instruction| Some(instruction.id.as_str()) == proposal.target.rule_instruction_id.as_deref()))
+            .map(|instruction| instruction.text.clone());
+        return match text {
+            Some(text) if proposal.base_text.as_deref() == Some(text.as_str()) => Standing::Current,
+            now => Standing::Stale { now },
+        };
+    }
     match target_instruction(snapshot, proposal) {
         Some(instruction) if !proposal.is_stale_against(instruction) => Standing::Current,
         Some(instruction) if !instruction.archived() => Standing::Stale {

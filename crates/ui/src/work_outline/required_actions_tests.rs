@@ -974,6 +974,27 @@ fn edit_proposal_shows_a_diff_and_accepts(cx: &mut gpui::TestAppContext) {
     assert!(recorded[0].get("allowStale").is_none());
 }
 
+#[gpui::test]
+fn template_proposal_shows_template_actions(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = modification_snapshot("Before", &[("p-template", "edit", "After", "Before")]);
+    let target = &mut snapshot.instruction_proposals.last_mut().unwrap().target;
+    target.scope = mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate;
+    target.container_work_item_id = Some("container".into());
+    target.rule_node_id = Some("rule".into());
+    target.rule_instruction_id = Some("instruction".into());
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, proposal_reply);
+    open_ui_proposals(&overview, vcx);
+    assert!(row_bounds(vcx, "child-template-proposal".into()).is_some());
+    assert!(row_bounds(vcx, "work-item-proposal-diff-p-template".into()).is_some());
+    assert!(row_bounds(vcx, "template-apply-p-template".into()).is_some());
+    assert!(row_bounds(vcx, "project-apply-p-template".into()).is_some());
+    click(vcx, "project-apply-p-template".into());
+    vcx.run_until_parked();
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded[0]["projectOnly"], true);
+}
+
 /// An edit whose instruction changed since the base is stale: the three-way
 /// view shows, and Apply anyway sends `allowStale`.
 #[gpui::test]

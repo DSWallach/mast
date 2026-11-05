@@ -245,7 +245,7 @@ pub(crate) fn decode_proposal(
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or(InstructionProposalTarget {
                 scope: ProposalTargetScope::Unknown,
-                work_item_id: None,
+                ..Default::default()
             }),
         text: str_field(row, "text").unwrap_or_default(),
         proposed_by: actor_field(row, "proposedBy"),
@@ -866,9 +866,6 @@ impl RegistryDoc {
                 }
                 if p.action == ProposalAction::Edit {
                     check_instruction_text(&p.text)?;
-                    if p.text == instruction.text {
-                        return Err(invalid("The proposed text equals the current text"));
-                    }
                 } else if !p.text.is_empty() {
                     return Err(invalid("A remove proposal carries no text (use rationale)"));
                 }
@@ -920,7 +917,26 @@ impl RegistryDoc {
             }
         };
         let (space_id, target) = if let Some(instruction) = &existing {
-            let target = match &instruction.work_item_id {
+            let target = if let Some(rule_instruction_id) = &instruction.template_instruction_id {
+                let item = instruction.work_item_id.as_deref().ok_or_else(|| invalid("Template instruction has no work item"))?;
+                let (container, rule_node, followed_item) = self.followed_template_rule(&instruction.space_id, item)
+                    .ok_or_else(|| invalid("The instruction no longer follows a child template"))?;
+                if followed_item != item {
+                    return Err(invalid("The instruction no longer follows a child template"));
+                }
+                let template = self.live_item(&container)?.container_template.ok_or_else(|| invalid("Child template not found"))?;
+                if !template.root.find(&rule_node).is_some_and(|node| node.instructions.iter().any(|i| i.id == *rule_instruction_id)) {
+                    return Err(invalid("The template instruction no longer exists"));
+                }
+                InstructionProposalTarget {
+                    scope: ProposalTargetScope::ChildTemplate,
+                    work_item_id: Some(item.to_owned()),
+                    container_work_item_id: Some(container),
+                    rule_node_id: Some(rule_node),
+                    rule_instruction_id: Some(rule_instruction_id.clone()),
+                    rule_node_path: Vec::new(),
+                }
+            } else { match &instruction.work_item_id {
                 Some(id) => {
                     if self.live_item(id)?.archived() {
                         return Err(err(
@@ -931,7 +947,7 @@ impl RegistryDoc {
                     InstructionProposalTarget::work_item(id)
                 }
                 None => InstructionProposalTarget::space_root(),
-            };
+            }};
             (instruction.space_id.clone(), target)
         } else {
             match p.target.scope {
@@ -973,6 +989,56 @@ impl RegistryDoc {
                         })?;
                     (space, InstructionProposalTarget::space_root())
                 }
+                ProposalTargetScope::ChildTemplate => {
+                    let item_id = p.target.work_item_id.as_deref().ok_or_else(|| invalid("A child-template proposal needs a followed item"))?;
+                    let item = self.live_item(item_id)?;
+                    if item.archived() { return Err(err(WorkOutlineErrorCode::Archived, "The work item is archived")); }
+                    if p.space_id.as_ref().is_some_and(|space| *space != item.space_id) {
+                        return Err(err(WorkOutlineErrorCode::CrossSpace, "The work item belongs to another Space"));
+                    }
+                    let (container, followed_rule, followed) = self.followed_template_rule(&item.space_id, item_id)
+                        .ok_or_else(|| invalid("The item does not follow a child template"))?;
+                    if p.target.container_work_item_id.as_deref().is_some_and(|id| id != container) {
+                        return Err(invalid("The item does not follow the requested template"));
+                    }
+                    if p.target.rule_node_id.is_some() && !p.target.rule_node_path.is_empty() {
+                        return Err(invalid("Use either ruleNodeId or ruleNodePath"));
+                    }
+                    let template = self.live_item(&container)?.container_template.ok_or_else(|| invalid("Child template not found"))?;
+                    let rule_node = if !p.target.rule_node_path.is_empty() {
+                        let mut node = &template.root;
+                        for title in &p.target.rule_node_path {
+                            let mut matches = node.children.iter().filter(|child| child.title == *title);
+                            node = matches.next().ok_or_else(|| invalid("Template rule path not found"))?;
+                            if matches.next().is_some() { return Err(invalid("Template rule path is ambiguous")); }
+                        }
+                        node.id.clone()
+                    } else { p.target.rule_node_id.clone().unwrap_or(followed_rule) };
+                    if template.root.find(&rule_node).is_none() { return Err(invalid("Template rule not found")); }
+                    let tree = self.outline_tree(&item.space_id);
+                    let root_of = |id: &str| -> Option<String> {
+                        let mut current = id.to_owned();
+                        loop {
+                            let parent = tree.parent.get(&current)?.as_ref()?;
+                            if parent == &container { return Some(current); }
+                            current = parent.clone();
+                        }
+                    };
+                    let child_root = root_of(&followed).ok_or_else(|| invalid("The followed item left its container"))?;
+                    let target_item = tree.items.values().find(|candidate| {
+                        candidate.template_node_id.as_deref() == Some(rule_node.as_str())
+                            && root_of(&candidate.id).as_deref() == Some(child_root.as_str())
+                            && self.followed_template_rule(&item.space_id, &candidate.id).is_some_and(|(c, n, f)| c == container && n == rule_node && f == candidate.id)
+                    }).ok_or_else(|| invalid("This child does not follow the requested template rule"))?;
+                    (item.space_id, InstructionProposalTarget {
+                        scope: ProposalTargetScope::ChildTemplate,
+                        work_item_id: Some(target_item.id.clone()),
+                        container_work_item_id: Some(container),
+                        rule_node_id: Some(rule_node),
+                        rule_instruction_id: None,
+                        rule_node_path: Vec::new(),
+                    })
+                }
                 ProposalTargetScope::Unknown => {
                     return Err(invalid("Unknown proposal target scope"));
                 }
@@ -1002,9 +1068,20 @@ impl RegistryDoc {
             ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
         ]);
         if let Some(instruction) = &existing {
+            let base_text = if target.scope == ProposalTargetScope::ChildTemplate {
+                let container = target.container_work_item_id.as_deref().ok_or_else(|| invalid("The proposal has no template container"))?;
+                let node = target.rule_node_id.as_deref().ok_or_else(|| invalid("The proposal has no template rule"))?;
+                let rule_id = target.rule_instruction_id.as_deref().ok_or_else(|| invalid("The proposal has no template instruction"))?;
+                let template = self.live_item(container)?.container_template.ok_or_else(|| invalid("Child template not found"))?;
+                template.root.find(node).and_then(|node| node.instructions.iter().find(|rule| rule.id == rule_id))
+                    .ok_or_else(|| invalid("The template instruction no longer exists"))?.text.clone()
+            } else { instruction.text.clone() };
+            if p.action == ProposalAction::Edit && p.text == base_text {
+                return Err(invalid("The proposed text equals the current text"));
+            }
             set.insert("action".to_owned(), json!(p.action.as_str()));
-            set.insert("instructionId".to_owned(), json!(instruction.id));
-            set.insert("baseText".to_owned(), json!(instruction.text));
+            set.insert("instructionId".to_owned(), json!(target.rule_instruction_id.as_deref().unwrap_or(&instruction.id)));
+            set.insert("baseText".to_owned(), json!(base_text));
             set.insert("baseUpdatedAt".to_owned(), json!(instruction.updated_at));
         }
         if let Some(rationale) = p.rationale.as_ref().filter(|r| !r.is_empty()) {
@@ -1047,6 +1124,9 @@ impl RegistryDoc {
             .instruction_proposal(&p.proposal_id)
             .ok_or_else(|| not_found("Proposal not found"))?;
         self.require_space(&proposal.space_id)?;
+        if proposal.target.scope == ProposalTargetScope::ChildTemplate {
+            return self.approve_template_instruction_proposal(p, &proposal, actor, now_ms);
+        }
         if proposal.action != ProposalAction::Add {
             return self.approve_instruction_modification(p, &proposal, actor, now_ms);
         }
@@ -1068,6 +1148,7 @@ impl RegistryDoc {
                     .clone()
                     .ok_or_else(|| invalid("The proposal's target has no work item"))?,
             },
+            ProposalTargetScope::ChildTemplate => return Err(invalid("Child-template proposal approval is not supported")),
             ProposalTargetScope::Unknown => {
                 return Err(invalid("The proposal's target scope is not supported"));
             }
@@ -1118,6 +1199,72 @@ impl RegistryDoc {
             .collect();
         self.commit(plan, &extra)?;
         Ok(instruction_id)
+    }
+
+    fn approve_template_instruction_proposal(
+        &mut self,
+        p: &ApproveWorkItemInstructionProposalParams,
+        proposal: &WorkItemInstructionProposalView,
+        actor: &WorkOutlineActor,
+        now_ms: i64,
+    ) -> Outcome<String> {
+        use mast_proto::work_outline_container_templates::{RuleInstruction, RuleNode, SetContainerTemplateParams};
+        fn find_mut<'a>(node: &'a mut RuleNode, id: &str) -> Option<&'a mut RuleNode> {
+            if node.id == id { return Some(node); }
+            node.children.iter_mut().find_map(|child| find_mut(child, id))
+        }
+        let result_id = if !p.project_only && proposal.action != ProposalAction::Add {
+            proposal.target.rule_instruction_id.clone().ok_or_else(|| invalid("The proposal has no template instruction"))?
+        } else {
+            derive_id(&proposal.id, roles::INSTRUCTION)
+        };
+        if proposal.status == InstructionProposalStatus::Approved {
+            return Ok(proposal.review.as_ref().and_then(|r| r.instruction_id.clone()).unwrap_or(result_id));
+        }
+        let target = &proposal.target;
+        let container = target.container_work_item_id.as_deref().ok_or_else(|| invalid("The proposal has no template container"))?;
+        let node_id = target.rule_node_id.as_deref().ok_or_else(|| invalid("The proposal has no template rule"))?;
+        let mut template = self.live_item(container)?.container_template.ok_or_else(|| invalid("The child template no longer exists"))?;
+        let node = find_mut(&mut template.root, node_id).ok_or_else(|| invalid("The template rule no longer exists"))?;
+        if proposal.action != ProposalAction::Add {
+            let rule_id = target.rule_instruction_id.as_deref().ok_or_else(|| invalid("The proposal has no template instruction"))?;
+            let current = node.instructions.iter().find(|i| i.id == rule_id).ok_or_else(|| invalid("The template instruction no longer exists"))?;
+            if proposal.base_text.as_deref() != Some(current.text.as_str()) && !p.allow_stale {
+                return Err(invalid("The template instruction changed after this proposal was made; apply anyway or dismiss it"));
+            }
+        }
+        let mut plan = if p.project_only {
+            let item_id = target.work_item_id.as_deref().ok_or_else(|| invalid("The proposal has no followed item"))?;
+            if !self.followed_template_rule(&proposal.space_id, item_id).is_some_and(|(c, n, i)| c == container && n == node_id && i == item_id) {
+                return Err(invalid("The work item no longer follows this template rule"));
+            }
+            let source = checked_source(Some(&InstructionSource {
+                chat_id: proposal.source_ref.chat_id.clone(),
+                message_id: proposal.source_ref.message_id.clone(),
+                excerpt: Some(truncate_chars(&proposal.text, limits::MAX_INSTRUCTION_EXCERPT_CHARS)),
+                content_hash: None,
+            }))?;
+            self.plan_new_instruction(NewInstruction {
+                id: &result_id, space_id: &proposal.space_id, work_item_id: Some(item_id),
+                text: if proposal.action == ProposalAction::Remove { proposal.base_text.as_deref().unwrap_or_default() } else { &p.approved_text }, placement: p.placement.clone().unwrap_or_default(),
+                source, source_proposal_id: Some(&proposal.id), inputs_hash: &inputs_hash(p),
+                action: "Approving this proposal",
+            }, actor, now_ms)?
+        } else {
+            match proposal.action {
+                ProposalAction::Add => node.instructions.push(RuleInstruction { id: result_id.clone(), text: p.approved_text.clone() }),
+                ProposalAction::Edit => node.instructions.iter_mut().find(|i| Some(i.id.as_str()) == target.rule_instruction_id.as_deref()).unwrap().text = p.approved_text.clone(),
+                ProposalAction::Remove => node.instructions.retain(|i| Some(i.id.as_str()) != target.rule_instruction_id.as_deref()),
+            }
+            self.plan_container_template(&SetContainerTemplateParams {
+                operation_id: p.operation_id.clone(), space_id: proposal.space_id.clone(),
+                work_item_id: container.to_owned(), template: Some(template),
+            }, actor, now_ms)?
+        };
+        plan.push(Planned::update(KIND_WORK_ITEM_INSTRUCTION_PROPOSALS, &proposal.id,
+            BTreeMap::from([("review".to_owned(), json!({"state": "approved", "by": actor_row_value(actor), "at": now_ms, "instructionId": result_id}))])));
+        self.commit(plan, &[(KIND_WORK_ITEMS, container)])?;
+        Ok(result_id)
     }
 
     /// Approving an `edit` (a new text on the same instruction, so its
@@ -1779,6 +1926,13 @@ impl RegistryDoc {
                         }
                     }
                     ProposalTargetScope::Unknown => Err(invalid("Unknown proposal target scope")),
+                    ProposalTargetScope::ChildTemplate => {
+                        let own = require_assigned()?;
+                        if p.target.work_item_id.as_deref() != Some(own.as_str()) {
+                            return Err(unauthorized("Agents may only propose for the template followed by their own work item"));
+                        }
+                        Ok(())
+                    }
                 }
             }
             other => Err(unauthorized(format!(

@@ -519,6 +519,12 @@ struct ProposeInstructionArgs {
     /// `item` (default), `parent`, or `spaceRoot`.
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    container_work_item_id: Option<String>,
+    #[serde(default)]
+    rule_node_id: Option<String>,
+    #[serde(default)]
+    rule_node_path: Vec<String>,
     /// Required for `add` and `edit`.
     #[serde(default)]
     text: String,
@@ -2033,6 +2039,14 @@ impl AgentToolsService {
         let target = match args.target.as_deref().map(str::trim).unwrap_or("item") {
             "item" => InstructionProposalTarget::work_item(item),
             "spaceRoot" => InstructionProposalTarget::space_root(),
+            "childTemplate" => InstructionProposalTarget {
+                scope: mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate,
+                work_item_id: Some(item.clone()),
+                container_work_item_id: non_empty(args.container_work_item_id),
+                rule_node_id: non_empty(args.rule_node_id),
+                rule_instruction_id: None,
+                rule_node_path: args.rule_node_path,
+            },
             "parent" => match self
                 .workspace
                 .effective_work_item_parent(&context.grant.space_id, &item)
@@ -2048,7 +2062,7 @@ impl AgentToolsService {
             },
             other => {
                 return Err(AgentToolError::invalid(format!(
-                    "target must be item, parent, or spaceRoot, not {other:?}"
+                    "target must be item, parent, spaceRoot, or childTemplate, not {other:?}"
                 )));
             }
         };
