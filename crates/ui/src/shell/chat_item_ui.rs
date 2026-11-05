@@ -251,6 +251,7 @@ impl Shell {
         let badges = self.render_header_badges(&facts, theme, cx);
         let admin_badge = self.render_admin_badge(&chat_id, "chat-header", theme, cx);
         let chips = self.render_header_chips(&facts, theme, cx);
+        let menu_chat_id = chat_id.clone();
         let title = div()
             .debug_selector(|| "chat-header-title".into())
             .min_w_0()
@@ -301,7 +302,16 @@ impl Shell {
                                 .child(title),
                         )
                         .children(admin_badge)
-                        .children(badges),
+                        .children(badges)
+                        .child(div().id("chat-header-menu").debug_selector(|| "chat-header-menu".into())
+                            .cursor_pointer()
+                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
+                                    .find(|chat| chat.id == menu_chat_id).and_then(|chat| chat.cwd.as_deref()));
+                                this.chat_menu.open(ChatMenuState { chat_id: menu_chat_id.clone(), position: event.position, page: ChatMenuPage::Root, closeable });
+                                cx.notify();
+                            }))
+                            .child(icon(icons::MORE_HORIZONTAL).size(px(16.0)).text_color(theme.text_muted))),
                 )
                 .child(chips)
                 .children(card)

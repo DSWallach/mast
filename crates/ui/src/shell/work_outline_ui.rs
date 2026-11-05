@@ -103,6 +103,7 @@ pub(super) enum WorkOutlineModal {
     FromChat(super::instructions_ui::FromChatDialog),
     /// Start Chat from a work item (`start_chat_ui`).
     StartChat(super::start_chat_ui::StartChatDialog),
+    HandOff(super::hand_off_ui::HandOffDialog),
     /// The on-demand Outline shortcut reference (read-only; Esc closes).
     Shortcuts,
 }
@@ -636,6 +637,7 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
         WorkOutlineModal::Compare(_)
         | WorkOutlineModal::FromChat(_)
         | WorkOutlineModal::StartChat(_)
+        | WorkOutlineModal::HandOff(_)
         | WorkOutlineModal::Shortcuts => {}
     }
 }
@@ -868,6 +870,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting()) {
+            return true;
+        }
         self.resolve_work_outline_modal(false, window, cx)
     }
 
@@ -1078,6 +1083,7 @@ impl Shell {
             });
         }
         let theme = Theme::of(cx).for_popup();
+        self.refresh_hand_off_details(cx);
         // Start Chat's picker closed (Esc / its chip): back to the prompt.
         if let Some(WorkOutlineModal::StartChat(dialog)) = self.work_outline_modal.as_mut()
             && std::mem::take(&mut dialog.focus_prompt_pending)
@@ -1103,6 +1109,7 @@ impl Shell {
                     let handle = dialog.initial_focus(&self.work_outline_modal_focus, cx);
                     window.focus(&handle, cx);
                 }
+                WorkOutlineModal::HandOff(dialog) => window.focus(&dialog.input_focus(cx), cx),
                 _ => window.focus(&self.work_outline_modal_focus, cx),
             }
         }
@@ -1176,6 +1183,7 @@ impl Shell {
                 &theme,
                 cx,
             ),
+            WorkOutlineModal::HandOff(dialog) => super::hand_off_ui::hand_off_card(dialog, &theme, cx),
             WorkOutlineModal::Shortcuts => shortcuts_card(&theme, cx),
             WorkOutlineModal::Confirm(dialog) => {
                 let accept = if dialog.destructive {

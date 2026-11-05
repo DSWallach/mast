@@ -893,6 +893,25 @@ fn launch_args(key: &str, item: &str, sandbox: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_rpc_transfers_workers_and_replays() {
+    let rig = rig().await;
+    let item = create_item(&rig, "user-handoff-item", "Coordinator", None).await;
+    assign_chat(&rig, "user-handoff-assignment", CHAT, &item).await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"user-handoff-worker", "spaceId":SPACE,
+        "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    let params = json!({"chatId": CHAT, "summary":"Continue coordinating", "operationId":"user-handoff"});
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await.unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
+    assert_eq!(retry["chatId"], successor);
+    assert_eq!(rig.core.workspace.chat("user-handoff-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor));
+    let source = rig.core.doc_host.open(CHAT).unwrap();
+    let entries = source.doc().read_entries().unwrap();
+    let marker = format!("[Mast hand-off: {successor}]");
+    assert_eq!(entries.iter().filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text == &marker))).count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
     let rig = rig().await;
     let item = create_item(&rig, "handoff-item", "Coordinator", None).await;
@@ -919,6 +938,7 @@ async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
     wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Continue the release")), "successor turn").await;
     let requests = rig.harness.requests.lock().unwrap();
     let prompt = &requests.iter().find(|r| r.prompt.contains("Continue the release")).unwrap().prompt;
+    assert!(prompt.starts_with("[Mast system message, not from the user: coordinator hand-off.]\n"));
     assert!(prompt.contains("handoff-worker"));
     assert!(prompt.contains("Review the result"));
 }

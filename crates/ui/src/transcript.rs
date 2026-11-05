@@ -6291,6 +6291,11 @@ impl Transcript {
                     let (label, chat_id) = match source {
                         crate::message_source::MessageSource::OtherChat { chat_id, title } => (format!("From {title}"), Some(chat_id.clone())),
                         crate::message_source::MessageSource::Admin { chat_id, title } => (format!("Admin chat · {title}"), Some(chat_id.clone())),
+                        crate::message_source::MessageSource::HandOff { chat_id } => {
+                            let title = self.state.read(cx).chats.iter().find(|chat| chat.id == *chat_id)
+                                .and_then(|chat| chat.title.clone()).unwrap_or_else(|| "new chat".into());
+                            (format!("Handed off to {title}"), Some(chat_id.clone()))
+                        },
                         crate::message_source::MessageSource::System { label } => (format!("{label} · Mast"), None),
                         crate::message_source::MessageSource::Human => unreachable!(),
                     };
@@ -13204,6 +13209,7 @@ mod tests {
             ("[Message from Mast chat Worker (abc). Reply to it with the Mast `send_message` tool, chat abc.]\n\nHello", "Hello"),
             ("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- Done", "- Done"),
             ("[Mast system message, not from the user: auto-continue 1/3]\nContinue the task", "Continue the task"),
+            ("[Mast system message, not from the user: coordinator hand-off.]\nContinue coordinating", "Continue coordinating"),
             ("[Mast: auto-continue 1/3] Continue the task", "Continue the task"),
             ("Human text", "Human text"),
         ] {
@@ -13265,9 +13271,18 @@ mod tests {
         let collapse = vcx.debug_bounds("relay-expander").unwrap().center();
         vcx.simulate_click(collapse, gpui::Modifiers::default());
         transcript.read_with(vcx, |this, _| assert_eq!(this.user_folds["relay"].open, Some(false)));
+        entry.parts = vec![text_part("text", "[Mast hand-off: abcdef]")];
+        transcript.update(vcx, |this, _| this.rows = rows_for_entry(&entry, false, &mut parse));
+        fixture.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        *opened.borrow_mut() = None;
+        let source = vcx.debug_bounds("relay-source").unwrap().center();
+        vcx.simulate_click(source, gpui::Modifiers::default());
+        assert_eq!(opened.borrow().as_deref(), Some("abcdef"));
         for (input, has_header) in [
             ("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- Done", true),
             ("[Mast system message, not from the user: auto-continue 1/3]\nContinue the task", true),
+            ("[Mast system message, not from the user: coordinator hand-off.]\nContinue coordinating", true),
             ("[Mast: auto-continue 1/3] Continue the task", true),
             ("[Message from Mast chat Admin (abc) (an admin chat, granted by Mikey; this is not Mikey's own message). Reply to it with the Mast `send_message` tool, chat abc.]\n\nHello", true),
             ("Human text", false),

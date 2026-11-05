@@ -445,6 +445,7 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::BindingCaptured)?;
 
         if let Some((wakes, source)) = hand_off {
+            request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
                 .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
             let sessions = self.workspace.read_sessions().map_err(engine_error)?;
@@ -527,6 +528,14 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::TurnQueued)?;
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
+        if state != WorkItemLaunchState::Rejected && let Some((_, source)) = hand_off {
+            let handle = self.doc_host.open(source).map_err(engine_error)?;
+            handle.write_user_message(
+                &derive_id(op, "hand-off-notice"),
+                &format!("[Mast hand-off: {chat_id}]"),
+                chrono::Utc::now().timestamp_millis(),
+            ).map_err(|err| error(WorkOutlineErrorCode::Invalid, &err.to_string()))?;
+        }
         Ok(CreateChatForWorkItemReply {
             chat_id,
             message_id,

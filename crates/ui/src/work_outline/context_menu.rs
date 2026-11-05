@@ -92,6 +92,7 @@ pub(crate) enum MenuAction {
     GrantAdmin(String),
     RevokeAdmin(String),
     ArchiveChat(String),
+    HandOffChat(String),
     /// Hide the Space from the Outline (device-local).
     HideSpace(String),
     UnhideSpace(String),
@@ -151,6 +152,7 @@ impl MenuAction {
             | Self::CloseOutChat(_)
             | Self::GrantAdmin(_)
             | Self::RevokeAdmin(_)
+            | Self::HandOffChat(_)
             | Self::HideSpace(_)
             | Self::UnhideSpace(_)
             | Self::RenameSpace(_)
