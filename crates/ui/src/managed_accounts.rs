@@ -592,22 +592,36 @@ impl AccountFlow {
         if label.is_empty() {
             return;
         }
+        self.start_sign_in(None, label, cx);
+    }
+
+    /// Sign in to an existing account without replacing its home or pin.
+    pub fn sign_in_again(&mut self, account_id: String, cx: &mut Context<Self>) {
+        self.start_sign_in(Some(account_id), String::new(), cx);
+    }
+
+    fn start_sign_in(&mut self, account_id: Option<String>, label: String, cx: &mut Context<Self>) {
         self.phase = Phase::Creating;
         let rpc = self.rpc(cx);
         let harness = self.harness;
         let space_id = self.space_id.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let created = rpc
-                .call(
+            let created = if let Some(id) = account_id {
+                Ok(id)
+            } else {
+                rpc.call(
                     methods::CREATE_MANAGED_ACCOUNT,
                     serde_json::json!({ "harness": harness, "label": label }),
                 )
                 .await
                 .and_then(|v| {
-                    serde_json::from_value::<ManagedAccount>(v).map_err(|e| e.to_string())
-                });
-            let account = match created {
-                Ok(account) => account,
+                    serde_json::from_value::<ManagedAccount>(v)
+                        .map(|account| account.id)
+                        .map_err(|e| e.to_string())
+                })
+            };
+            let account_id = match created {
+                Ok(account_id) => account_id,
                 Err(err) => {
                     this.update(cx, |flow, cx| {
                         flow.phase = Phase::Failed(err.into());
@@ -620,7 +634,7 @@ impl AccountFlow {
             let started = rpc
                 .call(
                     methods::START_MANAGED_ACCOUNT_LOGIN,
-                    serde_json::json!({ "accountId": account.id }),
+                    serde_json::json!({ "accountId": account_id }),
                 )
                 .await
                 .and_then(|v| {
@@ -700,7 +714,7 @@ impl AccountFlow {
                                         set_project_account_params(
                                             space_id,
                                             harness,
-                                            Some(&account.id),
+                                            Some(&account_id),
                                         ),
                                     )
                                     .await,

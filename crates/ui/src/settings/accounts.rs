@@ -538,9 +538,21 @@ impl AccountsPage {
     }
 
     fn open_account_flow(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        self.open_managed_sign_in(harness, None, cx);
+    }
+
+    fn open_managed_sign_in(
+        &mut self,
+        harness: HarnessId,
+        account_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let state = self.state.clone();
         let device = self.target_device.clone();
         let flow = cx.new(|cx| AccountFlow::new(state, harness, None, device, cx));
+        if let Some(account_id) = account_id {
+            flow.update(cx, |flow, cx| flow.sign_in_again(account_id, cx));
+        }
         self.account_flow_sub = Some(cx.subscribe(&flow, |this: &mut Self, _, _, cx| {
             this.account_flow = None;
             this.account_flow_sub = None;
@@ -559,6 +571,8 @@ impl AccountsPage {
                 .enumerate()
                 .map(|(ix, account)| {
                     let remove_id = account.id.clone();
+                    let sign_in_id = account.id.clone();
+                    let harness = account.harness;
                     // The meters sit under this row's own label and email, so
                     // each ring is attributed to the account it measures.
                     let meters: Vec<AnyElement> = account
@@ -608,6 +622,15 @@ impl AccountsPage {
                             theme,
                             crate::managed_accounts::harness_name(account.harness),
                         ))
+                        .child(
+                            widgets::ghost_action(theme)
+                                .id(("managed-account-sign-in", ix))
+                                .hover(|s| widgets::ghost_hover(theme, s))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_managed_sign_in(harness, Some(sign_in_id.clone()), cx)
+                                }))
+                                .child(SharedString::from("Sign in again")),
+                        )
                         .child(
                             widgets::ghost_action(theme)
                                 .id(("managed-account-remove", ix))

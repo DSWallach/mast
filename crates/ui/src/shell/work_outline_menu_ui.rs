@@ -2006,6 +2006,24 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn sign_in_again_starts_login_for_existing_account(cx: &mut gpui::TestAppContext) {
+        use crate::managed_accounts::AccountFlow;
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, _outline, _calls, cx) = two_space_shell(cx, dir.path());
+        let accounts = script_accounts(&shell, cx);
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        let flow = cx.new(|cx| AccountFlow::new(
+            state, mast_proto::HarnessId::ClaudeCode, None, Some("d".into()), cx,
+        ));
+        flow.update(cx, |flow, cx| flow.sign_in_again("a1".into(), cx));
+        cx.run_until_parked();
+        let calls = accounts.lock().unwrap();
+        assert!(!calls.iter().any(|(method, _)| method == mast_rpc::methods::CREATE_MANAGED_ACCOUNT));
+        let login = calls.iter().find(|(method, _)| method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN).unwrap();
+        assert_eq!(login.1["accountId"], "a1");
+    }
+
     /// The sign-in sheet follows the CLI's output (URL, code prompt) and a
     /// pasted code goes out as one SubmitManagedAccountLoginCode call, with the
     /// field cleared afterwards.
