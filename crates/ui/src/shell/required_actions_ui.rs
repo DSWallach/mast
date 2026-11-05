@@ -51,7 +51,15 @@ impl Shell {
                     crate::sound::play(crate::sound::Sound::Request);
                 }
                 if banner && notice.allows_banner() {
-                    crate::notify::post(&notice.title(), &notice.body(), notice.chat_id.as_deref());
+                    let chat_title = notice.chat_id.as_deref().and_then(|id| {
+                        state.read(cx).chats.iter().find(|chat| chat.id == id)
+                            .and_then(|chat| chat.title.clone())
+                    });
+                    let title = match chat_title.filter(|title| !title.trim().is_empty()) {
+                        Some(chat_title) => format!("{} · {chat_title}", notice.title()),
+                        None => notice.title(),
+                    };
+                    crate::notify::post(&title, &notice.body(), notice.chat_id.as_deref());
                 }
             }
         }
