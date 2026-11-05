@@ -4555,12 +4555,15 @@ impl Shell {
         // Flat top-to-bottom slot across groups: the same order
         // `sidebar_visible_order` hands the jump shortcuts and cycling, so a
         // chip always names the key that opens its row.
-        let visible_slots: std::collections::HashMap<_, _> = self
-            .sidebar_visible_order(cx)
-            .into_iter()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect();
+        let visible_slots: std::collections::HashMap<_, _> = if jump_hints {
+            self.sidebar_visible_order(cx)
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| (id, index))
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         let mut moving_row = None;
