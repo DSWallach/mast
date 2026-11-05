@@ -4471,6 +4471,7 @@ impl Overview {
         });
 
         div()
+            .debug_selector(|| "overview-expanded-detail".into())
             .w_full()
             .max_w_full()
             .flex()
@@ -8751,6 +8752,103 @@ mod logic_tests {
         overview.update(vcx, |overview, _| {
             assert!(overview.subagent_peek.is_none(), "Escape closes the peek");
         });
+    }
+
+    #[gpui::test]
+    fn grouped_list_keeps_selection_expansion_and_scroll_targets(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = (0..60)
+                .map(|i| {
+                    let mut chat = row(
+                        &format!("c{i:02}"),
+                        if i % 2 == 0 {
+                            "/work/alpha"
+                        } else {
+                            "/work/beta"
+                        },
+                        None,
+                    )
+                    .chat;
+                    chat.last_message_at = Some(Utc::now());
+                    chat
+                })
+                .collect();
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+        let (overview, vcx) = cx.add_window_view(|_, cx| {
+            let mut overview = Overview::new(
+                state,
+                gpui::WeakEntity::new_invalid(),
+                transcript,
+                composer,
+                cx,
+            );
+            overview.active_groups = vec![GroupDimension::Repo];
+            overview
+        });
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        vcx.run_until_parked();
+        draw(vcx);
+        let (first, last, count) = overview.read_with(vcx, |o, _| {
+            assert_eq!(o.list_order.len(), 60);
+            assert_eq!(
+                o.list_order[0].1, 1,
+                "the first group header precedes its rows"
+            );
+            assert!(
+                o.list_order
+                    .windows(2)
+                    .any(|pair| pair[1].1 > pair[0].1 + 1),
+                "another group header separates rows"
+            );
+            (
+                o.list_order[0].0.clone(),
+                o.list_order[59].0.clone(),
+                o.list_order.len(),
+            )
+        });
+        assert!(vcx.debug_bounds("overview-expanded-detail").is_none());
+        overview.update(vcx, |o, cx| {
+            o.toggle_expanded(&first, cx);
+            cx.notify();
+        });
+        draw(vcx);
+        assert!(overview.read_with(vcx, |o, _| o.expanded.contains(&first)));
+        assert!(vcx.debug_bounds("overview-expanded-detail").is_some());
+        overview.update(vcx, |o, cx| o.select_list_row(count - 1, cx));
+        draw(vcx);
+        assert_eq!(
+            overview.read_with(vcx, |o, _| o.list_selected.clone()),
+            Some(last.clone())
+        );
+        assert!(
+            overview.read_with(vcx, |o, _| o.scroll.offset().y < px(0.0)),
+            "selection scrolls into view"
+        );
+        overview.update(vcx, |o, cx| {
+            o.focus_due = Some(first.clone());
+            cx.notify();
+        });
+        draw(vcx);
+        assert!(
+            overview.read_with(vcx, |o, _| o.scroll.offset().y > px(-100.0)),
+            "focus target scrolls back to the first group"
+        );
+        assert!(
+            overview.read_with(vcx, |o, _| o.expanded.contains(&first)),
+            "scrolling preserves expansion"
+        );
     }
 
     /// List mode with more rows than fit on screen: each row keeps its full
