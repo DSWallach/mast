@@ -520,6 +520,7 @@ struct FakeGh {
     prs: Mutex<HashMap<String, Value>>,
     calls: Mutex<Vec<Call>>,
     fail: AtomicBool,
+    fail_file_offset: Mutex<Option<usize>>,
     delay: Duration,
     /// answer to the `mergeable` re-query (None: still UNKNOWN)
     retry_mergeable: Option<&'static str>,
@@ -615,6 +616,25 @@ impl GhRunner for FakeGh {
                 "pageInfo": { "hasNextPage": end < hits.len(), "endCursor": format!("c{end}") },
                 "nodes": nodes,
             } } }));
+        }
+        if query == FILES_QUERY {
+            let key = format!(
+                "{}/{}#{}",
+                call.var("owner").unwrap(),
+                call.var("name").unwrap(),
+                call.var("number").unwrap()
+            );
+            let pr = self.prs.lock().unwrap().get(&key).cloned().unwrap();
+            let all = pr["files"]["nodes"].as_array().cloned().unwrap_or_default();
+            let offset: usize = call.var("after").map(|c| c.parse().unwrap()).unwrap_or(0);
+            if *self.fail_file_offset.lock().unwrap() == Some(offset) {
+                return Err("rate limit".into());
+            }
+            let end = (offset + 100).min(all.len());
+            return Ok(json!({"data": {"repository": {"pullRequest": {"files": {
+                "nodes": all[offset..end], "totalCount": all.len(),
+                "pageInfo": {"hasNextPage": end < all.len(), "endCursor": end.to_string()}
+            }}}}}));
         }
         let mut data = serde_json::Map::new();
         for (i, part) in query.split("repository(owner: \"").skip(1).enumerate() {
@@ -1003,4 +1023,51 @@ async fn a_cold_start_peeks_the_persisted_rows_without_gh() {
     assert_eq!(peeked.me, reply.me);
     assert!(gh.calls().is_empty());
     assert!(second.peek(PrDashTab::ReviewRequested).is_none());
+}
+
+fn paging_pr(count: usize) -> Value {
+    let mut pr = pr_node("Acme/widgets", 12, "branch", "main");
+    pr["changedFiles"] = json!(count);
+    pr["files"]["nodes"] = json!((0..count).map(|i| json!({"path": format!("src/file{i}.rs"), "additions": 1, "deletions": 0, "changeType": "MODIFIED"})).collect::<Vec<_>>());
+    pr
+}
+
+#[tokio::test]
+async fn file_pages_are_scored_and_cached_by_head() {
+    let gh = Arc::new(FakeGh::new());
+    gh.add_search(AUTHORED_Q, vec![("Acme/widgets".into(), 12)]);
+    gh.add_pr(paging_pr(250));
+    let dash = dash_with(gh.clone(), cfg());
+    let first = dash.dashboard(PrDashTab::Authored, true).await;
+    assert_eq!(first.rows[0].diff.code_churn, 250);
+    assert_eq!(first.rows[0].diff.files_scored, 250);
+    assert!(!first.rows[0].diff.files_partial);
+    assert_eq!(
+        gh.calls().iter().filter(|c| c.query == FILES_QUERY).count(),
+        3
+    );
+    let second = dash.dashboard(PrDashTab::Authored, true).await;
+    assert_eq!(second.rows[0].diff.code_churn, 250);
+    assert_eq!(
+        gh.calls().iter().filter(|c| c.query == FILES_QUERY).count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn file_cap_and_failure_preserve_scored_pages() {
+    let gh = FakeGh::new();
+    let mut pr = paging_pr(3100);
+    gh.add_pr(pr.clone());
+    fetch_files(&gh, &mut pr).await;
+    let diff = authored(&pr).diff;
+    assert_eq!(diff.code_churn, 3000);
+    assert!(diff.files_partial);
+    *gh.fail_file_offset.lock().unwrap() = Some(100);
+    let mut pr = paging_pr(250);
+    gh.add_pr(pr.clone());
+    fetch_files(&gh, &mut pr).await;
+    let diff = authored(&pr).diff;
+    assert_eq!(diff.code_churn, 100);
+    assert!(diff.files_partial);
 }

@@ -733,6 +733,7 @@ impl ChatTypeView {
 
         // Churn, reviewers / author, CI, open, updated.
         let (churn, excluded) = pr_page::churn(&row.diff);
+        let partial_tooltip = pr_page::partial_score_tooltip(&row.diff);
         let churn = div()
             .flex_none()
             .w(px(W_CHURN))
@@ -741,6 +742,15 @@ impl ChatTypeView {
             .gap(px(2.0))
             .text_color(theme.text)
             .child(SharedString::from(churn))
+            .when_some(partial_tooltip, |el, tip| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(9.0))
+                        .text_color(theme.text_faint)
+                        .child("partial")
+                        .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
+                )
+            })
             .when_some(excluded, |el, excluded| {
                 el.child(
                     div()

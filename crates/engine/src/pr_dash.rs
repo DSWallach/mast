@@ -11,8 +11,8 @@
 //!   one shared in-flight fetch per tab, and last-good rows on failure.
 //!
 //! Deliberate deviations from pr-dash: no "inert line" discount of churn (it
-//! needs one REST diff request per PR), no file paging beyond the first 100
-//! files of a PR, and `mergeable: UNKNOWN` is retried twice rather than three
+//! needs one REST diff request per PR),
+//! and `mergeable: UNKNOWN` is retried twice rather than three
 //! times.
 
 use std::collections::{HashMap, HashSet};
@@ -83,7 +83,6 @@ assignees(first: 10) { nodes { login } }
 reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } }
 reviews(first: 100) { nodes { author { __typename login } state submittedAt bodyText } }
 comments(last: 40) { totalCount nodes { author { __typename login } createdAt } }
-files(first: 100) { totalCount pageInfo { hasNextPage endCursor } nodes { path additions deletions changeType } }
 reviewThreads(first: 100) { nodes { isResolved isOutdated comments(last: 20) { nodes { author { __typename login } } } } }
 commits(last: 1) { nodes { commit { statusCheckRollup { state
    contexts(first: 100) { nodes { __typename
@@ -431,6 +430,77 @@ async fn resolve_mergeable(gh: &dyn GhRunner, cfg: &PrDashConfig, prs: &mut [Val
     }
 }
 
+const FILE_LIMIT: usize = 3000;
+const FILES_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    files(first: 100, after: $after) { totalCount pageInfo { hasNextPage endCursor } nodes { path additions deletions changeType } }
+  } }
+}";
+
+async fn fetch_files(gh: &dyn GhRunner, pr: &mut Value) {
+    let full = str_field(&pr["repository"], "nameWithOwner").to_string();
+    let Some((owner, name)) = full.split_once('/') else {
+        return;
+    };
+    let number = pr["number"].as_u64().unwrap_or(0).to_string();
+    let mut files = Vec::new();
+    let mut after: Option<String> = None;
+    let mut partial = false;
+    loop {
+        let mut vars = vec![
+            ("owner", owner),
+            ("name", name),
+            ("number", number.as_str()),
+        ];
+        if let Some(cursor) = after.as_deref() {
+            vars.push(("after", cursor));
+        }
+        let response = gh.graphql(FILES_QUERY, &vars).await;
+        let Ok(body) = response else {
+            partial = true;
+            break;
+        };
+        if body
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|e| !e.is_empty())
+        {
+            partial = true;
+            break;
+        }
+        let Some(page) = body.pointer("/data/repository/pullRequest/files") else {
+            partial = true;
+            break;
+        };
+        let Some(nodes) = page.get("nodes").and_then(Value::as_array) else {
+            partial = true;
+            break;
+        };
+        files.extend(nodes.iter().take(FILE_LIMIT - files.len()).cloned());
+        let has_next = page
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if files.len() >= FILE_LIMIT {
+            partial = true;
+            break;
+        }
+        if !has_next {
+            break;
+        }
+        let cursor = page
+            .pointer("/pageInfo/endCursor")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if cursor.is_none() || cursor == after {
+            partial = true;
+            break;
+        }
+        after = cursor;
+    }
+    pr["files"] = serde_json::json!({"nodes": files, "partial": partial});
+}
+
 /// Fetch, normalize, stack and classify one tab's rows (no chat links).
 pub async fn fetch_rows(
     gh: &dyn GhRunner,
@@ -438,10 +508,40 @@ pub async fn fetch_rows(
     tab: PrDashTab,
     me: &str,
 ) -> Result<Vec<PrDashRow>, String> {
+    fetch_rows_cached(gh, cfg, tab, me, &[]).await
+}
+
+async fn fetch_rows_cached(
+    gh: &dyn GhRunner,
+    cfg: &PrDashConfig,
+    tab: PrDashTab,
+    me: &str,
+    cached: &[PrDashRow],
+) -> Result<Vec<PrDashRow>, String> {
     let hits = search_tab(gh, tab, me, cfg.search_limit).await?;
     let mut prs = read_prs(gh, cfg, &hits).await?;
     resolve_mergeable(gh, cfg, &mut prs).await;
-    let mut rows: Vec<PrDashRow> = prs.iter().map(|pr| normalize(pr, me, tab)).collect();
+    let mut rows = Vec::new();
+    for mut pr in prs {
+        let sha = str_field(&pr, "headRefOid");
+        let previous = cached
+            .iter()
+            .find(|row| !sha.is_empty() && row.head_sha == sha && row.url == str_field(&pr, "url"));
+        if previous.is_none() {
+            fetch_files(gh, &mut pr).await;
+        }
+        let mut row = normalize(&pr, me, tab);
+        if let Some(previous) = previous {
+            let additions = row.diff.additions;
+            let deletions = row.diff.deletions;
+            let changed_files = row.diff.changed_files;
+            row.diff = previous.diff.clone();
+            row.diff.additions = additions;
+            row.diff.deletions = deletions;
+            row.diff.changed_files = changed_files;
+        }
+        rows.push(row);
+    }
     annotate_stacks(&mut rows);
     classify_rows(tab, &mut rows, cfg.classify);
     Ok(rows)
@@ -853,6 +953,11 @@ pub fn normalize(node: &Value, me: &str, tab: PrDashTab) -> PrDashRow {
             .unwrap_or(0),
         ..PrDashDiff::default()
     };
+    diff.files_partial = node
+        .pointer("/files/partial")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    diff.files_scored = nodes(node, "files").len() as u64;
     for f in nodes(node, "files") {
         let adds = f.get("additions").and_then(Value::as_u64).unwrap_or(0);
         let dels = f.get("deletions").and_then(Value::as_u64).unwrap_or(0);
@@ -985,6 +1090,7 @@ pub fn normalize(node: &Value, me: &str, tab: PrDashTab) -> PrDashRow {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         head_ref,
+        head_sha: str_field(node, "headRefOid").to_string(),
         base_ref: str_field(node, "baseRefName").to_string(),
         ticket,
         labels: nodes(node, "labels")
@@ -1202,7 +1308,12 @@ impl Inner {
                 me
             }
         };
-        let rows = fetch_rows(self.gh.as_ref(), &self.cfg, tab, &me).await?;
+        let cached: Vec<PrDashRow> = PrDashTab::ALL
+            .iter()
+            .filter_map(|tab| self.store.peek(tab_key(*tab)))
+            .flat_map(|entry| entry.value.rows)
+            .collect();
+        let rows = fetch_rows_cached(self.gh.as_ref(), &self.cfg, tab, &me, &cached).await?;
         Ok(Cached { me, rows })
     }
 }

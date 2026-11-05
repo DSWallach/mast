@@ -148,6 +148,10 @@ pub struct PrDashDiff {
     pub test_lines: u64,
     pub generated_lines: u64,
     pub docs_lines: u64,
+    #[serde(default)]
+    pub files_partial: bool,
+    #[serde(default)]
+    pub files_scored: u64,
 }
 
 /// A Mast chat linked to a PR (shown on the row; click opens it).
@@ -186,6 +190,8 @@ pub struct PrDashRow {
     pub state: String,
     pub draft: bool,
     pub head_ref: String,
+    #[serde(default)]
+    pub head_sha: String,
     pub base_ref: String,
     /// First `ENG|COF|FND|ASK|OPS|BIZ-n` in the title, else the head branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]

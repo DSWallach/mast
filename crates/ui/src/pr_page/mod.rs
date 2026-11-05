@@ -327,6 +327,15 @@ pub(crate) fn pure_addition(diff: &PrDashDiff) -> bool {
 
 /// The Churn column in code-only mode: the main text and the excluded-lines
 /// superscript (`+{compact}` of test + generated + docs lines).
+pub(crate) fn partial_score_tooltip(diff: &PrDashDiff) -> Option<String> {
+    diff.files_partial.then(|| {
+        format!(
+            "Scored from the first {} of {} files",
+            diff.files_scored, diff.changed_files
+        )
+    })
+}
+
 pub(crate) fn churn(diff: &PrDashDiff) -> (String, Option<String>) {
     let main = if pure_addition(diff) {
         format!("⊕{} new", compact(diff.code_new_lines))
@@ -608,6 +617,21 @@ mod tests {
         assert_eq!(compact(9999), "10k");
         assert_eq!(compact(12_400), "12k");
         assert_eq!(compact(12_600), "13k");
+    }
+
+    #[test]
+    fn partial_score_has_a_tooltip() {
+        let diff = PrDashDiff {
+            files_partial: true,
+            files_scored: 100,
+            changed_files: 250,
+            ..Default::default()
+        };
+        assert_eq!(
+            partial_score_tooltip(&diff).as_deref(),
+            Some("Scored from the first 100 of 250 files")
+        );
+        assert_eq!(partial_score_tooltip(&PrDashDiff::default()), None);
     }
 
     #[test]
