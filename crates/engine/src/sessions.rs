@@ -61,7 +61,7 @@ pub enum SteerOutcome {
     NotSteerable,
 }
 
-type PendingInputs = Arc<Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>>;
+type PendingInputs = Arc<Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>> >;
 
 fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
@@ -1215,7 +1215,7 @@ impl SessionsEngine {
         // classified as an error instead of an interrupted turn.
         let _ = cancel.send(true);
         // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }

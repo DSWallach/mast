@@ -382,6 +382,9 @@ pub fn validate_input_answers(
     for answer in answers.iter_mut() {
         let question = questions.iter().find(|q| q.id == answer.question_id)
             .ok_or_else(|| format!("unknown question id {:?}; valid questions: {}", answer.question_id, valid_questions()))?;
+        if !question.multi_select && answer.labels.len() > 1 {
+            return Err(format!("question {} accepts only one label", question.id));
+        }
         if !question.options.is_empty() {
             if answer.labels.is_empty() {
                 return Err(format!("answer for {} requires an option: {}", question.id, question.options.join(", ")));
@@ -392,6 +395,9 @@ pub fn validate_input_answers(
                 *label = option.clone();
             }
         }
+    }
+    if answers.iter().enumerate().any(|(index, answer)| answers[..index].iter().any(|previous| previous.question_id == answer.question_id)) {
+        return Err(format!("duplicate answer; valid questions: {}", valid_questions()));
     }
     if questions.iter().any(|q| !answers.iter().any(|a| a.question_id == q.id)) {
         return Err(format!("an answer is required for every question; valid questions: {}", valid_questions()));
@@ -1543,6 +1549,8 @@ pub mod agent_tools {
                 serde_json::from_str::<Value>(example)
                     .unwrap_or_else(|e| panic!("{name} example is not JSON: {e}"));
             }
+            let input_usage = usage_text("respond_to_input").unwrap();
+            assert!(input_usage.contains("id may be omitted for one question"), "{input_usage}");
             let request_usage = usage_text(tools::CREATE_USER_ACTION_REQUEST).unwrap();
             assert!(request_usage.contains("links ("), "{request_usage}");
             assert!(request_usage.contains("facts ("), "{request_usage}");

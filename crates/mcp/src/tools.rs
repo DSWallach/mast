@@ -900,7 +900,7 @@ impl Tools {
         self.call_normalized(name, args).await.map_err(|error| {
             let argument_error = error.starts_with("invalid arguments")
                 || error.contains("idempotencyKey is required");
-            if name == "create_chat" && argument_error {
+            if matches!(name, "create_chat" | "respond_to_input") && argument_error {
                 agent_tools::with_usage(name, &error)
             } else {
                 error
@@ -3054,12 +3054,14 @@ mod tests {
     async fn input_answers_are_validated_before_queueing() {
         let question = |id: &str| json!({"id": id, "header": "Approval", "question": "Continue?", "options": ["Yes", "No"], "multiSelect": false});
         for questions in [json!([question("uuid")]), json!([question("claude-id")])] {
+            let expected_id = questions[0]["id"].as_str().unwrap().to_owned();
             let world = Arc::new(World { pending_questions: Some(questions), ..World::default() });
             let tools = tools(world.clone(), None);
             tools.call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"_", "labels":["yes"]}]})).await.unwrap();
             let writes = world.writes_of(methods::QUEUE_COMMAND);
             assert_eq!(writes.len(), 1);
             assert!(writes[0].to_string().contains("Yes"));
+            assert!(writes[0].to_string().contains(&expected_id));
             let before = writes.len();
             let error = tools.call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"labels":["invalid"]}]})).await.unwrap_err();
             assert!(error.contains("Yes") && error.contains("No"), "{error}");
