@@ -64,12 +64,12 @@ mod friction_section;
 #[path = "details_templates.rs"]
 pub(crate) mod templates_section;
 
-#[path = "details_template_review.rs"]
-pub(crate) mod template_review_section;
 #[path = "details_container_template.rs"]
 pub(crate) mod container_template_section;
 #[path = "details_convert.rs"]
 pub(crate) mod convert_section;
+#[path = "details_template_review.rs"]
+pub(crate) mod template_review_section;
 
 #[path = "details_artifacts.rs"]
 pub(crate) mod artifacts_section;
@@ -120,7 +120,10 @@ pub(crate) enum DetailsEvent {
     },
     /// A short result for the Outline's notice line (an error card when
     /// `error`; its first line is the title).
-    Notice { text: String, error: bool },
+    Notice {
+        text: String,
+        error: bool,
+    },
 }
 
 /// A parsed external-reference URL.
@@ -808,9 +811,9 @@ impl WorkItemDetails {
                         theme,
                     )
                     .debug_selector(|| "work-item-save-template".into())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.begin_save_template(window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.begin_save_template(window, cx)),
+                    ),
                 ),
         );
         for element in self.render_convert(item, theme, cx) {
@@ -825,9 +828,7 @@ impl WorkItemDetails {
                 div()
                     .text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_muted)
-                    .child(
-                        "Chats inside a project can create and read items anywhere in it.",
-                    ),
+                    .child("Chats inside a project can create and read items anywhere in it."),
             );
         }
         for element in self.render_template_review(item, theme, cx) {
@@ -851,7 +852,11 @@ impl WorkItemDetails {
                     .border_color(if selected { theme.accent } else { theme.border })
                     .cursor_pointer()
                     .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(if selected { theme.text } else { theme.text_muted })
+                    .text_color(if selected {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
                     .hover(|el| el.bg(theme.element_hover))
                     .child(SharedString::from(child.title.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -865,7 +870,9 @@ impl WorkItemDetails {
                 div()
                     .text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_muted)
-                    .child("Worker destination: where workers created by chats on this project go."),
+                    .child(
+                        "Worker destination: where workers created by chats on this project go.",
+                    ),
             )
             .child(buttons);
         section

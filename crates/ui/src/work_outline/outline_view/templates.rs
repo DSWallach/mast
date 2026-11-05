@@ -79,7 +79,11 @@ impl OutlineView {
         cx.notify();
     }
 
-    pub(super) fn open_requested_template_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_requested_template_flow(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(flow) = self.templates.pending.take() else {
             return;
         };
@@ -443,7 +447,10 @@ impl OutlineView {
     }
 
     pub(crate) fn template_toast_text(&self) -> Option<&str> {
-        self.templates.toast.as_ref().map(|toast| toast.text.as_str())
+        self.templates
+            .toast
+            .as_ref()
+            .map(|toast| toast.text.as_str())
     }
 
     pub(crate) fn dismiss_template_toast(&mut self, cx: &mut Context<Self>) {

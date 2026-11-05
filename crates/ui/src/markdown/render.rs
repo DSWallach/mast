@@ -2226,20 +2226,13 @@ fn text_element(
                         opts,
                         theme,
                     ));
-                    start = index + 1;
                 }
-            }
-            if start < runs.len() {
-                elements.push(text_element(
-                    &runs[start..],
-                    size,
-                    line_height,
-                    bold_default,
-                    top_ix,
-                    ix.wrapping_mul(4099).wrapping_add(start + 1000),
-                    opts,
+                elements.push((media.image)(
+                    image,
+                    format!("{}-image-{ix}-{index}", opts.row_key).into(),
                     theme,
                 ));
+                start = index + 1;
             }
         }
         if start < runs.len() {
@@ -2490,6 +2483,8 @@ fn render_code_block(
                 ix,
                 opts,
                 theme,
+                highlight,
+                vec![toggle_action],
             );
         }
         let mut actions = vec![toggle_action];

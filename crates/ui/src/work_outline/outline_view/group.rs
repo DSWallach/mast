@@ -51,7 +51,9 @@ impl OutlineView {
 
     /// The Space the current selection (primary or set) belongs to.
     fn selection_space(&self) -> Option<String> {
-        self.group_selection().first().map(|(space, _)| space.clone())
+        self.group_selection()
+            .first()
+            .map(|(space, _)| space.clone())
     }
 
     /// `key` as a groupable row: a live item row, in the selection's Space.
@@ -187,13 +189,19 @@ impl OutlineView {
         if self.group_selection().is_empty() {
             return Err("Select a work item first");
         }
-        let space_id = self
-            .selection_space()
-            .ok_or("Select a work item first")?;
-        if self.group_selection().iter().any(|(space, _)| *space != space_id) {
+        let space_id = self.selection_space().ok_or("Select a work item first")?;
+        if self
+            .group_selection()
+            .iter()
+            .any(|(space, _)| *space != space_id)
+        {
             return Err("Group items from one Space at a time");
         }
-        let ids: Vec<String> = self.group_selection().into_iter().map(|(_, id)| id).collect();
+        let ids: Vec<String> = self
+            .group_selection()
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
         let snapshot = self
             .snapshot(&space_id)
             .ok_or("This Space's outline is not loaded")?;
@@ -213,7 +221,11 @@ impl OutlineView {
         entries.extend(
             model::destinations(snapshot, None)
                 .into_iter()
-                .filter(|dest| dest.item_id.as_ref().is_some_and(|id| !excluded.contains(id)))
+                .filter(|dest| {
+                    dest.item_id
+                        .as_ref()
+                        .is_some_and(|id| !excluded.contains(id))
+                })
                 .map(|dest| PickerEntry {
                     label: dest.title,
                     depth: dest.depth,

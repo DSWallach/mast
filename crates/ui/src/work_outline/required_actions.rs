@@ -137,13 +137,21 @@ pub(crate) fn handoff_lifecycle_parts<'a>(
 ) -> Option<&'static str> {
     use mast_proto::work_outline_user_actions::{RequestLinkTarget, UserActionKind};
     use mast_proto::{PullRequestReviewDecision, PullRequestState};
-    if kind != UserActionKind::Handoff { return None; }
+    if kind != UserActionKind::Handoff {
+        return None;
+    }
     let mut branches = Vec::new();
     let mut references = Vec::new();
     for link in links {
         match &link.target {
-            RequestLinkTarget::Diff { branch: Some(branch) } if !branch.trim().is_empty() => branches.push(branch.trim()),
-            RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } => { if let Some(pr) = parse_handoff_pr(url) { references.push(pr); } },
+            RequestLinkTarget::Diff {
+                branch: Some(branch),
+            } if !branch.trim().is_empty() => branches.push(branch.trim()),
+            RequestLinkTarget::Pr { url } | RequestLinkTarget::Url { url } => {
+                if let Some(pr) = parse_handoff_pr(url) {
+                    references.push(pr);
+                }
+            }
             _ => {}
         }
     }
@@ -174,11 +182,17 @@ pub(crate) fn handoff_lifecycle_parts<'a>(
         })
         .collect();
     // A bare branch can exist in several repositories; avoid choosing one.
-    let status = if matching.len() == 1 { matching.first().copied() } else { None };
+    let status = if matching.len() == 1 {
+        matching.first().copied()
+    } else {
+        None
+    };
     Some(match status {
         Some(status) if status.state == PullRequestState::Merged => "Landed",
         Some(status) if status.state == PullRequestState::Closed => "Closed",
-        Some(status) if status.review_decision == Some(PullRequestReviewDecision::Approved) => "Waiting to land",
+        Some(status) if status.review_decision == Some(PullRequestReviewDecision::Approved) => {
+            "Waiting to land"
+        }
         _ => "Ready",
     })
 }
@@ -377,7 +391,9 @@ fn row_for(
                 by: resolution.map_or("Mast", |r| {
                     if r.answered_by_user() {
                         actor_label(WorkOutlineActorKind::User)
-                    } else if r.via.as_deref() == Some("prMerged") && r.by.kind == WorkOutlineActorKind::System {
+                    } else if r.via.as_deref() == Some("prMerged")
+                        && r.by.kind == WorkOutlineActorKind::System
+                    {
                         "Mast (PR merged)"
                     } else {
                         actor_label(r.by.kind)
@@ -1003,24 +1019,46 @@ mod tests {
 
     #[test]
     fn handoff_lifecycle_uses_cached_pr_state_and_branch() {
-        use mast_proto::{PullRequestRef, PullRequestReviewDecision, PullRequestState, PullRequestStatusSummary};
         use mast_proto::work_outline_user_actions::{RequestFact, UserActionKind};
+        use mast_proto::{
+            PullRequestRef, PullRequestReviewDecision, PullRequestState, PullRequestStatusSummary,
+        };
         let mut snapshot = fixture_snapshot("s1");
         let mut request = request("handoff", "s1", UI, "chat-ui", "Ready");
         request.kind = Some(UserActionKind::Handoff);
-        request.facts.push(RequestFact { label: "Branch".into(), value: "feature/a".into() });
+        request.facts.push(RequestFact {
+            label: "Branch".into(),
+            value: "feature/a".into(),
+        });
         snapshot.user_action_requests.push(request);
         let rows = collect_rows(&spaces(snapshot), &[], &RequestScope::Global);
-        let row = rows.open.iter().find(|row| row.request_id == "handoff").unwrap();
+        let row = rows
+            .open
+            .iter()
+            .find(|row| row.request_id == "handoff")
+            .unwrap();
         assert_eq!(handoff_lifecycle(row, std::iter::empty()), Some("Ready"));
-        let mut status = PullRequestStatusSummary { pr_ref: PullRequestRef::new("acme", "app", 1), head_ref_name: Some("feature/a".into()), ..Default::default() };
+        let mut status = PullRequestStatusSummary {
+            pr_ref: PullRequestRef::new("acme", "app", 1),
+            head_ref_name: Some("feature/a".into()),
+            ..Default::default()
+        };
         assert_eq!(handoff_lifecycle(row, [&status].into_iter()), Some("Ready"));
         status.review_decision = Some(PullRequestReviewDecision::Approved);
-        assert_eq!(handoff_lifecycle(row, [&status].into_iter()), Some("Waiting to land"));
+        assert_eq!(
+            handoff_lifecycle(row, [&status].into_iter()),
+            Some("Waiting to land")
+        );
         status.state = PullRequestState::Merged;
-        assert_eq!(handoff_lifecycle(row, [&status].into_iter()), Some("Landed"));
+        assert_eq!(
+            handoff_lifecycle(row, [&status].into_iter()),
+            Some("Landed")
+        );
         status.state = PullRequestState::Closed;
-        assert_eq!(handoff_lifecycle(row, [&status].into_iter()), Some("Closed"));
+        assert_eq!(
+            handoff_lifecycle(row, [&status].into_iter()),
+            Some("Closed")
+        );
     }
 
     fn chat(id: &str, archived: bool) -> OutlineChat {

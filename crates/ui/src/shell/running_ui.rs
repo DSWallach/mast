@@ -77,7 +77,11 @@ thread_local! {
     pub(super) static RELAUNCHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-fn run_state(indicator: crate::state::Indicator, background: u32, failed: bool) -> Option<RunState> {
+fn run_state(
+    indicator: crate::state::Indicator,
+    background: u32,
+    failed: bool,
+) -> Option<RunState> {
     use crate::state::Indicator;
     match indicator {
         Indicator::Working => Some(RunState::Working),
@@ -99,7 +103,8 @@ impl Shell {
             let background = 0; // not tracked at session level yet
             let session = state.session_for(&chat.id);
             let failed = session.is_some_and(|s| s.last_turn_tool_failures.is_some());
-            let Some(run) = run_state(state.indicator_for(&chat.id, now), background, failed) else {
+            let Some(run) = run_state(state.indicator_for(&chat.id, now), background, failed)
+            else {
                 continue;
             };
             let facts = self.chat_item_facts(&chat.id, cx);
@@ -127,7 +132,9 @@ impl Shell {
                 activity: chat
                     .last_message_preview
                     .as_deref()
-                    .map(|text| crate::transcript::single_line(&crate::message_source::preview(text)))
+                    .map(|text| {
+                        crate::transcript::single_line(&crate::message_source::preview(text))
+                    })
                     .unwrap_or_default(),
                 item_path,
                 account: facts.as_ref().and_then(|facts| facts.account.clone()),
@@ -248,7 +255,11 @@ impl Shell {
             return;
         };
         let fold_key = match snapshot.find(&key) {
-            Some(Entry::Fold { key, open: now_open, .. }) if *now_open != open => key.clone(),
+            Some(Entry::Fold {
+                key,
+                open: now_open,
+                ..
+            }) if *now_open != open => key.clone(),
             Some(Entry::Row(row)) => {
                 let folded_below = snapshot
                     .entries()
@@ -339,7 +350,11 @@ impl Shell {
 
     /// Record what the installed executable looks like now. A stamp unlike the
     /// launch stamp is a pending build; matching again (rolled back) clears it.
-    pub(super) fn observe_installed(&mut self, installed: Option<BuildStamp>, cx: &mut Context<Self>) {
+    pub(super) fn observe_installed(
+        &mut self,
+        installed: Option<BuildStamp>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(launch) = self.running.launch else {
             return;
         };
@@ -409,7 +424,12 @@ impl Shell {
     }
 
     /// Resume (re-send the last message) or dismiss one ledger entry, or all.
-    pub(super) fn handle_interrupted(&mut self, chat_ids: Vec<String>, resume: bool, cx: &mut Context<Self>) {
+    pub(super) fn handle_interrupted(
+        &mut self,
+        chat_ids: Vec<String>,
+        resume: bool,
+        cx: &mut Context<Self>,
+    ) {
         // Optimistic: the entry is gone from the list at once; the engine's
         // answer (and the next refresh) is the truth.
         self.running
@@ -431,17 +451,21 @@ impl Shell {
                     .call(method, serde_json::json!({ "chatId": chat_id }))
                     .await;
             }
-            this.update(cx, |shell, cx| shell.refresh_interrupted(cx)).ok();
+            this.update(cx, |shell, cx| shell.refresh_interrupted(cx))
+                .ok();
         })
         .detach();
     }
 
     /// The newer installed build, for the menu bar item.
     pub(super) fn pending_build(&self) -> Option<crate::menu_bar::PendingBuild> {
-        self.running.pending.as_ref().map(|pending| crate::menu_bar::PendingBuild {
-            changes: pending.changes.as_ref().map(Vec::len),
-            armed: self.running.plan.is_armed(),
-        })
+        self.running
+            .pending
+            .as_ref()
+            .map(|pending| crate::menu_bar::PendingBuild {
+                changes: pending.changes.as_ref().map(Vec::len),
+                armed: self.running.plan.is_armed(),
+            })
     }
 
     pub(super) fn interrupted_block(&self, cx: &App) -> Option<running_chats::InterruptedBlock> {
@@ -513,7 +537,11 @@ impl Shell {
     // ----------------------------------------------------------------------
 
     /// The titlebar lamp: the lit mark, one click from the list.
-    pub(super) fn render_running_lamp(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_running_lamp(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mark = self.logo(theme.appearance).w(px(12.0)).h(px(17.3));
         let open = self.running.open;
         div()
@@ -576,7 +604,8 @@ impl Shell {
             );
         }
         for section in &snapshot.sections {
-            list = list.child(self.render_running_section(section, selected.as_deref(), &theme, cx));
+            list =
+                list.child(self.render_running_section(section, selected.as_deref(), &theme, cx));
         }
         let card = popover::popover_card(&theme)
             .w(px(CARD_WIDTH))
@@ -637,16 +666,26 @@ impl Shell {
                 let more = changes.len().saturating_sub(shown.len());
                 format!(
                     "Running the {} build. Missing: {}{} ({} change{}).",
-                    self.running.launch.map(|l| clock(l.mtime_ms)).unwrap_or_default(),
+                    self.running
+                        .launch
+                        .map(|l| clock(l.mtime_ms))
+                        .unwrap_or_default(),
                     shown.join(", "),
-                    if more > 0 { format!(" +{more} more") } else { String::new() },
+                    if more > 0 {
+                        format!(" +{more} more")
+                    } else {
+                        String::new()
+                    },
                     changes.len(),
                     if changes.len() == 1 { "" } else { "s" },
                 )
             }
             _ => format!(
                 "Running the {} build.",
-                self.running.launch.map(|l| clock(l.mtime_ms)).unwrap_or_default()
+                self.running
+                    .launch
+                    .map(|l| clock(l.mtime_ms))
+                    .unwrap_or_default()
             ),
         };
         let title = match pending.changes.as_deref() {
@@ -657,43 +696,39 @@ impl Shell {
             ),
             _ => "New build installed".to_owned(),
         };
-        let mut banner = div()
-            .mx(px(4.0))
-            .mb(px(4.0))
-            .px(px(10.0))
-            .py(px(8.0))
-            .gap(px(6.0))
-            .flex()
-            .flex_col()
-            .rounded(px(popover::MENU_ITEM_RADIUS))
-            .border_1()
-            .border_color(theme.accent)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(SharedString::from(title)),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!(
-                                "installed {}",
-                                clock(pending.installed.mtime_ms)
-                            ))),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(summary)),
-            );
+        let mut banner =
+            div()
+                .mx(px(4.0))
+                .mb(px(4.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .gap(px(6.0))
+                .flex()
+                .flex_col()
+                .rounded(px(popover::MENU_ITEM_RADIUS))
+                .border_1()
+                .border_color(theme.accent)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(SharedString::from(title)),
+                        )
+                        .child(div().text_color(theme.text_muted).child(SharedString::from(
+                            format!("installed {}", clock(pending.installed.mtime_ms)),
+                        ))),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(summary)),
+                );
         let buttons = div().flex().flex_row().gap(px(6.0));
         banner = match self.running.plan.state {
             RestartState::Confirming => banner
@@ -726,32 +761,38 @@ impl Shell {
                 }))
                 .child(
                     buttons
-                        .child(running_button("restart-anyway", "Restart anyway", false, theme).on_click(
-                            cx.listener(|this, _, _, cx| this.confirm_restart(cx)),
-                        ))
-                        .child(running_button("restart-when-idle", "Restart when idle", true, theme).on_click(
-                            cx.listener(|this, _, _, cx| this.arm_restart_when_idle(cx)),
-                        ))
-                        .child(running_button("restart-wait", "Wait", false, theme).on_click(
-                            cx.listener(|this, _, _, cx| this.cancel_restart(cx)),
-                        )),
+                        .child(
+                            running_button("restart-anyway", "Restart anyway", false, theme)
+                                .on_click(cx.listener(|this, _, _, cx| this.confirm_restart(cx))),
+                        )
+                        .child(
+                            running_button("restart-when-idle", "Restart when idle", true, theme)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.arm_restart_when_idle(cx)),
+                                ),
+                        )
+                        .child(
+                            running_button("restart-wait", "Wait", false, theme)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_restart(cx))),
+                        ),
                 ),
             RestartState::WhenIdle { .. } => banner
-                .child(
-                    div()
-                        .child(SharedString::from(format!(
-                            "Restarting when idle \u{b7} {} working",
-                            mid_turn.len()
-                        ))),
-                )
+                .child(div().child(SharedString::from(format!(
+                    "Restarting when idle \u{b7} {} working",
+                    mid_turn.len()
+                ))))
                 .child(
                     buttons
-                        .child(running_button("restart-cancel", "Cancel", false, theme).on_click(
-                            cx.listener(|this, _, _, cx| this.cancel_restart(cx)),
-                        ))
-                        .child(running_button("restart-now", "Restart now\u{2026}", false, theme).on_click(
-                            cx.listener(|this, _, _, cx| this.request_restart_now(cx)),
-                        )),
+                        .child(
+                            running_button("restart-cancel", "Cancel", false, theme)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_restart(cx))),
+                        )
+                        .child(
+                            running_button("restart-now", "Restart now\u{2026}", false, theme)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.request_restart_now(cx)),
+                                ),
+                        ),
                 ),
             RestartState::Relaunching => banner.child(
                 div()
@@ -759,18 +800,21 @@ impl Shell {
                     .child(SharedString::from("Restarting\u{2026}")),
             ),
             RestartState::Idle if mid_turn.is_empty() => banner.child(
-                buttons.child(running_button("restart-now", "Restart", true, theme).on_click(
-                    cx.listener(|this, _, _, cx| this.request_restart_now(cx)),
-                )),
+                buttons.child(
+                    running_button("restart-now", "Restart", true, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.request_restart_now(cx))),
+                ),
             ),
             RestartState::Idle => banner.child(
                 buttons
-                    .child(running_button("restart-when-idle", "Restart when idle", true, theme).on_click(
-                        cx.listener(|this, _, _, cx| this.arm_restart_when_idle(cx)),
-                    ))
-                    .child(running_button("restart-now", "Restart now\u{2026}", false, theme).on_click(
-                        cx.listener(|this, _, _, cx| this.request_restart_now(cx)),
-                    )),
+                    .child(
+                        running_button("restart-when-idle", "Restart when idle", true, theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.arm_restart_when_idle(cx))),
+                    )
+                    .child(
+                        running_button("restart-now", "Restart now\u{2026}", false, theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.request_restart_now(cx))),
+                    ),
             ),
         };
         Some(banner.into_any_element())
@@ -778,12 +822,20 @@ impl Shell {
 
     /// "Restarted 09:41 · 4 interrupted": only exists while the ledger has
     /// entries for chats that still exist.
-    fn render_interrupted_block(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_interrupted_block(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let block = self.interrupted_block(cx)?;
         let at = chrono::DateTime::from_timestamp_millis(block.restarted_at_ms)
             .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
             .unwrap_or_default();
-        let all_decide: Vec<String> = block.needs_decision.iter().map(|r| r.chat_id.clone()).collect();
+        let all_decide: Vec<String> = block
+            .needs_decision
+            .iter()
+            .map(|r| r.chat_id.clone())
+            .collect();
         let all: Vec<String> = block
             .resumed
             .iter()
@@ -791,7 +843,8 @@ impl Shell {
             .map(|r| r.chat_id.clone())
             .collect();
         let row = |r: &running_chats::InterruptedRow, decide: bool, cx: &mut Context<Self>| {
-            let (resume_id, dismiss_id, open_id) = (r.chat_id.clone(), r.chat_id.clone(), r.chat_id.clone());
+            let (resume_id, dismiss_id, open_id) =
+                (r.chat_id.clone(), r.chat_id.clone(), r.chat_id.clone());
             div()
                 .flex()
                 .flex_row()
@@ -801,7 +854,10 @@ impl Shell {
                 .py(px(3.0))
                 .child(
                     div()
-                        .id(SharedString::from(format!("interrupted-open-{}", r.chat_id)))
+                        .id(SharedString::from(format!(
+                            "interrupted-open-{}",
+                            r.chat_id
+                        )))
                         .flex_1()
                         .min_w_0()
                         .cursor_pointer()
@@ -833,9 +889,11 @@ impl Shell {
                                 true,
                                 theme,
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.handle_interrupted(vec![resume_id.clone()], true, cx)
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.handle_interrupted(vec![resume_id.clone()], true, cx)
+                                },
+                            )),
                         )
                         .child(
                             running_button(
@@ -844,9 +902,11 @@ impl Shell {
                                 false,
                                 theme,
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.handle_interrupted(vec![dismiss_id.clone()], false, cx)
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.handle_interrupted(vec![dismiss_id.clone()], false, cx)
+                                },
+                            )),
                         )
                 }))
         };
@@ -888,20 +948,33 @@ impl Shell {
                         }))
                     }))
                     .child(
-                        running_button(SharedString::from("interrupted-dismiss-all"), "Dismiss", false, theme)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.handle_interrupted(all.clone(), false, cx)
-                            })),
+                        running_button(
+                            SharedString::from("interrupted-dismiss-all"),
+                            "Dismiss",
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.handle_interrupted(all.clone(), false, cx)
+                        })),
                     ),
             );
         if !block.needs_decision.is_empty() {
-            el = el.child(interrupted_label("Needs a decision", block.needs_decision.len(), theme));
+            el = el.child(interrupted_label(
+                "Needs a decision",
+                block.needs_decision.len(),
+                theme,
+            ));
             for r in &block.needs_decision {
                 el = el.child(row(r, true, cx));
             }
         }
         if !block.resumed.is_empty() {
-            el = el.child(interrupted_label("Resumed automatically", block.resumed.len(), theme));
+            el = el.child(interrupted_label(
+                "Resumed automatically",
+                block.resumed.len(),
+                theme,
+            ));
             for r in &block.resumed {
                 el = el.child(row(r, false, cx));
             }
@@ -928,7 +1001,11 @@ impl Shell {
                     .pb(px(2.0))
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(if urgent { theme.warning } else { theme.text_faint })
+                    .text_color(if urgent {
+                        theme.warning
+                    } else {
+                        theme.text_faint
+                    })
                     .child(SharedString::from(label)),
             )
             .children(section.entries.iter().map(|entry| {
@@ -968,11 +1045,15 @@ impl Shell {
             RunState::Working => theme.busy,
             RunState::IdleBackground => theme.text_faint,
         };
-        let meta = [row.item_path.clone(), row.account.clone(), row.model.clone()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" \u{b7} ");
+        let meta = [
+            row.item_path.clone(),
+            row.account.clone(),
+            row.model.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
         let activity = if row.state == RunState::IdleBackground {
             format!("idle \u{b7} {} background running", row.background)
         } else {
@@ -980,18 +1061,24 @@ impl Shell {
         };
         let chat_id = row.chat_id.clone();
         let pane_id = row.chat_id.clone();
-        let failed = self.state.read(cx).session_for(&row.chat_id).is_some_and(|s| s.last_turn_tool_failures.is_some());
+        let failed = self
+            .state
+            .read(cx)
+            .session_for(&row.chat_id)
+            .is_some_and(|s| s.last_turn_tool_failures.is_some());
         popover::menu_row_nav(theme, false, active, format!("running-row-{}", row.chat_id))
             .id(SharedString::from(format!("running-row-{}", row.chat_id)))
             .items_start()
             .pl(px(8.0 + 16.0 * f32::from(row.depth)))
-            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                if event.modifiers().platform {
-                    this.open_running_chat_in_pane(pane_id.clone(), cx);
-                } else {
-                    this.open_running_chat(chat_id.clone(), window, cx);
-                }
-            }))
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if event.modifiers().platform {
+                        this.open_running_chat_in_pane(pane_id.clone(), cx);
+                    } else {
+                        this.open_running_chat(chat_id.clone(), window, cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .mt(px(5.0))
@@ -1020,8 +1107,22 @@ impl Shell {
                                     .child(SharedString::from(row.title.clone())),
                             )
                             .when(row.state == RunState::Awaiting || failed, |el| {
-                                let (label, color) = if row.state == RunState::Awaiting { ("waiting for input", theme.warning) } else { ("tool calls failed", theme.danger) };
-                                el.child(div().debug_selector({ let selector = format!("running-stalled-{}", row.chat_id); move || selector.clone() }).text_color(color).text_size(crate::typography::ui_rems(10.5)).child(label))
+                                let (label, color) = if row.state == RunState::Awaiting {
+                                    ("waiting for input", theme.warning)
+                                } else {
+                                    ("tool calls failed", theme.danger)
+                                };
+                                el.child(
+                                    div()
+                                        .debug_selector({
+                                            let selector =
+                                                format!("running-stalled-{}", row.chat_id);
+                                            move || selector.clone()
+                                        })
+                                        .text_color(color)
+                                        .text_size(crate::typography::ui_rems(10.5))
+                                        .child(label),
+                                )
                             })
                             .when(row.admin, |el| {
                                 el.child(
@@ -1105,7 +1206,12 @@ fn interrupted_label(label: &'static str, count: usize, theme: &Theme) -> Div {
         .child(SharedString::from(format!("{label} \u{b7} {count}")))
 }
 
-fn running_button(id: impl Into<ElementId>, label: &'static str, primary: bool, theme: &Theme) -> gpui::Stateful<Div> {
+fn running_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    primary: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
     let button = div()
         .id(id)
         .px(px(10.0))
@@ -1260,9 +1366,14 @@ mod tests {
         let state = shell.read_with(cx, |shell, _| shell.state.clone());
         state.update(cx, |state, _| {
             state.sessions[1].status = SessionStatus::Idle;
-            state.sessions[1].last_turn_tool_failures = Some(mast_proto::ToolFailures { count: 1, tools: vec!["bind_chat_worktree".into()] });
+            state.sessions[1].last_turn_tool_failures = Some(mast_proto::ToolFailures {
+                count: 1,
+                tools: vec!["bind_chat_worktree".into()],
+            });
         });
-        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
         redraw(cx);
         assert!(cx.debug_bounds("running-stalled-c0").is_some());
         assert!(cx.debug_bounds("running-stalled-c1").is_some());
@@ -1272,14 +1383,19 @@ mod tests {
     fn zero_chats_opens_an_empty_list_with_no_restart_ui(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
-        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
         redraw(cx);
         shell.read_with(cx, |shell, cx| {
             assert!(shell.running.open);
             let snapshot = shell.running_snapshot(cx);
             assert_eq!(snapshot.headline(), "Nothing running");
             assert_eq!(shell.running.selected, None);
-            assert!(shell.running.pending.is_none(), "no pending build, no banner");
+            assert!(
+                shell.running.pending.is_none(),
+                "no pending build, no banner"
+            );
         });
         press(&shell, cx, "down");
         press(&shell, cx, "enter");
@@ -1293,7 +1409,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
         seed(&shell, cx, 3);
-        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
         redraw(cx);
         shell.read_with(cx, |shell, cx| {
             let snapshot = shell.running_snapshot(cx);
@@ -1314,7 +1432,11 @@ mod tests {
 
         press(&shell, cx, "i");
         let interrupted = shell.read_with(cx, |shell, _| shell.running.last_interrupt.clone());
-        assert_eq!(interrupted.as_deref(), Some("c2"), "I interrupts the highlighted chat");
+        assert_eq!(
+            interrupted.as_deref(),
+            Some("c2"),
+            "I interrupts the highlighted chat"
+        );
 
         press(&shell, cx, "up");
         press(&shell, cx, "enter");
@@ -1339,7 +1461,9 @@ mod tests {
                 skip_bulk_confirmation: false,
             }]);
         });
-        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
         redraw(cx);
         shell.read_with(cx, |shell, cx| {
             let snapshot = shell.running_snapshot(cx);
@@ -1363,7 +1487,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
         seed(&shell, cx, 15);
-        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
         redraw(cx);
         let count = |shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext| {
             shell.read_with(cx, |shell, cx| shell.running_snapshot(cx).entries().count())
@@ -1372,7 +1498,11 @@ mod tests {
         assert_eq!(count(&shell, cx), 3);
         press(&shell, cx, "down"); // c1
         press(&shell, cx, "right");
-        assert_eq!(count(&shell, cx), 15, "→ unfolds the coordinator's children");
+        assert_eq!(
+            count(&shell, cx),
+            15,
+            "→ unfolds the coordinator's children"
+        );
         press(&shell, cx, "left");
         assert_eq!(count(&shell, cx), 3, "← folds them again");
         press(&shell, cx, "down"); // the fold line
@@ -1388,7 +1518,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
         seed(&shell, cx, 3);
-        let launch = BuildStamp { inode: 1, mtime_ms: 1_000, len: 10 };
+        let launch = BuildStamp {
+            inode: 1,
+            mtime_ms: 1_000,
+            len: 10,
+        };
         shell.update(cx, |shell, cx| {
             shell.running.launch = Some(launch);
             shell.observe_installed(Some(launch), cx);
@@ -1396,12 +1530,21 @@ mod tests {
             shell.observe_installed(None, cx);
             assert!(shell.running.pending.is_none(), "unreadable: no pending");
         });
-        let newer = BuildStamp { inode: 2, mtime_ms: 2_000, len: 11 };
+        let newer = BuildStamp {
+            inode: 2,
+            mtime_ms: 2_000,
+            len: 11,
+        };
         shell.update(cx, |shell, cx| shell.observe_installed(Some(newer), cx));
-        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
         redraw(cx);
         shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.running.pending.as_ref().map(|p| p.installed), Some(newer));
+            assert_eq!(
+                shell.running.pending.as_ref().map(|p| p.installed),
+                Some(newer)
+            );
         });
         // Rolled back to the launch build: the banner and any plan go away.
         shell.update(cx, |shell, cx| {
@@ -1446,7 +1589,11 @@ mod tests {
             shell.running_tick(cx);
             shell.running_tick(cx);
         });
-        assert_eq!(RELAUNCHES.with(|count| count.get()), 0, "chats still working");
+        assert_eq!(
+            RELAUNCHES.with(|count| count.get()),
+            0,
+            "chats still working"
+        );
         // Every chat finishes.
         let state = shell.read_with(cx, |shell, _| shell.state.clone());
         state.update(cx, |state, _| {
@@ -1455,7 +1602,11 @@ mod tests {
             }
         });
         shell.update(cx, |shell, cx| shell.running_tick(cx));
-        assert_eq!(RELAUNCHES.with(|count| count.get()), 0, "one quiet tick is not enough");
+        assert_eq!(
+            RELAUNCHES.with(|count| count.get()),
+            0,
+            "one quiet tick is not enough"
+        );
         shell.update(cx, |shell, cx| shell.running_tick(cx));
         assert_eq!(RELAUNCHES.with(|count| count.get()), 1);
     }
@@ -1489,7 +1640,9 @@ mod tests {
                 run("deleted", InterruptedOutcome::Exhausted),
             ];
         });
-        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
         redraw(cx);
         shell.read_with(cx, |shell, cx| {
             let block = shell.interrupted_block(cx).unwrap();
@@ -1508,7 +1661,9 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.handle_interrupted(vec!["c1".into()], false, cx)
         });
-        shell.read_with(cx, |shell, cx| assert!(shell.interrupted_block(cx).is_none()));
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.interrupted_block(cx).is_none())
+        });
         redraw(cx);
     }
 }

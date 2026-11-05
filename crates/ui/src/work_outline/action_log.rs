@@ -358,11 +358,10 @@ impl Probe {
                 if item.archived_at.is_some() {
                     return Err("The group is archived".into());
                 }
-                let mut live: Vec<&str> =
-                    super::restructure::live_children(snapshot, Some(parent))
-                        .iter()
-                        .map(|child| child.id.as_str())
-                        .collect();
+                let mut live: Vec<&str> = super::restructure::live_children(snapshot, Some(parent))
+                    .iter()
+                    .map(|child| child.id.as_str())
+                    .collect();
                 let mut want: Vec<&str> = children.iter().map(String::as_str).collect();
                 live.sort_unstable();
                 want.sort_unstable();
@@ -675,7 +674,10 @@ pub(crate) fn move_entry(
 /// Where "Group into…" puts the items.
 pub(crate) enum GroupTarget<'a> {
     /// A container created by the same action.
-    New { work_item_id: &'a str, title: &'a str },
+    New {
+        work_item_id: &'a str,
+        title: &'a str,
+    },
     /// An existing work item; items are appended.
     Existing { work_item_id: &'a str },
 }

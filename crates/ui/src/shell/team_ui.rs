@@ -9,7 +9,8 @@ use super::*;
 
 use crate::shell::chat_item_ui::{ChipTone, chip_palette};
 use crate::team::{
-    ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr, WorkerState, team,
+    ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr, WorkerState,
+    team,
 };
 
 impl Shell {
@@ -58,7 +59,11 @@ impl Shell {
             return;
         }
         let chat_id = self.active_chat.clone();
-        if !self.settings.team_tab_visibility.visible(!self.team_facts(&chat_id, cx).is_empty()) {
+        if !self
+            .settings
+            .team_tab_visibility
+            .visible(!self.team_facts(&chat_id, cx).is_empty())
+        {
             return;
         }
         self.leave_overview_for_chat(cx);
@@ -189,13 +194,17 @@ impl Shell {
             .overflow_y_scroll()
             .p(px(14.0))
             .key_context("TeamPanel")
-            .on_action(cx.listener(move |this, _: &OpenTeamTabFromPanel, window, cx| {
-                if tracked.is_focused(window) && this.resolved_right_active(cx) != RightSurface::Team {
-                    this.open_team_tab(cx);
-                } else {
-                    cx.propagate();
-                }
-            }))
+            .on_action(
+                cx.listener(move |this, _: &OpenTeamTabFromPanel, window, cx| {
+                    if tracked.is_focused(window)
+                        && this.resolved_right_active(cx) != RightSurface::Team
+                    {
+                        this.open_team_tab(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
             .child(body)
             .into_any_element()
     }
@@ -222,7 +231,10 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .hover(|el| el.text_color(theme.accent))
-                    .child(SharedString::from(format!("Team \u{b7} {}", team.roll_up())))
+                    .child(SharedString::from(format!(
+                        "Team \u{b7} {}",
+                        team.roll_up()
+                    )))
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
         for worker in team.live().take(ITEM_TAB_WORKERS) {
@@ -283,7 +295,11 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let prefix = if compact { "chat-item-worker" } else { "team-worker" };
+        let prefix = if compact {
+            "chat-item-worker"
+        } else {
+            "team-worker"
+        };
         let id = worker.chat_id.clone();
         let selector = format!("{prefix}-{id}");
         let now = chrono::Utc::now();
@@ -298,7 +314,10 @@ impl Shell {
             if session.status == mast_proto::SessionStatus::AwaitingInput {
                 Some(("waiting for input".to_owned(), theme.warning))
             } else {
-                session.last_turn_tool_failures.as_ref().map(|failure| (format!("{} tool calls failed", failure.count), theme.danger))
+                session
+                    .last_turn_tool_failures
+                    .as_ref()
+                    .map(|failure| (format!("{} tool calls failed", failure.count), theme.danger))
             }
         });
         let mut row = div()
@@ -332,8 +351,15 @@ impl Shell {
                             .child(SharedString::from(worker.title.clone())),
                     )
                     .children(stalled.map(|(label, color)| {
-                        div().debug_selector({ let selector = format!("{prefix}-stalled-{id}"); move || selector.clone() })
-                            .flex_none().text_size(crate::typography::ui_rems(10.5)).text_color(color).child(SharedString::from(label))
+                        div()
+                            .debug_selector({
+                                let selector = format!("{prefix}-stalled-{id}");
+                                move || selector.clone()
+                            })
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(10.5))
+                            .text_color(color)
+                            .child(SharedString::from(label))
                     }))
                     .children((!unseen.is_empty()).then(|| {
                         let tip = SharedString::from(format!(
@@ -427,7 +453,12 @@ impl Shell {
             );
         }
         if !compact {
-            let mut chips = div().pl(px(13.0)).flex().flex_wrap().items_center().gap(px(4.0));
+            let mut chips = div()
+                .pl(px(13.0))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(4.0));
             let mut any = false;
             if let Some(branch) = &worker.branch {
                 any = true;
@@ -442,15 +473,20 @@ impl Shell {
                 any = true;
                 let url = pr.url.clone();
                 chips = chips.child(
-                    Self::chip(theme, format!("team-pr-{id}-{ix}"), pr.label(), Self::pr_tone(pr))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            if !url.is_empty() {
-                                let external = window.modifiers().secondary();
-                                this.open_web_reference(&url, external, window, cx)
-                            }
-                        })),
+                    Self::chip(
+                        theme,
+                        format!("team-pr-{id}-{ix}"),
+                        pr.label(),
+                        Self::pr_tone(pr),
+                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if !url.is_empty() {
+                            let external = window.modifiers().secondary();
+                            this.open_web_reference(&url, external, window, cx)
+                        }
+                    })),
                 );
             }
             if let Some(ticket) = &worker.ticket {
@@ -501,9 +537,7 @@ impl Shell {
                 row = row.child(chips);
             }
         }
-        if !compact
-            && let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable)
-        {
+        if !compact && let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(
                 div()
                     .debug_selector({
@@ -514,41 +548,99 @@ impl Shell {
                     .truncate()
                     .text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(format!("can archive \u{b7} {}", verdict.reason))),
+                    .child(SharedString::from(format!(
+                        "can archive \u{b7} {}",
+                        verdict.reason
+                    ))),
             );
         }
         if let Some(ready) = &worker.ready {
             let text = ready.text.clone();
             let mut references = {
                 let state = self.state.read(cx);
-                state.work_outline(&ready.space_id).snapshot()
+                state
+                    .work_outline(&ready.space_id)
+                    .snapshot()
                     .and_then(|snapshot| snapshot.user_action_request(&ready.request_id))
                     .map(|request| {
-                        request.links.iter().filter_map(|link| match &link.target {
-                            mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => crate::work_outline::required_actions::parse_handoff_pr(url),
-                            _ => None,
-                        }).chain(request.facts.iter().filter(|fact| fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request"))
-                            .filter_map(|fact| crate::work_outline::required_actions::parse_handoff_pr(&fact.value))).collect::<Vec<_>>()
-                    }).unwrap_or_default()
+                        request
+                            .links
+                            .iter()
+                            .filter_map(|link| match &link.target {
+                                mast_proto::work_outline_user_actions::RequestLinkTarget::Pr {
+                                    url,
+                                }
+                                | mast_proto::work_outline_user_actions::RequestLinkTarget::Url {
+                                    url,
+                                } => crate::work_outline::required_actions::parse_handoff_pr(url),
+                                _ => None,
+                            })
+                            .chain(
+                                request
+                                    .facts
+                                    .iter()
+                                    .filter(|fact| {
+                                        fact.label.eq_ignore_ascii_case("pr")
+                                            || fact.label.eq_ignore_ascii_case("pull request")
+                                    })
+                                    .filter_map(|fact| {
+                                        crate::work_outline::required_actions::parse_handoff_pr(
+                                            &fact.value,
+                                        )
+                                    }),
+                            )
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
             };
             if worker.branch.is_some() {
-                references.extend(worker.prs.iter().filter_map(|pr| crate::work_outline::required_actions::parse_handoff_pr(&pr.url)));
+                references.extend(worker.prs.iter().filter_map(|pr| {
+                    crate::work_outline::required_actions::parse_handoff_pr(&pr.url)
+                }));
             }
             for pr in references {
                 crate::github::store::request_status(&self.state, &pr, false, cx);
             }
             let lifecycle = {
                 let state = self.state.read(cx);
-                state.work_outline(&ready.space_id).snapshot()
+                state
+                    .work_outline(&ready.space_id)
+                    .snapshot()
                     .and_then(|snapshot| snapshot.user_action_request(&ready.request_id))
                     .and_then(|request| {
                         let explicit_pr = request.links.iter().any(|link| match &link.target {
-                            mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => crate::work_outline::required_actions::parse_handoff_pr(url).is_some(),
+                            mast_proto::work_outline_user_actions::RequestLinkTarget::Pr {
+                                url,
+                            }
+                            | mast_proto::work_outline_user_actions::RequestLinkTarget::Url {
+                                url,
+                            } => crate::work_outline::required_actions::parse_handoff_pr(url)
+                                .is_some(),
                             _ => false,
-                        }) || request.facts.iter().any(|fact| (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && crate::work_outline::required_actions::parse_handoff_pr(&fact.value).is_some());
-                        let worker_prs: std::collections::HashSet<_> = worker.prs.iter().filter_map(|pr| crate::work_outline::required_actions::parse_handoff_pr(&pr.url)).map(|pr| pr.key()).collect();
+                        }) || request.facts.iter().any(|fact| {
+                            (fact.label.eq_ignore_ascii_case("pr")
+                                || fact.label.eq_ignore_ascii_case("pull request"))
+                                && crate::work_outline::required_actions::parse_handoff_pr(
+                                    &fact.value,
+                                )
+                                .is_some()
+                        });
+                        let worker_prs: std::collections::HashSet<_> = worker
+                            .prs
+                            .iter()
+                            .filter_map(|pr| {
+                                crate::work_outline::required_actions::parse_handoff_pr(&pr.url)
+                            })
+                            .map(|pr| pr.key())
+                            .collect();
                         crate::work_outline::required_actions::handoff_lifecycle_parts(
-                            request.effective_kind(), &request.links, &request.facts, state.github.ready_statuses().filter(|status| explicit_pr || worker_prs.contains(&status.pr_ref.key())))
+                            request.effective_kind(),
+                            &request.links,
+                            &request.facts,
+                            state.github.ready_statuses().filter(|status| {
+                                explicit_pr || worker_prs.contains(&status.pr_ref.key())
+                            }),
+                        )
                     })
             };
             row = row.child(
@@ -566,9 +658,14 @@ impl Shell {
                             .text_color(theme.success)
                             .child(SharedString::from(text)),
                     )
-                    .when_some(lifecycle, |el, lifecycle| el.child(Self::chip(
-                        theme, format!("team-handoff-lifecycle-{id}"), lifecycle.to_owned(), ChipTone::Dim,
-                    )))
+                    .when_some(lifecycle, |el, lifecycle| {
+                        el.child(Self::chip(
+                            theme,
+                            format!("team-handoff-lifecycle-{id}"),
+                            lifecycle.to_owned(),
+                            ChipTone::Dim,
+                        ))
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("{prefix}-jump-{id}")))
@@ -604,7 +701,11 @@ fn team_button(
     label: String,
     primary: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let color = if primary { theme.accent } else { theme.text_muted };
+    let color = if primary {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
     let id: String = id.into();
     let selector = id.clone();
     div()
@@ -661,14 +762,21 @@ impl Shell {
                 );
             for worker in &finished {
                 let selector = format!("team-archive-confirm-row-{}", worker.chat_id);
-                let reason = worker.archivable.as_ref().map(|a| a.reason.clone()).unwrap_or_default();
+                let reason = worker
+                    .archivable
+                    .as_ref()
+                    .map(|a| a.reason.clone())
+                    .unwrap_or_default();
                 confirm = confirm.child(
                     div()
                         .debug_selector(move || selector.clone())
                         .truncate()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("{} \u{b7} {reason}", worker.title))),
+                        .child(SharedString::from(format!(
+                            "{} \u{b7} {reason}",
+                            worker.title
+                        ))),
                 );
             }
             let go_chat = chat_id.to_owned();
@@ -685,17 +793,29 @@ impl Shell {
                         .flex()
                         .gap(px(6.0))
                         .child(
-                            team_button(theme, "team-archive-confirm-go", format!("Archive {n}"), true)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.archive_finished_workers(&go_chat, cx)
-                                })),
+                            team_button(
+                                theme,
+                                "team-archive-confirm-go",
+                                format!("Archive {n}"),
+                                true,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.archive_finished_workers(&go_chat, cx),
+                            )),
                         )
                         .child(
-                            team_button(theme, "team-archive-confirm-cancel", "Cancel".into(), false)
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            team_button(
+                                theme,
+                                "team-archive-confirm-cancel",
+                                "Cancel".into(),
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     this.wakes.archive_confirm.remove(&cancel_chat);
                                     cx.notify();
-                                })),
+                                },
+                            )),
                         ),
                 );
             return block.child(confirm).into_any_element();
@@ -710,17 +830,24 @@ impl Shell {
                     .min_w_0()
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(format!("{n} finished workers can be archived"))),
+                    .child(SharedString::from(format!(
+                        "{n} finished workers can be archived"
+                    ))),
             );
         } else {
             line = line.child(div().flex_1());
         }
         line = line.child(
-            team_button(theme, "team-archive-finished", format!("Archive finished ({n})"), true)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.wakes.archive_confirm.insert(ask_chat.clone());
-                    cx.notify();
-                })),
+            team_button(
+                theme,
+                "team-archive-finished",
+                format!("Archive finished ({n})"),
+                true,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.wakes.archive_confirm.insert(ask_chat.clone());
+                cx.notify();
+            })),
         );
         block.child(line).into_any_element()
     }

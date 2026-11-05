@@ -1342,7 +1342,8 @@ impl OutlineView {
         {
             // "Group into… › New container…": create it and move the items.
             self.editing = None;
-            if let Err(notice) = self.group_items(space_id, item_ids, group::GroupDest::New(title), cx)
+            if let Err(notice) =
+                self.group_items(space_id, item_ids, group::GroupDest::New(title), cx)
             {
                 self.show_notice(notice, cx);
             }
@@ -1662,7 +1663,9 @@ impl OutlineView {
                     work_item_id: item_id.clone(),
                 })
             }
-            PickerPurpose::RecentChanges | PickerPurpose::Group { .. } | PickerPurpose::Template(_) => None,
+            PickerPurpose::RecentChanges
+            | PickerPurpose::Group { .. }
+            | PickerPurpose::Template(_) => None,
         };
         let snapshot = match &purpose {
             PickerPurpose::Move { item_id } | PickerPurpose::AssociateWithItem { item_id } => {
@@ -1675,7 +1678,9 @@ impl OutlineView {
                 .find(|chat| &chat.id == chat_id)
                 .and_then(|chat| chat.space_id.as_deref())
                 .and_then(|space| self.snapshot(space)),
-            PickerPurpose::RecentChanges | PickerPurpose::Group { .. } | PickerPurpose::Template(_) => None,
+            PickerPurpose::RecentChanges
+            | PickerPurpose::Group { .. }
+            | PickerPurpose::Template(_) => None,
         };
         let impact = change
             .as_ref()
@@ -1713,7 +1718,9 @@ impl OutlineView {
                             work_item_id: item_id.clone(),
                         })
                 }
-                PickerPurpose::RecentChanges | PickerPurpose::Group { .. } | PickerPurpose::Template(_) => None,
+                PickerPurpose::RecentChanges
+                | PickerPurpose::Group { .. }
+                | PickerPurpose::Template(_) => None,
             };
             snapshot
                 .map(|snapshot| snapshot.space_id.clone())
@@ -1748,7 +1755,9 @@ impl OutlineView {
             WorkOutlinePlacement::Last
         };
         let (task, item_id, change) = match picker.purpose.clone() {
-            PickerPurpose::RecentChanges | PickerPurpose::Group { .. } | PickerPurpose::Template(_) => return,
+            PickerPurpose::RecentChanges
+            | PickerPurpose::Group { .. }
+            | PickerPurpose::Template(_) => return,
             PickerPurpose::Move { item_id } => (
                 actions.move_work_item(mast_proto::MoveWorkItemParams {
                     work_item_id: item_id.clone(),
@@ -3646,19 +3655,31 @@ fn item_body(
             ))
         })
         .children(proposals)
-        .when_some(item.template_changed.filter(|_| !item.archived), |el, (from, to)| {
-            let tip: SharedString =
-                "The blueprint this item came from changed. Open details to review".into();
-            el.child(
-                chips::template_chip(format!("outline-template-changed-{key}"), from, to, theme)
-                    .id(SharedString::from(format!("outline-template-changed-{key}")))
+        .when_some(
+            item.template_changed.filter(|_| !item.archived),
+            |el, (from, to)| {
+                let tip: SharedString =
+                    "The blueprint this item came from changed. Open details to review".into();
+                el.child(
+                    chips::template_chip(
+                        format!("outline-template-changed-{key}"),
+                        from,
+                        to,
+                        theme,
+                    )
+                    .id(SharedString::from(format!(
+                        "outline-template-changed-{key}"
+                    )))
                     .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
-            )
-        })
+                )
+            },
+        )
         .when(item.follows_template && !item.archived, |el| {
             el.child(
                 div()
-                    .id(SharedString::from(format!("outline-follows-template-{key}")))
+                    .id(SharedString::from(format!(
+                        "outline-follows-template-{key}"
+                    )))
                     .debug_selector({
                         let selector = format!("outline-follows-template-{key}");
                         move || selector.clone()
@@ -4039,10 +4060,7 @@ impl Render for OutlineView {
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 // Esc closes the move toast; every other key goes on to the
                 // tree's bindings (focus never leaves it).
-                if event.keystroke.key == "escape"
-                    && !this.is_editing()
-                    && this.clear_multi(cx)
-                {
+                if event.keystroke.key == "escape" && !this.is_editing() && this.clear_multi(cx) {
                     cx.stop_propagation();
                     return;
                 }
