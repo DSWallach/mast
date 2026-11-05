@@ -62,7 +62,7 @@ pub struct Batch {
 
 impl Batch {
     /// The one message the orchestrator receives.
-    pub fn render(&self) -> String {
+    pub fn render(&self, mut label: impl FnMut(&str) -> String) -> String {
         let mut out = format!(
             "{}, not from the user: worker updates for you, the \
              orchestrator. Act on them with your Mast tools (work_outline_read_subtree, \
@@ -72,7 +72,21 @@ impl Batch {
         );
         for event in &self.events {
             out.push_str("\n- ");
-            out.push_str(&event.summary);
+            out.push_str(&label(&event.worker_chat_id));
+            let short: String = event.worker_chat_id.chars().take(12).collect();
+            let marker = format!("chat {short}");
+            let detail = event.summary.find(&marker).and_then(|index| {
+                event.summary[index + marker.len()..]
+                    .strip_prefix(") — ")
+                    .or_else(|| event.summary[index + marker.len()..].strip_prefix(" — "))
+            }).or_else(|| event.summary.split_once(" — ").map(|(_, detail)| detail));
+            if let Some(detail) = detail {
+                out.push_str(" — ");
+                out.push_str(detail);
+            } else {
+                out.push_str(" — ");
+                out.push_str(&event.summary);
+            }
             if let Some(report) = &event.report {
                 for line in report.lines() {
                     out.push_str("\n  | ");
@@ -550,11 +564,26 @@ mod tests {
             panic!("expected a delivery");
         };
         assert_eq!(batch.events.len(), 2);
-        let text = batch.render();
+        let text = batch.render(|id| id.to_owned());
         assert!(text.contains("Worker updates:"));
         assert!(text.contains("w1 — act:a") && text.contains("w2 — err:w2"));
         core.delivered(ORCH, &batch, 50_000);
         assert_eq!(core.decide(ORCH, 60_000, IDLE, false), Decision::Nothing);
+    }
+
+    #[test]
+    fn report_uses_current_title_after_recording() {
+        let mut core = WakeCore::new();
+        let mut report = event(&mut core, "worker", WakeEventKind::WorkerReport, "report", 1_000);
+        report.summary = "GPT-6 (chat worker) — worker report: finished".into();
+        report.report = Some("finished".into());
+        assert!(core.record(ORCH, report, 1_000));
+        let Decision::Deliver(batch) = core.decide(ORCH, 50_000, IDLE, false) else {
+            panic!("expected a delivery");
+        };
+        let text = batch.render(|_| "Current title (chat worker)".into());
+        assert!(text.contains("Current title (chat worker) — worker report: finished"));
+        assert!(!text.contains("GPT-6"));
     }
 
     #[test]

@@ -354,6 +354,8 @@ fn canonical_executable(candidate: std::path::PathBuf) -> Option<std::path::Path
 /// version manager's bin dir, and the CLIs themselves shell out to tools
 /// (git, rg, node) that a GUI/service launch's own PATH may lack.
 pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
+    #[cfg(unix)]
+    process::raise_child_file_limit(cmd);
     compose_path(
         cmd.as_std_mut(),
         exe.parent().filter(|d| !d.as_os_str().is_empty()),

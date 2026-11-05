@@ -1483,7 +1483,10 @@ impl OrchestratorWakes {
                 if !self.hosted_here(orch) {
                     return;
                 }
-                let text = batch.render();
+                let text = batch.render(|id| {
+                    let title = self.inner.workspace.chat(id).ok().flatten().and_then(|chat| chat.title);
+                    wake_label(id, title.as_deref())
+                });
                 let message_id = crate::new_id();
                 if let Err(error) = self.inner.event_turns.synchronize_held(&state.core.held_events()) {
                     tracing::warn!(%error, chat = %orch, "could not save held wake events");
@@ -1586,6 +1589,14 @@ fn firm_link(value: Option<&String>, source: Option<mast_proto::ChatLinkSource>)
     match source {
         Some(mast_proto::ChatLinkSource::Mentioned) | None => None,
         Some(_) => value.cloned(),
+    }
+}
+
+fn wake_label(chat_id: &str, title: Option<&str>) -> String {
+    let short: String = chat_id.chars().take(12).collect();
+    match title.map(str::trim).filter(|title| !title.is_empty()) {
+        Some(title) => format!("{title} (chat {short})"),
+        None => format!("chat {short}"),
     }
 }
 
