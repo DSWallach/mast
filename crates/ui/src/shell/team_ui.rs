@@ -130,6 +130,18 @@ impl Shell {
         )
     }
 
+    fn render_team_summary(team: &TeamFacts, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let parts = team.roll_up_parts();
+        if parts.is_empty() { return div().child("No active workers").into_any_element(); }
+        let mut summary = div().flex().items_center().gap(px(4.0));
+        for (index, (status, label)) in parts.into_iter().enumerate() {
+            if index > 0 { summary = summary.child("·"); }
+            let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("team-summary-{index}"), cx.entity_id(), cx);
+            summary = summary.child(indicator).child(SharedString::from(label));
+        }
+        summary.into_any_element()
+    }
+
     /// The Team tab's body: roll-up line, then one row per worker.
     pub(super) fn render_team_tab(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
@@ -167,7 +179,7 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from(team.roll_up())),
+                    .child(Self::render_team_summary(&team, &theme, cx)),
             );
             col = col.child(self.render_team_wake_header(&chat_id, &theme, cx));
             col = col.child(self.render_team_archive_block(&chat_id, &team, &theme, cx));
@@ -233,10 +245,9 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .hover(|el| el.text_color(theme.accent))
-                    .child(SharedString::from(format!(
-                        "Team \u{b7} {}",
-                        team.roll_up()
-                    )))
+                    .flex().items_center().gap(px(4.0))
+                    .child("Team ·")
+                    .child(Self::render_team_summary(team, theme, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
         for worker in team.live().take(ITEM_TAB_WORKERS) {
