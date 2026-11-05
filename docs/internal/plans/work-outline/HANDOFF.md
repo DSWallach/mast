@@ -618,6 +618,13 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Template-aware instruction proposals** (2026-11-05, `template-instruction-proposals`, Terra): edit/remove proposals on
+  a template-derived instruction (`templateInstructionId`) now target the container's rule instruction; approving
+  goes through `setContainerTemplate` and propagates to every following child. New `childTemplate` add target (rule
+  id or title path; defaults to the caller's container/rule node). Review card: "Child template · applies to N items"
+  with Apply to template / This project only (adds an own instruction). Guard: approval can no longer write a
+  template-linked row directly (it used to, and the next template save silently overwrote it). Release run: nextest
+  2388/2388, UI 2489/0.
 - **Rename for distribution** (2026-11-05, `rename-for-distribution`, Terra; decisions: bundle id
   computer.mikey.mast / .dev, `~/.mast` for new installs, keep `~/.zeron`): binary `mast` with a `zeron` shim bin;
   updater and `daemon install/status` accept both; `CFBundleExecutable mast`; both `mast://` and `zeron://` declared,
