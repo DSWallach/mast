@@ -977,6 +977,11 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 - Not touched: data/binary rename (needs Mikey), design items.
 - Open from first-run audit: signed-out-but-installed agent flow, sign-in gate and no-auth tab states.
 
+**Queued (2026-11-05):** distribution rename running (`rename-for-distribution`: binary `mast`, bundle id
+computer.mikey.mast(.dev), `mast://`, `~/.mast` for new installs with `~/.zeron` kept, Keychain fallback); Start Chat sign-in
+preflight running. After the rename: retire the agent-mode-tools wrapper (Space root → plain mast clone, move artifact
+folders, update instructions/HANDOFF/memory; quiet window, no workers). Workflow pack (export Mikey's setup) not started.
+
 **Queued after overnight:** Needs-you phases 5–6, PR review phase 4 (walkthrough), data/binary rename
 migration, item-tab artifact surfacing (171cde5a), container templates phases 2+.
 
