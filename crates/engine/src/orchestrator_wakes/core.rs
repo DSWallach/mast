@@ -106,7 +106,6 @@ struct Orch {
 #[derive(Debug, Default)]
 pub struct WakeCore {
     orchs: HashMap<String, Orch>,
-    seq: u64,
 }
 
 impl WakeCore {
@@ -115,8 +114,7 @@ impl WakeCore {
     }
 
     pub fn next_event_id(&mut self) -> String {
-        self.seq += 1;
-        format!("wake-{}", self.seq)
+        crate::new_id()
     }
 
     pub fn settings(&self, orch: &str) -> WakeSettings {
