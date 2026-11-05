@@ -974,7 +974,7 @@ impl Tools {
             "note": if origin.is_some() {
                 "Messages you send are attributed to this chat; it cannot message itself. \
                  You can reach only the chats you created (plus read this one), and \
-                 create_chat works only in this chat's project, never with a wider \
+                 create_chat works only in this chat's Space, never with a wider \
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
                  need an idempotency key. Admin chats (user-granted, per Space, expiring) \
                  also reach every chat and item of their Space; see adminSpaceId."
@@ -1246,7 +1246,7 @@ impl Tools {
                     .await?;
                 if space.id != origin.space_id {
                     anyhow::bail!(
-                        "agents can only create chats in their own project ({})",
+                        "agents can only create chats in their own Space ({})",
                         short(&origin.space_id)
                     );
                 }
@@ -1283,7 +1283,7 @@ impl Tools {
             ];
             if !path_within_any(cwd, &roots) {
                 anyhow::bail!(
-                    "agents can only start a child chat inside this project's folder or \
+                    "agents can only start a child chat inside this Space's folder or \
                      this chat's working directory (cwd {cwd:?} is outside both)"
                 );
             }
@@ -3141,7 +3141,7 @@ mod tests {
         let world = Arc::new(World::default());
         let tools = tools(world.clone(), Some(BETA_TOKEN));
         let refused = [
-            (json!({ "project": "nova" }), "own project"),
+            (json!({ "project": "nova" }), "own Space"),
             (json!({ "device": "Desktop" }), "own device"),
             (
                 json!({ "sandbox": "danger-full-access" }),

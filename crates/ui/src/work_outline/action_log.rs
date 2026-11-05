@@ -768,7 +768,7 @@ pub(crate) fn instantiate_entry(
 ) -> Draft {
     draft(
         format!(
-            "created project {} from blueprint {}",
+            "created item {} from blueprint {}",
             quoted(title),
             quoted(template_name)
         ),

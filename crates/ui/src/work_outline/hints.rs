@@ -717,7 +717,7 @@ mod tests {
         );
         assert_eq!(row(&groups, "Search").keys.as_deref(), Some("\u{2318}F"));
         assert_eq!(
-            row(&groups, "Project up (project row)").keys.as_deref(),
+            row(&groups, "Space up (Space row)").keys.as_deref(),
             Some("\u{21e7}\u{2191}")
         );
         assert_eq!(

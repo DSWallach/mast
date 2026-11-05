@@ -740,7 +740,7 @@ mod tests {
                 super::super::outside_file_ui::OutsideFileState::Offer
             );
             assert_eq!(prompt.path, "/Users/me/notes/doc.md");
-            assert_eq!(prompt.message(), "This file is outside the project");
+            assert_eq!(prompt.message(), "This file is outside the Space");
         });
         vcx.run_until_parked();
         // Nothing is read or registered until the user chooses.
@@ -811,7 +811,7 @@ mod tests {
             assert!(
                 prompt
                     .message()
-                    .starts_with("This file is outside the project on ")
+                    .starts_with("This file is outside the Space on ")
             );
             // Confirming does nothing for a remote viewer.
             shell.confirm_outside_file_prompt(window, cx);

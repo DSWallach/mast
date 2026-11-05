@@ -459,7 +459,7 @@ fn new_from_template_sends_the_ordered_sequence_with_derived_ids(cx: &mut gpui::
     outline.read_with(vcx, |o, _| {
         assert_eq!(
             o.template_toast_text()
-                .map(|t| t.starts_with("Created project")),
+                .map(|t| t.starts_with("Created item")),
             Some(true)
         );
     });
@@ -501,7 +501,7 @@ fn one_undo_archives_the_new_project_and_redo_restores_it(cx: &mut gpui::TestApp
         outline
             .read_with(vcx, |o, cx| o.next_undo_label(cx))
             .as_deref(),
-        Some("created project \u{2018}Q3 launch\u{2019} from blueprint \u{2018}Launch kit\u{2019}")
+        Some("created item \u{2018}Q3 launch\u{2019} from blueprint \u{2018}Launch kit\u{2019}")
     );
 
     vcx.simulate_keystrokes("cmd-z");
