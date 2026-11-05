@@ -893,6 +893,37 @@ fn launch_args(key: &str, item: &str, sandbox: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
+    let rig = rig().await;
+    let item = create_item(&rig, "handoff-item", "Coordinator", None).await;
+    assign_chat(&rig, "handoff-assignment", CHAT, &item).await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"handoff-worker", "spaceId":SPACE,
+        "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    assign_chat(&rig, "handoff-worker-assignment", "handoff-worker", &item).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let worker = tokens.mint("handoff-worker", "worker-run", SPACE, &rig.core.device_id);
+    tool(&rig, worker.token(), "work_outline_create_user_action_request", json!({
+        "request":"Review the result", "idempotencyKey":"review-result"
+    })).await.unwrap();
+    let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one"});
+    let reply = tool(&rig, lease.token(), "hand_off_orchestrator", args.clone()).await.unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    let retry = tool(&rig, lease.token(), "hand_off_orchestrator", args).await.unwrap();
+    assert_eq!(retry["chatId"], successor);
+    assert!(tool(&rig, lease.token(), "hand_off_orchestrator", json!({
+        "summary":"Changed summary", "idempotencyKey":"handoff-one"
+    })).await.is_err());
+    assert_eq!(rig.core.workspace.chat("handoff-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor));
+    assert!(!rig.core.workspace.chat(CHAT).unwrap().unwrap().archived);
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Continue the release")), "successor turn").await;
+    let requests = rig.harness.requests.lock().unwrap();
+    let prompt = &requests.iter().find(|r| r.prompt.contains("Continue the release")).unwrap().prompt;
+    assert!(prompt.contains("handoff-worker"));
+    assert!(prompt.contains("Review the result"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_child_started_for_a_descendant_item_gets_that_items_instructions() {
     let rig = rig().await;
     let root_a = create_item(&rig, "op-a", "Coordinator", None).await;
