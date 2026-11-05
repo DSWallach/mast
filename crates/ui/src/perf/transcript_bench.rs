@@ -344,3 +344,91 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         "streaming must not render every transcript row per chunk"
     );
 }
+
+/// Selection through the embedded engine's local opening-tail and full replay.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_engine_chat_selection(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let core = mast_engine::EngineCore::assemble(
+        dir.path(),
+        std::sync::Arc::new(mast_engine::HarnessRegistry::new()),
+        mast_proto::HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let doc = core.doc_host.open("selection-benchmark").unwrap();
+    for entry in long_chat(2000) {
+        doc.doc().push_message(&entry).unwrap();
+    }
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let state = cx.new(|_| AppState::new());
+    let (_view, vcx) = cx.add_window_view(|_, cx| {
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        Cached(transcript)
+    });
+    state.update(vcx, |state, _| {
+        state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
+    });
+    let start = std::time::Instant::now();
+    state.update(vcx, |state, cx| {
+        state.select_chat(Some("selection-benchmark".into()), cx)
+    });
+    loop {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if state.read_with(vcx, |state, _| !state.transcript.is_empty()) {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "opening frame did not arrive"
+        );
+        std::thread::yield_now();
+    }
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine selection to opening draw | ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    loop {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if state.read_with(vcx, |state, _| state.transcript_replayed) {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "full replay did not arrive"
+        );
+        std::thread::yield_now();
+    }
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine selection to full replay draw | ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    state.update(vcx, |state, cx| state.select_chat(None, cx));
+    let revisit = std::time::Instant::now();
+    state.update(vcx, |state, cx| {
+        state.select_chat(Some("selection-benchmark".into()), cx)
+    });
+    let hit = state.read_with(vcx, |state, _| state.transcript_replayed);
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine cached revisit draw | ms={:.2} | cache_hit={hit}",
+        revisit.elapsed().as_secs_f64() * 1000.0
+    );
+    state.update(vcx, |state, cx| state.select_chat(None, cx));
+    vcx.run_until_parked();
+}
