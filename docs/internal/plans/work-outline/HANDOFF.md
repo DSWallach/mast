@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Terminology pass** (2026-11-05, `terminology-pass`, Terra; text only): copy templates are **Blueprints**
+  ("New from blueprint…", "Blueprint changed"), container templates are **Child template** ("Set up child
+  template…", "Child template applied"); glossary in docs/work-outline.md (Space = the folder/outline root,
+  project = an outline item marked as a project). Identifiers, tool names, RPCs and stored keys unchanged.
+  Release run: nextest 55/55 (selected), UI 2445/0.
 - **Hand-off + quick wins** (2026-11-05, `hand-off-orchestrator`, `pr-merged-wake`, `diff-target-remove`,
   `visual-compare-banner`, Terra): `hand_off_orchestrator` MCP tool stages a successor chat on the same item
   (same harness/model/sandbox), reparents active workers before its first turn, moves held/queued wakes,
@@ -820,8 +825,9 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
   transcript messages. Merge only if sound and cheap (Mikey's bar).
 
 **Queued (agreed with Mikey 2026-11-05):**
-1. Terminology pass (item 48466e7d): "Blueprints" (one-time tree copy) vs "Child template" (live rules),
-   plus Space-vs-project glossary and copy pass across UI, MCP descriptions and docs.
+1. `managed-account-reauth` (chat df06ad6f, item 86405070, running): "Sign in again" for Space accounts in the
+   same home, signed-out badge, chat auth-error action. Workaround meanwhile: `CLAUDE_CONFIG_DIR=<home>
+   claude auth login` in Terminal.
 2. Hand-off UI slice: "Hand off to new chat…" on a chat.
 3. PR dashboard file paging (#5, files changed within a PR beyond the first 100): asked Mikey, unanswered.
 4. Coworker readiness: first-run smoke test on a throwaway profile; import the Cofactr friction log.
