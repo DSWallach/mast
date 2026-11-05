@@ -6,7 +6,7 @@
 - Why approval was needed: Network access
 - Workaround used: Retry after approval
 - Suggested rule/tooling improvement: Permit the build
-- Additional context: See the local build instructions.
+- Additional context: See [the guide](https://example.test/guide) and `/tmp/build.md`.
 
 ## 2026-01-03 Documentation failure
 - Friction: A synthetic API token api_key=synthetic-secret was printed.

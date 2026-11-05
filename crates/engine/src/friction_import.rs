@@ -54,6 +54,7 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
     let clean = |s: &str| mast_harness::redact::redact_secrets(s);
     let mut links = Vec::new();
     for word in clean(body).split_whitespace() {
+        let word = word.rsplit_once("](").map_or(word, |(_, target)| target);
         let word = word.trim_matches(|c: char| {
             matches!(c, '`' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '.')
         });
@@ -235,10 +236,11 @@ mod tests {
         assert_eq!(report.summary, "Build approval");
         assert_eq!(
             report.what_happened,
-            "Build was blocked by a missing permission.\nadditional context: See the local build instructions."
+            "Build was blocked by a missing permission.\nadditional context: See [the guide](https://example.test/guide) and `/tmp/build.md`."
         );
         assert_eq!(report.workaround.as_deref(), Some("Retry after approval"));
         assert_eq!(report.approval.as_ref().unwrap().command, "cargo build");
+        assert_eq!(report.links.len(), 2);
         assert_eq!(result.reports[1].kind, FrictionKind::Docs);
         assert_eq!(result.reports[1].severity, Some(FrictionSeverity::Low));
         assert!(!result.reports[1].what_happened.contains("synthetic-secret"));
