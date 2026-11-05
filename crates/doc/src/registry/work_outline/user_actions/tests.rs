@@ -220,6 +220,7 @@ fn approve_stale_params(op: &str, proposal: &str, text: &str) -> WorkOutlineMuta
             approved_text: text.into(),
             placement: None,
             allow_stale: true,
+            project_only: false,
             operation_id: op.into(),
         },
     )
@@ -251,6 +252,7 @@ fn approve_params(op: &str, proposal: &str, text: &str) -> WorkOutlineMutation {
             approved_text: text.into(),
             placement: None,
             allow_stale: false,
+            project_only: false,
             operation_id: op.into(),
         },
     )
@@ -1036,6 +1038,7 @@ fn approval_of_an_archived_target_fails_and_placement_is_honored() {
                 approved_text: "first".into(),
                 placement: Some(InstructionPlacement::First),
                 allow_stale: false,
+                project_only: false,
                 operation_id: "op-a".into(),
             },
         ),
@@ -1546,6 +1549,11 @@ fn agent_proposals_target_its_item_parent_or_space_root() {
         &mut f,
         propose_params("p5", InstructionProposalTarget::work_item(&child), None),
     );
+    denied(&mut f, propose_params("p-template-outside", InstructionProposalTarget {
+        scope: ProposalTargetScope::ChildTemplate,
+        work_item_id: Some(sibling.clone()),
+        ..Default::default()
+    }, None));
     denied(
         &mut f,
         propose_params("p6", InstructionProposalTarget::work_item(&own), Some("c2")),

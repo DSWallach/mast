@@ -99,6 +99,43 @@ struct Writer<'a> {
 }
 
 impl RegistryDoc {
+    /// Find the nearest followed rule and its container for an item. Verify
+    /// the complete parent path against the rules rather than trusting a
+    /// template marker on its own.
+    pub(super) fn followed_template_rule(
+        &self,
+        space_id: &str,
+        item_id: &str,
+    ) -> Option<(String, String, String)> {
+        let tree = self.outline_tree(space_id);
+        let mut current = item_id.to_owned();
+        while tree.items.get(&current)?.template_node_id.is_none() {
+            current = tree.parent.get(&current)?.clone()?;
+        }
+        let followed_item = current.clone();
+        let mut path = Vec::new();
+        loop {
+            let item = tree.items.get(&current)?;
+            if item.archived() {
+                return None;
+            }
+            path.push(item.template_node_id.clone()?);
+            let parent_id = tree.parent.get(&current)?.as_ref()?;
+            let parent = tree.items.get(parent_id)?;
+            if let Some(template) = &parent.container_template {
+                if parent.archived() || path.last()? != &template.root.id {
+                    return None;
+                }
+                let mut rule = &template.root;
+                for id in path.iter().rev().skip(1) {
+                    rule = rule.children.iter().find(|child| &child.id == id)?;
+                }
+                return Some((parent_id.clone(), rule.id.clone(), followed_item));
+            }
+            current = parent_id.clone();
+        }
+    }
+
     fn container_world(&self, space_id: &str) -> World {
         let rows = self.overlay_rows(KIND_WORK_ITEMS);
         let tree = super::materialize::build_tree(space_id, &rows);
@@ -174,6 +211,21 @@ impl RegistryDoc {
         actor: &WorkOutlineActor,
         now_ms: i64,
     ) -> Outcome<()> {
+        let plan = self.plan_container_template(p, actor, now_ms)?;
+        if plan.is_empty() {
+            return Ok(());
+        }
+        self.commit(plan, &[(KIND_WORK_ITEMS, p.work_item_id.as_str())])
+    }
+
+    /// Plan the same propagation as `setContainerTemplate`, so another
+    /// mutation can commit the rule change and its own bookkeeping together.
+    pub(super) fn plan_container_template(
+        &self,
+        p: &SetContainerTemplateParams,
+        actor: &WorkOutlineActor,
+        now_ms: i64,
+    ) -> Outcome<Vec<Planned>> {
         check_operation_id(&p.operation_id)?;
         if actor.kind == WorkOutlineActorKind::Agent && !self.admin_in_force() {
             return Err(WorkOutlineError::unauthorized(
@@ -227,7 +279,7 @@ impl RegistryDoc {
             }
         };
         if old == new {
-            return Ok(());
+            return Ok(Vec::new());
         }
         if let Some(new) = &new {
             let units = serde_json::to_string(new).map_err(|e| invalid(e.to_string()))?;
@@ -284,7 +336,7 @@ impl RegistryDoc {
                 ("updatedAt".to_owned(), json!(now_ms)),
             ]),
         ));
-        self.commit(plan, &[(KIND_WORK_ITEMS, p.work_item_id.as_str())])
+        Ok(plan)
     }
 
     /// `applyContainerTemplate`.

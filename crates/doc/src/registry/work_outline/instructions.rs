@@ -595,11 +595,6 @@ impl RegistryDoc {
     ) -> Outcome<()> {
         let instruction = self.live_instruction(&p.instruction_id)?;
         self.require_space(&instruction.space_id)?;
-        if instruction.template_instruction_id.is_some() {
-            return Err(invalid(
-                "This instruction comes from the container's template. Edit the template, or add your own instruction",
-            ));
-        }
         let plan = self.plan_instruction_text_update(&instruction, &p.text, now_ms)?;
         match plan {
             Some(plan) => self.commit(vec![plan], &[]),
@@ -616,6 +611,11 @@ impl RegistryDoc {
         text: &str,
         now_ms: i64,
     ) -> Outcome<Option<Planned>> {
+        if instruction.template_instruction_id.is_some() {
+            return Err(invalid(
+                "This instruction comes from the container's template. Edit the template, or add your own instruction",
+            ));
+        }
         if instruction.archived() {
             return Err(err(
                 WorkOutlineErrorCode::Archived,

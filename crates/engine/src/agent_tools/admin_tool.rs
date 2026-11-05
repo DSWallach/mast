@@ -485,6 +485,7 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
                         approved_text: approved,
                         placement: None,
                         allow_stale: step.get("allowStale").and_then(Value::as_bool).unwrap_or(false),
+                        project_only: false,
                         operation_id: op.to_owned(),
                     },
                 ),

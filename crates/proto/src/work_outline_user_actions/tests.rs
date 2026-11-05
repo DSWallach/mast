@@ -246,6 +246,7 @@ fn mutation_field_names_are_pinned() {
                 approved_text: "Prefer small pull requests".into(),
                 placement: Some(InstructionPlacement::First),
                 allow_stale: false,
+                project_only: false,
                 operation_id: "op-4".into(),
             },
         ),

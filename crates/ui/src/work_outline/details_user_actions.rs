@@ -338,8 +338,14 @@ impl WorkItemDetails {
         let change = self.proposal_change(&proposal, &text);
         let proposal_id = proposal.id.clone();
         self.with_drift_confirm(change, cx, move |this, cx| {
-            this.send_approve(proposal_id, text, allow_stale, cx)
+            this.send_approve(proposal_id, text, allow_stale, false, cx)
         });
+    }
+
+    fn accept_template_proposal(&mut self, proposal_id: &str, project_only: bool, cx: &mut Context<Self>) {
+        let Some(proposal) = self.proposal(proposal_id) else { return; };
+        let stale = self.snapshot.as_ref().is_some_and(|snapshot| matches!(proposal_diff::standing(snapshot, &proposal), Standing::Stale { .. }));
+        self.send_approve(proposal.id, proposal.text, stale, project_only, cx);
     }
 
     /// Dismiss without a reason (an edit or remove card's one-click path).
@@ -361,6 +367,7 @@ impl WorkItemDetails {
         proposal_id: String,
         text: String,
         allow_stale: bool,
+        project_only: bool,
         cx: &mut Context<Self>,
     ) {
         let operation_id = match self.proposal_review.as_mut() {
@@ -376,6 +383,7 @@ impl WorkItemDetails {
                 approved_text: text,
                 placement: None,
                 allow_stale,
+                project_only,
                 operation_id,
             });
         self.run_proposal(format!("proposal:{proposal_id}"), task, cx);
@@ -940,6 +948,40 @@ impl WorkItemDetails {
             .py(px(2.0))
             .child(provenance);
         let is_modification = proposal.action != ProposalAction::Add;
+        if proposal.target.scope == mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate {
+            fn count_followers(snapshot: &WorkOutlineSnapshot, parent: &str, node: &mast_proto::work_outline_container_templates::RuleNode, target: &str) -> usize {
+                snapshot.items.iter().filter(|item| item.archived_at.is_none()
+                    && item.parent_work_item_id.as_deref() == Some(parent)
+                    && item.template_node_id.as_deref() == Some(node.id.as_str()))
+                    .map(|item| usize::from(node.id == target) + node.children.iter().map(|child| count_followers(snapshot, &item.id, child, target)).sum::<usize>())
+                    .sum()
+            }
+            let count = proposal.target.container_work_item_id.as_deref()
+                .and_then(|id| snapshot.item(id).map(|item| (id, item)))
+                .and_then(|(id, item)| item.container_template.as_ref().zip(proposal.target.rule_node_id.as_deref()).map(|(template, rule)| count_followers(snapshot, id, &template.root, rule)))
+                .unwrap_or(0);
+            let template_id = id.clone();
+            let project_id = id.clone();
+            let dismiss_id = id.clone();
+            let body = if is_modification {
+                Self::modification_body(proposal, &proposal_diff::standing(snapshot, proposal), theme)
+            } else {
+                div().child(SharedString::from(proposal.text.clone())).into_any_element()
+            };
+            return row.child(div().debug_selector(|| "child-template-proposal".into())
+                .child(SharedString::from(format!("Child template · applies to {count} items"))))
+                .child(body)
+                .child(div().flex().gap(px(6.0))
+                    .child(Self::small_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
+                        .debug_selector({ let selector = format!("template-apply-{id}"); move || selector.clone() })
+                        .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&template_id, false, cx))))
+                    .child(Self::small_button(SharedString::from(format!("project-apply-{id}")), "This project only", theme)
+                        .debug_selector({ let selector = format!("project-apply-{id}"); move || selector.clone() })
+                        .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&project_id, true, cx))))
+                    .child(Self::small_button(SharedString::from(format!("template-dismiss-{id}")), "Dismiss", theme)
+                        .on_click(cx.listener(move |this, _, _, cx| this.dismiss_proposal(&dismiss_id, cx)))))
+                .into_any_element();
+        }
         let Some(review) = reviewing else {
             let review_id = id.clone();
             if is_modification {

@@ -552,7 +552,7 @@ pub(crate) fn open_request_count(spaces: &[SpaceSnapshot]) -> usize {
 /// scope).
 pub(crate) fn proposal_target_item(proposal: &WorkItemInstructionProposalView) -> Option<&str> {
     match proposal.target.scope {
-        ProposalTargetScope::WorkItem => proposal.target.work_item_id.as_deref(),
+        ProposalTargetScope::WorkItem | ProposalTargetScope::ChildTemplate => proposal.target.work_item_id.as_deref(),
         _ => None,
     }
 }
@@ -572,7 +572,7 @@ pub(crate) fn proposals_for<'a>(
         .iter()
         .filter(move |proposal| match (proposal.target.scope, item_id) {
             (ProposalTargetScope::SpaceRoot, None) => true,
-            (ProposalTargetScope::WorkItem, Some(id)) => {
+            (ProposalTargetScope::WorkItem | ProposalTargetScope::ChildTemplate, Some(id)) => {
                 proposal.target.work_item_id.as_deref() == Some(id)
             }
             _ => false,

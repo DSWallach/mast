@@ -407,6 +407,7 @@ pub struct ResolveUserActionRequestParams {
 #[serde(rename_all = "camelCase")]
 pub enum ProposalTargetScope {
     SpaceRoot,
+    ChildTemplate,
     #[default]
     WorkItem,
     #[doc(hidden)]
@@ -452,6 +453,14 @@ pub struct InstructionProposalTarget {
     pub scope: ProposalTargetScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_work_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_instruction_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_node_path: Vec<String>,
 }
 
 impl InstructionProposalTarget {
@@ -459,6 +468,7 @@ impl InstructionProposalTarget {
         Self {
             scope: ProposalTargetScope::SpaceRoot,
             work_item_id: None,
+            ..Default::default()
         }
     }
 
@@ -466,6 +476,7 @@ impl InstructionProposalTarget {
         Self {
             scope: ProposalTargetScope::WorkItem,
             work_item_id: Some(work_item_id.into()),
+            ..Default::default()
         }
     }
 }
@@ -622,6 +633,9 @@ pub struct ApproveWorkItemInstructionProposalParams {
     /// proposal was made.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_stale: bool,
+    /// Apply a child-template proposal as an own instruction on its origin item.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub project_only: bool,
     pub operation_id: String,
 }
 
