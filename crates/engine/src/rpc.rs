@@ -3142,7 +3142,7 @@ impl RpcService for EngineRpc {
                 };
                 let chat = identity.map(|identity| {
                     let hash = Sha256::digest(format!("{scope:?}\0{identity}"));
-                    format!("[{}](zeron://open/chat/{}?workspace={})", row.provenance.chat_id, row.provenance.chat_id, &format!("{:x}", hash)[..16])
+                    format!("[{}](mast://open/chat/{}?workspace={})", row.provenance.chat_id, row.provenance.chat_id, &format!("{:x}", hash)[..16])
                 }).unwrap_or_else(|| row.provenance.chat_id.clone());
                 let description = format!("## What happened\n\n{}\n\n## Workaround\n\n{}\n\n## Suggestion\n\n{}\n\n## Approval\n\n{}\n\n## Provenance\n\nChat: {}\nHarness: {}\nModel: {}\nBranch: {}\n", row.what_happened, row.workaround.as_deref().unwrap_or("None"), row.suggestion.as_deref().unwrap_or("None"), row.approval.as_ref().map(|a| format!("Command: `{}`\n\nReason: {}\n\nAnswer: {:?}", a.command, a.why, a.answer)).unwrap_or_else(|| "None".into()), chat, row.provenance.harness, row.provenance.model.as_deref().unwrap_or("Unknown"), row.provenance.branch.as_deref().unwrap_or("Unknown"));
                 let op = mast_proto::derive_id(&format!("{}:{}", row.id, p.parent_item_id), "friction-promotion");
