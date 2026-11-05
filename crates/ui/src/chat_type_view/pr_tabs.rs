@@ -522,7 +522,7 @@ impl ChatTypeView {
         }
         let message = if !state.loaded {
             Some(("pr-dash-loading", "Loading pull requests…"))
-        } else if list.is_empty() {
+        } else if list.is_empty() && state.error.is_none() {
             Some(if total == 0 {
                 ("pr-dash-empty", "No pull requests")
             } else {

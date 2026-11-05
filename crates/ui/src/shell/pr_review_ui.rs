@@ -909,7 +909,7 @@ mod tests {
         });
         click(cx, "pr-dash-refresh");
         assert!(cx.debug_bounds("pr-dash-error").is_some());
-        assert!(cx.debug_bounds("pr-dash-empty").is_some());
+        assert!(cx.debug_bounds("pr-dash-empty").is_none());
         // A good reply clears it.
         shell.update(cx, |shell, _| {
             shell.pr_dash_script = Some(Arc::new(|_| {
