@@ -188,3 +188,6 @@ fn await_tree(path: &std::path::Path) -> Vec<u32> {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+#[cfg(test)]
+#[path = "../../../../test_support/isolation.rs"]
+mod test_isolation;

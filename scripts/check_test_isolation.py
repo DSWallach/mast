@@ -49,6 +49,13 @@ def test_binaries():
                     yield entry
             yield from sorted((package / "src/bin").glob("*.rs"))
             yield from sorted((package / "tests").glob("*.rs"))
+            # Explicit binary targets may live outside src/bin (for example,
+            # a native test fixture compiled as a binary target).
+            for block in re.split(r'^\[\[bin\]\]\s*$', manifest.read_text(), flags=re.MULTILINE)[1:]:
+                block = re.split(r'^\[', block, maxsplit=1, flags=re.MULTILINE)[0]
+                match = re.search(r'^path\s*=\s*"([^"]+)"', block, flags=re.MULTILINE)
+                if match and (package / match.group(1)).is_file():
+                    yield package / match.group(1)
 
 
 def main():
