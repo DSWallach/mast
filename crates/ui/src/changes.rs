@@ -4087,6 +4087,26 @@ impl Changes {
         self.close_checkout_menu(cx);
     }
 
+    fn remove_checkout(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.owner_chat_id_owned() else { return };
+        let task = self.state.update(cx, |state, cx| {
+            state.set_chat_diff_target(&chat_id, mast_proto::SetChatDiffTargetAction::Unbind, Some(path.clone()), cx)
+        });
+        cx.spawn(async move |this, cx| {
+            if task.await.is_ok() {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(menu) = this.checkout_menu.open_mut() {
+                        if let popover::Loadable::Ready(rows) = &mut menu.candidates {
+                            rows.retain(|row| row.candidate.path != path);
+                        }
+                        menu.active = 0;
+                    }
+                    cx.notify();
+                });
+            }
+        }).detach();
+    }
+
     /// Start excerpt parsing and a lazy full-source fetch for an expanded file.
     fn request_highlight(
         &mut self,
@@ -5637,6 +5657,8 @@ impl Changes {
                     let tip: SharedString = row.candidate.path.clone().into();
                     let candidate = row.candidate.clone();
                     let selected = row.candidate.selected;
+                    let removable = row.candidate.bound && row.candidate.kind != mast_proto::DiffCheckoutKind::Own;
+                    let remove_path = row.candidate.path.clone();
                     popover::menu_row_nav(
                         theme,
                         selected,
@@ -5724,6 +5746,16 @@ impl Changes {
                                     ))),
                             ),
                     )
+                    .when(removable, |element| element.child(
+                        div().id(("changes-checkout-remove", row_ix))
+                            .debug_selector(move || format!("changes-checkout-remove-{row_ix}"))
+                            .flex_none().px(px(6.0)).text_size(px(11.0))
+                            .text_color(theme.text_muted).child("Remove")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_checkout(remove_path.clone(), cx);
+                            }))
+                    ))
                 }))
                 .into_any_element(),
         };
@@ -8833,7 +8865,7 @@ index 1111111..2222222 160000
     /// The engine's answer to "Diff checkout...": own + submodule + 2 worktrees.
     fn picker_candidates() -> Vec<mast_proto::DiffCheckoutCandidate> {
         use mast_proto::DiffCheckoutKind::*;
-        vec![
+        let mut candidates = vec![
             candidate(WS, Own, Some("main"), true),
             candidate("/work/ws/flagship", Submodule, Some("main"), false),
             candidate(WT_OTHER, Worktree, Some("michael/spike"), false),
@@ -8843,7 +8875,9 @@ index 1111111..2222222 160000
                 Some("michael/eng-3012-kit-line-ship-estimates"),
                 false,
             ),
-        ]
+        ];
+        candidates[3].bound = true;
+        candidates
     }
 
     /// A state with one local chat and a fake diff-target engine. `set_error`
@@ -8977,6 +9011,21 @@ index 1111111..2222222 160000
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("changes-checkout-row-0").is_some());
         assert!(vcx.debug_bounds("changes-checkout-row-3").is_some());
+    }
+
+    #[gpui::test]
+    fn removing_a_checkout_unbinds_it_and_removes_its_row(cx: &mut gpui::TestAppContext) {
+        let (changes, calls, vcx) = open_target_changes(cx, Vec::new(), None);
+        open_picker(&changes, vcx);
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-checkout-remove-1").is_none());
+        let button = vcx.debug_bounds("changes-checkout-remove-0").unwrap().center();
+        vcx.simulate_click(button, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(rpc_calls(&calls, mast_rpc::methods::SET_CHAT_DIFF_TARGET), vec![
+            serde_json::json!({"chatId": "chat-wt", "action": "unbind", "path": WT_TICKET})
+        ]);
+        assert!(!picker_rows(&changes, vcx).iter().any(|(path, _)| path == WT_TICKET));
     }
 
     /// The ticket also comes from the chat's branch when no link is stored.

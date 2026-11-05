@@ -181,11 +181,20 @@ impl DiffTargets {
 
     /// Every stored row (diff-sync resolves them into views).
     pub fn rows(&self) -> Vec<ChatDiffTargetsRow> {
+        let rows = self.workspace.all_chat_diff_targets().unwrap_or_default();
+        for row in &rows {
+            if self.local_chat(&row.chat_id).is_ok() {
+                self.prune_missing(&row.chat_id);
+            }
+        }
         self.workspace.all_chat_diff_targets().unwrap_or_default()
     }
 
     /// The chat's stored targets (empty when it never bound one).
     pub fn stored(&self, chat_id: &str) -> ChatDiffTargetsReply {
+        if self.local_chat(chat_id).is_ok() {
+            self.prune_missing(chat_id);
+        }
         reply_of(
             &self
                 .workspace
@@ -204,6 +213,7 @@ impl DiffTargets {
         chat_id: &str,
     ) -> Result<ListChatDiffCheckoutsReply, DiffTargetError> {
         let chat = self.local_chat(chat_id)?;
+        self.prune_missing(chat_id);
         let family = Family::resolve(&chat, true)?;
         let row = self
             .workspace
@@ -248,6 +258,7 @@ impl DiffTargets {
     ) -> Result<BindOutcome, DiffTargetError> {
         let requested = parse_path_argument(path)?;
         let chat = self.local_chat(chat_id)?;
+        self.prune_missing(chat_id);
         let family = Family::resolve(&chat, false)?;
         let checkout = family.member(&requested)?;
         let facts = checkout_facts(&checkout.path)
@@ -298,15 +309,10 @@ impl DiffTargets {
                         }
                         None => {
                             if row.targets.len() >= MAX_CHAT_DIFF_TARGETS {
-                                // Make room only by dropping targets whose
-                                // checkout no longer exists on disk.
-                                row.targets.retain(|t| Path::new(&t.path).is_dir());
-                            }
-                            if row.targets.len() >= MAX_CHAT_DIFF_TARGETS {
                                 failure = Some(DiffTargetError::Limit(format!(
                                     "This chat already has {MAX_CHAT_DIFF_TARGETS} diff targets. \
-                                     Remove one you no longer need (unbind it in the Changes \
-                                     pane's Diff checkout… picker) before binding {path_text}."
+                                     Use Remove in the Changes pane's Diff checkout… picker \
+                                     before binding {path_text}."
                                 )));
                                 return;
                             }
@@ -398,6 +404,23 @@ impl DiffTargets {
         self.changes.send_modify(|count| *count += 1);
     }
 
+    fn prune_missing(&self, chat_id: &str) {
+        let mut removed = Vec::new();
+        let result = self.workspace.update_chat_diff_targets(chat_id, |row| {
+            prune_missing_targets(row, &mut removed);
+        });
+        match result {
+            Ok(true) => {
+                for path in removed {
+                    tracing::info!(chat_id, path, "removed missing chat diff target");
+                }
+                self.bump();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(chat_id, %error, "failed to prune chat diff targets"),
+        }
+    }
+
     fn local_chat(&self, chat_id: &str) -> Result<Chat, DiffTargetError> {
         let chat = self
             .workspace
@@ -410,6 +433,19 @@ impl DiffTargets {
             });
         }
         Ok(chat)
+    }
+}
+
+fn prune_missing_targets(row: &mut ChatDiffTargetsRow, removed: &mut Vec<String>) {
+    row.targets.retain(|target| {
+        let missing = matches!(std::fs::metadata(&target.path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+        if missing {
+            removed.push(target.path.clone());
+        }
+        !missing
+    });
+    if row.selected.as_ref().is_some_and(|path| removed.contains(path)) {
+        row.selected = None;
     }
 }
 
@@ -1034,6 +1070,30 @@ mod tests {
         row.selected = Some("/a".into());
         assert_eq!(effective_selected(&row), Some("/a"));
         assert!(reply_of(&row).targets[0].selected);
+    }
+
+    #[test]
+    fn missing_targets_are_pruned_and_existing_targets_are_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let existing = directory.path().to_string_lossy().into_owned();
+        let missing = directory.path().join("missing").to_string_lossy().into_owned();
+        let target = |path: String| StoredChatDiffTarget {
+            path, source: ChatDiffTargetSource::Agent, repo_id: String::new(),
+            worktree_id: String::new(), bound_at: 0,
+        };
+        let mut row = ChatDiffTargetsRow {
+            targets: vec![target(existing.clone()), target(missing.clone())],
+            selected: Some(missing.clone()), ..Default::default()
+        };
+        let mut removed = Vec::new();
+        prune_missing_targets(&mut row, &mut removed);
+        assert_eq!(removed, vec![missing]);
+        assert_eq!(row.targets.len(), 1);
+        assert_eq!(row.targets[0].path, existing);
+        assert_eq!(row.selected, None);
+        removed.clear();
+        prune_missing_targets(&mut row, &mut removed);
+        assert!(removed.is_empty());
     }
 
     #[test]
