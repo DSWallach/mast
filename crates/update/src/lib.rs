@@ -527,7 +527,7 @@ pub fn restart_service() -> anyhow::Result<()> {
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.app")],
+            &["kickstart", "-k", &format!("gui/{uid}/computer.mikey.mast")],
         )
     } else {
         run("systemctl", &["--user", "restart", "zeron.service"])

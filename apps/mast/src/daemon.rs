@@ -12,7 +12,7 @@ use std::process::Command;
 
 use anyhow::{Context, bail};
 
-const LAUNCHD_LABEL: &str = "sh.zeron.app";
+const LAUNCHD_LABEL: &str = "computer.mikey.mast";
 /// Same unit name the curl|sh installer (`edge/src/install.sh`) writes, so
 /// `zeron daemon …` manages that installation rather than a competing copy.
 const SYSTEMD_UNIT: &str = "zeron.service";
@@ -51,6 +51,19 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
         let plist = launchd_plist_path()?;
         std::fs::create_dir_all(plist.parent().expect("LaunchAgents parent"))?;
         std::fs::create_dir_all(data_dir)?;
+        // Only an explicit install retires the legacy launch agent.
+        let legacy_target = format!("{}/sh.zeron.app", launchd_domain()?);
+        if run_quiet("launchctl", &["bootout", &legacy_target]).is_err()
+            && run_quiet("launchctl", &["print", &legacy_target]).is_ok()
+        {
+            bail!("could not stop the legacy launch agent {legacy_target}");
+        }
+        let legacy_plist = plist.with_file_name("sh.zeron.app.plist");
+        match std::fs::remove_file(&legacy_plist) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         // Reinstall-friendly: unload any previous incarnation before rewriting.
         let _ = run_quiet("launchctl", &["bootout", &launchd_service_target()?]);
         std::fs::write(
@@ -469,7 +482,7 @@ mod tests {
             &[("MAST_EDGE_URL".into(), "https://e?a=1&b=2".into())],
             Path::new("/Users/x/.zeron/daemon.log"),
         );
-        assert!(plist.contains("<key>Label</key><string>sh.zeron.app</string>"));
+        assert!(plist.contains("<key>Label</key><string>computer.mikey.mast</string>"));
         // XML-escaped exe path and env value.
         assert!(plist.contains("<string>/Users/x/zeron &amp; co/zeron</string>"));
         assert!(plist.contains("<string>https://e?a=1&amp;b=2</string>"));

@@ -43,7 +43,7 @@ pub fn workspace_locator(
 
 pub fn zeron_conversation_link(chat_id: &str, workspace: &str) -> String {
     format!(
-        "zeron://open/chat/{}?workspace={}",
+        "mast://open/chat/{}?workspace={}",
         encode_component(chat_id),
         encode_component(workspace)
     )
@@ -51,7 +51,8 @@ pub fn zeron_conversation_link(chat_id: &str, workspace: &str) -> String {
 
 pub fn parse_mast_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
     let rest = url
-        .strip_prefix("zeron://open/chat/")
+        .strip_prefix("mast://open/chat/")
+        .or_else(|| url.strip_prefix("zeron://open/chat/"))
         .ok_or("not a Mast conversation link")?;
     let (chat_id, query) = rest.split_once('?').ok_or("missing workspace locator")?;
     if chat_id.is_empty() || chat_id.contains('/') {
@@ -156,6 +157,11 @@ mod tests {
     #[test]
     fn zeron_link_round_trips_reserved_characters() {
         let link = zeron_conversation_link("chat/with space", "workspace:one");
+        assert!(link.starts_with("mast://"));
+        assert_eq!(
+            parse_mast_conversation_link(&link.replace("mast://", "zeron://")).unwrap(),
+            parse_mast_conversation_link(&link).unwrap()
+        );
         assert_eq!(
             parse_mast_conversation_link(&link).unwrap(),
             ConversationDeepLink {

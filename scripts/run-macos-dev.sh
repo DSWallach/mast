@@ -49,13 +49,13 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --force --sign "$IDENTITY" --identifier sh.zeron.app.dev "$APP"
+  codesign --force --sign "$IDENTITY" --identifier computer.mikey.mast.dev "$APP"
 else
-  codesign --force --sign - --identifier sh.zeron.app.dev "$APP"
+  codesign --force --sign - --identifier computer.mikey.mast.dev "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
-echo "running Mast Dev (bundle sh.zeron.app.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
+echo "running Mast Dev (bundle computer.mikey.mast.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
 # LaunchServices must own the process. Launching Contents/MacOS/mast directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the

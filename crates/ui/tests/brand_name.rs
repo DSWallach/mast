@@ -141,9 +141,9 @@ fn macos_bundle_templates_are_named_mast() {
             assert_eq!(value, Some("Mast"), "{name} {key}");
         }
         assert!(plist.contains("<string>mast.icns</string>"), "{name} icon");
-        // Internal identifiers stay put.
-        assert!(plist.contains("<string>sh.zeron.app"), "{name} bundle id");
-        assert!(plist.contains("<key>CFBundleExecutable</key>\n    <string>zeron</string>"));
+        // Distribution identifiers and executable use the Mast name.
+        assert!(plist.contains("<string>computer.mikey.mast"), "{name} bundle id");
+        assert!(plist.contains("<key>CFBundleExecutable</key>\n    <string>mast</string>"));
     }
 }
 
