@@ -616,6 +616,9 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **PR file paging** (2026-11-05 overnight, `pr-files-paging`, Terra): PR files fetched page by page up to 3,000;
+  partial results kept on failures and rate limits; scores reused for an unchanged head sha; "partial" badge
+  with "Scored from the first N of M files". Release run: nextest 2350/2350, UI passed.
 - **Diff navigation perf + friction import** (2026-11-05 overnight, `perf-diff-navigation`, `friction-import`,
   Terra): navigation keeps the flattened rows when the target is already expanded; the file sidebar is
   virtualized (diff body already was). 300-file synthetic diff: first draw 30.9→1.7 ms, hunk key 52.5→3.4 ms,
@@ -855,7 +858,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
   redraws) and cleanup sweep (item e71201b1: warnings/clippy, dead code, stale docs/scripts; no behavior
   change). Mikey: "up until 8 am look for perf improvements and clean up opportunities".
 - Wave 3: Needs-you phase 4 (answer ask/choose on the card).
-- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import.
+- Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging.
 - Release in batches of ≤3 branches; never run a release while 3 Terra builds are compiling.
 - Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
 
