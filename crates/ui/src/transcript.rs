@@ -13271,6 +13271,14 @@ mod tests {
         let collapse = vcx.debug_bounds("relay-expander").unwrap().center();
         vcx.simulate_click(collapse, gpui::Modifiers::default());
         transcript.read_with(vcx, |this, _| assert_eq!(this.user_folds["relay"].open, Some(false)));
+        entry.parts = vec![text_part("text", "[Mast hand-off: abcdef]")];
+        transcript.update(vcx, |this, _| this.rows = rows_for_entry(&entry, false, &mut parse));
+        fixture.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        *opened.borrow_mut() = None;
+        let source = vcx.debug_bounds("relay-source").unwrap().center();
+        vcx.simulate_click(source, gpui::Modifiers::default());
+        assert_eq!(opened.borrow().as_deref(), Some("abcdef"));
         for (input, has_header) in [
             ("[Mast system message, not from the user: worker updates for you, the orchestrator.]\nWorker updates:\n- Done", true),
             ("[Mast system message, not from the user: auto-continue 1/3]\nContinue the task", true),

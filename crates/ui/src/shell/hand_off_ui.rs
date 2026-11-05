@@ -7,6 +7,7 @@ pub(super) struct HandOffDialog {
     chat_id: String,
     input: Entity<ComposerInput>,
     workers: Vec<String>,
+    details_available: bool,
     archive: bool,
     submitting: bool,
     error: Option<String>,
@@ -33,11 +34,18 @@ impl Shell {
         let item = snapshot.and_then(|snapshot| crate::work_outline::instructions::assigned_chats(snapshot).remove(&chat_id)
             .and_then(|id| snapshot.item(&id)));
         let summary = format!("Continue as coordinator for {}. Read the work item, its instructions, and the worker list below.", item.map(|item| item.title.as_str()).unwrap_or("this work item"));
+        let details_available = item.is_some();
         let workers: Vec<String> = state.chats.iter().filter(|worker| !worker.archived && worker.parent_chat_id.as_deref() == Some(chat_id.as_str())).map(|worker| {
             let status = state.sessions.iter().find(|session| session.chat_id == worker.id)
-                .map(|session| format!("{:?}", session.status)).unwrap_or_else(|| "Unknown".into());
-            let requests = snapshot.map(|snapshot| snapshot.user_action_requests.iter().filter(|request| request.chat_id == worker.id && request.is_unresolved() && !request.deduped).count()).unwrap_or(0);
-            format!("{} · {} · {} open requests", worker.title.as_deref().unwrap_or("Untitled"), status, requests)
+                .map(|session| match session.status {
+                    mast_proto::SessionStatus::Idle => "Idle",
+                    mast_proto::SessionStatus::Working => "Working",
+                    mast_proto::SessionStatus::AwaitingInput => "Awaiting input",
+                    mast_proto::SessionStatus::Errored => "Errored",
+                }).unwrap_or("Unknown");
+            let requests = snapshot.map(|snapshot| snapshot.user_action_requests.iter().filter(|request| request.chat_id == worker.id && request.is_unresolved() && !request.deduped).count());
+            let requests = requests.map(|count| format!("{count} open requests")).unwrap_or_else(|| "Request count unavailable".into());
+            format!("{} · {} · {}", worker.title.as_deref().unwrap_or("Untitled"), status, requests)
         }).collect();
         if workers.is_empty() { return; }
         let input = cx.new(|cx| {
@@ -46,7 +54,9 @@ impl Shell {
             input
         });
         self.begin_work_outline_modal(WorkOutlineModal::HandOff(HandOffDialog {
-            chat_id, input, workers, archive: false, submitting: false, error: None, operation: OperationSlot::default(),
+            chat_id, input, workers, details_available, archive: false, submitting: false,
+            error: (!details_available).then(|| "Work item details are unavailable. Open the chat and try again.".into()),
+            operation: OperationSlot::default(),
         }), cx);
     }
 
@@ -54,6 +64,11 @@ impl Shell {
         let actions = self.state.read(cx).work_outline_actions();
         let Some(WorkOutlineModal::HandOff(dialog)) = self.work_outline_modal.as_mut() else { return };
         if dialog.submitting { return; }
+        if !dialog.details_available {
+            dialog.error = Some("Work item details are unavailable. Open the chat and try again.".into());
+            cx.notify();
+            return;
+        }
         let summary = dialog.input.read(cx).text().trim().to_owned();
         if summary.is_empty() { dialog.error = Some("Enter a summary".into()); cx.notify(); return; }
         let source = dialog.chat_id.clone();
