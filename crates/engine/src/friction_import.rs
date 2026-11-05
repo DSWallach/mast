@@ -181,18 +181,20 @@ mod tests {
 
     #[test]
     fn parses_synthetic_entries_and_skips_malformed_entries() {
-        let result = parse_friction_markdown(
-            "## 2026-01-02 13:45 Build approval\n- Friction: Build was blocked\n- Approval requested: cargo build\n- Why: Network access\n- Workaround: Retry\n- Suggested improvement: Permit the build\n- Extra: More detail\n\n## invalid entry\n- Friction: Failure\n\n## 2026-01-03 Missing details\n- Workaround: none\n",
-        );
-        assert_eq!(result.reports.len(), 1);
+        let result = parse_friction_markdown(include_str!("../tests/fixtures/friction-log.md"));
+        assert_eq!(result.reports.len(), 2);
         assert_eq!(result.skipped.len(), 2);
         let report = &result.reports[0];
         assert_eq!(report.summary, "Build approval");
         assert_eq!(
             report.what_happened,
-            "Build was blocked\nextra: More detail"
+            "Build was blocked by a missing permission.\nadditional context: See the local build instructions."
         );
-        assert_eq!(report.workaround.as_deref(), Some("Retry"));
+        assert_eq!(report.workaround.as_deref(), Some("Retry after approval"));
         assert_eq!(report.approval.as_ref().unwrap().command, "cargo build");
+        assert_eq!(result.reports[1].kind, FrictionKind::Docs);
+        assert_eq!(result.reports[1].severity, Some(FrictionSeverity::Low));
+        assert!(!result.reports[1].what_happened.contains("synthetic-secret"));
+        assert_eq!(result.skipped[0].reason, "invalid date");
     }
 }
