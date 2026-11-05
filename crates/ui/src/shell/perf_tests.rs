@@ -217,3 +217,75 @@ fn streaming_one_chat_among_many_notifies_few_views(cx: &mut TestAppContext) {
         eprintln!("{name:<22}{a:>12}{b:>12}{c:>12}");
     }
 }
+
+/// UI initialization and a headless shell with a preloaded synthetic chat list.
+/// This excludes engine bootstrap and registry reads; see performance-sweep.md.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_shell_initialization(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = crate::perf::measure("startup", "load settings", || {
+        settings::UiSettings::load(dir.path())
+    });
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        settings::init(settings.clone(), dir.path(), cx);
+        let fonts = crate::perf::measure("startup", "register fonts", || {
+            crate::typography::register_fonts(cx)
+        });
+        crate::typography::init(
+            settings.ui_font_family.clone(),
+            settings.ui_font_size,
+            settings.terminal_font_family.clone(),
+            settings.terminal_font_size,
+            settings.code_font_family.clone(),
+            settings.code_font_size,
+            fonts,
+            cx,
+        );
+        crate::perf::measure("startup", "load themes", || {
+            crate::theme_library::init(dir.path(), cx)
+        });
+        crate::appearance::init(
+            settings.appearance,
+            settings.theme_selection.clone(),
+            settings.accent,
+            settings.surface,
+            cx,
+        );
+        crate::history::init(
+            settings.git_history_columns,
+            settings.git_history_column_widths,
+            settings.git_history_column_order,
+            settings.git_history_author_display,
+            cx,
+        );
+        crate::composer::init(cx, settings.composer_send_behavior);
+        crate::terminal::panel::init(cx);
+        crate::app_menus::init(cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = (0..250).map(chat_row).collect();
+        state.chats_synced = true;
+        state.data_dir = Some(dir.path().to_path_buf());
+    });
+    let boot = EngineBootConfig {
+        data_dir: dir.path().to_path_buf(),
+        ipc_port: 0,
+        edge_url: "http://127.0.0.1:1".into(),
+        edge_token: None,
+        org_id: None,
+        workos_client_id: None,
+        default_harness: mast_proto::HarnessId::Mock,
+    };
+    let (_, vcx) = crate::perf::measure("startup", "construct shell window", || {
+        cx.add_window_view(|_, cx| Shell::new(state.clone(), boot, cx))
+    });
+    crate::perf::measure("startup", "first shell draw", || {
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    });
+}

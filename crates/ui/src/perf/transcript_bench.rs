@@ -423,10 +423,30 @@ fn bench_engine_chat_selection(cx: &mut gpui::TestAppContext) {
     state.update(vcx, |state, cx| {
         state.select_chat(Some("selection-benchmark".into()), cx)
     });
+    let previous_revision = state.read_with(vcx, |state, _| state.transcript_revision);
     let hit = state.read_with(vcx, |state, _| state.transcript_replayed);
     draw(vcx);
     eprintln!(
         "BENCH transcript | engine cached revisit draw | ms={:.2} | cache_hit={hit}",
+        revisit.elapsed().as_secs_f64() * 1000.0
+    );
+    loop {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if state.read_with(vcx, |state, _| {
+            state.transcript_revision > previous_revision
+        }) {
+            break;
+        }
+        assert!(
+            revisit.elapsed() < std::time::Duration::from_secs(60),
+            "revisit replay did not arrive"
+        );
+        std::thread::yield_now();
+    }
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | engine revisit to authoritative replay draw | ms={:.2}",
         revisit.elapsed().as_secs_f64() * 1000.0
     );
     state.update(vcx, |state, cx| state.select_chat(None, cx));
