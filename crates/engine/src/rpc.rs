@@ -3086,7 +3086,7 @@ impl RpcService for EngineRpc {
                     let identity = mast_proto::derive_id(&format!("{entry:?}"), "friction-import-entry");
                     let ordinal = identities.entry(identity.clone()).or_default();
                     *ordinal += 1;
-                    let import_id = mast_proto::derive_id(&format!("{identity}:{ordinal}"), "friction-import-occurrence");
+                    let import_id = mast_proto::derive_id(&format!("{filename}:{identity}:{ordinal}"), "friction-import-occurrence");
                     let report = mast_proto::FrictionReport {
                         id: String::new(), kind: entry.kind, summary: entry.summary,
                         what_happened: entry.what_happened, workaround: entry.workaround,

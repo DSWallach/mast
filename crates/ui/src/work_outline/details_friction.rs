@@ -17,13 +17,13 @@ fn friction_markdown(reports: &[FrictionReport]) -> String {
         let date = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(report.provenance.created_at)
             .map(|date| date.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "n/a".to_owned());
-        format!("## {date} {}\n- Friction: {}\n- Approval requested: {}\n- Why approval was needed: {}\n- Workaround used: {}\n- Suggested rule/tooling improvement: {}\n- Kind: {}\n- Severity: {}\n- Links: {}",
+        format!("## {date} {}\n- Friction: {}\n- Approval requested: {}\n- Why approval was needed: {}\n- Workaround used: {}\n- Suggested rule/tooling improvement: {}\n- Kind: {}\n- Severity: {}\n- Created at: {}\n- Links: {}",
             report.summary, value(Some(&report.what_happened)),
             value(report.approval.as_ref().map(|approval| approval.command.as_str())),
             value(report.approval.as_ref().map(|approval| approval.why.as_str())),
             value(report.workaround.as_deref()), value(report.suggestion.as_deref()),
             serde_json::to_value(report.kind).unwrap().as_str().unwrap_or("workflow"),
-            report.severity.map(|s| serde_json::to_value(s).unwrap().as_str().unwrap_or("n/a").to_owned()).unwrap_or_else(|| "n/a".into()), serde_json::to_string(&report.links).unwrap())
+            report.severity.map(|s| serde_json::to_value(s).unwrap().as_str().unwrap_or("n/a").to_owned()).unwrap_or_else(|| "n/a".into()), report.provenance.created_at, serde_json::to_string(&report.links).unwrap())
     }).collect::<Vec<_>>().join("\n\n")
 }
 
@@ -37,7 +37,7 @@ mod tests {
             "id": "one", "kind": "bug", "summary": "Build failed", "whatHappened": "Compiler failed",
             "workaround": "Retry", "suggestion": "Update docs", "severity": "high", "approval": null,
             "links": [{"label":"guide", "target":{"type":"file", "path":"/tmp/guide.md"}}],
-            "provenance": {"chatId":"chat", "harness":"codex", "model":null, "spaceId":"space", "createdAt":0, "source":"agent"},
+            "provenance": {"chatId":"chat", "harness":"codex", "model":null, "spaceId":"space", "createdAt":123456, "source":"agent"},
             "fingerprint":"one", "occurrences":1, "lastSeen":0, "status":"open"
         })).unwrap();
         let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(&[report.clone()]));
@@ -63,7 +63,7 @@ mod tests {
         })).unwrap();
         assert_eq!(
             friction_markdown(&[report]),
-            "## 1970-01-01 00:00 Build failed\n- Friction: Compiler failed\n- Approval requested: cargo build\n- Why approval was needed: Network access\n- Workaround used: Retry\n- Suggested rule/tooling improvement: n/a\n- Kind: bug\n- Severity: n/a\n- Links: []"
+            "## 1970-01-01 00:00 Build failed\n- Friction: Compiler failed\n- Approval requested: cargo build\n- Why approval was needed: Network access\n- Workaround used: Retry\n- Suggested rule/tooling improvement: n/a\n- Kind: bug\n- Severity: n/a\n- Created at: 0\n- Links: []"
         );
     }
 }

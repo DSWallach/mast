@@ -105,6 +105,7 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
     let mut why = None;
     let mut kind = FrictionKind::Workflow;
     let mut severity = None;
+    let mut created_at = Utc.from_utc_datetime(&date_time).timestamp_millis();
     for (name, value) in fields {
         match name.as_str() {
             "friction" | "what happened" => {
@@ -116,6 +117,10 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
             "suggested improvement" | "suggested rule/tooling improvement" | "suggestion" => {
                 suggestion = optional(&value)
             }
+            "created at" => match value.trim().parse::<i64>() {
+                Ok(value) => created_at = value,
+                Err(_) => happened.push(format!("Created at: {value}")),
+            },
             "links" => match serde_json::from_str::<Vec<RequestLink>>(&clean(&value)) {
                 Ok(values) => {
                     for link in values {
@@ -182,7 +187,7 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
         kind,
         severity,
         links,
-        created_at: Utc.from_utc_datetime(&date_time).timestamp_millis(),
+        created_at,
     })
 }
 
