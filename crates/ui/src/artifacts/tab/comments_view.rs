@@ -75,10 +75,11 @@ impl ArtifactTab {
     /// The rows for the comments against the source on screen (cached per
     /// document and comment set).
     pub(crate) fn comment_rows(&mut self, artifact: &ArtifactView) -> Vec<CommentRow> {
-        if let Some((generation, comments, rows)) = &self.comments.cached {
-            if *generation == self.generation && *comments == artifact.comments {
-                return rows.clone();
-            }
+        if let Some((generation, comments, rows)) = &self.comments.cached
+            && *generation == self.generation
+            && *comments == artifact.comments
+        {
+            return rows.clone();
         }
         let source = match &self.body {
             Some(ArtifactBody::Web { source, .. }) if !self.loading => Some(source.as_str()),

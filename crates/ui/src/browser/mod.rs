@@ -33,7 +33,10 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
         !combo.is_empty()
             && !ShortcutId::ALL.iter().any(|id| {
                 Some(*id) != own
-                    && !matches!(id, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)
+                    && !matches!(
+                        id,
+                        ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel
+                    )
                     && gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
                         == gpui::Keystroke::parse(&platform_combo(combo)).ok()
             })
@@ -374,8 +377,7 @@ impl BrowserSurface {
                     while let Some(value) = updates.recv().await {
                         if let Ok(snapshot) =
                             serde_json::from_value::<mast_proto::PreviewSnapshot>(value)
-                        {
-                            if this
+                            && this
                                 .update(cx, |this, cx| {
                                     #[cfg(target_os = "macos")]
                                     for service in &snapshot.services {
@@ -388,9 +390,8 @@ impl BrowserSurface {
                                     cx.notify();
                                 })
                                 .is_err()
-                            {
-                                return;
-                            }
+                        {
+                            return;
                         }
                     }
                 }
@@ -618,11 +619,11 @@ impl BrowserSurface {
                     self.favicon_task = None;
                 }
                 if !self.address.focus_handle(cx).is_focused(window) {
-                    if let Some(url) = &page.url {
-                        if self.address.read(cx).text() != url {
-                            self.address
-                                .update(cx, |input, cx| input.set_text(url.clone(), cx));
-                        }
+                    if let Some(url) = &page.url
+                        && self.address.read(cx).text() != url
+                    {
+                        self.address
+                            .update(cx, |input, cx| input.set_text(url.clone(), cx));
                     }
                     self.address_edited = false;
                 }

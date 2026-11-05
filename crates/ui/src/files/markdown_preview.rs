@@ -202,14 +202,13 @@ pub(crate) type WebLinkHandler = Rc<dyn Fn(&render::LinkActivation, &mut gpui::A
 
 impl MarkdownPreview {
     fn close_media_preview(&mut self, cx: &mut gpui::App) {
-        if let Some(preview) = self.preview_image.take() {
-            if self
+        if let Some(preview) = self.preview_image.take()
+            && self
                 .zoom_source
                 .as_ref()
                 .is_some_and(|source| !Arc::ptr_eq(&source.image, &preview.image))
-            {
-                cx.defer(move |cx| gpui::ImageSource::Image(preview.image).evict(None, cx));
-            }
+        {
+            cx.defer(move |cx| gpui::ImageSource::Image(preview.image).evict(None, cx));
         }
         self.zoom_source = None;
         self.zoom_render = None;
@@ -345,20 +344,20 @@ impl MarkdownPreview {
                 )
             })
             .collect();
-        if let Some((line, input, editing)) = &self.comment_draft {
-            if comment_block(&self.block_lines, *line) == Some(ix) {
-                elements.push(crate::comment_ui::render_comment_draft(
-                    &self.path,
-                    *line,
-                    input.clone(),
-                    *editing,
-                    theme,
-                    cx,
-                    Self::cancel_comment,
-                    Self::commit_comment,
-                    column,
-                ));
-            }
+        if let Some((line, input, editing)) = &self.comment_draft
+            && comment_block(&self.block_lines, *line) == Some(ix)
+        {
+            elements.push(crate::comment_ui::render_comment_draft(
+                &self.path,
+                *line,
+                input.clone(),
+                *editing,
+                theme,
+                cx,
+                Self::cancel_comment,
+                Self::commit_comment,
+                column,
+            ));
         }
         elements
     }
@@ -473,14 +472,14 @@ impl MarkdownPreview {
                     let mut highlights = HashMap::new();
                     let mut anchors = HashMap::new();
                     for (ix, top) in tree.blocks.iter().enumerate() {
-                        if let Block::CodeBlock { language, code } = &top.block {
-                            if let Ok(doc) = mast_syntax::highlight(mast_syntax::HighlightRequest {
+                        if let Block::CodeBlock { language, code } = &top.block
+                            && let Ok(doc) = mast_syntax::highlight(mast_syntax::HighlightRequest {
                                 source: code,
                                 path: None,
                                 fence_tag: language.as_deref(),
-                            }) {
-                                highlights.insert(ix, Arc::new(doc));
-                            }
+                            })
+                        {
+                            highlights.insert(ix, Arc::new(doc));
                         }
                         if let Block::Heading { runs, .. } = &top.block {
                             let text: String = runs.iter().map(|r| r.text.as_str()).collect();
@@ -1182,13 +1181,13 @@ impl MarkdownPreview {
                 {
                     return render::LinkOutcome::Internal;
                 }
-                if activation.target.navigation.is_ok() {
-                    if let Some(open_web_link) = &open_web_link {
-                        // Emit through the owning FilesSurface before borrowing
-                        // this preview: selecting Browser can suspend this view.
-                        open_web_link(activation, cx);
-                        return render::LinkOutcome::Internal;
-                    }
+                if activation.target.navigation.is_ok()
+                    && let Some(open_web_link) = &open_web_link
+                {
+                    // Emit through the owning FilesSurface before borrowing
+                    // this preview: selecting Browser can suspend this view.
+                    open_web_link(activation, cx);
+                    return render::LinkOutcome::Internal;
                 }
                 let target = &activation.target.original;
                 weak.update(cx, |view, cx| {
@@ -1546,11 +1545,10 @@ impl Render for MarkdownPreview {
             .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "c"
                     && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+                    && let Some(text) = crate::markdown::selection::selected_text()
                 {
-                    if let Some(text) = crate::markdown::selection::selected_text() {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                        cx.stop_propagation();
-                    }
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    cx.stop_propagation();
                 }
             }))
             .child(render::selection_surface_reset(self.scope.clone()))

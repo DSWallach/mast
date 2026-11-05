@@ -686,21 +686,21 @@ impl WorkItemDetails {
                 .child(
                     Self::small_button(("work-item-ct-up", key), "\u{2191}", theme).on_click(
                         cx.listener(move |this, _, _, cx| {
-                            this.edit_template(|editor| drop(editor.move_node(node_key, true)), cx)
+                            this.edit_template(|editor| { let _ = editor.move_node(node_key, true); }, cx)
                         }),
                     ),
                 )
                 .child(
                     Self::small_button(("work-item-ct-down", key), "\u{2193}", theme).on_click(
                         cx.listener(move |this, _, _, cx| {
-                            this.edit_template(|editor| drop(editor.move_node(node_key, false)), cx)
+                            this.edit_template(|editor| { let _ = editor.move_node(node_key, false); }, cx)
                         }),
                     ),
                 )
                 .child(
                     Self::small_button(("work-item-ct-remove", key), "Remove", theme).on_click(
                         cx.listener(move |this, _, _, cx| {
-                            this.edit_template(|editor| drop(editor.remove_node(node_key)), cx)
+                            this.edit_template(|editor| { let _ = editor.remove_node(node_key); }, cx)
                         }),
                     ),
                 );
@@ -753,13 +753,13 @@ impl WorkItemDetails {
                         theme,
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit_template(|editor| drop(editor.add_instruction(node_key)), cx)
+                        this.edit_template(|editor| { let _ = editor.add_instruction(node_key); }, cx)
                     })),
                 )
                 .child(
                     Self::small_button(("work-item-ct-add-child", key), "Add item", theme)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit_template(|editor| drop(editor.add_child(node_key)), cx)
+                            this.edit_template(|editor| { let _ = editor.add_child(node_key); }, cx)
                         })),
                 ),
         );

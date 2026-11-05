@@ -846,7 +846,6 @@ impl Composer {
         path: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use crate::attachments;
         let device = self
             .state
             .read(cx)

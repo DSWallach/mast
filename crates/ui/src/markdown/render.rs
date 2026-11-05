@@ -873,10 +873,8 @@ fn render_question(
                 ),
         );
     }
-    if can_answer {
-        if let (Some(ui), Some(id)) = (answer_ui, card.id.as_ref()) {
-            body = body.child(answer_affordance(id, ui, &opts.row_key, theme));
-        }
+    if can_answer && let (Some(ui), Some(id)) = (answer_ui, card.id.as_ref()) {
+        body = body.child(answer_affordance(id, ui, &opts.row_key, theme));
     }
 
     let accent = if collapsible || status == QuestionStatus::Resolved {
@@ -2210,51 +2208,51 @@ fn text_element(
     opts: &RenderOptions,
     theme: &Theme,
 ) -> AnyElement {
-    if let Some(media) = &opts.media {
-        if runs.iter().any(|run| run.style.image.is_some()) {
-            let mut elements = Vec::new();
-            let mut start = 0;
-            for (index, run) in runs.iter().enumerate() {
-                if let Some(image) = &run.style.image {
-                    if start < index {
-                        elements.push(text_element(
-                            &runs[start..index],
-                            size,
-                            line_height,
-                            bold_default,
-                            top_ix,
-                            ix.wrapping_mul(4099).wrapping_add(start + 1000),
-                            opts,
-                            theme,
-                        ));
-                    }
-                    elements.push((media.image)(
-                        image,
-                        format!("{}-image-{ix}-{index}", opts.row_key).into(),
+    if let Some(media) = &opts.media
+        && runs.iter().any(|run| run.style.image.is_some())
+    {
+        let mut elements = Vec::new();
+        let mut start = 0;
+        for (index, run) in runs.iter().enumerate() {
+            if let Some(image) = &run.style.image {
+                if start < index {
+                    elements.push(text_element(
+                        &runs[start..index],
+                        size,
+                        line_height,
+                        bold_default,
+                        top_ix,
+                        ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                        opts,
                         theme,
                     ));
-                    start = index + 1;
                 }
-            }
-            if start < runs.len() {
-                elements.push(text_element(
-                    &runs[start..],
-                    size,
-                    line_height,
-                    bold_default,
-                    top_ix,
-                    ix.wrapping_mul(4099).wrapping_add(start + 1000),
-                    opts,
+                elements.push((media.image)(
+                    image,
+                    format!("{}-image-{ix}-{index}", opts.row_key).into(),
                     theme,
                 ));
+                start = index + 1;
             }
-            return div()
-                .flex()
-                .flex_col()
-                .gap(crate::typography::ui_rems(8.0))
-                .children(elements)
-                .into_any_element();
         }
+        if start < runs.len() {
+            elements.push(text_element(
+                &runs[start..],
+                size,
+                line_height,
+                bold_default,
+                top_ix,
+                ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                opts,
+                theme,
+            ));
+        }
+        return div()
+            .flex()
+            .flex_col()
+            .gap(crate::typography::ui_rems(8.0))
+            .children(elements)
+            .into_any_element();
     }
     // Coding agents overwhelmingly spell navigable references as inline code
     // (`src/lib.rs:42`) rather than authoring Markdown links. Promote only an
@@ -2456,43 +2454,43 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    if is_mermaid(language) {
-        if let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref()) {
-            let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
-            let diagram = handler(code, frame_id.clone(), theme);
-            let toggle = diagram.toggle_source.clone();
-            let toggle_action = code_icon_action(
-                format!("{frame_id}-source-toggle").into(),
-                if diagram.show_source {
-                    "Show diagram"
-                } else {
-                    "Show source"
-                },
-                if diagram.show_source {
-                    crate::icons::EYE
-                } else {
-                    crate::icons::FILE_CODE
-                },
-                Rc::new(move |window, cx| toggle(window, cx)),
-                theme,
-            );
+    if is_mermaid(language)
+        && let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref())
+    {
+        let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
+        let diagram = handler(code, frame_id.clone(), theme);
+        let toggle = diagram.toggle_source.clone();
+        let toggle_action = code_icon_action(
+            format!("{frame_id}-source-toggle").into(),
             if diagram.show_source {
-                return render_code_block_source_with_actions(
-                    language,
-                    code,
-                    top_ix,
-                    ix,
-                    opts,
-                    theme,
-                    highlight,
-                    vec![toggle_action],
-                );
-            }
-            let mut actions = vec![toggle_action];
-            actions.extend(code_copy_button(code, ix, opts, theme));
-            return code_block_frame(frame_id, language, actions, diagram.body, theme)
-                .into_any_element();
+                "Show diagram"
+            } else {
+                "Show source"
+            },
+            if diagram.show_source {
+                crate::icons::EYE
+            } else {
+                crate::icons::FILE_CODE
+            },
+            Rc::new(move |window, cx| toggle(window, cx)),
+            theme,
+        );
+        if diagram.show_source {
+            return render_code_block_source_with_actions(
+                language,
+                code,
+                top_ix,
+                ix,
+                opts,
+                theme,
+                highlight,
+                vec![toggle_action],
+            );
         }
+        let mut actions = vec![toggle_action];
+        actions.extend(code_copy_button(code, ix, opts, theme));
+        return code_block_frame(frame_id, language, actions, diagram.body, theme)
+            .into_any_element();
     }
     render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
 }

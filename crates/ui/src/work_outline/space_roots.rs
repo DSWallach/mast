@@ -170,14 +170,14 @@ impl OutlineView {
     /// Store `order` (the full order of every current Space) and show it.
     fn set_space_order(&mut self, order: Vec<String>, cx: &mut Context<Self>) {
         self.space_order = order;
-        if let Some(data_dir) = self.state.read(cx).data_dir.clone() {
-            if let Err(err) = overview_positions::save_string_list(
+        if let Some(data_dir) = self.state.read(cx).data_dir.clone()
+            && let Err(err) = overview_positions::save_string_list(
                 &data_dir,
                 overview_positions::OUTLINE_SPACE_ORDER_FILE,
                 &self.space_order,
-            ) {
-                tracing::warn!(error = %err, "saving outline space order failed");
-            }
+            )
+        {
+            tracing::warn!(error = %err, "saving outline space order failed");
         }
         self.reflatten();
         if let Some(ix) = self
@@ -215,14 +215,14 @@ impl OutlineView {
         let present: BTreeSet<&str> = self.inputs.spaces.iter().map(|s| s.id.as_str()).collect();
         self.hidden_spaces
             .retain(|id| present.is_empty() || present.contains(id.as_str()));
-        if let Some(data_dir) = self.state.read(cx).data_dir.clone() {
-            if let Err(err) = overview_positions::save_string_set(
+        if let Some(data_dir) = self.state.read(cx).data_dir.clone()
+            && let Err(err) = overview_positions::save_string_set(
                 &data_dir,
                 overview_positions::OUTLINE_HIDDEN_SPACES_FILE,
                 &self.hidden_spaces,
-            ) {
-                tracing::warn!(error = %err, "saving hidden outline spaces failed");
-            }
+            )
+        {
+            tracing::warn!(error = %err, "saving hidden outline spaces failed");
         }
         let label = self
             .inputs

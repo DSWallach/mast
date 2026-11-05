@@ -145,10 +145,10 @@ impl OutlineView {
         let guides = &self.guide_state.guides;
         let mut out = Vec::new();
         let ix_of = |key: &Option<String>| key.as_deref().and_then(|k| self.model.position(k));
-        if let Some(flash) = ix_of(&self.guide_state.flash) {
-            if let Some(parent) = self.model.rows[flash].parent {
-                out.push((Lit::Flash, GuideHighlight::subtree(guides, parent)));
-            }
+        if let Some(flash) = ix_of(&self.guide_state.flash)
+            && let Some(parent) = self.model.rows[flash].parent
+        {
+            out.push((Lit::Flash, GuideHighlight::subtree(guides, parent)));
         }
         if let Some(selected) = ix_of(&self.selected) {
             out.push((

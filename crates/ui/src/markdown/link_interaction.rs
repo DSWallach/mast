@@ -226,49 +226,47 @@ impl Element for LinkRanges {
                     overlays.push(hit);
                 }
             }
-            if state.menu.borrow().is_none() && !state.dismissed.get() {
-                if let Some(index) = focused {
-                    if let Some(rect) =
-                        range_rects(&self.layout, &self.links[index].0, 0., 0.).first()
-                    {
-                        let card = super::link_destination::destination_card(
-                            &state.targets[index].original,
-                            state.tooltip_bounds.clone(),
-                            window,
-                            cx,
-                        );
-                        let dismissed = state.dismissed.clone();
-                        let epoch = state.epoch.clone();
-                        // This disclosure is not a menu: menu_at consumes every
-                        // outside press, preventing other controls from receiving it.
-                        let mut popup = gpui::deferred(
-                            gpui::anchored()
-                                .position(rect.bottom_left())
-                                .anchor(gpui::Anchor::TopLeft)
-                                .snap_to_window_with_margin(px(8.))
-                                .child(
-                                    div()
-                                        .id("focused-link-destination")
-                                        .occlude()
-                                        .on_mouse_down_out(move |_, window, _| {
-                                            dismissed.set(true);
-                                            epoch.set(epoch.get().wrapping_add(1));
-                                            window.refresh();
-                                        })
-                                        .child(card),
-                                ),
-                        )
-                        .priority(1)
-                        .into_any_element();
-                        popup.prepaint_as_root(
-                            bounds.origin,
-                            window.viewport_size().map(AvailableSpace::Definite),
-                            window,
-                            cx,
-                        );
-                        overlays.push(popup);
-                    }
-                }
+            if state.menu.borrow().is_none()
+                && !state.dismissed.get()
+                && let Some(index) = focused
+                && let Some(rect) = range_rects(&self.layout, &self.links[index].0, 0., 0.).first()
+            {
+                let card = super::link_destination::destination_card(
+                    &state.targets[index].original,
+                    state.tooltip_bounds.clone(),
+                    window,
+                    cx,
+                );
+                let dismissed = state.dismissed.clone();
+                let epoch = state.epoch.clone();
+                // This disclosure is not a menu: menu_at consumes every
+                // outside press, preventing other controls from receiving it.
+                let mut popup = gpui::deferred(
+                    gpui::anchored()
+                        .position(rect.bottom_left())
+                        .anchor(gpui::Anchor::TopLeft)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .id("focused-link-destination")
+                                .occlude()
+                                .on_mouse_down_out(move |_, window, _| {
+                                    dismissed.set(true);
+                                    epoch.set(epoch.get().wrapping_add(1));
+                                    window.refresh();
+                                })
+                                .child(card),
+                        ),
+                )
+                .priority(1)
+                .into_any_element();
+                popup.prepaint_as_root(
+                    bounds.origin,
+                    window.viewport_size().map(AvailableSpace::Definite),
+                    window,
+                    cx,
+                );
+                overlays.push(popup);
             }
             if let Some((index, position)) = *state.menu.borrow() {
                 let theme = theme.for_popup();

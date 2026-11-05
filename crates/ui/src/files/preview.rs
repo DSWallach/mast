@@ -547,10 +547,19 @@ impl Render for FileEditorTooltip {
 
 impl FilesSurface {
     pub(crate) fn editor_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.preview.active.as_deref().and_then(|path| self.preview.documents.get(path))
+        self.preview
+            .active
+            .as_deref()
+            .and_then(|path| self.preview.documents.get(path))
             .is_some_and(|document| {
-                document.editor.as_ref().is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx))
-                    || document.markdown.as_ref().is_some_and(|view| view.read(cx).focus.contains_focused(window, cx))
+                document
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx))
+                    || document
+                        .markdown
+                        .as_ref()
+                        .is_some_and(|view| view.read(cx).focus.contains_focused(window, cx))
             })
     }
     #[cfg(test)]
@@ -2269,10 +2278,10 @@ impl FilesSurface {
                         };
                         if let Some(document) = this.preview.documents.get_mut(&path) {
                             document.show_markdown = !document.show_markdown;
-                            if !document.show_markdown {
-                                if let Some(view) = &document.markdown {
-                                    view.update(cx, |view, cx| view.suspend(cx));
-                                }
+                            if !document.show_markdown
+                                && let Some(view) = &document.markdown
+                            {
+                                view.update(cx, |view, cx| view.suspend(cx));
                             }
                         }
                         if this

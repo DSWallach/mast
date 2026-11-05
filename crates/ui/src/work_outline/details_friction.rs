@@ -40,7 +40,9 @@ mod tests {
             "provenance": {"chatId":"chat", "harness":"codex", "model":null, "spaceId":"space", "createdAt":123456, "source":"agent"},
             "fingerprint":"one", "occurrences":1, "lastSeen":0, "status":"open"
         })).unwrap();
-        let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(&[report.clone()]));
+        let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(&[
+            report.clone(),
+        ]));
         assert!(parsed.skipped.is_empty());
         let entry = &parsed.reports[0];
         assert_eq!(entry.kind, report.kind);
@@ -119,62 +121,113 @@ impl WorkItemDetails {
 
     fn preview_friction_file(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true, directories: false, multiple: false, prompt: Some("Import Markdown friction log".into()),
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import Markdown friction log".into()),
         });
         cx.spawn(async move |this, cx| {
-            let path = match receiver.await { Ok(Ok(Some(mut paths))) => paths.pop(), _ => None };
-            let Some(path) = path else { return; };
+            let path = match receiver.await {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                _ => None,
+            };
+            let Some(path) = path else {
+                return;
+            };
             let loaded = (|| -> Result<(String, String), String> {
-                if path.extension().and_then(|s| s.to_str()).is_none_or(|s| !s.eq_ignore_ascii_case("md")) {
+                if path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_none_or(|s| !s.eq_ignore_ascii_case("md"))
+                {
                     return Err("Choose a Markdown (.md) file".into());
                 }
                 let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-                if metadata.len() > 10 * 1024 * 1024 { return Err("File exceeds 10 MB".into()); }
-                let file_name = path.file_name().and_then(|s| s.to_str()).ok_or("Invalid file name")?.to_owned();
+                if metadata.len() > 10 * 1024 * 1024 {
+                    return Err("File exceeds 10 MB".into());
+                }
+                let file_name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or("Invalid file name")?
+                    .to_owned();
                 let markdown = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
                 Ok((file_name, markdown))
             })();
-            this.update(cx, |this, cx| {
-                match loaded {
-                    Ok((file_name, markdown)) => {
-                        let task = this.state.read(cx).work_outline_actions().import_friction(mast_proto::ImportFrictionParams {
-                            space_id: this.space_id.clone(), file_name: file_name.clone(), markdown: markdown.clone(), preview: true,
-                        });
-                        cx.spawn(async move |this, cx| {
-                            let result = task.await;
-                            this.update(cx, |this, cx| {
-                                match result {
-                                    Ok(preview) => this.friction.import_preview = Some((file_name, markdown, preview)),
-                                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+            this.update(cx, |this, cx| match loaded {
+                Ok((file_name, markdown)) => {
+                    let task = this.state.read(cx).work_outline_actions().import_friction(
+                        mast_proto::ImportFrictionParams {
+                            space_id: this.space_id.clone(),
+                            file_name: file_name.clone(),
+                            markdown: markdown.clone(),
+                            preview: true,
+                        },
+                    );
+                    cx.spawn(async move |this, cx| {
+                        let result = task.await;
+                        this.update(cx, |this, cx| {
+                            match result {
+                                Ok(preview) => {
+                                    this.friction.import_preview =
+                                        Some((file_name, markdown, preview))
                                 }
-                                cx.notify();
-                            }).ok();
-                        }).detach();
-                    }
-                    Err(text) => cx.emit(DetailsEvent::Notice { text, error: true }),
+                                Err(error) => cx.emit(DetailsEvent::Notice {
+                                    text: error.message,
+                                    error: true,
+                                }),
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
-            }).ok();
-        }).detach();
+                Err(text) => cx.emit(DetailsEvent::Notice { text, error: true }),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn import_friction_preview(&mut self, cx: &mut Context<Self>) {
-        let Some((file_name, markdown, _)) = self.friction.import_preview.take() else { return; };
-        let task = self.state.read(cx).work_outline_actions().import_friction(mast_proto::ImportFrictionParams {
-            space_id: self.space_id.clone(), file_name, markdown, preview: false,
-        });
+        let Some((file_name, markdown, _)) = self.friction.import_preview.take() else {
+            return;
+        };
+        let task = self.state.read(cx).work_outline_actions().import_friction(
+            mast_proto::ImportFrictionParams {
+                space_id: self.space_id.clone(),
+                file_name,
+                markdown,
+                preview: false,
+            },
+        );
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(result) => {
-                        cx.emit(DetailsEvent::Notice { text: format!("Friction import: {} added, {} merged, {} skipped", result.added, result.merged, result.skipped.len()), error: false });
+                        cx.emit(DetailsEvent::Notice {
+                            text: format!(
+                                "Friction import: {} added, {} merged, {} skipped",
+                                result.added,
+                                result.merged,
+                                result.skipped.len()
+                            ),
+                            error: false,
+                        });
                         this.fetch_friction(cx);
                     }
-                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+                    Err(error) => cx.emit(DetailsEvent::Notice {
+                        text: error.message,
+                        error: true,
+                    }),
                 }
                 cx.notify();
-            }).ok();
-        }).detach();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn render_friction_section(
@@ -196,25 +249,67 @@ impl WorkItemDetails {
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
-                    .flex().items_center().justify_between()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .child("Friction")
-                    .child(Self::small_button("friction-import", "Import…", theme)
-                        .on_click(cx.listener(|this, _, _, cx| this.preview_friction_file(cx)))),
+                    .child(
+                        Self::small_button("friction-import", "Import…", theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.preview_friction_file(cx))),
+                    ),
             );
         if let Some((file_name, _, preview)) = &self.friction.import_preview {
             let mut counts = Vec::new();
-            for (label, kind) in [("Bug", FrictionKind::Bug), ("Tool failure", FrictionKind::ToolFailure), ("Permission", FrictionKind::Permission), ("Environment", FrictionKind::Environment), ("Workflow", FrictionKind::Workflow), ("Docs", FrictionKind::Docs)] {
-                let count = preview.entries.iter().filter(|entry| entry.kind == kind).count();
-                if count > 0 { counts.push(format!("{label}: {count}")); }
+            for (label, kind) in [
+                ("Bug", FrictionKind::Bug),
+                ("Tool failure", FrictionKind::ToolFailure),
+                ("Permission", FrictionKind::Permission),
+                ("Environment", FrictionKind::Environment),
+                ("Workflow", FrictionKind::Workflow),
+                ("Docs", FrictionKind::Docs),
+            ] {
+                let count = preview
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.kind == kind)
+                    .count();
+                if count > 0 {
+                    counts.push(format!("{label}: {count}"));
+                }
             }
-            let mut box_view = div().debug_selector(|| "friction-import-preview".into()).flex().flex_col().gap(px(3.0))
+            let mut box_view = div()
+                .debug_selector(|| "friction-import-preview".into())
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
                 .child(SharedString::from(format!("Preview: {file_name}")))
                 .child(SharedString::from(counts.join(" · ")))
-                .child(SharedString::from(format!("{} entries, {} skipped", preview.entries.len(), preview.skipped.len())));
-            for entry in preview.entries.iter().take(10) { box_view = box_view.child(SharedString::from(entry.summary.clone())); }
-            box_view = box_view.child(div().flex().gap(px(6.0))
-                .child(Self::small_button("friction-import-confirm", "Import", theme).on_click(cx.listener(|this, _, _, cx| this.import_friction_preview(cx))))
-                .child(Self::small_button("friction-import-cancel", "Cancel", theme).on_click(cx.listener(|this, _, _, cx| { this.friction.import_preview = None; cx.notify(); }))));
+                .child(SharedString::from(format!(
+                    "{} entries, {} skipped",
+                    preview.entries.len(),
+                    preview.skipped.len()
+                )));
+            for entry in preview.entries.iter().take(10) {
+                box_view = box_view.child(SharedString::from(entry.summary.clone()));
+            }
+            box_view = box_view.child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(
+                        Self::small_button("friction-import-confirm", "Import", theme).on_click(
+                            cx.listener(|this, _, _, cx| this.import_friction_preview(cx)),
+                        ),
+                    )
+                    .child(
+                        Self::small_button("friction-import-cancel", "Cancel", theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.friction.import_preview = None;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            );
             section = section.child(box_view);
         }
         let mut filters = div().flex().gap(px(6.0));
@@ -441,83 +536,86 @@ impl WorkItemDetails {
                                 })
                             })),
                     );
-                } else if picker_open {
-                    if let Some(snapshot) = &self.snapshot {
-                        let last = crate::settings::current(cx)
-                            .friction_destination_by_space_id
-                            .get(&self.space_id)
-                            .cloned();
-                        let mut choices: Vec<_> = snapshot
-                            .items
-                            .iter()
-                            .filter(|item| item.archived_at.is_none())
-                            .collect();
-                        choices.sort_by_key(|item| last.as_deref() != Some(item.id.as_str()));
-                        for (choice_index, item) in choices.into_iter().enumerate() {
-                            let parent_item_id = item.id.clone();
-                            let fingerprint = report.fingerprint.clone();
-                            let report_id = report.id.clone();
-                            details = details.child(
-                                div()
-                                    .id(("friction-parent", index * 10000 + choice_index))
-                                    .debug_selector({
-                                        let selector = format!("friction-parent-{}", item.id);
-                                        move || selector.clone()
-                                    })
-                                    .cursor_pointer()
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(item.title.clone()))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let task = this
-                                            .state
-                                            .read(cx)
-                                            .work_outline_actions()
-                                            .promote_friction_to_item(
-                                                mast_proto::PromoteFrictionToItemParams {
-                                                    space_id: this.space_id.clone(),
-                                                    fingerprint: fingerprint.clone(),
-                                                    parent_item_id: parent_item_id.clone(),
-                                                },
-                                            );
-                                        let report_id = report_id.clone();
-                                        let parent_item_id = parent_item_id.clone();
-                                        let space_id = this.space_id.clone();
-                                        cx.spawn(async move |this, cx| {
-                                            let result = task.await;
-                                            this.update(cx, |this, cx| {
-                                                match result {
-                                                    Ok(result) => {
-                                                        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
-                                                            settings.friction_destination_by_space_id.insert(space_id, parent_item_id);
-                                                        });
-                                                        if let Some(report) = this
-                                                            .friction
-                                                            .reports
-                                                            .as_mut()
-                                                            .and_then(|reports| {
+                } else if picker_open && let Some(snapshot) = &self.snapshot {
+                    let last = crate::settings::current(cx)
+                        .friction_destination_by_space_id
+                        .get(&self.space_id)
+                        .cloned();
+                    let mut choices: Vec<_> = snapshot
+                        .items
+                        .iter()
+                        .filter(|item| item.archived_at.is_none())
+                        .collect();
+                    choices.sort_by_key(|item| last.as_deref() != Some(item.id.as_str()));
+                    for (choice_index, item) in choices.into_iter().enumerate() {
+                        let parent_item_id = item.id.clone();
+                        let fingerprint = report.fingerprint.clone();
+                        let report_id = report.id.clone();
+                        details = details.child(
+                            div()
+                                .id(("friction-parent", index * 10000 + choice_index))
+                                .debug_selector({
+                                    let selector = format!("friction-parent-{}", item.id);
+                                    move || selector.clone()
+                                })
+                                .cursor_pointer()
+                                .text_color(theme.text)
+                                .child(SharedString::from(item.title.clone()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let task = this
+                                        .state
+                                        .read(cx)
+                                        .work_outline_actions()
+                                        .promote_friction_to_item(
+                                            mast_proto::PromoteFrictionToItemParams {
+                                                space_id: this.space_id.clone(),
+                                                fingerprint: fingerprint.clone(),
+                                                parent_item_id: parent_item_id.clone(),
+                                            },
+                                        );
+                                    let report_id = report_id.clone();
+                                    let parent_item_id = parent_item_id.clone();
+                                    let space_id = this.space_id.clone();
+                                    cx.spawn(async move |this, cx| {
+                                        let result = task.await;
+                                        this.update(cx, |this, cx| {
+                                            match result {
+                                                Ok(result) => {
+                                                    crate::settings::update(
+                                                        crate::settings::SavePolicy::Debounced,
+                                                        cx,
+                                                        |settings| {
+                                                            settings
+                                                                .friction_destination_by_space_id
+                                                                .insert(space_id, parent_item_id);
+                                                        },
+                                                    );
+                                                    if let Some(report) =
+                                                        this.friction.reports.as_mut().and_then(
+                                                            |reports| {
                                                                 reports.iter_mut().find(|report| {
                                                                     report.id == report_id
                                                                 })
-                                                            })
-                                                        {
-                                                            report.promoted_item_id =
-                                                                Some(result.work_item_id);
-                                                        }
-                                                        this.friction.picker = None;
+                                                            },
+                                                        )
+                                                    {
+                                                        report.promoted_item_id =
+                                                            Some(result.work_item_id);
                                                     }
-                                                    Err(error) => cx.emit(DetailsEvent::Notice {
-                                                        text: error.message,
-                                                        error: true,
-                                                    }),
+                                                    this.friction.picker = None;
                                                 }
-                                                cx.notify();
-                                            })
-                                            .ok();
+                                                Err(error) => cx.emit(DetailsEvent::Notice {
+                                                    text: error.message,
+                                                    error: true,
+                                                }),
+                                            }
+                                            cx.notify();
                                         })
-                                        .detach();
-                                    })),
-                            );
-                        }
+                                        .ok();
+                                    })
+                                    .detach();
+                                })),
+                        );
                     }
                 }
                 let dismiss = Self::small_button(("friction-dismiss", index), "Dismiss", theme)
@@ -606,7 +704,8 @@ impl WorkItemDetails {
                         .child(dismiss),
                 );
                 if let Some(file_name) = &report.provenance.file_name {
-                    details = details.child(SharedString::from(format!("Imported from {file_name}")));
+                    details =
+                        details.child(SharedString::from(format!("Imported from {file_name}")));
                 } else {
                     let chat_id = report.provenance.chat_id.clone();
                     details = details.child(

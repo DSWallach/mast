@@ -79,7 +79,11 @@ impl OutlineView {
         cx.notify();
     }
 
-    pub(super) fn open_requested_template_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_requested_template_flow(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(flow) = self.templates.pending.take() else {
             return;
         };
@@ -100,13 +104,12 @@ impl OutlineView {
             .snapshot(&flow.space_id)
             .filter(|snapshot| snapshot.available)
             .ok_or("This Space\u{2019}s outline is not available yet")?;
-        if let Some(parent) = &flow.parent {
-            if !snapshot
+        if let Some(parent) = &flow.parent
+            && !snapshot
                 .item(parent)
                 .is_some_and(|item| item.archived_at.is_none())
-            {
-                return Err("Restore this work item to add an item under it".into());
-            }
+        {
+            return Err("Restore this work item to add an item under it".into());
         }
         if snapshot.templates.is_empty() {
             return Err(
@@ -285,13 +288,12 @@ impl OutlineView {
             .find(|template| Some(&template.id) == flow.template_id.as_ref())
             .cloned()
             .ok_or("That blueprint no longer exists")?;
-        if let Some(parent) = &flow.parent {
-            if !snapshot
+        if let Some(parent) = &flow.parent
+            && !snapshot
                 .item(parent)
                 .is_some_and(|item| item.archived_at.is_none())
-            {
-                return Err("That work item is not available".into());
-            }
+        {
+            return Err("That work item is not available".into());
         }
         let title: String = title
             .trim()
@@ -345,8 +347,8 @@ impl OutlineView {
                 }
             }
             let mut link_note = None;
-            if failure.is_none() {
-                if let Some(project) = linear {
+            if failure.is_none()
+                && let Some(project) = linear {
                     let name = project.name.clone();
                     let result = actions
                         .link_linear_project(mast_proto::LinkLinearProjectParams {
@@ -365,7 +367,6 @@ impl OutlineView {
                         ),
                     });
                 }
-            }
             this.update(cx, |this, cx| {
                 match failure {
                     None => {
@@ -446,7 +447,10 @@ impl OutlineView {
     }
 
     pub(crate) fn template_toast_text(&self) -> Option<&str> {
-        self.templates.toast.as_ref().map(|toast| toast.text.as_str())
+        self.templates
+            .toast
+            .as_ref()
+            .map(|toast| toast.text.as_str())
     }
 
     pub(crate) fn dismiss_template_toast(&mut self, cx: &mut Context<Self>) {

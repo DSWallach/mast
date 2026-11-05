@@ -55,8 +55,14 @@ use crate::theme::Theme;
 const REPLY_PROBES: usize = 6;
 const REPLY_PROBE_DELAY: Duration = Duration::from_millis(500);
 
-fn handoff_pr_references(status: &mast_engine::pr_ticket_cache::ChatLinkStatus) -> Vec<mast_proto::PullRequestRef> {
-    status.pr_links.iter().filter_map(|link| required_actions::parse_handoff_pr(&link.url)).collect()
+fn handoff_pr_references(
+    status: &mast_engine::pr_ticket_cache::ChatLinkStatus,
+) -> Vec<mast_proto::PullRequestRef> {
+    status
+        .pr_links
+        .iter()
+        .filter_map(|link| required_actions::parse_handoff_pr(&link.url))
+        .collect()
 }
 
 /// The composer's notion of a busy Chat: its message queues.
@@ -251,18 +257,17 @@ impl RequiredActionsList {
                 .with_text_metrics(12.0, 18.0)
                 .with_auto_grow()
         });
-        let subscriptions =
-            vec![
-                cx.subscribe(&note_input, |this: &mut Self, _, event, cx| match event {
-                    ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
-                        this.submit_note(cx)
-                    }
-                    // Reply & resolve enables as soon as a note is typed.
-                    ComposerInputEvent::Edited => cx.notify(),
-                    _ => {}
-                }),
-                cx.observe(&state, |_: &mut Self, _, cx| cx.notify()),
-            ];
+        let subscriptions = vec![
+            cx.subscribe(&note_input, |this: &mut Self, _, event, cx| match event {
+                ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
+                    this.submit_note(cx)
+                }
+                // Reply & resolve enables as soon as a note is typed.
+                ComposerInputEvent::Edited => cx.notify(),
+                _ => {}
+            }),
+            cx.observe(&state, |_: &mut Self, _, cx| cx.notify()),
+        ];
         Self {
             state,
             scope,
@@ -306,28 +311,63 @@ impl RequiredActionsList {
     }
 
     fn ensure_handoff_chat_links(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        if self.handoff_chat_links.get(&chat_id).is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(120))
-            || self.handoff_chat_links_pending.contains(&chat_id) { return; }
-        let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
+        if self
+            .handoff_chat_links
+            .get(&chat_id)
+            .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(120))
+            || self.handoff_chat_links_pending.contains(&chat_id)
+        {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
         self.handoff_chat_links_pending.insert(chat_id.clone());
         cx.spawn(async move |this, cx| {
-            let response = engine.client().call(mast_rpc::methods::CHAT_LINK_STATUS, serde_json::json!({"chatId": chat_id})).await;
+            let response = engine
+                .client()
+                .call(
+                    mast_rpc::methods::CHAT_LINK_STATUS,
+                    serde_json::json!({"chatId": chat_id}),
+                )
+                .await;
             this.update(cx, |this, cx| {
                 this.handoff_chat_links_pending.remove(&chat_id);
-                let references = response.ok()
-                    .and_then(|value| serde_json::from_value::<mast_engine::pr_ticket_cache::ChatLinkStatus>(value).ok())
+                let references = response
+                    .ok()
+                    .and_then(|value| {
+                        serde_json::from_value::<mast_engine::pr_ticket_cache::ChatLinkStatus>(
+                            value,
+                        )
+                        .ok()
+                    })
                     .map(|status| handoff_pr_references(&status))
-                    .or_else(|| this.handoff_chat_links.get(&chat_id).map(|(_, references)| references.clone()))
+                    .or_else(|| {
+                        this.handoff_chat_links
+                            .get(&chat_id)
+                            .map(|(_, references)| references.clone())
+                    })
                     .unwrap_or_default();
-                this.handoff_chat_links.insert(chat_id, (Instant::now(), references));
+                this.handoff_chat_links
+                    .insert(chat_id, (Instant::now(), references));
                 cx.notify();
-            }).ok();
-        }).detach();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     #[cfg(test)]
-    pub(crate) fn set_handoff_chat_links_for_test(&mut self, chat_id: &str, status: &mast_engine::pr_ticket_cache::ChatLinkStatus, cx: &mut Context<Self>) {
-        self.handoff_chat_links.insert(chat_id.to_owned(), (Instant::now(), handoff_pr_references(status)));
+    pub(crate) fn set_handoff_chat_links_for_test(
+        &mut self,
+        chat_id: &str,
+        status: &mast_engine::pr_ticket_cache::ChatLinkStatus,
+        cx: &mut Context<Self>,
+    ) {
+        self.handoff_chat_links.insert(
+            chat_id.to_owned(),
+            (Instant::now(), handoff_pr_references(status)),
+        );
         cx.notify();
     }
 
@@ -539,26 +579,54 @@ impl RequiredActionsList {
         }
     }
 
-    pub(crate) fn choose_option(&mut self, request_id: String, option_id: String, cx: &mut Context<Self>) {
-        if self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() { return; }
-        if let Some(intent) = self.replies.get(&request_id).filter(|intent| intent.sent).cloned() {
+    pub(crate) fn choose_option(
+        &mut self,
+        request_id: String,
+        option_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() {
+            return;
+        }
+        if let Some(intent) = self
+            .replies
+            .get(&request_id)
+            .filter(|intent| intent.sent)
+            .cloned()
+        {
             self.in_flight.insert(request_id.clone());
             self.resolve_reply(request_id, intent, cx);
             return;
         }
-        let Some(row) = self.open_row(&request_id) else { return; };
-        if !row.chat_available || row.system { return; }
-        let Some(option) = row.options.iter().find(|option| option.id == option_id) else { return; };
+        let Some(row) = self.open_row(&request_id) else {
+            return;
+        };
+        if !row.chat_available || row.system {
+            return;
+        }
+        let Some(option) = row.options.iter().find(|option| option.id == option_id) else {
+            return;
+        };
         let note = option.label.clone();
-        let intent = self.replies.get(&request_id).filter(|intent| intent.option_id.as_deref() == Some(option_id.as_str())).cloned().unwrap_or_else(|| ReplyIntent {
-            operation_id: super::actions::new_operation_id(),
-            chat_id: row.chat_id.clone(),
-            message: required_actions::decision_message(&row.text, &request_id, "chosen", &note),
-            note,
-            outcome: "done".into(),
-            option_id: Some(option_id),
-            sent: false,
-        });
+        let intent = self
+            .replies
+            .get(&request_id)
+            .filter(|intent| intent.option_id.as_deref() == Some(option_id.as_str()))
+            .cloned()
+            .unwrap_or_else(|| ReplyIntent {
+                operation_id: super::actions::new_operation_id(),
+                chat_id: row.chat_id.clone(),
+                message: required_actions::decision_message(
+                    &row.text,
+                    &request_id,
+                    "chosen",
+                    &note,
+                ),
+                note,
+                outcome: "done".into(),
+                option_id: Some(option_id),
+                sent: false,
+            });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
         self.clear_error();
@@ -706,12 +774,10 @@ impl RequiredActionsList {
         option_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let values = outcome
-            .as_ref()
-            .map(|action| match option_id {
-                Some(option_id) => serde_json::json!({ "action": action, "optionId": option_id }),
-                None => serde_json::json!({ "action": action }),
-            });
+        let values = outcome.as_ref().map(|action| match option_id {
+            Some(option_id) => serde_json::json!({ "action": action, "optionId": option_id }),
+            None => serde_json::json!({ "action": action }),
+        });
         let task = self
             .state
             .read(cx)
@@ -941,65 +1007,125 @@ impl RequiredActionsList {
         let attention = chips::attention_color(theme);
         let mut relevant_chat_ids = Vec::new();
         if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff {
-            let branches: Vec<&str> = row.links.iter().filter_map(|link| match &link.target {
-                mast_proto::work_outline_user_actions::RequestLinkTarget::Diff { branch: Some(branch) } => Some(branch.as_str()),
-                _ => None,
-            }).chain(row.facts.iter().filter(|fact| fact.label.eq_ignore_ascii_case("branch")).map(|fact| fact.value.trim())).collect();
+            let branches: Vec<&str> = row
+                .links
+                .iter()
+                .filter_map(|link| match &link.target {
+                    mast_proto::work_outline_user_actions::RequestLinkTarget::Diff {
+                        branch: Some(branch),
+                    } => Some(branch.as_str()),
+                    _ => None,
+                })
+                .chain(
+                    row.facts
+                        .iter()
+                        .filter(|fact| fact.label.eq_ignore_ascii_case("branch"))
+                        .map(|fact| fact.value.trim()),
+                )
+                .collect();
             let relevant_chats: Vec<String> = {
                 let state = self.state.read(cx);
-                state.chats.iter().filter(|chat| chat.space_id.as_deref() == Some(row.space_id.as_str())
-                    && (chat.id == row.chat_id || chat.branch.as_deref().is_some_and(|branch| branches.contains(&branch))))
-                    .map(|chat| chat.id.clone()).collect()
+                state
+                    .chats
+                    .iter()
+                    .filter(|chat| {
+                        chat.space_id.as_deref() == Some(row.space_id.as_str())
+                            && (chat.id == row.chat_id
+                                || chat
+                                    .branch
+                                    .as_deref()
+                                    .is_some_and(|branch| branches.contains(&branch)))
+                    })
+                    .map(|chat| chat.id.clone())
+                    .collect()
             };
             relevant_chat_ids = relevant_chats.clone();
             if !branches.is_empty() {
-                for chat_id in &relevant_chats { self.ensure_handoff_chat_links(chat_id.clone(), cx); }
+                for chat_id in &relevant_chats {
+                    self.ensure_handoff_chat_links(chat_id.clone(), cx);
+                }
             }
             let branch_prs: Vec<_> = {
                 let state = self.state.read(cx);
-                state.chats.iter().filter(|chat| chat.space_id.as_deref() == Some(row.space_id.as_str())
-                    && chat.branch.as_deref().is_some_and(|branch| branches.contains(&branch)))
+                state
+                    .chats
+                    .iter()
+                    .filter(|chat| {
+                        chat.space_id.as_deref() == Some(row.space_id.as_str())
+                            && chat
+                                .branch
+                                .as_deref()
+                                .is_some_and(|branch| branches.contains(&branch))
+                    })
                     .filter_map(|chat| chat.linked_pr_url.as_deref())
-                    .filter_map(required_actions::parse_handoff_pr).collect()
+                    .filter_map(required_actions::parse_handoff_pr)
+                    .collect()
             };
             for pr in branch_prs {
                 crate::github::store::request_status(&self.state, &pr, false, cx);
             }
-            for pr in relevant_chats.iter().filter_map(|id| self.handoff_chat_links.get(id)).flat_map(|(_, prs)| prs) {
+            for pr in relevant_chats
+                .iter()
+                .filter_map(|id| self.handoff_chat_links.get(id))
+                .flat_map(|(_, prs)| prs)
+            {
                 crate::github::store::request_status(&self.state, pr, false, cx);
             }
             for link in &row.links {
-                if let mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } = &link.target {
-                    if let Some(pr) = required_actions::parse_handoff_pr(url) {
-                        crate::github::store::request_status(&self.state, &pr, false, cx);
-                    }
+                if let mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url }
+                | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } =
+                    &link.target
+                    && let Some(pr) = required_actions::parse_handoff_pr(url)
+                {
+                    crate::github::store::request_status(&self.state, &pr, false, cx);
                 }
             }
             for fact in &row.facts {
-                if fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request") {
-                    if let Some(pr) = required_actions::parse_handoff_pr(&fact.value) {
-                        crate::github::store::request_status(&self.state, &pr, false, cx);
-                    }
+                if (fact.label.eq_ignore_ascii_case("pr")
+                    || fact.label.eq_ignore_ascii_case("pull request"))
+                    && let Some(pr) = required_actions::parse_handoff_pr(&fact.value)
+                {
+                    crate::github::store::request_status(&self.state, &pr, false, cx);
                 }
             }
         }
         let lifecycle = {
             let state = self.state.read(cx);
             let explicit_pr = row.links.iter().any(|link| match &link.target {
-                mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url } | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => required_actions::parse_handoff_pr(url).is_some(),
+                mast_proto::work_outline_user_actions::RequestLinkTarget::Pr { url }
+                | mast_proto::work_outline_user_actions::RequestLinkTarget::Url { url } => {
+                    required_actions::parse_handoff_pr(url).is_some()
+                }
                 _ => false,
-            }) || row.facts.iter().any(|fact| (fact.label.eq_ignore_ascii_case("pr") || fact.label.eq_ignore_ascii_case("pull request")) && required_actions::parse_handoff_pr(&fact.value).is_some());
-            let mut space_prs: std::collections::HashSet<_> = state.chats.iter()
+            }) || row.facts.iter().any(|fact| {
+                (fact.label.eq_ignore_ascii_case("pr")
+                    || fact.label.eq_ignore_ascii_case("pull request"))
+                    && required_actions::parse_handoff_pr(&fact.value).is_some()
+            });
+            let mut space_prs: std::collections::HashSet<_> = state
+                .chats
+                .iter()
                 .filter(|chat| relevant_chat_ids.contains(&chat.id))
                 .filter_map(|chat| chat.linked_pr_url.as_deref())
-                .filter_map(required_actions::parse_handoff_pr).map(|pr| pr.key()).collect();
-            for chat in state.chats.iter().filter(|chat| relevant_chat_ids.contains(&chat.id)) {
+                .filter_map(required_actions::parse_handoff_pr)
+                .map(|pr| pr.key())
+                .collect();
+            for chat in state
+                .chats
+                .iter()
+                .filter(|chat| relevant_chat_ids.contains(&chat.id))
+            {
                 if let Some((_, references)) = self.handoff_chat_links.get(&chat.id) {
                     space_prs.extend(references.iter().map(|pr| pr.key()));
                 }
             }
-            required_actions::handoff_lifecycle(&row, state.github.ready_statuses()
-                .filter(|status| explicit_pr || space_prs.contains(&status.pr_ref.key())))
+            required_actions::handoff_lifecycle(
+                &row,
+                state
+                    .github
+                    .ready_statuses()
+                    .filter(|status| explicit_pr || space_prs.contains(&status.pr_ref.key())),
+            )
         };
         let age = required_actions::age_label(row.created_at, now);
         let chat_tip: SharedString = if row.system {
@@ -1212,7 +1338,11 @@ impl RequiredActionsList {
                         el = el.child(
                             Self::button(
                                 SharedString::from(format!("required-actions-reply-{id}")),
-                                if row.kind == UserActionKind::Choose && !row.options.is_empty() { "Other…" } else { "Reply" },
+                                if row.kind == UserActionKind::Choose && !row.options.is_empty() {
+                                    "Other…"
+                                } else {
+                                    "Reply"
+                                },
                                 !busy && row.chat_available,
                                 theme,
                             )
@@ -1247,22 +1377,38 @@ impl RequiredActionsList {
                     )
                 })
         });
-        let inline_reply = if open && !row.system && row.chat_available && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Ask && !resolving {
+        let inline_reply = if open
+            && !row.system
+            && row.chat_available
+            && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Ask
+            && !resolving
+        {
             let input = if let Some(input) = self.reply_inputs.get(&id) {
                 input.clone()
             } else {
-                let input = cx.new(|cx| ComposerInput::new("Reply…", cx).with_text_metrics(12.0, 18.0).with_auto_grow());
+                let input = cx.new(|cx| {
+                    ComposerInput::new("Reply…", cx)
+                        .with_text_metrics(12.0, 18.0)
+                        .with_auto_grow()
+                });
                 let request_id = id.clone();
-                let subscription = cx.subscribe(&input, move |this: &mut Self, input, event, cx| {
-                    match event {
+                let subscription = cx.subscribe(
+                    &input,
+                    move |this: &mut Self, input, event, cx| match event {
                         ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
-                            let note = input.read(cx).text().trim().chars().take(mast_proto::user_action_limits::MAX_NOTE_CHARS).collect();
+                            let note = input
+                                .read(cx)
+                                .text()
+                                .trim()
+                                .chars()
+                                .take(mast_proto::user_action_limits::MAX_NOTE_CHARS)
+                                .collect();
                             this.reply_and_resolve(request_id.clone(), note, cx);
                         }
                         ComposerInputEvent::Edited => cx.notify(),
                         _ => {}
-                    }
-                });
+                    },
+                );
                 self._subscriptions.push(subscription);
                 self.reply_inputs.insert(id.clone(), input.clone());
                 input
@@ -1271,14 +1417,40 @@ impl RequiredActionsList {
             let submit_selector = format!("required-actions-inline-submit-{id}");
             let note = input.read(cx).text().trim().to_owned();
             let enabled = !busy && !note.is_empty();
-            Some(div().flex().gap(px(4.0)).pl(px(12.0))
-                .child(div().flex_1().min_w_0().px(px(6.0)).py(px(3.0)).rounded(px(4.0)).border_1().border_color(theme.border).child(input))
-                .child(Self::button(SharedString::from(submit_selector.clone()), "Send", enabled, theme)
-                    .debug_selector(move || submit_selector.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if enabled { this.reply_and_resolve(request_id.clone(), note.clone(), cx); }
-                    }))))
-        } else { None };
+            Some(
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .pl(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(6.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(input),
+                    )
+                    .child(
+                        Self::button(
+                            SharedString::from(submit_selector.clone()),
+                            "Send",
+                            enabled,
+                            theme,
+                        )
+                        .debug_selector(move || submit_selector.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if enabled {
+                                this.reply_and_resolve(request_id.clone(), note.clone(), cx);
+                            }
+                        })),
+                    ),
+            )
+        } else {
+            None
+        };
         let resolve_form = resolving.then(|| {
             div()
                 .flex()
@@ -1428,7 +1600,10 @@ impl RequiredActionsList {
         } else {
             format!("required-actions-history-row-{id}")
         };
-        let choices = if open && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose && !row.options.is_empty() {
+        let choices = if open
+            && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose
+            && !row.options.is_empty()
+        {
             let mut choices = div().flex().flex_wrap().gap(px(4.0)).pl(px(12.0));
             for (index, option) in row.options.iter().enumerate() {
                 let request_id = id.clone();
@@ -1436,20 +1611,45 @@ impl RequiredActionsList {
                 let label = option.label.clone();
                 let detail = option.detail.clone();
                 let button_id = format!("required-actions-option-{id}-{index}");
-                choices = choices.child(Self::button(SharedString::from(button_id.clone()), "", !busy && row.chat_available, theme)
+                choices = choices.child(
+                    Self::button(
+                        SharedString::from(button_id.clone()),
+                        "",
+                        !busy && row.chat_available,
+                        theme,
+                    )
                     .child(SharedString::from(label))
-                    .when_some(detail, |el, detail| el.tooltip(move |_, cx| cx.new(|_| TextTooltip(detail.clone().into())).into()))
+                    .when_some(detail, |el, detail| {
+                        el.tooltip(move |_, cx| {
+                            cx.new(|_| TextTooltip(detail.clone().into())).into()
+                        })
+                    })
                     .debug_selector(move || button_id.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| this.choose_option(request_id.clone(), option_id.clone(), cx))));
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_option(request_id.clone(), option_id.clone(), cx)
+                    })),
+                );
             }
             Some(choices)
-        } else { None };
+        } else {
+            None
+        };
         let keyboard_id = id.clone();
         let keyboard_options = row.options.clone();
-        let keyboard_enabled = open && !resolving && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose && row.chat_available;
+        let keyboard_enabled = open
+            && !resolving
+            && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose
+            && row.chat_available;
         let choice_focus = if keyboard_enabled && !keyboard_options.is_empty() {
-            Some(self.choice_focus.entry(id.clone()).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone())
-        } else { None };
+            Some(
+                self.choice_focus
+                    .entry(id.clone())
+                    .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let artifact_links = self.render_artifact_links(&id, &row, theme, cx);
         let request_links = self.render_request_links(&id, &row, theme, cx);
         let detail = row.info.as_deref().map(|source| {
@@ -1487,14 +1687,12 @@ impl RequiredActionsList {
             .when_some(choice_focus, |el, focus| el.track_focus(&focus))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                 if !keyboard_enabled || event.is_held || event.keystroke.modifiers != gpui::Modifiers::default() { return; }
-                if let Ok(index) = event.keystroke.key.parse::<usize>() {
-                    if (1..=9).contains(&index) {
-                        if let Some(option) = keyboard_options.get(index - 1) {
+                if let Ok(index) = event.keystroke.key.parse::<usize>()
+                    && (1..=9).contains(&index)
+                        && let Some(option) = keyboard_options.get(index - 1) {
                             this.choose_option(keyboard_id.clone(), option.id.clone(), cx);
                             cx.stop_propagation();
                         }
-                    }
-                }
             }))
             .flex()
             .flex_col()

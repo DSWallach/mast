@@ -12,7 +12,9 @@
 //! A child module of `details_panel`, so it uses the surface's private
 //! state directly.
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
-use mast_proto::{TemplateChange, WorkItemView, WorkOutlineMutation, diff_template_against_project};
+use mast_proto::{
+    TemplateChange, WorkItemView, WorkOutlineMutation, diff_template_against_project,
+};
 
 use super::super::actions::new_operation_id;
 use super::super::chips::template_chip;
@@ -110,11 +112,10 @@ impl WorkItemDetails {
             .review
             .as_mut()
             .and_then(|review| review.rows.get_mut(ix))
+            && (row.state == RowState::Pending || matches!(row.state, RowState::Failed(_)))
         {
-            if row.state == RowState::Pending || matches!(row.state, RowState::Failed(_)) {
-                row.state = RowState::Skipped;
-                cx.notify();
-            }
+            row.state = RowState::Skipped;
+            cx.notify();
         }
     }
 
@@ -238,11 +239,10 @@ impl WorkItemDetails {
                 }
             }
             let mut link_error = None;
-            if advance && !failed {
-                if let Err(error) = actions.mutate(link).await {
+            if advance && !failed
+                && let Err(error) = actions.mutate(link).await {
                     link_error = Some(error.message);
                 }
-            }
             this.update(cx, |this, cx| {
                 this.in_flight.remove(&in_flight);
                 if let Some(message) = link_error {
@@ -303,7 +303,12 @@ impl WorkItemDetails {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(template_chip("work-item-template-changed".to_owned(), from, to, theme))
+                .child(template_chip(
+                    "work-item-template-changed".to_owned(),
+                    from,
+                    to,
+                    theme,
+                ))
                 .when(open.is_none(), |row| {
                     row.child(
                         Self::small_button(
@@ -349,9 +354,9 @@ impl WorkItemDetails {
                 .child(
                     Self::small_button("work-item-review-accept-all", "Accept all", theme)
                         .debug_selector(|| "work-item-review-accept-all".into())
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.run_template_review(ReviewRun::All, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_template_review(ReviewRun::All, cx)
+                        })),
                 )
                 .child(
                     Self::small_button("work-item-review-mark-reviewed", "Mark reviewed", theme)

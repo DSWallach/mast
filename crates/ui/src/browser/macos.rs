@@ -70,10 +70,10 @@ impl BrowserData {
         if !data.preview_hosts.insert(host.into()) {
             return;
         }
-        if let Some(store) = &data.store {
-            if let Err(error) = configure_preview_proxy(store, &data.preview_hosts) {
-                tracing::warn!(%error, "preview hostname proxy unavailable");
-            }
+        if let Some(store) = &data.store
+            && let Err(error) = configure_preview_proxy(store, &data.preview_hosts)
+        {
+            tracing::warn!(%error, "preview hostname proxy unavailable");
         }
     }
 }
@@ -260,10 +260,10 @@ impl Observer {
         unsafe { msg_send![super(object), init] }
     }
     fn changed(&self) {
-        if !self.ivars().pending.replace(true) {
-            if self.ivars().tx.try_send(NativeEvent::Changed).is_err() {
-                self.ivars().pending.set(false);
-            }
+        if !self.ivars().pending.replace(true)
+            && self.ivars().tx.try_send(NativeEvent::Changed).is_err()
+        {
+            self.ivars().pending.set(false);
         }
     }
     fn fail(&self, message: &str) {
@@ -765,6 +765,7 @@ fn key_route(
 }
 
 /// Whether a keystroke typed into the web view may be forwarded to GPUI.
+#[cfg(test)]
 fn is_forwarded_key(
     combo: &str,
     keystroke: &gpui::Keystroke,

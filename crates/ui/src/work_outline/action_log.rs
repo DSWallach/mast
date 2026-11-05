@@ -358,11 +358,10 @@ impl Probe {
                 if item.archived_at.is_some() {
                     return Err("The group is archived".into());
                 }
-                let mut live: Vec<&str> =
-                    super::restructure::live_children(snapshot, Some(parent))
-                        .iter()
-                        .map(|child| child.id.as_str())
-                        .collect();
+                let mut live: Vec<&str> = super::restructure::live_children(snapshot, Some(parent))
+                    .iter()
+                    .map(|child| child.id.as_str())
+                    .collect();
                 let mut want: Vec<&str> = children.iter().map(String::as_str).collect();
                 live.sort_unstable();
                 want.sort_unstable();
@@ -493,24 +492,24 @@ impl ActionLog {
 
     /// `entry_id` was just undone (it must be the next undo).
     pub(crate) fn mark_undone(&mut self, space_id: &str, entry_id: u64) {
-        if let Some(log) = self.spaces.get_mut(space_id) {
-            if log.applied > 0 && log.entries[log.applied - 1].id == entry_id {
-                log.applied -= 1;
-            }
+        if let Some(log) = self.spaces.get_mut(space_id)
+            && log.applied > 0
+            && log.entries[log.applied - 1].id == entry_id
+        {
+            log.applied -= 1;
         }
         self.last_space = Some(space_id.to_owned());
     }
 
     /// `entry_id` was just redone (it must be the next redo).
     pub(crate) fn mark_redone(&mut self, space_id: &str, entry_id: u64) {
-        if let Some(log) = self.spaces.get_mut(space_id) {
-            if log
+        if let Some(log) = self.spaces.get_mut(space_id)
+            && log
                 .entries
                 .get(log.applied)
                 .is_some_and(|e| e.id == entry_id)
-            {
-                log.applied += 1;
-            }
+        {
+            log.applied += 1;
         }
         self.last_space = Some(space_id.to_owned());
     }
@@ -675,7 +674,10 @@ pub(crate) fn move_entry(
 /// Where "Group into…" puts the items.
 pub(crate) enum GroupTarget<'a> {
     /// A container created by the same action.
-    New { work_item_id: &'a str, title: &'a str },
+    New {
+        work_item_id: &'a str,
+        title: &'a str,
+    },
     /// An existing work item; items are appended.
     Existing { work_item_id: &'a str },
 }

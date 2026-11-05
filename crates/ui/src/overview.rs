@@ -388,10 +388,10 @@ fn repo_key(cwd: Option<&str>) -> String {
     let Some(cwd) = cwd else {
         return overview_grouping::NONE_KEY.to_string();
     };
-    if let Some(root) = workspace_root_of(cwd) {
-        if let Some(key) = last_segment(&root) {
-            return key;
-        }
+    if let Some(root) = workspace_root_of(cwd)
+        && let Some(key) = last_segment(&root)
+    {
+        return key;
     }
     last_segment(cwd).unwrap_or_else(|| overview_grouping::NONE_KEY.to_string())
 }
@@ -1716,7 +1716,8 @@ pub struct Overview {
 
 impl Overview {
     pub(crate) fn set_compact_single_chat(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.outline.update(cx, |outline, cx| outline.set_compact_single_chat(value, cx));
+        self.outline
+            .update(cx, |outline, cx| outline.set_compact_single_chat(value, cx));
     }
 
     pub fn new(
@@ -4378,7 +4379,10 @@ impl Overview {
         }
 
         if let Some(preview) = &row.chat.last_message_preview {
-            rows.push(detail_row("last message", text(crate::message_source::preview(preview))));
+            rows.push(detail_row(
+                "last message",
+                text(crate::message_source::preview(preview)),
+            ));
         }
 
         let archived = row.chat.archived;
@@ -6504,8 +6508,9 @@ impl Overview {
                     None,
                 );
                 flow.template_id = template_id.clone();
-                this.outline
-                    .update(cx, |outline, cx| outline.request_new_from_template(flow, cx));
+                this.outline.update(cx, |outline, cx| {
+                    outline.request_new_from_template(flow, cx)
+                });
             }
             DetailsEvent::Notice { text, error } => {
                 this.outline.update(cx, |outline, cx| {
