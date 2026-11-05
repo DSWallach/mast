@@ -616,6 +616,12 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **`zeron doctor`** (2026-11-05, `mast-doctor`, Terra; merged after Mikey's go-ahead): read-only setup checklist
+  (`zeron doctor`, `--json`): agent CLIs (login-shell PATH, exact override paths, rustup shims kept), local agent
+  sign-in, gh + auth, git/LFS, data dir access/size/free space, engine lock + IPC, Rust toolchain, Linear Keychain
+  presence. ✓/!/✗ with a fix per line; errors exit 1, warnings 0; missing both Claude and Codex is an error. README
+  and getting-started mention it (conflict with the terminology pass resolved). Release run: nextest 2411/2411, UI
+  2481/0. A shorter `mast` command belongs to the binary rename.
 - **Perf sweep 5: startup main-thread ticks** (2026-11-05 overnight, `perf-sweep-5`, Terra; gated instrumentation
   only): per-view startup spans name WatchSpaces and AuthStatus updates as the first two long main-thread ticks; GPUI
   test-support draws dirty windows synchronously during effect flush (inflates headless numbers). A third tick
@@ -956,7 +962,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
 - Release in batches; never run a release while 3 Terra builds compile.
-- Not touched: `mast-doctor` (Mikey's review), data/binary rename (needs Mikey), design items.
+- Not touched: data/binary rename (needs Mikey), design items.
 - Open from first-run audit: signed-out-but-installed agent flow, sign-in gate and no-auth tab states.
 
 **Queued after overnight:** Needs-you phases 5–6, PR review phase 4 (walkthrough), data/binary rename
