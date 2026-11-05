@@ -3979,6 +3979,7 @@ impl Render for ComposerInput {
 /// Events the shell listens for.
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
+    SignIn { device: String, harness: mast_proto::HarnessId, account: Option<String>, snapshot: mast_proto::ManagedAccountsSnapshot },
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -4400,6 +4401,7 @@ impl ComposerSlice {
 }
 
 pub struct Composer {
+    sign_in_check: Option<(Option<String>, mast_proto::HarnessId, Option<String>, Instant, bool)>,
     pub(crate) state: Entity<AppState>,
     seen: crate::observe_gate::ObserveGate<ComposerSlice>,
     pub(crate) input: Entity<ComposerInput>,
@@ -4564,6 +4566,36 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    fn refresh_sign_in_status(&mut self, cx: &mut Context<Self>) -> Option<(String, mast_proto::HarnessId, Option<String>, mast_proto::ManagedAccountsSnapshot)> {
+        let state = self.state.read(cx);
+        if state.selected_chat.is_some() { self.sign_in_check = None; return None; }
+        let harness = self.pickers.read(cx).resolved(cx).harness?;
+        if !crate::managed_accounts::supports_accounts(harness) { return None; }
+        let device = state.effective_device_id();
+        let snapshot = state.managed_accounts_for(device.as_deref()).cloned().unwrap_or_default();
+        let account = state.selected_space_row().and_then(|space| crate::managed_accounts::project_account(&snapshot, &space.id, harness)).map(|account| account.id.clone());
+        let key = (device.clone(), harness, account.clone());
+        let refresh = self.sign_in_check.as_ref().is_none_or(|(d, h, a, at, _)| (d, *h, a) != (&key.0, key.1, &key.2) || at.elapsed() >= Duration::from_secs(30));
+        if refresh {
+            let rpc = state.accounts_rpc(device.as_deref());
+            let started = Instant::now();
+            self.sign_in_check = Some((device.clone(), harness, account.clone(), started, false));
+            let request_key = key.clone();
+            cx.spawn(async move |this, cx| {
+                let result = rpc.call(mast_rpc::methods::LOCAL_AGENT_SIGN_IN_STATUS, serde_json::json!({"harness": harness, "accountId": request_key.2.clone()})).await;
+                this.update(cx, |this, cx| {
+                    if let Some((d, h, a, at, signed_out)) = &mut this.sign_in_check {
+                        if (&*d, *h, &*a, *at) == (&request_key.0, request_key.1, &request_key.2, started) {
+                            *signed_out = result.ok().and_then(|value| value.as_str().map(str::to_owned)).as_deref() == Some("signed_out");
+                            cx.notify();
+                        }
+                    }
+                }).ok();
+            }).detach();
+            return None;
+        }
+        self.sign_in_check.as_ref().is_some_and(|entry| entry.4).then(|| (device.unwrap_or_default(), harness, account, snapshot))
+    }
     pub(crate) fn set_dock_frame(
         &mut self,
         frame: crate::composer_dock::DockFrame,
@@ -4693,6 +4725,7 @@ impl Composer {
         });
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {
+            sign_in_check: None,
             state,
             input,
             queue_edit_draft: None,
@@ -8248,6 +8281,7 @@ impl Render for Composer {
         // New chats render expanded regardless of `expanded_mode` (see below),
         // so a mode flip there changes nothing visible — never morph it.
         let new_chat = self.state.read(cx).selected_chat.is_none();
+        let sign_in_notice = self.refresh_sign_in_status(cx);
         // Morph clock in ms; dividing by the measurement knob stretches the
         // timeline exactly like shell.rs eval_tween's scaled duration.
         let now_ms = self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
@@ -8936,7 +8970,17 @@ impl Render for Composer {
         } else {
             container
         };
-        let container = container.child(pill_surface);
+        let container = container.when_some(sign_in_notice, |container, (device, harness, account, snapshot)| {
+            let name = if harness == mast_proto::HarnessId::ClaudeCode { "Claude Code" } else { "Codex" };
+            container.child(div().debug_selector(|| "composer-sign-in-notice".into()).flex().items_center().gap(px(8.0))
+                .text_color(theme.warning).child(SharedString::from(format!("{name} isn't signed in")))
+                .child(crate::popover::btn_ghost(&theme, "Sign in…", "composer-sign-in")
+                    .id("composer-sign-in").debug_selector(|| "composer-sign-in".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sign_in_check = None;
+                        cx.emit(ComposerEvent::SignIn { device: device.clone(), harness, account: account.clone(), snapshot: snapshot.clone() });
+                    }))))
+        }).child(pill_surface);
 
         // The lower slot keeps a stable footprint for Git projects while its
         // old floating checkout/ref controls dissolve into the session footer.

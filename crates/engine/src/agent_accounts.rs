@@ -284,6 +284,7 @@ struct UsageSnapshot {
 struct Inner {
     config: AgentAccountsConfig,
     sign_in_cache: Mutex<HashMap<HarnessId, (LocalSignInStatus, Instant)>>,
+    sign_in_generation: std::sync::atomic::AtomicU64,
     http: reqwest::Client,
     flows: Mutex<HashMap<String, LoginFlow>>,
     /// `"{harness}:{accountKey}"` → cached usage windows.
@@ -357,6 +358,7 @@ impl AgentAccounts {
             inner: Arc::new(Inner {
                 config,
                 sign_in_cache: Mutex::new(HashMap::new()),
+                sign_in_generation: std::sync::atomic::AtomicU64::new(0),
                 http,
                 flows: Mutex::new(HashMap::new()),
                 usage_cache: Mutex::new(HashMap::new()),
@@ -370,6 +372,7 @@ impl AgentAccounts {
 
     /// Inspect the configured local home. Errors and unsupported harnesses are unknown.
     pub async fn local_sign_in_status(&self, harness: HarnessId) -> LocalSignInStatus {
+        let generation = self.inner.sign_in_generation.load(std::sync::atomic::Ordering::Acquire);
         if let Some((status, checked)) = lock(&self.inner.sign_in_cache).get(&harness).copied()
             && checked.elapsed() < Duration::from_secs(30)
         {
@@ -393,12 +396,18 @@ impl AgentAccounts {
             }
             _ => LocalSignInStatus::Unknown,
         };
-        lock(&self.inner.sign_in_cache).insert(harness, (status, Instant::now()));
+        let mut cache = lock(&self.inner.sign_in_cache);
+        if self.inner.sign_in_generation.load(std::sync::atomic::Ordering::Acquire) != generation {
+            return LocalSignInStatus::Unknown;
+        }
+        cache.insert(harness, (status, Instant::now()));
         status
     }
 
     pub fn invalidate_local_sign_in_status(&self) {
-        lock(&self.inner.sign_in_cache).clear();
+        let mut cache = lock(&self.inner.sign_in_cache);
+        self.inner.sign_in_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        cache.clear();
     }
 
     /// Point the Claude and Codex usage probes at other endpoints (fakes).
