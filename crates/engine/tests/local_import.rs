@@ -15,6 +15,38 @@ fn assemble(profile: EngineProfile) -> EngineCore {
         .expect("assemble profile")
 }
 
+/// HOME is process-global, and local/synced profiles asynchronously adopt
+/// external sessions from it. Run each test in a child with its own empty home
+/// so adoption cannot add rows from the developer's machine or another test.
+fn run_in_isolated_home() -> bool {
+    const CHILD_ENV: &str = "MAST_LOCAL_IMPORT_ISOLATED_TEST";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return false;
+    }
+    let home = tempfile::tempdir().expect("isolated home");
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("test thread name");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env("HOME", home.path())
+        .env("MAST_WORKTREES_DIR", home.path().join("worktrees"))
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("run isolated test");
+    assert!(
+        output.status.success(),
+        "isolated test failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "isolated test did not run exactly once: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    true
+}
+
 /// Seed a local profile with a space, two chats (one with a doc + journal,
 /// one row-only), exactly as a local-first stretch leaves them on disk.
 async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
@@ -114,6 +146,9 @@ fn summary(events: &[ImportEvent]) -> (usize, usize, usize, usize) {
 
 #[tokio::test]
 async fn local_work_imports_into_synced_profile_once() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let (_device, chat_doc, chat_bare) = seed_local(dir.path()).await;
 
@@ -223,6 +258,9 @@ async fn local_work_imports_into_synced_profile_once() {
 
 #[tokio::test]
 async fn import_without_local_profile_is_a_clean_no_op() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
 
@@ -257,6 +295,9 @@ fn raw_summary(events: &[ImportEvent]) -> (usize, usize, Vec<String>) {
 
 #[tokio::test]
 async fn per_item_failures_surface_in_the_summary_and_leave_the_row_retryable() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let (_device, chat_doc, chat_bare) = seed_local(dir.path()).await;
 
@@ -314,6 +355,9 @@ async fn per_item_failures_surface_in_the_summary_and_leave_the_row_retryable() 
 
 #[tokio::test]
 async fn corrupt_marker_is_moved_aside_not_clobbered() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let (..) = seed_local(dir.path()).await;
 
@@ -341,6 +385,9 @@ async fn corrupt_marker_is_moved_aside_not_clobbered() {
 
 #[tokio::test]
 async fn marker_persistence_failure_is_an_import_error() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let (..) = seed_local(dir.path()).await;
 
@@ -362,6 +409,9 @@ async fn marker_persistence_failure_is_an_import_error() {
 
 #[tokio::test]
 async fn spaces_only_profile_imports_its_spaces() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let local = assemble(EngineProfile::local(dir.path()).expect("local profile"));
     let device = local.device_id.clone();
@@ -411,6 +461,9 @@ async fn spaces_only_profile_imports_its_spaces() {
 
 #[tokio::test]
 async fn marker_keeps_one_entry_per_account() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let (..) = seed_local(dir.path()).await;
 
@@ -431,6 +484,9 @@ async fn marker_keeps_one_entry_per_account() {
 
 #[tokio::test]
 async fn later_local_work_imports_as_a_delta() {
+    if run_in_isolated_home() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let (device, ..) = seed_local(dir.path()).await;
 
