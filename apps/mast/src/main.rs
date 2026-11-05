@@ -8,13 +8,14 @@ mod auth_cli;
 mod daemon;
 mod doctor;
 mod paths;
+mod preferences;
 mod update_cli;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "zeron",
+    name = "mast",
     version,
     about = "Multi-device controller for coding agents"
 )]
@@ -140,6 +141,10 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
+    #[cfg(all(target_os = "macos", not(test)))]
+    if cli.command.is_none() {
+        preferences::migrate();
+    }
     // Classify before logging or either engine mode creates startup files.
     if cli.command.is_none() || matches!(cli.command, Some(Command::Headless)) {
         mast_ui::settings::UiSettings::load_for_startup(&paths::data_dir());
@@ -245,7 +250,8 @@ fn main() -> anyhow::Result<()> {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(27654);
-            let report = runtime.block_on(doctor::inspect(paths::data_dir_read_only(), port));
+            let (data_dir, reason) = paths::data_dir_read_only();
+            let report = runtime.block_on(doctor::inspect(data_dir, reason, port));
             doctor::print_report(&report, json)?;
             if report.exit_code() != 0 {
                 std::process::exit(1);

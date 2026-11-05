@@ -47,9 +47,9 @@ cd mast                                   # the default branch is work-outline-i
 cargo build --profile installed -p mast   # optimised build, about 3 minutes the first time
 ```
 
-Run `target/installed/zeron doctor` from the checkout for a prerequisite checklist and suggested fixes (`--json` emits machine-readable results).
+Run `target/installed/mast doctor` from the checkout for a prerequisite checklist and suggested fixes (`--json` emits machine-readable results).
 
-The binary is `target/installed/zeron`. The binary and some internal names still say `zeron`; the product is Mast.
+The binary is `target/installed/mast`. A `zeron` executable remains available for compatibility for one release.
 
 To get a normal app you can keep in `/Applications`, build the bundle and disk image. Packaging also needs Python 3, pip and the `dmgbuild` Python package. It builds the release profile separately, so the first packaging run compiles again:
 
@@ -65,7 +65,7 @@ To try it without touching an installed Mast, run the isolated dev app:
 scripts/run-macos-dev.sh
 ```
 
-It builds a debug binary and opens `Mast Dev.app` with its own data folder (`target/macos-dev/data`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
+It builds a debug binary and opens `Mast Dev.app` with its own data folder (`~/.mast-dev`, or an existing `~/.zeron-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
 
 ## First run
 
@@ -99,6 +99,7 @@ The full list is in [docs/guide/keyboard.md](docs/guide/keyboard.md).
 Guides:
 
 - [Getting started](docs/guide/getting-started.md)
+- [What changes when you update](docs/guide/updating-to-mast.md)
 - [The Work Outline](docs/guide/work-outline.md)
 - [Orchestrating with coordinator and worker chats](docs/guide/orchestrating.md)
 - [Plans and artifacts](docs/guide/plans-and-artifacts.md)

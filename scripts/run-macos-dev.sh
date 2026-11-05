@@ -11,10 +11,17 @@ VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 DEV_ROOT="$ROOT/target/macos-dev"
 APP="$DEV_ROOT/Mast Dev.app"
 CONTENTS="$APP/Contents"
-DATA_DIR="${MAST_DEV_DATA_DIR:-$DEV_ROOT/data}"
+if [[ -n "${MAST_DEV_DATA_DIR:-${ZERON_DEV_DATA_DIR:-}}" ]]; then
+  DATA_DIR="${MAST_DEV_DATA_DIR:-$ZERON_DEV_DATA_DIR}"
+elif [[ -e "$HOME/.zeron-dev" && ! -e "$HOME/.mast-dev" ]]; then
+  DATA_DIR="$HOME/.zeron-dev"
+else
+  DATA_DIR="$HOME/.mast-dev"
+fi
 IPC_PORT="${MAST_DEV_IPC_PORT:-49777}"
 
-if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
+if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1 || \
+   pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Mast Dev is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi
@@ -23,7 +30,8 @@ cd "$ROOT"
 cargo build -p mast
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
-install -m 755 "$ROOT/target/debug/zeron" "$CONTENTS/MacOS/zeron"
+install -m 755 "$ROOT/target/debug/mast" "$CONTENTS/MacOS/mast"
+ln -sfn mast "$CONTENTS/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.MAST_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.MAST_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
@@ -47,14 +55,14 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --force --sign "$IDENTITY" --identifier sh.zeron.app.dev "$APP"
+  codesign --force --sign "$IDENTITY" --identifier computer.mikey.mast.dev "$APP"
 else
-  codesign --force --sign - --identifier sh.zeron.app.dev "$APP"
+  codesign --force --sign - --identifier computer.mikey.mast.dev "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
-echo "running Mast Dev (bundle sh.zeron.app.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
-# LaunchServices must own the process. Launching Contents/MacOS/zeron directly
+echo "running Mast Dev (bundle computer.mikey.mast.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
+# LaunchServices must own the process. Launching Contents/MacOS/mast directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the
 # isolated data directory (`target/macos-dev/data/logs/mast-headed.log`).

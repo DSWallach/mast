@@ -9,11 +9,11 @@
     <key>CFBundleDisplayName</key>
     <string>Mast</string>
     <key>CFBundleExecutable</key>
-    <string>zeron</string>
+    <string>mast</string>
     <key>CFBundleIconFile</key>
     <string>mast.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>sh.zeron.app</string>
+    <string>computer.mikey.mast</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -28,9 +28,10 @@
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>sh.zeron.app.conversation</string>
+            <string>computer.mikey.mast.conversation</string>
             <key>CFBundleURLSchemes</key>
             <array>
+                <string>mast</string>
                 <string>zeron</string>
             </array>
         </dict>

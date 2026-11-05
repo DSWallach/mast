@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Keychain service and account of the stored key.
-pub const KEYCHAIN_SERVICE: &str = "sh.zeron.linear";
+pub const KEYCHAIN_SERVICE: &str = "computer.mikey.mast.linear";
+const LEGACY_KEYCHAIN_SERVICE: &str = "sh.zeron.linear";
 pub const KEYCHAIN_ACCOUNT: &str = "api-key";
 /// Environment fallback (and the only source when no store holds a key).
 pub const ENV_KEY: &str = "LINEAR_API_KEY";
@@ -84,6 +85,24 @@ impl LinearKeyStore for MemoryKeyStore {
 /// environment variable is the only source).
 pub struct KeychainKeyStore;
 
+// Keep migration independent of the security command so tests can supply a
+// fake store. A failed copy is reported rather than silently losing it.
+#[cfg(any(target_os = "macos", test))]
+fn read_migrated_key(
+    mut read: impl FnMut(&str) -> Result<Option<String>, String>,
+    mut write: impl FnMut(&str, &str) -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    if let Some(key) = read(KEYCHAIN_SERVICE)? {
+        // An empty item records an explicit deletion and suppresses fallback.
+        return Ok((!key.is_empty()).then_some(key));
+    }
+    let key = read(LEGACY_KEYCHAIN_SERVICE)?.filter(|key| !key.is_empty());
+    if let Some(ref key) = key {
+        write(KEYCHAIN_SERVICE, key)?;
+    }
+    Ok(key)
+}
+
 #[cfg(target_os = "macos")]
 impl KeychainKeyStore {
     /// `security` blocks indefinitely on an unanswered consent dialog.
@@ -125,23 +144,7 @@ impl KeychainKeyStore {
 #[cfg(target_os = "macos")]
 impl LinearKeyStore for KeychainKeyStore {
     fn read(&self) -> Result<Option<String>, String> {
-        let (ok, stdout, stderr) = Self::run(&[
-            "find-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-        ])?;
-        if ok {
-            let key = stdout.trim().to_owned();
-            return Ok((!key.is_empty()).then_some(key));
-        }
-        // errSecItemNotFound: "The specified item could not be found …".
-        if stderr.contains("could not be found") {
-            return Ok(None);
-        }
-        Err(format!("Keychain read failed: {stderr}"))
+        read_migrated_key(Self::read_service, |_, key| self.write(key))
     }
 
     fn write(&self, key: &str) -> Result<(), String> {
@@ -165,18 +168,31 @@ impl LinearKeyStore for KeychainKeyStore {
     }
 
     fn delete(&self) -> Result<(), String> {
-        let (ok, _, stderr) = Self::run(&[
-            "delete-generic-password",
+        // Retain the legacy item but prevent it from being restored on read.
+        self.write("")
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl KeychainKeyStore {
+    fn read_service(service: &str) -> Result<Option<String>, String> {
+        let (ok, stdout, stderr) = Self::run(&[
+            "find-generic-password",
             "-s",
-            KEYCHAIN_SERVICE,
+            service,
             "-a",
             KEYCHAIN_ACCOUNT,
+            "-w",
         ])?;
-        if ok || stderr.contains("could not be found") {
-            Ok(())
-        } else {
-            Err(format!("Keychain delete failed: {stderr}"))
+        if ok {
+            let key = stdout.trim().to_owned();
+            return Ok(Some(key));
         }
+        // errSecItemNotFound: "The specified item could not be found …".
+        if stderr.contains("could not be found") {
+            return Ok(None);
+        }
+        Err(format!("Keychain read failed: {stderr}"))
     }
 }
 
@@ -219,4 +235,59 @@ pub fn process_env_source() -> EnvKeySource {
 
 pub fn no_env_source() -> EnvKeySource {
     Arc::new(|| None)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[test]
+    fn migrates_only_when_current_service_is_absent() {
+        let items = RefCell::new(HashMap::from([(
+            LEGACY_KEYCHAIN_SERVICE.to_owned(),
+            "legacy".to_owned(),
+        )]));
+        let read = || {
+            read_migrated_key(
+                |service| Ok(items.borrow().get(service).cloned()),
+                |service, key| {
+                    items
+                        .borrow_mut()
+                        .insert(service.to_owned(), key.to_owned());
+                    Ok(())
+                },
+            )
+        };
+        assert_eq!(read().unwrap().as_deref(), Some("legacy"));
+        assert_eq!(
+            items.borrow().get(LEGACY_KEYCHAIN_SERVICE).unwrap(),
+            "legacy"
+        );
+        items
+            .borrow_mut()
+            .insert(KEYCHAIN_SERVICE.into(), "current".into());
+        assert_eq!(read().unwrap().as_deref(), Some("current"));
+        items
+            .borrow_mut()
+            .insert(KEYCHAIN_SERVICE.into(), String::new());
+        assert_eq!(read().unwrap(), None);
+        items.borrow_mut().clear();
+        assert_eq!(read().unwrap(), None);
+        items
+            .borrow_mut()
+            .insert(LEGACY_KEYCHAIN_SERVICE.into(), String::new());
+        assert_eq!(read().unwrap(), None);
+        assert!(!items.borrow().contains_key(KEYCHAIN_SERVICE));
+    }
+
+    #[test]
+    fn reports_copy_failure_without_removing_legacy_item() {
+        let result = read_migrated_key(
+            |service| Ok((service == LEGACY_KEYCHAIN_SERVICE).then(|| "legacy".to_owned())),
+            |_, _| Err("copy failed".into()),
+        );
+        assert_eq!(result.unwrap_err(), "copy failed");
+    }
 }

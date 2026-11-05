@@ -403,27 +403,25 @@ fn linear_check(env: &impl Environment) -> Check {
             );
         };
         // No -w: security only reports item attributes, and stdout is discarded.
-        return match env.run(
-            "security",
-            &security,
-            &[
-                "find-generic-password",
-                "-s",
-                "sh.zeron.linear",
-                "-a",
-                "api-key",
-            ],
-            false,
-        ) {
-            Some(result) if result.success => {
-                Check::new("Linear", Status::Ok, "Keychain item present", None)
-            }
-            _ => Check::new(
+        return if ["computer.mikey.mast.linear", "sh.zeron.linear"]
+            .iter()
+            .any(|service| {
+                env.run(
+                    "security",
+                    &security,
+                    &["find-generic-password", "-s", service, "-a", "api-key"],
+                    false,
+                )
+                .is_some_and(|result| result.success)
+            }) {
+            Check::new("Linear", Status::Ok, "Keychain item present", None)
+        } else {
+            Check::new(
                 "Linear",
                 Status::Warning,
                 "Keychain item absent or unavailable",
                 Some("Optionally add a key in Settings → Linear"),
-            ),
+            )
         };
     }
     #[cfg(not(target_os = "macos"))]
@@ -673,7 +671,7 @@ fn toolchain_check(
                 "Rust toolchain",
                 Status::Warning,
                 "no rust-toolchain file found from the current directory",
-                Some("Run zeron doctor from the Mast checkout to compare its toolchain"),
+                Some("Run mast doctor from the Mast checkout to compare its toolchain"),
             );
         }
         Err(_) => {
@@ -746,7 +744,7 @@ fn toolchain_check(
     }
 }
 
-pub async fn inspect(data_dir: PathBuf, port: u16) -> Report {
+pub async fn inspect(data_dir: PathBuf, reason: &str, port: u16) -> Report {
     let env = System;
     let mut checks = Vec::new();
     let (claude, claude_path, _) = version_check(
@@ -789,7 +787,9 @@ pub async fn inspect(data_dir: PathBuf, port: u16) -> Report {
         )
         .0,
     );
-    checks.extend(data_checks(&data_dir));
+    let mut storage_checks = data_checks(&data_dir);
+    storage_checks[0].message.push_str(&format!("; selected by {reason}"));
+    checks.extend(storage_checks);
     checks.push(engine_check(&data_dir, port).await);
     let (cargo, _, cargo_version) = version_check(&env, "cargo", false, "Install Rust with rustup");
     checks.push(cargo);
@@ -1060,7 +1060,7 @@ mod tests {
             &[
                 "find-generic-password",
                 "-s",
-                "sh.zeron.linear",
+                "computer.mikey.mast.linear",
                 "-a",
                 "api-key",
             ],

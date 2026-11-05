@@ -36,6 +36,26 @@ pub fn var_os(name: &str) -> Option<OsString> {
     std::env::var_os(name).or_else(|| legacy_name(name).and_then(std::env::var_os))
 }
 
+/// Select a home-relative storage directory without moving an existing one.
+pub fn home_storage_dir(
+    home: &std::path::Path,
+    development: bool,
+) -> (std::path::PathBuf, &'static str) {
+    assert_test_home_isolated(home);
+    let (current, legacy) = if development {
+        (".mast-dev", ".zeron-dev")
+    } else {
+        (".mast", ".zeron")
+    };
+    let current = home.join(current);
+    let legacy = home.join(legacy);
+    if legacy.exists() && !current.exists() {
+        (legacy, "existing legacy directory")
+    } else {
+        (current, "default Mast directory")
+    }
+}
+
 /// Reject a test process resolving a home-relative default against its original home.
 /// The test initializer sets the marker before changing HOME; ordinary application
 /// processes never set it, including in release builds.
@@ -60,6 +80,35 @@ pub fn assert_test_home_isolated(home: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_storage_selection_preserves_existing_legacy_directories() {
+        for (development, current, legacy) in [
+            (false, ".mast", ".zeron"),
+            (true, ".mast-dev", ".zeron-dev"),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            assert_eq!(
+                home_storage_dir(home.path(), development).0,
+                home.path().join(current)
+            );
+            std::fs::create_dir(home.path().join(legacy)).unwrap();
+            assert_eq!(
+                home_storage_dir(home.path(), development).0,
+                home.path().join(legacy)
+            );
+            std::fs::create_dir(home.path().join(current)).unwrap();
+            assert_eq!(
+                home_storage_dir(home.path(), development).0,
+                home.path().join(current)
+            );
+            std::fs::remove_dir(home.path().join(legacy)).unwrap();
+            assert_eq!(
+                home_storage_dir(home.path(), development).0,
+                home.path().join(current)
+            );
+        }
+    }
 
     #[test]
     fn test_process_home_is_isolated() {

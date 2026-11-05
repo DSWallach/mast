@@ -362,6 +362,12 @@ impl AgentToolsLaunch {
     /// the engine actually bound. `None` when the executable path is unknown.
     pub fn from_current_exe() -> Option<Self> {
         let command = std::env::current_exe().ok()?;
+        let mast = command.with_file_name("mast");
+        let command = if command.file_name().is_some_and(|name| name == "zeron") && mast.is_file() {
+            mast
+        } else {
+            command
+        };
         Some(Self {
             command,
             args: vec!["mcp".into()],

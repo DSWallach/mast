@@ -33,20 +33,21 @@ import json, sys
 binary = None
 for line in sys.stdin:
     message = json.loads(line)
-    if message.get("reason") == "compiler-artifact" and message.get("target", {}).get("name") == "zeron" and message.get("executable"):
+    if message.get("reason") == "compiler-artifact" and message.get("target", {}).get("name") == "mast" and message.get("executable"):
         binary = message["executable"]
 if binary is None:
-    sys.exit("Cargo did not report a built zeron executable")
+    sys.exit("Cargo did not report a built mast executable")
 print(binary)
 ')"
 if [[ ! -f "$BINARY" ]]; then
-  echo "Cargo reported a missing zeron executable: $BINARY" >&2
+  echo "Cargo reported a missing mast executable: $BINARY" >&2
   exit 1
 fi
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-install -m 755 "$BINARY" "$APP/Contents/MacOS/zeron"
+install -m 755 "$BINARY" "$APP/Contents/MacOS/mast"
+ln -s mast "$APP/Contents/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"

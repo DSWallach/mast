@@ -115,7 +115,7 @@ fn post_impl(title: &str, body: &str, chat_id: Option<&str>, actions: &[(String,
 /// The identity banners are attributed to — the packaged app's bundle id
 /// (`dist/macos/Info.plist`), which the center resolves to its name + icon.
 #[cfg(target_os = "macos")]
-const MACOS_BUNDLE_ID: &std::ffi::CStr = c"sh.zeron.app";
+const MACOS_BUNDLE_ID: &std::ffi::CStr = c"computer.mikey.mast";
 
 /// `userInfo` key carrying the banner's chat id back to the click handler.
 #[cfg(target_os = "macos")]
