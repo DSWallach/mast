@@ -1680,7 +1680,7 @@ impl Render for WorkItemDetails {
                             this.disassociate(remove_id.clone(), cx)
                         })),
                 )
-        });
+        }).collect::<Vec<_>>();
         let associated: HashSet<&str> = snapshot
             .items
             .iter()
