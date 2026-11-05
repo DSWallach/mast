@@ -426,7 +426,6 @@ impl OrchestratorWakes {
         state.core.transfer_held(from, to);
         state.handed_off_to.insert(from.to_owned(), to.to_owned());
         state.timers.remove(from);
-        self.persist(state);
     }
 
     /// Hand off direct workers and their pending wakes to another orchestrator.
@@ -464,6 +463,7 @@ impl OrchestratorWakes {
                     }
                 }
             }
+            self.persist_checked(&state).map_err(|error| format!("could not save wake settings: {error}"))?;
             workers
         };
         Ok(workers)
@@ -474,8 +474,14 @@ impl OrchestratorWakes {
     }
 
     fn persist(&self, state: &State) {
+        if let Err(error) = self.persist_checked(state) {
+            tracing::warn!(%error, "could not save orchestrator wake settings");
+        }
+    }
+
+    fn persist_checked(&self, state: &State) -> Result<(), std::io::Error> {
         let Some(path) = &self.inner.store else {
-            return;
+            return Ok(());
         };
         let settings = serde_json::json!({
             "autoContinue": state.auto_continue_default,
@@ -483,9 +489,13 @@ impl OrchestratorWakes {
             "autoContinueWorkers": state.auto_continue,
             "handedOffTo": state.handed_off_to,
         });
-        if let Ok(bytes) = serde_json::to_vec_pretty(&settings) {
-            let _ = std::fs::write(path, bytes);
-        }
+        let bytes = serde_json::to_vec_pretty(&settings).map_err(std::io::Error::other)?;
+        let staging = path.with_extension("handoff-tmp");
+        let mut file = std::fs::File::create(&staging)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        std::fs::rename(staging, path)?;
+        Ok(())
     }
 
     pub fn status(&self, chat_id: &str) -> WakeStatus {
