@@ -190,6 +190,7 @@ struct State {
     turn_starts: HashMap<String, TurnStart>,
     auto_continue_default: bool,
     settings_overrides: HashMap<String, WakeSettings>,
+    handed_off_to: HashMap<String, String>,
     chats: HashMap<String, ChatInfo>,
     chats_seeded: bool,
     /// Per Space: worker chat → orchestrators by project worker destination.
@@ -239,6 +240,12 @@ impl OrchestratorWakes {
                 && let Ok(saved) = serde_json::from_value(saved.clone())
             {
                 state.auto_continue = saved;
+            }
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let Some(saved) = value.get("handedOffTo")
+                && let Ok(saved) = serde_json::from_value(saved.clone())
+            {
+                state.handed_off_to = saved;
             }
             let (auto_continue_default, saved) = read_settings(&bytes);
             state.auto_continue_default = auto_continue_default;
@@ -416,6 +423,7 @@ impl OrchestratorWakes {
         state.core.set_settings_preserving_held(to, settings);
         state.settings_overrides.insert(to.to_owned(), settings);
         state.core.transfer_held(from, to);
+        state.handed_off_to.insert(from.to_owned(), to.to_owned());
         state.timers.remove(from);
         self.persist(state);
     }
@@ -424,6 +432,18 @@ impl OrchestratorWakes {
     pub async fn hand_off_orchestrator(&self, from: &str, to: &str, actor: &str) -> Result<Vec<String>, String> {
         let workers = {
             let mut state = lock(&self.inner.state);
+            if state.handed_off_to.get(from).is_some_and(|existing| existing != to) {
+                return Err("source already handed off to another chat".into());
+            }
+            let mut cursor = to;
+            let mut remaining = state.handed_off_to.len() + 1;
+            while let Some(next) = state.handed_off_to.get(cursor) {
+                if next == from || remaining == 0 {
+                    return Err("hand-off would create a routing cycle".into());
+                }
+                cursor = next;
+                remaining -= 1;
+            }
             let (workers, replayed) = self.inner.workspace.hand_off_chat_children(from, to, actor, self.now())?;
             if !replayed {
                 self.transfer_wakes(&mut state, from, to);
@@ -447,6 +467,7 @@ impl OrchestratorWakes {
             "autoContinue": state.auto_continue_default,
             "orchestrators": state.settings_overrides,
             "autoContinueWorkers": state.auto_continue,
+            "handedOffTo": state.handed_off_to,
         });
         if let Ok(bytes) = serde_json::to_vec_pretty(&settings) {
             let _ = std::fs::write(path, bytes);
@@ -1219,7 +1240,19 @@ fn parents_of(state: &State, worker: &str) -> Vec<String> {
             }
         }
     }
-    out
+    let mut redirected = Vec::new();
+    for mut parent in out {
+        let mut remaining = state.handed_off_to.len();
+        while remaining > 0 {
+            let Some(next) = state.handed_off_to.get(&parent) else { break };
+            parent = next.clone();
+            remaining -= 1;
+        }
+        if parent != worker && !redirected.contains(&parent) {
+            redirected.push(parent);
+        }
+    }
+    redirected
 }
 
 fn is_orchestrator(state: &State, chat_id: &str) -> bool {
@@ -1263,6 +1296,20 @@ fn destination_parents(snapshot: &WorkOutlineSnapshot) -> HashMap<String, Vec<St
         }
     }
     out
+}
+
+#[cfg(test)]
+mod hand_off_tests {
+    use super::*;
+
+    #[test]
+    fn hand_off_redirects_project_destination_wakes() {
+        let mut state = State::default();
+        state.chats.insert("worker".into(), ChatInfo { parent: Some("successor".into()), ..Default::default() });
+        state.destination_parents.entry("space".into()).or_default().insert("worker".into(), vec!["source".into()]);
+        state.handed_off_to.insert("source".into(), "successor".into());
+        assert_eq!(parents_of(&state, "worker"), vec!["successor"]);
+    }
 }
 
 #[cfg(test)]
