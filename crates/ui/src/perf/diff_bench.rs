@@ -20,6 +20,10 @@ fn bench_diff_parse_5000_lines() {
     measure("diff", "parse_diff_tree (parse+layout)", || {
         parse_diff_tree(&patch, &[])
     });
+    let files = parse_patch(&patch);
+    measure_n("diff", "highlight 200-line excerpt", 30, |_| {
+        std::hint::black_box(excerpt_highlights(&files[0], Lang::Rust));
+    });
 }
 
 #[gpui::test]
