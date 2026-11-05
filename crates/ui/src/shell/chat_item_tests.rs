@@ -88,6 +88,7 @@ pub(super) fn mount<'a>(
             cx,
         );
         crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default(), Default::default());
     });
     let (host, vcx) = cx.add_window_view(move |_, cx| {
         let shell = cx.new(|cx| {
@@ -1198,6 +1199,22 @@ fn plain_t_opens_the_team_tab_only_when_the_panel_itself_is_focused(cx: &mut Tes
     vcx.update(|window, cx| window.focus(&panel, cx));
     draw(vcx);
     vcx.simulate_keystrokes("t");
+    shell.read_with(vcx, |shell, cx| assert_eq!(shell.resolved_right_active(cx), RightSurface::Team));
+}
+
+#[gpui::test]
+fn team_panel_rebind_replaces_the_default(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 3);
+    let mut keymap = crate::settings::KeymapConfig::default();
+    keymap.set(crate::settings::ShortcutId::OpenTeamTabFromPanel, "y".into());
+    vcx.update(|_, cx| crate::shell::apply_keymap(cx, &keymap, Default::default()));
+    let panel = shell.update(vcx, |shell, cx| shell.team_panel_focus(cx));
+    vcx.update(|window, cx| window.focus(&panel, cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("t");
+    shell.read_with(vcx, |shell, cx| assert_ne!(shell.resolved_right_active(cx), RightSurface::Team));
+    vcx.simulate_keystrokes("y");
     shell.read_with(vcx, |shell, cx| assert_eq!(shell.resolved_right_active(cx), RightSurface::Team));
 }
 
