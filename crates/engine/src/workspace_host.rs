@@ -729,6 +729,10 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_chats())?)
     }
 
+    pub fn hand_off_chat_children(&self, from: &str, to: &str, actor: &str, at_ms: i64) -> Result<(Vec<String>, bool), String> {
+        self.mutate(|doc| doc.hand_off_chat_children(from, to, actor, at_ms))
+    }
+
     /// Every durable PR linked to this chat. Independent link rows are
     /// authoritative; the legacy single-value slot is folded in as a fallback
     /// so pre-migration chats immediately read as a one-element collection.

@@ -295,8 +295,8 @@ fn hand_off_chat_children_records_provenance_and_replays() {
         row.archived = id == "archived";
         doc.upsert_chat(&row).unwrap();
     }
-    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 123).unwrap(), vec!["worker"]);
-    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 999).unwrap(), vec!["worker"]);
+    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 123).unwrap(), (vec!["worker".into()], false));
+    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 999).unwrap(), (vec!["worker".into()], true));
     assert_eq!(doc.chat("worker").unwrap().unwrap().parent_chat_id.as_deref(), Some("destination"));
     assert_eq!(doc.chat("archived").unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
     let provenance = doc.overlay_row(KIND_CHATS, "destination").unwrap().fields["orchestratorHandOff"].clone();

@@ -1401,14 +1401,13 @@ impl RegistryDoc {
     }
 
     /// Reparent active direct children and record the hand-off on the destination.
-    /// The caller must additionally validate project scope before invoking this.
     pub fn hand_off_chat_children(
         &mut self,
         from: &str,
         to: &str,
         actor: &str,
         at_ms: i64,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<(Vec<String>, bool), String> {
         let source = self.chat(from).map_err(|e| e.to_string())?
             .ok_or("source chat does not exist")?;
         let destination = self.chat(to).map_err(|e| e.to_string())?
@@ -1418,6 +1417,9 @@ impl RegistryDoc {
         }
         if source.space_id.is_none() || source.space_id != destination.space_id {
             return Err("chats must belong to the same Space".into());
+        }
+        if !self.chats_share_project(source.space_id.as_deref().unwrap(), from, to) {
+            return Err("chats must belong to the same project".into());
         }
         if destination.parent_chat_id.as_deref() == Some(from) {
             return Err("destination cannot be a child of the source".into());
@@ -1431,6 +1433,7 @@ impl RegistryDoc {
                 return Err("destination already has a different hand-off".into());
             }
             return serde_json::from_value(provenance["workerChatIds"].clone())
+                .map(|workers| (workers, true))
                 .map_err(|e| format!("invalid hand-off provenance: {e}"));
         }
         let workers: Vec<String> = self.read_chats().map_err(|e| e.to_string())?
@@ -1443,7 +1446,7 @@ impl RegistryDoc {
         self.write(KIND_CHATS, to, OpKind::Update, fields([("orchestratorHandOff", json!({
             "fromChatId": from, "actorChatId": actor, "at": at_ms, "workerChatIds": workers,
         }))]));
-        Ok(workers)
+        Ok((workers, false))
     }
 
     pub fn rename_chat(&mut self, chat_id: &str, title: &str) -> Result<bool, DocError> {

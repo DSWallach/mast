@@ -420,6 +420,25 @@ impl OrchestratorWakes {
         self.persist(state);
     }
 
+    /// Hand off direct workers and their pending wakes to another orchestrator.
+    pub async fn hand_off_orchestrator(&self, from: &str, to: &str, actor: &str) -> Result<Vec<String>, String> {
+        let workers = {
+            let mut state = lock(&self.inner.state);
+            let (workers, replayed) = self.inner.workspace.hand_off_chat_children(from, to, actor, self.now())?;
+            if !replayed {
+                self.transfer_wakes(&mut state, from, to);
+                for worker in &workers {
+                    if let Some(info) = state.chats.get_mut(worker) {
+                        info.parent = Some(to.to_owned());
+                    }
+                }
+            }
+            workers
+        };
+        self.evaluate(to, false).await;
+        Ok(workers)
+    }
+
     fn persist(&self, state: &State) {
         let Some(path) = &self.inner.store else {
             return;
@@ -840,6 +859,8 @@ impl OrchestratorWakes {
         if text.is_empty() {
             return Err("text is empty".into());
         }
+        let (parent_id, truncated) = {
+        let mut state = lock(&self.inner.state);
         let worker = self
             .inner
             .workspace
@@ -872,7 +893,6 @@ impl OrchestratorWakes {
         let (report, truncated) = mast_proto::cap_worker_report(text);
         let now = self.now();
         {
-            let mut state = lock(&self.inner.state);
             let info = state.chats.entry(from.to_owned()).or_default();
             info.title = worker.title.clone();
             info.ticket = worker.linked_ticket_id.clone();
@@ -895,6 +915,8 @@ impl OrchestratorWakes {
             event.report = Some(report);
             state.core.record(&parent_id, event, now);
         }
+        (parent_id, truncated)
+        };
         self.evaluate(&parent_id, false).await;
         let status = self.status(&parent_id);
         if !status.settings.wakes_for(WakeEventKind::WorkerReport) {
