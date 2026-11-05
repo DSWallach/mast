@@ -16,7 +16,12 @@ pub fn classify(text: &str) -> (MessageSource, &str) {
         && let Some((chat_id, body)) = rest.split_once(']')
         && !chat_id.is_empty()
     {
-        return (MessageSource::HandOff { chat_id: chat_id.into() }, body.trim_start());
+        return (
+            MessageSource::HandOff {
+                chat_id: chat_id.into(),
+            },
+            body.trim_start(),
+        );
     }
     if let Some(rest) = trimmed.strip_prefix("[Mast: auto-continue ")
         && let Some((attempt, body)) = rest.split_once(']')
@@ -29,61 +34,59 @@ pub fn classify(text: &str) -> (MessageSource, &str) {
             body.trim_start(),
         );
     }
-    if let Some(rest) = trimmed.strip_prefix("[Mast system message") {
-        if let Some((envelope, body)) = rest.split_once(']') {
-            let label = if envelope.contains("worker updates") {
-                "Worker updates"
-            } else if envelope.contains("coordinator hand-off") {
-                "Coordinator hand-off"
-            } else if envelope.contains("auto-continue") {
-                "Auto-continue"
-            } else {
-                "System message"
-            };
-            let body = body.trim_start();
-            let body = if label == "Worker updates" {
-                body.strip_prefix("Worker updates:")
-                    .unwrap_or(body)
-                    .trim_start()
-            } else {
-                body
-            };
-            return (
-                MessageSource::System {
-                    label: label.into(),
-                },
-                body,
-            );
-        }
+    if let Some(rest) = trimmed.strip_prefix("[Mast system message")
+        && let Some((envelope, body)) = rest.split_once(']')
+    {
+        let label = if envelope.contains("worker updates") {
+            "Worker updates"
+        } else if envelope.contains("coordinator hand-off") {
+            "Coordinator hand-off"
+        } else if envelope.contains("auto-continue") {
+            "Auto-continue"
+        } else {
+            "System message"
+        };
+        let body = body.trim_start();
+        let body = if label == "Worker updates" {
+            body.strip_prefix("Worker updates:")
+                .unwrap_or(body)
+                .trim_start()
+        } else {
+            body
+        };
+        return (
+            MessageSource::System {
+                label: label.into(),
+            },
+            body,
+        );
     }
-    if let Some(rest) = trimmed.strip_prefix("[Message from Mast chat ") {
-        if let Some((identity, remainder)) =
+    if let Some(rest) = trimmed.strip_prefix("[Message from Mast chat ")
+        && let Some((identity, remainder)) =
             rest.split_once(". Reply to it with the Mast `send_message` tool, chat ")
-        {
-            if let Some((reply, body)) = remainder.split_once(']') {
-                let chat_id = reply.trim_end_matches('.').trim();
-                if !chat_id.is_empty() {
-                    let admin = identity.contains(" (an admin chat,");
-                    let identity = identity
-                        .split(" (an admin chat,")
-                        .next()
-                        .unwrap_or(identity);
-                    let suffix = format!(" ({chat_id})");
-                    let title = identity.strip_suffix(&suffix).unwrap_or(identity).trim();
-                    let source = if admin {
-                        MessageSource::Admin {
-                            chat_id: chat_id.into(),
-                            title: title.into(),
-                        }
-                    } else {
-                        MessageSource::OtherChat {
-                            chat_id: chat_id.into(),
-                            title: title.into(),
-                        }
-                    };
-                    return (source, body.trim_start());
+        && let Some((reply, body)) = remainder.split_once(']')
+    {
+        let chat_id = reply.trim_end_matches('.').trim();
+        if !chat_id.is_empty() {
+            let admin = identity.contains(" (an admin chat,");
+            let identity = identity
+                .split(" (an admin chat,")
+                .next()
+                .unwrap_or(identity);
+            let suffix = format!(" ({chat_id})");
+            let title = identity.strip_suffix(&suffix).unwrap_or(identity).trim();
+            let source = if admin {
+                MessageSource::Admin {
+                    chat_id: chat_id.into(),
+                    title: title.into(),
                 }
-            }
+            } else {
+                MessageSource::OtherChat {
+                    chat_id: chat_id.into(),
+                    title: title.into(),
+                }
+            };
+            return (source, body.trim_start());
         }
     }
     (MessageSource::Human, text)
@@ -100,10 +103,10 @@ pub fn preview(text: &str) -> String {
         MessageSource::HandOff { .. } => "Handed off to a new chat".into(),
         MessageSource::Human => {
             // Old previews were truncated before the envelope was stripped.
-            if let Some(rest) = text.trim_start().strip_prefix("[Message from Mast chat ") {
-                if let Some((title, _)) = rest.split_once(" (") {
-                    return format!("From {title}");
-                }
+            if let Some(rest) = text.trim_start().strip_prefix("[Message from Mast chat ")
+                && let Some((title, _)) = rest.split_once(" (")
+            {
+                return format!("From {title}");
             }
             if text.trim_start().starts_with("[Mast system message") {
                 return "Mast".into();
@@ -156,10 +159,25 @@ mod tests {
             )
         );
         assert_eq!(classify("hello"), (MessageSource::Human, "hello"));
-        assert_eq!(classify("[Mast hand-off: abc]"), (MessageSource::HandOff { chat_id: "abc".into() }, ""));
         assert_eq!(
-            classify("[Mast system message, not from the user: coordinator hand-off.]\nContinue coordinating"),
-            (MessageSource::System { label: "Coordinator hand-off".into() }, "Continue coordinating")
+            classify("[Mast hand-off: abc]"),
+            (
+                MessageSource::HandOff {
+                    chat_id: "abc".into()
+                },
+                ""
+            )
+        );
+        assert_eq!(
+            classify(
+                "[Mast system message, not from the user: coordinator hand-off.]\nContinue coordinating"
+            ),
+            (
+                MessageSource::System {
+                    label: "Coordinator hand-off".into()
+                },
+                "Continue coordinating"
+            )
         );
         assert_eq!(
             classify("[Message from Mast chat unfinished"),
