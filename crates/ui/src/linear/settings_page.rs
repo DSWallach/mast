@@ -376,7 +376,7 @@ impl Render for LinearSettingsPage {
                             .child(widgets::page_header(&theme, "Linear", None))
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "Read-only. Turn Linear on per project in its Space details; nothing is created in the Outline or written to Linear automatically. The key stays in this Mac\u{2019}s Keychain.",
+                                "Read-only. Turn Linear on in each Space’s details; nothing is created in the Outline or written to Linear automatically. The key stays in this Mac\u{2019}s Keychain.",
                             ))
                             .child(widgets::section_card(&theme).child(status_row).child(key_row)),
                     ),

@@ -8,7 +8,7 @@
 //! kept so renames follow; new nodes and instructions carry empty ids the
 //! engine assigns); Turn off sends `template: None`.
 //!
-//! Also here: "Doesn't follow the template" + **Apply template** on a child
+//! Also here: "Doesn't follow the template" + **Apply child template\u{2026}** on a child
 //! of a container whose rules it doesn't follow, and **Apply to all
 //! children…** on the container when some child doesn't.
 //!
@@ -336,7 +336,7 @@ pub(crate) struct ContainerTemplateState {
 }
 
 impl WorkItemDetails {
-    /// "Set up template…" / "Edit": open the editor on the current rules.
+    /// "Set up child template…" / "Edit": open the editor on the current rules.
     pub(crate) fn begin_container_template(&mut self, cx: &mut Context<Self>) {
         let editor = TemplateEditor::new(
             self.item()
@@ -458,7 +458,7 @@ impl WorkItemDetails {
                     Ok(_) => {
                         this.close_container_template(cx);
                         cx.emit(DetailsEvent::Notice {
-                            text: if off { "Template turned off" } else { "Template saved" }.into(),
+                            text: if off { "Child template turned off" } else { "Child template saved" }.into(),
                             error: false,
                         });
                     }
@@ -493,7 +493,7 @@ impl WorkItemDetails {
                 this.in_flight.remove(&key);
                 match result {
                     Ok(_) => cx.emit(DetailsEvent::Notice {
-                        text: "Template applied".into(),
+                        text: "Child template applied".into(),
                         error: false,
                     }),
                     Err(error) => this.error = Some(error.message),
@@ -519,14 +519,14 @@ impl WorkItemDetails {
                 .text_size(crate::typography::ui_rems(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text_muted)
-                .child("Template"),
+                .child("Child template"),
         );
         let editing = self.container_template.editor.is_some();
         if !editing {
             header = header.child(
                 Self::small_button(
                     "work-item-container-template-edit",
-                    if state.has_rules { "Edit" } else { "Set up template\u{2026}" },
+                    if state.has_rules { "Edit" } else { "Set up child template\u{2026}" },
                     theme,
                 )
                 .debug_selector(|| "work-item-container-template-edit".into())
@@ -572,12 +572,12 @@ impl WorkItemDetails {
                             .debug_selector(|| "work-item-template-doesnt-follow".into())
                             .text_size(crate::typography::ui_rems(10.5))
                             .text_color(theme.text_muted)
-                            .child("Doesn\u{2019}t follow the template"),
+                            .child("Doesn\u{2019}t follow the child template"),
                     )
                     .child(
                         Self::small_button(
                             "work-item-template-apply",
-                            "Apply template",
+                            "Apply child template\u{2026}",
                             theme,
                         )
                         .debug_selector(|| "work-item-template-apply".into())

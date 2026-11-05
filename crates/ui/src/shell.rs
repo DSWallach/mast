@@ -1825,7 +1825,7 @@ pub struct Shell {
     /// A `sidebar_notice` text that was raised as an explicit failure (so it
     /// renders as the copyable error card even when its wording is unusual).
     sidebar_error_text: Option<SharedString>,
-    /// Inline "outside the project" strip for a clicked local file path.
+    /// Inline "outside the Space" strip for a clicked local file path.
     outside_file_prompt: Option<outside_file_ui::OutsideFilePrompt>,
     /// Chat whose header copy-identity button is showing its transient
     /// "copied" check; cleared by `copied_chat_identity_clear` after ~1.2s.
@@ -2672,7 +2672,7 @@ impl Shell {
             if state.read(cx).selected_chat.is_none() {
                 // A set sidebar filter is an explicit standing choice — the
                 // canvas defaults (project AND its device) follow it, even
-                // over a remembered "no project" opt-out. Otherwise the last
+                // over a remembered "no Space" opt-out. Otherwise the last
                 // selected project stands, unless opted out.
                 let exists = |id: &String| state.read(cx).space_row(id).is_some();
                 let filter = self.settings.space_filter.clone().filter(&exists);
@@ -7570,7 +7570,7 @@ impl Shell {
                     cx.new(|_| DragGhost)
                 })
             })
-            // Line 1: "project @ device", status word / time-ago right.
+            // Line 1: "Space @ device", status word / time-ago right.
             .when(!compact && show_label, |el| {
                 el.child(
                     div()
@@ -9938,7 +9938,7 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
+                                .child(SharedString::from("Add a Space to get started")),
                         )
                         .child(
                             div()
@@ -9946,11 +9946,11 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
+                                    "A Space is a folder on one of your devices.",
                                 )),
                         )
                         .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
+                            popover::btn_primary(&theme_owned, "Add a Space")
                                 .id("onboarding-add-space")
                                 .mt(px(20.0))
                                 .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
@@ -13325,7 +13325,7 @@ mod tests {
         assert_eq!(
             local_work_phrase(0, 1).as_deref(),
             Some("the 1 project"),
-            "a projects-only profile must be offered the import, not a bare switch"
+            "a Spaces-only profile must be offered the import, not a bare switch"
         );
         assert_eq!(
             local_work_phrase(1, 2).as_deref(),

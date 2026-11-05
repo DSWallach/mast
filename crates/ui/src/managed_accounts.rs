@@ -268,7 +268,7 @@ pub fn promote_saved_params(
     serde_json::json!({ "spaceId": space_id, "harness": harness, "slotId": slot_id })
 }
 
-pub const SAVED_NOTE: &str = "Choosing a saved login moves it into this project's accounts, so it stops being offered for switching in Settings \u{2014} one sign-in can't safely live in two places. Your Default login can't be moved: use Add account to sign in separately.";
+pub const SAVED_NOTE: &str = "Choosing a saved login moves it into this Space's accounts, so it stops being offered for switching in Settings \u{2014} one sign-in can't safely live in two places. Your Default login can't be moved: use Add account to sign in separately.";
 
 /// Email, or "Not signed in".
 pub fn account_detail(account: &ManagedAccount) -> String {
@@ -301,7 +301,7 @@ pub fn set_project_account_params(
 }
 
 pub const PICKER_NOTE: &str =
-    "Applies to new chats in this project. Existing chats keep the account they started with.";
+    "Applies to new chats in this Space. Existing chats keep the account they started with.";
 
 // ---------------------------------------------------------------------------
 // RPC plumbing + store (on AppState)
@@ -896,7 +896,7 @@ impl AccountFlow {
         let name = harness_name(self.harness);
         let (title, body): (String, AnyElement) = match &self.phase {
             Phase::Pick => (
-                format!("{name} account for this project"),
+                format!("{name} account for this Space"),
                 self.render_pick(theme, cx),
             ),
             Phase::Name => {

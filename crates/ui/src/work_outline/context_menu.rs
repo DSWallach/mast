@@ -368,7 +368,7 @@ fn space_root_menu(
             .separated(),
             MenuEntry::new(
                 "rename-space",
-                "Rename Project\u{2026}",
+                "Rename Space\u{2026}",
                 icons::PEN,
                 MenuAction::RenameSpace(id.clone()),
             ),
@@ -398,7 +398,7 @@ fn space_root_menu(
         entries.push(
             MenuEntry::new(
                 "delete-space",
-                "Delete Project\u{2026}",
+                "Delete Space\u{2026}",
                 icons::TRASH_BIN_MINIMALISTIC,
                 MenuAction::DeleteSpace(id),
             )
@@ -530,7 +530,7 @@ impl OutlineView {
     fn space_unavailable(&self, space_id: &str) -> Option<&'static str> {
         self.snapshot(space_id)
             .is_none_or(|snapshot| !snapshot.available)
-            .then_some("This project's outline is not available yet")
+            .then_some("This Space's outline is not available yet")
     }
 
     fn item_context_menu(&self, key: &str, item: &ItemRow) -> OutlineContextMenu {
@@ -542,7 +542,7 @@ impl OutlineView {
                 return Some("Restore this work item before moving it");
             }
             let Some(snapshot) = snapshot else {
-                return Some("This project's outline is not loaded");
+                return Some("This Space's outline is not loaded");
             };
             let shown = |id: &str| {
                 self.model
@@ -805,7 +805,7 @@ impl OutlineView {
                 row.chat
                     .space_id
                     .is_none()
-                    .then_some("Chats without a project cannot be associated")
+                    .then_some("Chats without a Space cannot be associated")
             }))
             .separated(),
         ];
@@ -857,11 +857,11 @@ impl OutlineView {
         let blocked_by = gone.or_else(|| {
             space_id
                 .is_none()
-                .then_some("Chats without a project cannot be associated")
+                .then_some("Chats without a Space cannot be associated")
                 .or_else(|| {
                     snapshot
                         .is_none()
-                        .then_some("This project's outline is not loaded")
+                        .then_some("This Space's outline is not loaded")
                 })
         });
         let blocked = |op: RestructureOp| -> Option<&'static str> {
@@ -928,7 +928,7 @@ impl OutlineView {
         .disabled(
             chat.space_id
                 .is_none()
-                .then_some("Chats without a project cannot be associated"),
+                .then_some("Chats without a Space cannot be associated"),
         );
         Some(OutlineContextMenu {
             kind: MenuKind::Unassociated,
@@ -1134,7 +1134,7 @@ mod tests {
     fn space_row_menu_adds_reorder_hide_rename_and_delete() {
         let row = SpaceRowMenu {
             hidden: false,
-            up_blocked: Some("Already the first project"),
+            up_blocked: Some("Already the first Space"),
             down_blocked: None,
             account_labels: vec![(
                 mast_proto::HarnessId::Codex,
@@ -1165,7 +1165,7 @@ mod tests {
         let entry = |id: &str| menu.entries.iter().find(|e| e.id == id).unwrap();
         assert_eq!(
             entry("move-up").disabled.as_deref(),
-            Some("Already the first project")
+            Some("Already the first Space")
         );
         assert_eq!(
             entry("move-up").hint,

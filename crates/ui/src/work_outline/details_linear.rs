@@ -618,9 +618,9 @@ impl WorkItemDetails {
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_faint)
                     .child(if enabled {
-                        "On: the Linear panel, chips and links work in this project. Nothing is created or written automatically."
+                        "On: the Linear panel, chips and links work in this Space. Nothing is created or written automatically."
                     } else {
-                        "Off: no Linear calls or UI in this project; Linear URLs stay plain links."
+                        "Off: no Linear calls or UI in this Space; Linear URLs stay plain links."
                     }),
             );
         if not_available {

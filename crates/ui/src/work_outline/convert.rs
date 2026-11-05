@@ -13,7 +13,7 @@
 //! Instructions are only written to items this conversion creates. Template
 //! instructions the existing item or nodes lack are reported in the preview
 //! and left to the template review: the link then says "not reviewed yet"
-//! (revision 0) so the "Template changed" chip invites that review.
+//! (revision 0) so the "Blueprint changed" chip invites that review.
 //!
 //! Chats stay on the item they are on. The preview sends nothing; the
 //! mutations of [`ConvertPlan`] go out in order on Apply, as one undo step
@@ -203,7 +203,7 @@ pub(crate) fn plan_conversion(
         let (parent_id, parent_created) = resolved
             .get(&parent_path)
             .cloned()
-            .ok_or("The template is malformed")?;
+            .ok_or("The blueprint is malformed")?;
         let title = &node.title;
         // An existing child of an existing parent is reused.
         let existing = (!parent_created)
@@ -269,7 +269,7 @@ pub(crate) fn plan_conversion(
             .ok_or("A child to move is no longer there")?;
         let (to_id, _) = resolved
             .get(path)
-            .ok_or_else(|| format!("The template has no \u{201c}{}\u{201d}", path.join(" / ")))?;
+            .ok_or_else(|| format!("The blueprint has no \u{201c}{}\u{201d}", path.join(" / ")))?;
         // Template nodes that already exist stay; nothing moves into itself.
         if matched_ids.contains(&&child.id) || &child.id == to_id {
             continue;
@@ -360,12 +360,12 @@ pub(crate) fn preview_lines(plan: &ConvertPlan) -> Vec<String> {
     }
     if plan.unapplied.is_empty() {
         lines.push(format!(
-            "Link template \u{201c}{}\u{201d} (up to date)",
+            "Link blueprint \u{201c}{}\u{201d} (up to date)",
             plan.template_name
         ));
     } else {
         lines.push(format!(
-            "Link template \u{201c}{}\u{201d} as not reviewed yet: its instructions differ on {} (use Review changes\u{2026})",
+            "Link blueprint \u{201c}{}\u{201d} as not reviewed yet: its instructions differ on {} (use Review changes\u{2026})",
             plan.template_name,
             plan.unapplied.join(", ")
         ));

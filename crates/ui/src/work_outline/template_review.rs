@@ -1,4 +1,4 @@
-//! "Template changed" review, the pure parts: when a project's chip shows,
+//! "Blueprint changed" review, the pure parts: when a project's chip shows,
 //! how each [`TemplateChange`] reads in the list, and the exact mutations
 //! that accepting one sends.
 //!
@@ -45,9 +45,9 @@ pub(crate) fn chip_revisions(
         .then(|| (project.template_revision.unwrap_or(0), template.revision))
 }
 
-/// "Template changed (rev 2 → 3)".
+/// "Blueprint changed (rev 2 → 3)".
 pub(crate) fn chip_text(from: u32, to: u32) -> String {
-    format!("Template changed (rev {from} \u{2192} {to})")
+    format!("Blueprint changed (rev {from} \u{2192} {to})")
 }
 
 /// Whether Accept applies `change` (a removal is information only).
@@ -92,7 +92,7 @@ pub(crate) fn describe(change: &TemplateChange) -> (&'static str, String) {
         TemplateChange::RemovedItem { path } => (
             "!",
             format!(
-                "{} exists in the project, not in the template. Left as is",
+                "{} exists in the project, not in the blueprint. Left as is",
                 path_text(path)
             ),
         ),

@@ -1,4 +1,4 @@
-//! Spaces sidebar: the space-filter dropdown (searchable, with "All projects"),
+//! Spaces sidebar: the space-filter dropdown (searchable, with "All Spaces"),
 //! the filtered Sessions list, and the add-space palette (device
 //! tabs + filtered folder browser).
 //!
@@ -1921,7 +1921,7 @@ pub(super) fn compare_sidebar_chats(
 pub(super) struct SpacesMenu {
     search: Entity<ComposerInput>,
     /// Keyboard highlight — an index into [`Shell::spaces_menu_rows`], or
-    /// that list's length when the pinned "New project…" footer holds it.
+    /// that list's length when the pinned "New Space…" footer holds it.
     active: usize,
     /// Tracked on the card — puts it on the keyboard dispatch path while the
     /// search input holds focus (the structure every working picker uses).
@@ -2090,7 +2090,7 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
 }
 
 /// One activatable row of the open dropdown, in nav order. `AddSpace` names
-/// the card's pinned "New project…" footer, not a list row — keyboard nav
+/// the card's pinned "New Space…" footer, not a list row — keyboard nav
 /// maps the list-length index to it.
 #[derive(Clone, PartialEq)]
 pub(super) enum SpacesMenuRow {
@@ -3052,9 +3052,9 @@ impl Shell {
         }
     }
 
-    /// The filter's scrollable rows: "All projects", then spaces matching
+    /// The filter's scrollable rows: "All Spaces", then spaces matching
     /// the search (ranked — `popover::filter_indices`). "All" only shows on
-    /// an empty query (searching means hunting a space). The "New project…"
+    /// an empty query (searching means hunting a space). The "New Space…"
     /// action is not a row here — the card renders it as a pinned footer.
     fn spaces_menu_rows(&self, cx: &App) -> Vec<SpacesMenuRow> {
         let query = self
@@ -3085,7 +3085,7 @@ impl Shell {
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
         let search =
-            cx.new(|cx| ComposerInput::with_context("Search projects…", "PaletteSearch", cx));
+            cx.new(|cx| ComposerInput::with_context("Search Spaces…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 if let Some(menu) = this.spaces_menu.open_mut() {
@@ -3410,14 +3410,14 @@ impl Shell {
 
         let labels = [
             "By device",
-            "By project",
+            "By Space",
             "None",
             "Last updated",
             "Created",
             "Branch",
             "Pull request",
             "Harness",
-            "Project icon",
+            "Space icon",
             "Location",
         ];
         let icons = [
@@ -3736,7 +3736,7 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The sidebar's space-filter row: current filter ("All projects" or the
+    /// The sidebar's space-filter row: current filter ("All Spaces" or the
     /// space's name) + chevron, the dropdown floating beneath while open.
     /// Sits OUTSIDE the sidebar's scroll region so the float never clips.
     pub(super) fn render_spaces_filter(
@@ -3757,7 +3757,7 @@ impl Shell {
                         Some((tag.into(), offline)),
                     )
                 }
-                None => (SharedString::from("All projects"), None),
+                None => (SharedString::from("All Spaces"), None),
             }
         };
         let open = self.spaces_menu.is_open();
@@ -3985,8 +3985,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The dropdown card: search on top, "All projects" + space rows (check on
-    /// the active filter; right-click for rename/remove) + "New project…".
+    /// The dropdown card: search on top, "All Spaces" + space rows (check on
+    /// the active filter; right-click for rename/remove) + "New Space…".
     fn render_spaces_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let theme = &theme.for_popup();
         let (search, active, focus, list_scroll) = {
@@ -4018,7 +4018,7 @@ impl Shell {
                 .map(|row| match row {
                     SpacesMenuRow::All => (
                         SpacesMenuRow::All,
-                        SharedString::from("All projects"),
+                        SharedString::from("All Spaces"),
                         None,
                         false,
                         filter.is_none(),
@@ -4139,7 +4139,7 @@ impl Shell {
                 search.into_any_element(),
             ))
             .child(list)
-            // "New project…" is a pinned action row under the list (the
+            // "New Space…" is a pinned action row under the list (the
             // chat composer's project menu treatment) — scrolling must
             // never carry it away, and its nav index (`add_index`) keeps it
             // LAST.
@@ -4176,7 +4176,7 @@ impl Shell {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .child(SharedString::from("New project…")),
+                        .child(SharedString::from("New Space…")),
                 ),
             )
             .into_any_element()
@@ -4286,7 +4286,7 @@ impl Shell {
         chat: mast_proto::Chat,
         state: &AppState,
     ) -> ActiveChatRow {
-        // Line 1 is "project @ device" (t3code's project row);
+        // Line 1 is "Space @ device" (t3code's project row);
         // project-less sessions read as their home-dir cwd `~`.
         let space = state.space_for_chat(&chat);
         let project = match (space, chat.space_id.as_deref()) {
@@ -6140,7 +6140,7 @@ impl Shell {
                     "project-crumb-root".into(),
                     pick_labels
                         .as_ref()
-                        .map_or_else(|| "New project".into(), |(title, _)| title.clone()),
+                        .map_or_else(|| "New Space".into(), |(title, _)| title.clone()),
                     None,
                     step == ProjectStep::Devices,
                 )
@@ -6288,7 +6288,7 @@ impl Shell {
                         match &pick_labels {
                             Some((_, confirm)) => confirm.as_ref(),
                             None if busy => "Adding…",
-                            None => "Add project",
+                            None => "Add Space",
                         },
                         "project-add",
                     )
@@ -6390,7 +6390,7 @@ impl Shell {
             .space_row(&space_id)
             .map(|s| s.display_name().to_string())
             .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Project name", cx));
+        let input = cx.new(|cx| ComposerInput::new("Space name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
@@ -6573,7 +6573,7 @@ impl Shell {
                         cx.stop_propagation();
                     }
                 }))
-                .child(popover::dialog_title(&theme, "Rename project"))
+                .child(popover::dialog_title(&theme, "Rename Space"))
                 .child(
                     div()
                         .mt(px(12.0))
@@ -6618,7 +6618,7 @@ impl Shell {
                 (
                     space
                         .map(|s| s.display_name().to_string())
-                        .unwrap_or_else(|| "this project".into()),
+                        .unwrap_or_else(|| "this Space".into()),
                     space
                         .and_then(|s| state.device_name(&s.device_id))
                         .unwrap_or("its device")
@@ -6628,7 +6628,7 @@ impl Shell {
             };
             let copy = delete_space_copy(&name, &device, count);
             let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Remove project?"))
+                .child(popover::dialog_title(&theme, "Remove Space?"))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
                 .child(
                     div()

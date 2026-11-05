@@ -6,14 +6,14 @@ This gets you from a fresh install to a first chat running inside a work item.
 
 Follow the install steps in the [README](../../README.md). You need Rust, the Xcode command line tools, a signed-in agent CLI (Claude Code or Codex) and `gh`.
 
-## Add a project
+## Add a Space
 
-A project (Mast also calls it a Space) is a folder with your code in it, usually a git repo.
+A Space is a folder you work in, usually a git repo. A project is an outline item marked as a project, with its own worker destination.
 
-1. Press `⇧⌘N`, or open the project picker and choose **New project…**.
+1. Press `⇧⌘N`, or open the Space picker and choose **New Space…**.
 2. Pick the folder.
 
-The project's chats, outline, instructions and accounts all hang off this folder.
+The Space's chats, outline, instructions and accounts all hang off this folder.
 
 ## Start a chat
 
@@ -31,7 +31,7 @@ When the agent needs you, the item shows **User Action Required**. Open **Requir
 
 ## Try it
 
-1. Add a project and open the Outline.
+1. Add a Space and open the Outline.
 2. Make an item with an instruction.
 3. Start a chat in it and ask the agent to read the repo and summarise it.
 4. Press `?` in the outline to see every key.

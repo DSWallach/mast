@@ -623,8 +623,8 @@ impl AccountsPage {
             _ => Vec::new(),
         };
         let empty_copy = match &self.managed {
-            Loadable::Error(message) => format!("Couldn\u{2019}t load project accounts: {message}"),
-            Loadable::Ready(_) => "No project accounts yet.".to_string(),
+            Loadable::Error(message) => format!("Couldn\u{2019}t load Space accounts: {message}"),
+            Loadable::Ready(_) => "No Space accounts yet.".to_string(),
             _ => "Loading\u{2026}".to_string(),
         };
         let card = widgets::section_card(theme).mt(px(8.0));
@@ -657,7 +657,7 @@ impl AccountsPage {
                             .text_size(crate::typography::ui_rems(14.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from("Project accounts")),
+                            .child(SharedString::from("Space accounts")),
                     )
                     .child(div().flex_1())
                     .children([HarnessId::ClaudeCode, HarnessId::Codex].map(|harness| {

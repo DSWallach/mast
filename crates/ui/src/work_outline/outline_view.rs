@@ -514,7 +514,7 @@ pub(crate) struct OutlineView {
     space_order: Vec<String>,
     /// Spaces hidden from the Outline (device-local; see `space_roots`).
     hidden_spaces: std::collections::BTreeSet<String>,
-    /// "Hidden projects (N)" is on: hidden Spaces show as dimmed roots.
+    /// "Hidden Spaces (N)" is on: hidden Spaces show as dimmed roots.
     show_hidden_spaces: bool,
     /// Fold a single-chat item's Chat into its row (on in the app).
     compact_single_chat: bool,
@@ -1222,12 +1222,12 @@ impl OutlineView {
         } else {
             let space_id = self
                 .target_space(cx)
-                .ok_or("Add a project to create work items")?;
+                .ok_or("Add a Space to create work items")?;
             if self
                 .snapshot(&space_id)
                 .is_none_or(|snapshot| !snapshot.available)
             {
-                return Err("This project's outline is not available yet");
+                return Err("This Space's outline is not available yet");
             }
             let anchor = if self.model.multi_space {
                 let key = row_key::space(&space_id);
@@ -1456,7 +1456,7 @@ impl OutlineView {
         let (space_id, item_id) = self.selected_item().ok_or("Select a work item first")?;
         let snapshot = self
             .snapshot(&space_id)
-            .ok_or("This project's outline is not loaded")?;
+            .ok_or("This Space's outline is not loaded")?;
         let entries = model::destinations(snapshot, Some(&item_id))
             .into_iter()
             .map(|dest| PickerEntry {
@@ -1496,10 +1496,10 @@ impl OutlineView {
             let space_id = chat
                 .space_id
                 .clone()
-                .ok_or("Chats without a project cannot be associated")?;
+                .ok_or("Chats without a Space cannot be associated")?;
             let snapshot = self
                 .snapshot(&space_id)
-                .ok_or("This project's outline is not loaded")?;
+                .ok_or("This Space's outline is not loaded")?;
             let entries: Vec<PickerEntry> = model::destinations(snapshot, None)
                 .into_iter()
                 .map(|dest| PickerEntry {
@@ -1509,7 +1509,7 @@ impl OutlineView {
                 })
                 .collect();
             if entries.is_empty() {
-                return Err("This project has no work items yet");
+                return Err("This Space has no work items yet");
             }
             self.open_picker(
                 format!("Associate “{}” with…", chat.title),
@@ -1545,7 +1545,7 @@ impl OutlineView {
             .collect();
         chats.sort_by(|a, b| b.activity.cmp(&a.activity));
         if chats.is_empty() {
-            return Err("No unassociated chats in this project");
+            return Err("No unassociated chats in this Space");
         }
         let entries = chats
             .into_iter()
@@ -1898,7 +1898,7 @@ impl OutlineView {
                 ?op, %space_id, %item_id,
                 "restructure: outline not loaded"
             );
-            return Err("This project's outline is not loaded");
+            return Err("This Space's outline is not loaded");
         };
         if snapshot
             .item(&item_id)
@@ -1955,10 +1955,10 @@ impl OutlineView {
             return Err("This chat no longer exists on any device");
         }
         let Some(space_id) = row.chat.space_id.clone() else {
-            return Err("Chats without a project cannot be associated");
+            return Err("Chats without a Space cannot be associated");
         };
         let Some(snapshot) = self.snapshot(&space_id) else {
-            return Err("This project's outline is not loaded");
+            return Err("This Space's outline is not loaded");
         };
         let model = &self.model;
         let shown = |id: &str| model.position(&row_key::item(&space_id, id)).is_some();
@@ -2310,7 +2310,7 @@ impl OutlineView {
     // ----------------------------------------------------------------------
 
     /// The drag payload of `row`, or `None` when the row cannot be dragged:
-    /// archived work items, Chats without a project or whose row is gone.
+    /// archived work items, Chats without a Space or whose row is gone.
     fn drag_payload(row: &OutlineRow) -> Option<OutlineDrag> {
         match &row.kind {
             OutlineRowKind::Item(item) if !item.archived => Some(OutlineDrag::Item {
@@ -2915,7 +2915,7 @@ impl OutlineView {
                             .text_color(theme.text_muted)
                             .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
                             .child("Unhide")
-                            .hint("Show this project in the Outline again", HintKey::None)
+                            .hint("Show this Space in the Outline again", HintKey::None)
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation()
                             })
@@ -3650,7 +3650,7 @@ fn item_body(
         .children(proposals)
         .when_some(item.template_changed.filter(|_| !item.archived), |el, (from, to)| {
             let tip: SharedString =
-                "The template this project came from changed. Open details to review".into();
+                "The blueprint this item came from changed. Open details to review".into();
             el.child(
                 chips::template_chip(format!("outline-template-changed-{key}"), from, to, theme)
                     .id(SharedString::from(format!("outline-template-changed-{key}")))
@@ -3669,7 +3669,7 @@ fn item_body(
                     .text_size(crate::typography::ui_rems(10.0))
                     .text_color(theme.text_faint)
                     .child("\u{25c7}")
-                    .hint("Follows its container\u{2019}s template", HintKey::None),
+                    .hint("Follows its parent\u{2019}s child template", HintKey::None),
             )
         })
         .when(

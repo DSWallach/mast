@@ -469,7 +469,7 @@ const GROUP_ORDER: [&str; 8] = [
     "Browser",
     "Panels",
     "Sessions",
-    "Projects",
+    "Spaces",
     "Work Outline",
     "Jump to session",
     "Appshots",
@@ -486,7 +486,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ToggleFiles
         | ShortcutId::ToggleTerminal
         | ShortcutId::OpenMyPrs => "Panels",
-        ShortcutId::NewProject => "Projects",
+        ShortcutId::NewProject => "Spaces",
         ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
         | ShortcutId::NextSession
@@ -535,7 +535,7 @@ fn description(id: ShortcutId) -> &'static str {
             "Open the PR page: your PRs, review requests and PR review chats. ⇧⌘P also opens it."
         }
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
-        ShortcutId::NewProject => "Open the new project dialog.",
+        ShortcutId::NewProject => "Open the new Space dialog.",
         ShortcutId::OpenModelPicker => "Open the model picker for the current session.",
         ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
         ShortcutId::PrevSession => {

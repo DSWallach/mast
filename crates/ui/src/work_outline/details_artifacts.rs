@@ -40,7 +40,7 @@ pub(crate) struct ArtifactsDetailsState {
 pub(crate) fn register_path_refusal(space_path: &str, path: &str) -> Option<String> {
     let path = path.trim();
     if path.is_empty() {
-        return Some("Enter a file path inside the project".into());
+        return Some("Enter a file path inside the Space".into());
     }
     if !path.starts_with('/') {
         // Relative paths are relative to the Space folder.

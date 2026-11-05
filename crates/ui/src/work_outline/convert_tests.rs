@@ -280,7 +280,7 @@ fn the_convert_entry_is_disabled_with_a_reason_for_projects_and_without_template
     assert!(
         crate::work_outline::templates::convert_blocked(Some(&snapshot), LAUNCH)
             .unwrap()
-            .starts_with("Save a template first")
+            .starts_with("Save a blueprint first")
     );
     let _ = cx;
 }

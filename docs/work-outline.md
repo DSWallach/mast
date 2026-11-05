@@ -1,6 +1,6 @@
 # Work Outline
 
-The Work Outline organizes a project's Chats under nested **work items**. A work
+The Work Outline organizes a Space's Chats under nested **work items**. A work
 item can stand for a workstream, a ticket, a pull request, or an investigation.
 It holds the instructions its Chats inherit, the folders and repositories they
 run in, and the questions agents have asked you. Chats stay the main working
@@ -13,14 +13,21 @@ never needs a work item.
 | Instructions | Plain-text directives attached to the Space root or to a work item. A Chat receives the Space-root instructions, then its ancestors' instructions, then its own item's instructions, as runtime context outside the transcript. |
 | Execution setup | The execution root, primary repository, member repositories, and optional pinned worktrees that a work item's Chats run in. Items inherit the setup of their nearest ancestor. |
 | Required actions | Durable requests from agents (questions, approvals, decisions) that keep an item in User Action Required until they are resolved. |
-| Agent tools | Work Outline tools that agents in a project Chat can call to read their item, create children, set status, ask you for something, or propose an instruction. |
+| Agent tools | Work Outline tools that agents in a Space Chat can call to read their item, create children, set status, ask you for something, or propose an instruction. |
+
+## Glossary
+
+A **Space** is a folder you work in and the root of its outline. A **project** is an
+outline item marked as a project, with its own worker destination. A **Blueprint**
+saves an item tree for a one-time copy; a **Child template** sets live rules on a
+parent that apply to its direct children.
 
 ## Quick start
 
 1. Open the Overview and choose **Outline**, or press `⇧⌘L` (`Ctrl+Shift+L`). The Overview has two views, List and
    Outline. A saved view setting that says Canvas (the removed third view) loads as Outline.
 2. Create a work item with **New item**, `⇧⌘I` (`Ctrl+Shift+I`), or `N`. Type a
-   title and press Enter. In a project with no work items, the Outline offers
+   title and press Enter. In a Space with no work items, the Outline offers
    **Create work item** in place of the empty tree.
 3. Select the item and press Enter to open **Work Item Details**. Under
    **Instructions**, add an instruction and click **Save**.
@@ -71,7 +78,7 @@ inline editor, a picker, the search field, or any other text input.
 | Outdent (right after the former parent) | `⇧←` or `⇧⇥` | `Shift+←` or `Shift+Tab` |
 | Chat row: move to the previous / next work item | `⇧↑` / `⇧↓` | `Shift+↑` / `Shift+↓` |
 | Chat row: move to the parent item (out of a top-level item) | `⇧←` or `⇧⇥` | `Shift+←` or `Shift+Tab` |
-| Project row (more than one project): move the project up / down | `⇧↑` / `⇧↓` | `Shift+↑` / `Shift+↓` |
+| Space root row (more than one Space): move the Space up / down | `⇧↑` / `⇧↓` | `Shift+↑` / `Shift+↓` |
 | Group the selected items into a new or existing container (see [Restructuring](#restructuring)) | `⇧⌘G` | `Ctrl+Shift+G` |
 | Undo / redo the last Outline change (see [Undo and redo](#undo-and-redo)) | `⌘Z` or `⌃Z` / `⇧⌘Z` or `⌃⇧Z` | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Shortcut reference | `?` | `?` |
@@ -82,7 +89,7 @@ inline editor, a picker, the search field, or any other text input.
 Shortcuts**). Outside the Outline tree it archives the open Chat as before. In the
 tree it acts on the selected row: a Chat row is archived the way the sidebar
 archives it and the selection moves to the next row, a work item opens its
-Archive dialog with the choice for its descendants, and project and group rows
+Archive dialog with the choice for its descendants, and Space and group rows
 ignore it. The **Archive Chat** and **Archive…** menu entries show the key.
 
 ### Search
@@ -112,7 +119,7 @@ global keys also fire while a text field has focus:
 | Toggle Outline Focus | `⌘;` / `Ctrl+;` |
 | Open Full Chat | `⇧⌘↩` / `Ctrl+Shift+Enter` |
 | Create Work Item | `⇧⌘I` / `Ctrl+Shift+I` |
-| Toggle Linear Panel (only while a project has Linear on) | `⌥⌘L` / `Ctrl+Shift+E` |
+| Toggle Linear Panel (only while a Space has Linear on) | `⌥⌘L` / `Ctrl+Shift+E` |
 | Create Child Work Item, Rename, Move, Associate Chat with Work Item, Open Effective Instructions, Create Instruction from Chat, Open Required Actions, Start Chat in Work Item, Move Up / Down, Indent / Outdent, Show Outline Shortcuts | Unbound |
 
 **Start Chat in Work Item** has no global key because `⌘↩` (`Ctrl+Enter`) sends
@@ -135,7 +142,7 @@ you chose yourself is kept.
 - From a Chat (the full chat or the Chat beside the Outline), it switches to the
   Outline, selects that Chat's row, expands any collapsed parent items, scrolls
   the row into view, and focuses the tree. If the Outline does not show the
-  Chat (a Chat without a project, or one hidden by a filter), the selection
+  Chat (a Chat without a Space, or one hidden by a filter), the selection
   stays where it was and the tree is focused.
 - From the Outline tree, it returns to the last Chat you opened from the Outline
   (or the Chat you jumped from), in the same layout, with its composer focused.
@@ -176,7 +183,7 @@ at the top level).
 | --- | --- |
 | Work item | Open Details, Start Chat, Rename, New Sibling, New Child, Move Up, Move Down, Indent, Outdent, Move To…, Group into…, Set Status (Pending, Active, Completed), Associate Chat…, Open Effective Instructions, Add Instruction, Copy Path, Archive…, Restore, Undo, Redo, Recent Changes… |
 | Chat | Open Chat, Open Full Chat, Rename…, Associate with Work Item… (or Move to Work Item…), Move to Previous Item, Move to Next Item, Move to Parent Item (Move to Unassociated Chats from a top-level item), Remove from Work Item, Compare Instructions… and Apply Current Instructions (when the instructions changed), and the sidebar's Pin, Copy name + IDs, Close out worktree…, and Archive Chat |
-| Space root (a project row, or **Space root instructions** in a single-project Outline) | New Work Item, Space Instructions, Execution Setup, Required Actions, Undo, Redo, Recent Changes…, Show Outline Shortcuts. A project row also has Move Up, Move Down, Hide from Outline (Unhide on a hidden project), Rename Project…, and Delete Project… |
+| Space root (a Space row, or **Space root instructions** in a single-Space Outline) | New Work Item, Space Instructions, Execution Setup, Required Actions, Undo, Redo, Recent Changes…, Show Outline Shortcuts. A Space row also has Move Up, Move Down, Hide from Outline (Unhide on a hidden Space), Rename Space…, and Delete Space… |
 | Unassociated Chats | Associate “Chat”… for the selected Chat (no menu without one) |
 
 Linear and PR review sync add their own entries where they apply (see
@@ -204,7 +211,7 @@ revisions, and drift).
 container in a single step. `⌘`-click a row (`Ctrl`-click on Windows and Linux)
 to add or remove it from the selection, or `⇧`-click to add every item row from
 the current row to the one you click. The selected rows are highlighted; a plain
-click or `Esc` clears the selection. Only work items of one project can be
+click or `Esc` clears the selection. Only work items of one Space can be
 grouped. Choose **New container…** and type a title to create a work item where
 the first selected item was and move the selection under it, or choose an
 existing work item to append them there. They keep their order on screen. An
@@ -240,12 +247,12 @@ move the Chat between work items instead:
   happens for an unassociated Chat.
 - `⇧→` and `⇥` do nothing on a Chat row.
 
-Moves stay inside the Chat's project. Only the selected Chat moves: Chats
+Moves stay inside the Chat's Space. Only the selected Chat moves: Chats
 started from it keep their own work items, and a Chat shown under the Chat
 that started it stays there while its work item changes. The selection follows the Chat,
 and the move applies at once, with the same **Undo** toast as **Move to Work
 Item…** when the Chat's instructions change. Rapid presses apply in order. Chats without a
-project, and Chats that no longer exist, cannot move. A move never changes a
+Space, and Chats that no longer exist, cannot move. A move never changes a
 Chat's folder or execution setup. The palette's Move Up /
 Down, Indent, and Outdent commands (and any shortcut you bind to them) do the
 same as the keys on a Chat row. Archiving an item that has children asks
@@ -253,24 +260,24 @@ whether to archive them as well or move them to another parent first.
 
 ## Projects in the Outline
 
-With more than one project, the Outline shows one collapsible row per project.
+With more than one Space, the Outline shows one collapsible row per Space.
 You can arrange and declutter these rows. Order and hidden projects are saved
-on this device only, apply right away, and never change the project itself.
-A single-project Outline has no project rows, so none of this applies there.
+on this device only, apply right away, and never change the Space itself.
+A single-Space Outline has no Space rows, so none of this applies there.
 
-- **Reorder.** Select a project row and press `⇧↑` / `⇧↓`, choose **Move Up** /
-  **Move Down** in its menu, or drag it onto another project row. Dropping on
-  the upper half of a row places the project before it, and the lower half
+- **Reorder.** Select a Space row and press `⇧↑` / `⇧↓`, choose **Move Up** /
+  **Move Down** in its menu, or drag it onto another Space row. Dropping on
+  the upper half of a row places the Space before it, and the lower half
   places it after. Projects you have never moved, including new ones, follow
   the ones you arranged, in alphabetical order.
-- **Hide.** Choose **Hide from Outline** in a project row's menu. The project
+- **Hide.** Choose **Hide from Outline** in a Space row's menu. The Space
   and its Chats disappear from the Outline only. The sidebar and List
-  still show them. While any project is hidden, the Outline toolbar shows
+  still show them. While any Space is hidden, the Outline toolbar shows
   **Hidden projects (N)**. Click it to list hidden projects as dimmed rows, and
   click **Unhide** on a row (or choose **Unhide** in its menu) to bring it back.
-- **Rename Project…** opens the same rename dialog as the sidebar's project menu.
-- **Delete Project…** opens the sidebar's **Remove project?** confirmation.
-  Removing a project permanently deletes its sessions: its Chats leave Mast's
+- **Rename Space…** opens the same rename dialog as the sidebar's Space menu.
+- **Delete Space…** opens the sidebar's **Remove Space?** confirmation.
+  Removing a Space permanently deletes its sessions: its Chats leave Mast's
   index, and its whole Work Outline (work items, instructions, and requests) is
   deleted. This can't be undone. To just declutter the Outline, use **Hide from
   Outline** instead. Cancel deletes nothing.
@@ -293,7 +300,7 @@ closed. Sections stay collapsed until you open them.
 | Proposed instructions | Instructions that agents have proposed and that are waiting for review. |
 
 The Space root has its own Details (**Space root instructions** at the top of a
-single-project Outline, or **Instructions** on each project row) for Space-wide
+single-Space Outline, or **Instructions** on each Space row) for Space-wide
 instructions.
 
 ## Instructions, revisions, and drift
@@ -358,7 +365,7 @@ instructions.
   own setup wins entirely, and fields are not merged across levels. The
   execution root can be any folder except your home directory. Every configured
   repository must be a Git checkout.
-- **Validate** checks the saved setup on the device that owns the project.
+- **Validate** checks the saved setup on the device that owns the Space.
   **Start Chat** validates again, and Start stays disabled until validation
   passes. When the setup does not pin a worktree, the dialog lets you choose the
   Space workspace, an existing checkout, or a new worktree.
@@ -416,8 +423,8 @@ instructions.
 
 ## Linear
 
-Linear is off until you turn it on for a project, and it never writes to
-Linear. While it is off, a project shows no Linear UI, makes no Linear calls,
+Linear is off until you turn it on for a Space, and it never writes to
+Linear. While it is off, a Space shows no Linear UI, makes no Linear calls,
 and keeps pasted Linear URLs as plain links. Nothing is added to the Outline
 automatically: items and links come only from the actions below.
 
@@ -426,9 +433,9 @@ automatically: items and links come only from the actions below.
   Mac's Keychain, then shows **Connected as \<name\>**. The key is never shown
   again or given to agents. **Disconnect** removes the stored key. If Linear
   rejects the key later, Mast deletes it and asks you to reconnect.
-- **Turn it on.** Open the project's Space-root details (**Instructions** on the
+- **Turn it on.** Open the Space-root details (**Instructions** on the
   Space row) and switch on **Linear**. Without a key, **Connect Linear…** opens
-  Settings → Linear. The first time you paste a Linear URL in a project with
+  Settings → Linear. The first time you paste a Linear URL in a Space with
   Linear off, Mast offers **Enable** once.
 - **Linear panel.** Press `⌥⌘L` (`Ctrl+Shift+E` on Windows and Linux;
   rebind **Toggle Inbox column** in Settings → Shortcuts), click **Inbox** in
@@ -443,7 +450,7 @@ automatically: items and links come only from the actions below.
     search. With the panel open and the cursor elsewhere, it moves the cursor
     to the search. With the cursor in the panel, it closes the panel and
     returns to the Outline tree. `Esc` in the panel also closes it.
-  - With no project on Linear and none with PR review sync, the key and the
+  - With no Space on Linear and none with PR review sync, the key and the
     command only show a notice.
   - Drag the panel's right edge to resize it (double-click the edge to reset).
     Its width and whether it is open are remembered on this device. If the
@@ -457,9 +464,9 @@ automatically: items and links come only from the actions below.
   focus it and press `←` to fold and `→` to unfold. Expand a project to see its
   open issues. Folded sections and expanded projects are remembered on this
   device. Search filters both lists. Lists load when the panel opens and when
-  you click ↻. Rows that an item in this project already links show
-  **Linked · Reveal**, which selects that item in the Outline. With several
-  Linear projects on, click the project name in the panel header to switch.
+  you click ↻. Rows that an item in this Space already links show
+  **Linked · Reveal**, which selects that item in the Outline. With Linear enabled in several
+  Spaces, click the Space name in the panel header to switch.
 - **Create work item** (**Create** on an issue, or double-click the issue, or
   focus its row and press `↩`) adds `ENG-123 · title` as the last child of:
   - the work item linked to the issue's Linear project, whatever is selected
@@ -479,7 +486,7 @@ automatically: items and links come only from the actions below.
 - **Add issues from \<project\>…** on a project-linked item (its right-click
   menu, or its Details **Linear** section) opens a picker of the project's open
   issues. It works with the Linear panel closed. Issues that already have a
-  work item in this project show checked and greyed out, with **Added ·
+  work item in this Space show checked and greyed out, with **Added ·
   Reveal**. Search filters the list, **Select all** checks every shown issue
   not added yet, and **Create** adds one work item per checked issue as the
   item's last children, then selects the first new one. `Esc` or **Cancel**
@@ -516,14 +523,14 @@ automatically: items and links come only from the actions below.
 ## PR review sync
 
 PR review sync keeps one work item per pull request that asks for your
-review, in the project's GitHub repositories (the project folder's checkout,
+review, in the Space's GitHub repositories (the Space folder's checkout,
 its submodules, and nested repositories, matched by `origin`). It is off until
 you pick a destination, and it never writes to GitHub. It runs on the device
-that owns the project, through that device's `gh` login.
+that owns the Space, through that device's `gh` login.
 
 - **Pick the destination.** The quickest way is the Inbox column's GitHub
   section: while the sync is off it leads with **Auto-sync review requests
-  into… Choose item ▾**, a searchable menu of the project's live work items
+  into… Choose item ▾**, a searchable menu of the Space's live work items
   plus **Create "PR reviews" item** (a new top-level item that becomes the
   destination). Once set, the section reads **Syncing into <item> · last
   synced 5m ago** with **Sync now**, **Change ▾**, and **Stop** (synced items
@@ -577,7 +584,7 @@ that owns the project, through that device's `gh` login.
   an item linked to a Linear issue gets the GitHub PRs Linear attached to the
   issue (on the Linear sync), and any item gets a PR its Chat created
   (`gh pr create` in that Chat, or a PR you linked to the Chat yourself).
-  Only PRs of the project's repositories; links are added, never removed or
+  Only PRs of the Space's repositories; links are added, never removed or
   moved (a Chat moved to another item leaves its PR where it was), and a link
   you remove stays removed. The item's status is not changed when a PR
   merges. An item with several PRs shows one PR icon for each (up to three, then
@@ -594,12 +601,12 @@ that owns the project, through that device's `gh` login.
   **Review**, **Fix CI**, **Open on GitHub**, and **Refresh PR Status**; they
   open the same dialog.
 - **GitHub section.** The **Inbox** column (`⌥⌘L`, the toolbar's **Inbox**)
-  shows a **GitHub** section for the project under its Linear panel: the sync
+  shows a **GitHub** section for the Space under its Linear panel: the sync
   bar (above), then **Review requested** and **My open PRs**, each foldable
   (click **GitHub** to fold the whole section; folds are remembered on this
   device). Lists load when the column opens and on ↻. The header's **All repos
-  ▾** menu filters both lists to one repository of the project (and, with
-  several projects, switches the project); ↑/↓, ↩, and Esc work in every menu
+  ▾** menu filters both lists to one repository of the Space (and, with
+  several Spaces, switches the Space); ↑/↓, ↩, and Esc work in every menu
   of the column. With a destination, each requested PR shows **Synced ✓** once
   its item exists (click the row to reveal it) or **Pending first sync** until
   the next pass adds it; a PR some other item links shows **Linked**. Manual
@@ -607,7 +614,7 @@ that owns the project, through that device's `gh` login.
   item, else the destination), **Link to selected item**, and **Create work
   item** (under the destination, else the selected item); or drag the row onto
   an Outline item to create it there. Retries never duplicate.
-- **PR review chats (⌘P / ⇧⌘P).** With a destination in the current project,
+- **PR review chats (⌘P / ⇧⌘P).** With a destination in the current Space,
   the PR page's **Review chats** tab lists the destination's PR items (chip,
   Review, Fix CI) with their review Chats under each; click an item for its
   Details. Without one, the tab lists the launcher review Chats (the Chats with
@@ -618,7 +625,7 @@ that owns the project, through that device's `gh` login.
 
 ## Agent tools
 
-Claude Code and Codex Chats that belong to a project get a `mast-agent` MCP
+Claude Code and Codex Chats that belong to a Space get a `mast-agent` MCP
 server for the duration of each run. These are the Work Outline tools:
 
 | Tool | Does |
@@ -639,50 +646,50 @@ Agents cannot:
 - Associate a Chat other than their own.
 - Move their own Chat outside its current item's subtree, or re-associate a
   Chat that is bound to an execution setup.
-- Act outside their own project and device.
+- Act outside their own Space and device.
 - Widen their sandbox or enable auto-approve.
 
 Every change an agent makes needs an idempotency key, so retries do not create
 duplicate items.
 
-## Project templates
+## Blueprints
 
-A template is a frozen **copy** of ANY item's subtree (titles, descriptions, instructions on every
+A blueprint is a frozen **copy** of ANY item's subtree (titles, descriptions, instructions on every
 node, which node is a project and which is a worker destination). Mast never decides what a project
 looks like: the structure is whatever tree you saved. Chats, Required Actions, external links and
-the tickets under a worker destination are not copied. It is not live: editing the template does
-not touch projects made from it, and editing a project does not touch its template.
+the tickets under a worker destination are not copied. It is not live: editing the blueprint does
+not touch projects made from it, and editing a project does not touch its blueprint.
 
-- **Save as template…**: right-click any item (or use the button in the Project section of Work
+- **Save as blueprint…**: right-click any item (or use the button in the Project section of Work
   Item Details). The prompt is prefilled with the item's title; a project that already links a
-  template offers **Update template** (replaces it, revision + 1) or **Save as new**. Saving is
+  blueprint offers **Update blueprint** (replaces it, revision + 1) or **Save as new**. Saving is
   not an undo step. Duplicate names and the size limits come back as an error card.
-- **Templates list**: the Space-root details panel lists the Space's templates (name, revision,
-  item count) with **New from template…** and **Delete** (confirms first) per row. Click a name
+- **Blueprints list**: the Space-root details panel lists the Space's blueprints (name, revision,
+  item count) with **New from blueprint…** and **Delete** (confirms first) per row. Click a name
   to preview its tree: nodes, their instructions, and project / worker destination badges. To edit
-  a template, edit the tree it came from and **Update template**.
-- **New from template…**: in the item menu (creates the project under that item) and the Space
-  root menu (top level), or from the Templates list. Pick a template, then name the project
-  (prefilled with the template's root title). Nothing else is invented: the new item is that exact
-  tree. The whole project is created in order and is ONE undo
+  a blueprint, edit the tree it came from and **Update blueprint**.
+- **New from blueprint…**: in the item menu (creates the item under that item) and the Space
+  root menu (top level), or from the Blueprints list. Pick a blueprint, then name the item
+  (prefilled with the blueprint's root title). Nothing else is invented: the new item is that exact
+  tree. The whole tree is created in order and is ONE undo
   step: undo archives it with its items, redo restores it. A toast offers Undo.
-- **From Linear**: on a project row in the Linear panel, **New project item…** picks a template and
+- **From Linear**: on a project row in the Linear panel, **New project item…** picks a blueprint and
   a parent, names the item after the Linear project, and links it to that project. Use "Add Issues
   from <project>…" on the new item to pull in issues. Nothing is written to Linear.
 
-- **Template changed**: a project that links an older template revision shows a "Template changed
+- **Blueprint changed**: a project that links an older blueprint revision shows a "Blueprint changed
   (rev N → M)" chip (outline row and details) and **Review changes…**. Each difference (added or
-  changed instructions, items the template gained, a changed worker destination) has **Accept** or
+  changed instructions, items the blueprint gained, a changed worker destination) has **Accept** or
   **Skip**; **Accept all** and **Mark reviewed** clear the chip. Items the project has but the
-  template doesn't are listed for information only and are never removed. Nothing applies by
+  blueprint doesn't are listed for information only and are never removed. Nothing applies by
   itself, and none of it is an undo step.
 - **Convert to project…**: right-click an item that is not a project yet (or the button in its
-  Project section). Pick the template it should become; a preview lists exactly what will happen
-  and **nothing is written until Apply**. Template nodes that already exist as children (matched by
+  Project section). Pick the blueprint it should become; a preview lists exactly what will happen
+  and **nothing is written until Apply**. Blueprint nodes that already exist as children (matched by
   title) are reused, the others are created with their instructions; existing children can be moved
-  under a template node (by default, children with an external link move under the template's worker
+  under a blueprint node (by default, children with an external link move under the blueprint's worker
   destination; click a row to cycle where it goes, or leave it where it is); the item is marked as a
-  project, gets the worker destination and links the template. Instructions the template has for
+  project, gets the worker destination and links the blueprint. Instructions the blueprint has for
   nodes that already exist are not written; the link then records "not reviewed" so **Review
   changes…** can apply them. Chats stay where they are. The whole conversion is ONE undo step.
   Basedash and Kit Line in Cofactr are meant to be migrated this way when you are ready; nothing
@@ -711,7 +718,7 @@ not touch projects made from it, and editing a project does not touch its templa
 
 ## Undo and redo
 
-Changes you make to the Outline are kept in an action log, one per project, for this
+Changes you make to the Outline are kept in an action log, one per Space, for this
 session (the newest 200). With the Outline tree focused, `⌘Z` undoes the newest and `⇧⌘Z`
 redoes it (`Ctrl+Z` / `Ctrl+Shift+Z` on Windows and Linux; `⌃Z` / `⌃⇧Z` also work on macOS).
 A text field keeps its own ⌘Z: in the composer, the inline rename box, or an
@@ -728,7 +735,7 @@ instruction editor, ⌘Z undoes typing and never touches the Outline.
 - **Feedback:** the Outline shows "Undid: moved ‘X’ under ‘Y’" (or "Redid: …").
 - **Conflicts:** if the item or Chat changed since your action (someone archived it, moved
   it again, edited it again), undo says so and changes nothing.
-- **Recent changes:** **Recent Changes…** in a work item's or project's right-click menu lists the last actions, newest
+- **Recent changes:** **Recent Changes…** in a work item's or Space's right-click menu lists the last actions, newest
   first. Choose one to undo everything back to it; rows already undone can be redone the
   same way.
 
@@ -738,3 +745,10 @@ In Work Item Details, **Project → Mark as project** makes an item a project. C
 (on the project or any item below it) can create, read and start chats for anything in that project,
 but never outside it. On a project, choose a **worker destination** (e.g. its "Tickets" child):
 workers an agent creates without naming a parent land there. Project settings are not undo steps.
+
+## Child templates
+
+Configure a **Child template** in a parent item's details to apply a structure and
+live instructions to its direct children. New children follow the rules; existing
+children can use **Apply child template…**. Unlike a Blueprint, changes to the
+child template apply as live rules.

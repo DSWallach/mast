@@ -215,7 +215,7 @@ mod tests {
     }
 }
 
-/// The "Template changed (rev N → M)" chip of a project whose template moved
+/// The "Blueprint changed (rev N → M)" chip of a project whose template moved
 /// on, on its Outline row and in its Details Project section.
 pub(crate) fn template_chip(selector: String, from: u32, to: u32, theme: &Theme) -> gpui::Div {
     div()

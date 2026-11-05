@@ -112,7 +112,7 @@ pub(crate) enum DetailsEvent {
         chat_id: String,
         work_item_id: Option<String>,
     },
-    /// Project templates: "New from template…" for this Space (the Outline
+    /// Project templates: "New from blueprint…" for this Space (the Outline
     /// asks for the title and creates the project).
     NewFromTemplate {
         space_id: String,
@@ -372,7 +372,7 @@ impl WorkItemDetails {
         });
         let template_name_input = cx.new(|cx| {
             ComposerInput::with_context(
-                "Template name",
+                "Blueprint name",
                 crate::composer::PALETTE_SEARCH_CONTEXT,
                 cx,
             )
@@ -804,7 +804,7 @@ impl WorkItemDetails {
                 .child(
                     Self::small_button(
                         "work-item-save-template",
-                        "Save as template\u{2026}",
+                        "Save as blueprint\u{2026}",
                         theme,
                     )
                     .debug_selector(|| "work-item-save-template".into())
@@ -1703,7 +1703,7 @@ impl Render for WorkItemDetails {
                         div()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_faint)
-                            .child("No unassociated chats in this project"),
+                            .child("No unassociated chats in this Space"),
                     )
                 })
                 .children(candidates.into_iter().enumerate().map(|(ix, (id, title))| {

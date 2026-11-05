@@ -1707,7 +1707,7 @@ impl LinearPanel {
                 .tooltip(|_, cx| {
                     cx.new(|_| {
                         TextTooltip(
-                            "Create a project work item from a template, named and linked to this Linear project"
+                            "Create a project work item from a blueprint, named and linked to this Linear project"
                                 .into(),
                         )
                     })

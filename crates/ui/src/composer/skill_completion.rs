@@ -522,7 +522,7 @@ impl SkillCompletion {
                     Err(error) => {
                         this.error = Some(
                             if crate::work_outline::actions::is_transport_failure(&error) {
-                                "The project's device is unreachable".into()
+                                "The Space's device is unreachable".into()
                             } else {
                                 "Couldn't load skills for this folder".into()
                             },

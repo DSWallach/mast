@@ -266,7 +266,7 @@ fn save_as_template_sends_the_mutation_and_is_not_undoable(cx: &mut gpui::TestAp
         outline
             .read_with(vcx, |o, _| o.notice().map(str::to_owned))
             .as_deref(),
-        Some("Saved template \u{2018}Housekeeping\u{2019} \u{b7} rev 1")
+        Some("Saved blueprint \u{2018}Housekeeping\u{2019} \u{b7} rev 1")
     );
     assert!(
         outline
@@ -303,7 +303,7 @@ fn a_project_linked_to_a_template_offers_update_or_save_as_new(cx: &mut gpui::Te
         outline
             .read_with(vcx, |o, _| o.notice().map(str::to_owned))
             .as_deref(),
-        Some("Saved template \u{2018}Launch kit\u{2019} \u{b7} rev 3")
+        Some("Saved blueprint \u{2018}Launch kit\u{2019} \u{b7} rev 3")
     );
 }
 
@@ -399,7 +399,7 @@ fn the_empty_templates_list_explains_how_to_make_one(cx: &mut gpui::TestAppConte
     let result = outline.update_in(vcx, |outline, window, cx| {
         outline.begin_new_from_template(TemplateFlow::new("s1", None), window, cx)
     });
-    assert!(result.unwrap_err().contains("No templates"));
+    assert!(result.unwrap_err().contains("No blueprints"));
     assert!(mutations(&calls).is_empty());
 }
 
@@ -459,7 +459,7 @@ fn new_from_template_sends_the_ordered_sequence_with_derived_ids(cx: &mut gpui::
     outline.read_with(vcx, |o, _| {
         assert_eq!(
             o.template_toast_text()
-                .map(|t| t.starts_with("Created project")),
+                .map(|t| t.starts_with("Created item")),
             Some(true)
         );
     });
@@ -501,7 +501,7 @@ fn one_undo_archives_the_new_project_and_redo_restores_it(cx: &mut gpui::TestApp
         outline
             .read_with(vcx, |o, cx| o.next_undo_label(cx))
             .as_deref(),
-        Some("created project \u{2018}Q3 launch\u{2019} from template \u{2018}Launch kit\u{2019}")
+        Some("created item \u{2018}Q3 launch\u{2019} from blueprint \u{2018}Launch kit\u{2019}")
     );
 
     vcx.simulate_keystrokes("cmd-z");

@@ -1,4 +1,4 @@
-//! "Template changed": the chip and the per-project review in the Project
+//! "Blueprint changed": the chip and the per-project review in the Project
 //! section of Work Item Details.
 //!
 //! A project whose template link is behind shows the chip and **Review
@@ -133,7 +133,7 @@ impl WorkItemDetails {
             .find(|template| template.id == state.template_id)
             .cloned()
         else {
-            self.template_review_error("That template no longer exists", cx);
+            self.template_review_error("That blueprint no longer exists", cx);
             return;
         };
         let project_id = state.item_id.clone();
@@ -256,7 +256,7 @@ impl WorkItemDetails {
                     this.templates.review = None;
                     cx.emit(DetailsEvent::Notice {
                         text: format!(
-                            "Reviewed against template \u{2018}{name}\u{2019} \u{b7} rev {revision}"
+                            "Reviewed against blueprint \u{2018}{name}\u{2019} \u{b7} rev {revision}"
                         ),
                         error: false,
                     });
@@ -273,7 +273,7 @@ impl WorkItemDetails {
             open.error = Some(message.to_owned());
         }
         cx.emit(DetailsEvent::Notice {
-            text: format!("Template review\n{message}"),
+            text: format!("Blueprint review\n{message}"),
             error: true,
         });
         cx.notify();

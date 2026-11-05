@@ -41,7 +41,7 @@ impl Overview {
     ) -> Result<(), &'static str> {
         let snapshot = self
             .outline_snapshot(&space_id, cx)
-            .ok_or("This project's outline is not loaded")?;
+            .ok_or("This Space's outline is not loaded")?;
         let pr = crate::github::item_pull_request(&snapshot, &item_id)
             .ok_or("This work item isn\u{2019}t linked to a pull request")?;
         self.start_pr_review_filed(pr, Some((space_id, item_id)), action, cx)

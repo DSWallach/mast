@@ -518,7 +518,7 @@ impl OutlineView {
             Direction::Redo => (&entry.before, &entry.forward),
         };
         let Some(snapshot) = self.snapshot(space) else {
-            self.show_notice("This project's outline is not loaded", cx);
+            self.show_notice("This Space's outline is not loaded", cx);
             return None;
         };
         if let Err(why) = probe.check(snapshot) {

@@ -91,12 +91,12 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_devices",
-            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
+            description: "Devices in this workspace (the local engine's device is flagged). Chats and Spaces are hosted on a device.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: "list_projects",
-            description: "Projects: a folder on a device. Each chat belongs to one project, which fixes its host device and working directory.",
+            description: "Spaces: folders on a device. Each chat belongs to one Space, which fixes its host device and working directory. The project field identifies a Space.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -117,11 +117,11 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_chats",
-            description: "Chats with their project, host device, harness, model (the model that actually ran when the harness reported it: see modelIsActual, actualModel, configuredModel), live status, and last activity. Newest activity first.",
+            description: "Chats with their Space, host device, harness, model (the model that actually ran when the harness reported it: see modelIsActual, actualModel, configuredModel), live status, and last activity. Newest activity first.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Only chats in this project (id, path, or name)." },
+                    "project": { "type": "string", "description": "Only chats in this Space (id, path, or name)." },
                     "device": { "type": "string", "description": "Only chats hosted on this device (id or name)." },
                     "include_archived": { "type": "boolean", "default": false },
                     "parent": { "type": "string", "description": "Only chats created by this chat (id, prefix, or title) — e.g. your own id to list the chats you spawned." },
@@ -145,14 +145,14 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your project inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own project on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
+            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "idempotency_key": { "type": "string", "description": "Stable key for this request (required inside a Mast chat). The same key returns the same chat; a new chat needs a new key." },
                     "workItemId": { "type": "string", "description": "Start the child for your chat's item, a descendant, or any item inside your project. Requires prompt; incompatible with cwd and branch." },
-                    "project": { "type": "string", "description": "Project id, path, or name. Required unless device is given." },
-                    "device": { "type": "string", "description": "Host device (id or name) for a project-less chat; defaults to this device." },
+                    "project": { "type": "string", "description": "Space id, path, or name. Required unless device is given." },
+                    "device": { "type": "string", "description": "Host device (id or name) for a chat without a Space; defaults to this device." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses). Defaults to claude-code when available." },
                     "model": { "type": "string", "description": "Model id from list_models. Omit for Mast's default for the harness (Claude Code: claude-opus-5-5)." },
@@ -161,7 +161,7 @@ fn catalog() -> Vec<ToolDef> {
                     "autoApprove": { "type": "boolean", "default": false, "description": "Start the child on Auto (full access, never asks). Allowed only when your own chat is on Auto; otherwise refused." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
-                    "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
+                    "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the Space folder." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
@@ -293,7 +293,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::ASSOCIATE_CURRENT_CHAT,
-            description: "Associate your own chat with a work item of its project (never another chat). Required: workItemId. Optional: idempotencyKey (derived when omitted).",
+            description: "Associate your own chat with a work item of its Space (never another chat). Required: workItemId. Optional: idempotencyKey (derived when omitted).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -379,11 +379,11 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::APPLY_CONTAINER_TEMPLATE,
-            description: "Make an item follow its parent's container template (the structure and live instructions configured on a container such as \"Projects\"). Pass the container to apply it to every direct child that doesn't follow yet, or one item under it. Existing sub-items are matched by title and adopted; missing ones are created; nothing is deleted or moved. Only the user edits a template's rules. Required: workItemId. Optional: idempotencyKey (derived when omitted).",
+            description: "Make an item follow its parent's child template (the structure and live instructions configured on a container such as \"Projects\"). Pass the container to apply it to every direct child that doesn't follow yet, or one item under it. Existing sub-items are matched by title and adopted; missing ones are created; nothing is deleted or moved. Only the user edits a child template's rules. Required: workItemId. Optional: idempotencyKey (derived when omitted).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "workItemId": { "type": "string", "description": "A container with a template, or an item under it." },
+                    "workItemId": { "type": "string", "description": "A container with a child template, or an item under it." },
                     "idempotencyKey": optional_idempotency_key_schema()
                 },
                 "required": ["workItemId"]
@@ -408,7 +408,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::ADMIN,
-            description: "ADMIN CHATS ONLY (the user grants this per chat and Space, with an expiry; refused otherwise). Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?} template_set{itemId,template|null} template_apply{itemId}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
+            description: "ADMIN CHATS ONLY (the user grants this per chat and Space, with an expiry; refused otherwise). Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. Child template rules are managed with template_set and applied with template_apply. A project is an outline item marked as a project. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?} template_set{itemId,template|null} template_apply{itemId}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -436,7 +436,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the project folder, or a temp folder)." },
+                    "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder)." },
                     "title": { "type": "string", "description": "Human title, e.g. \"Receiving flow — plan\". Same title + role on the same work item = same artifact." },
                     "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options"], "description": "Defaults from the file extension." },
                     "role": { "type": "string", "description": "plan, diagram, state-machine, comparison, or doc (free-form)." },
@@ -974,7 +974,7 @@ impl Tools {
             "note": if origin.is_some() {
                 "Messages you send are attributed to this chat; it cannot message itself. \
                  You can reach only the chats you created (plus read this one), and \
-                 create_chat works only in this chat's project, never with a wider \
+                 create_chat works only in this chat's Space, never with a wider \
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
                  need an idempotency key. Admin chats (user-granted, per Space, expiring) \
                  also reach every chat and item of their Space; see adminSpaceId."
@@ -1246,7 +1246,7 @@ impl Tools {
                     .await?;
                 if space.id != origin.space_id {
                     anyhow::bail!(
-                        "agents can only create chats in their own project ({})",
+                        "agents can only create chats in their own Space ({})",
                         short(&origin.space_id)
                     );
                 }
@@ -1283,7 +1283,7 @@ impl Tools {
             ];
             if !path_within_any(cwd, &roots) {
                 anyhow::bail!(
-                    "agents can only start a child chat inside this project's folder or \
+                    "agents can only start a child chat inside this Space's folder or \
                      this chat's working directory (cwd {cwd:?} is outside both)"
                 );
             }
@@ -3141,7 +3141,7 @@ mod tests {
         let world = Arc::new(World::default());
         let tools = tools(world.clone(), Some(BETA_TOKEN));
         let refused = [
-            (json!({ "project": "nova" }), "own project"),
+            (json!({ "project": "nova" }), "own Space"),
             (json!({ "device": "Desktop" }), "own device"),
             (
                 json!({ "sandbox": "danger-full-access" }),

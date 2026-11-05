@@ -1,4 +1,4 @@
-//! "New from template…" for the Outline.
+//! "New from blueprint…" for the Outline.
 //!
 //! The flow: pick a template (skipped when one is preselected, e.g. from the
 //! Templates list), then name the new project in the inline title row
@@ -21,7 +21,7 @@ use super::*;
 /// How long the "Created project" toast stays.
 pub(crate) const TEMPLATE_TOAST_LIFETIME: Duration = Duration::from_secs(8);
 
-/// One "New from template…" in progress.
+/// One "New from blueprint…" in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TemplateFlow {
     pub space_id: String,
@@ -72,7 +72,7 @@ pub(crate) struct TemplatesState {
 }
 
 impl OutlineView {
-    /// Ask for "New from template…" from a place that has no window (the
+    /// Ask for "New from blueprint…" from a place that has no window (the
     /// Details panel, the Linear panel); the next render opens it.
     pub(crate) fn request_new_from_template(&mut self, flow: TemplateFlow, cx: &mut Context<Self>) {
         self.templates.pending = Some(flow);
@@ -99,24 +99,24 @@ impl OutlineView {
         let snapshot = self
             .snapshot(&flow.space_id)
             .filter(|snapshot| snapshot.available)
-            .ok_or("This project\u{2019}s outline is not available yet")?;
+            .ok_or("This Space\u{2019}s outline is not available yet")?;
         if let Some(parent) = &flow.parent {
             if !snapshot
                 .item(parent)
                 .is_some_and(|item| item.archived_at.is_none())
             {
-                return Err("Restore this work item to add a project under it".into());
+                return Err("Restore this work item to add an item under it".into());
             }
         }
         if snapshot.templates.is_empty() {
             return Err(
-                "No templates in this project yet. Pick any item and Save as Template\u{2026}"
+                "No blueprints in this Space yet. Pick any item and Save as blueprint\u{2026}"
                     .into(),
             );
         }
         if let Some(id) = &flow.template_id {
             if !snapshot.templates.iter().any(|template| &template.id == id) {
-                return Err("That template no longer exists".into());
+                return Err("That blueprint no longer exists".into());
             }
             return self.after_template_chosen(flow, window, cx);
         }
@@ -130,7 +130,7 @@ impl OutlineView {
             })
             .collect();
         self.open_picker(
-            "New from template\u{2026}".to_string(),
+            "New from blueprint\u{2026}".to_string(),
             entries,
             PickerPurpose::Template(TemplateStage::Choose(flow)),
             window,
@@ -181,7 +181,7 @@ impl OutlineView {
     ) -> Result<(), String> {
         let snapshot = self
             .snapshot(&flow.space_id)
-            .ok_or("This project\u{2019}s outline is not loaded")?;
+            .ok_or("This Space\u{2019}s outline is not loaded")?;
         if flow.linear.is_some() {
             if flow.ask_parent {
                 let mut entries = vec![PickerEntry {
@@ -216,7 +216,7 @@ impl OutlineView {
             .templates
             .iter()
             .find(|template| Some(&template.id) == flow.template_id.as_ref())
-            .ok_or("That template no longer exists")?;
+            .ok_or("That blueprint no longer exists")?;
         let prefill = template.body.title.clone();
         let space_id = flow.space_id.clone();
         let (parent, placement, anchor) = match &flow.parent {
@@ -278,13 +278,13 @@ impl OutlineView {
         let snapshot = self
             .snapshot(&space_id)
             .filter(|snapshot| snapshot.available)
-            .ok_or("This project\u{2019}s outline is not available yet")?;
+            .ok_or("This Space\u{2019}s outline is not available yet")?;
         let template = snapshot
             .templates
             .iter()
             .find(|template| Some(&template.id) == flow.template_id.as_ref())
             .cloned()
-            .ok_or("That template no longer exists")?;
+            .ok_or("That blueprint no longer exists")?;
         if let Some(parent) = &flow.parent {
             if !snapshot
                 .item(parent)
@@ -299,7 +299,7 @@ impl OutlineView {
             .take(mast_proto::limits::MAX_TITLE_CHARS)
             .collect();
         if title.is_empty() {
-            return Err("Give the new project a title".into());
+            return Err("Give the new item a title".into());
         }
 
         let operation_key = new_operation_id();
@@ -371,7 +371,7 @@ impl OutlineView {
                     None => {
                         this.confirm_change(&first_op, cx);
                         let mut text = format!(
-                            "Created project \u{2018}{title}\u{2019} from template \u{2018}{template_name}\u{2019}"
+                            "Created item \u{2018}{title}\u{2019} from blueprint \u{2018}{template_name}\u{2019}"
                         );
                         text.push_str(&link_note.unwrap_or_default());
                         this.show_template_toast(text, cx);
@@ -384,16 +384,16 @@ impl OutlineView {
                                 this.pending_select = None;
                             }
                         } else {
-                            // A partial project exists; ⌘Z archives it.
+                            // A partial item exists; ⌘Z archives it.
                             this.confirm_change(&first_op, cx);
                         }
                         this.show_error(
                             format!(
-                                "Couldn\u{2019}t create the project from the template\n{}{}",
+                                "Couldn\u{2019}t create the item from the blueprint\n{}{}",
                                 error.message,
                                 if sent > 0 {
                                     format!(
-                                        " ({sent} of {total} steps were applied; undo removes the partial project)"
+                                        " ({sent} of {total} steps were applied; undo removes the partial item)"
                                     )
                                 } else {
                                     String::new()

@@ -1797,7 +1797,7 @@ impl Overview {
                 item_id,
                 pr,
             } => this.pull_request_dropped(space_id.clone(), item_id.clone(), (**pr).clone(), cx),
-            // The toolbar's Hidden projects count.
+            // The toolbar's Hidden Spaces count.
             OutlineEvent::SpacesArranged => cx.notify(),
         });
         // Idle refresh — same `cx.spawn` + `background_executor().timer`
@@ -5869,7 +5869,7 @@ impl Overview {
     }
 
     /// Outline-only toolbar controls: the inline "New item" entry point, the
-    /// reveal for projects hidden from the Outline, and the explicit reveal
+    /// reveal for Spaces hidden from the Outline, and the explicit reveal
     /// for completed items hidden by "Hide stale".
     fn render_outline_toolbar(
         &self,
@@ -5978,15 +5978,15 @@ impl Overview {
             out.push(
                 pill(
                     "outline-hidden-spaces",
-                    format!("Hidden projects ({hidden_spaces})"),
+                    format!("Hidden Spaces ({hidden_spaces})"),
                     showing_hidden,
                 )
                 .debug_selector(|| "outline-hidden-spaces".into())
                 .hint(
                     if showing_hidden {
-                        "Stop showing the projects hidden from the Outline"
+                        "Stop showing the Spaces hidden from the Outline"
                     } else {
-                        "Show the projects hidden from the Outline, to unhide them"
+                        "Show the Spaces hidden from the Outline, to unhide them"
                     },
                     HintKey::None,
                 )
@@ -6825,7 +6825,7 @@ impl Overview {
     ) -> Result<(), &'static str> {
         let snapshot = self
             .outline_snapshot(&space_id, cx)
-            .ok_or("This project's outline is not loaded")?;
+            .ok_or("This Space's outline is not loaded")?;
         let item = snapshot.item(&item_id).ok_or("That work item is gone")?;
         if item.archived_at.is_some() {
             return Err("Restore the work item to start a Chat in it");
