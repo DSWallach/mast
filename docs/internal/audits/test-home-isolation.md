@@ -4,7 +4,9 @@ Initial inventory at integration head f566310ac. Matches include production path
 
 Confirmed exposures:
 
-- `crates/harness/src/acp/mod.rs:4270`: test creates a directory in the passwd home.
+- `crates/harness/src/acp/mod.rs:4270`: test created a directory in the passwd home; changed to verify expansion without creating a directory.
+- `crates/engine/src/subagent_scan.rs:404`: unignored unit test inspected a live Claude transcript; replaced with a synthetic fixture.
+- `crates/engine/tests/subagent_scan_real_smoke.rs:8`: ignored test explicitly reads a live Claude transcript.
 - `crates/engine/tests/external_import_real_smoke.rs:52` and `:65`: ignored tests explicitly read live Claude transcripts.
 - `crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27`: ignored test explicitly reads a live Claude transcript.
 - `crates/engine/src/external_import.rs:1002`: background scan derives the Claude projects directory from HOME, including when an engine has an isolated data directory.
