@@ -5371,6 +5371,7 @@ dependencies = [
  "raw-window-handle",
  "reqwest",
  "roxmltree 0.21.1",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
