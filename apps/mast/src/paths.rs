@@ -4,12 +4,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
-    resolve_data_dir(std::env::var_os, true).0
+    resolve_data_dir(|name| std::env::var_os(name), true).0
 }
 
 /// Resolve the configured location without performing the legacy migration.
 pub fn data_dir_read_only() -> (PathBuf, &'static str) {
-    resolve_data_dir(std::env::var_os, false)
+    resolve_data_dir(|name| std::env::var_os(name), false)
 }
 
 fn resolve_data_dir(
