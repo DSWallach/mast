@@ -616,6 +616,11 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Needs-you phase 6** (2026-11-05 overnight, `needs-you-phase-6`, Terra): notification banners and the menu bar's
+  needs-you section show the request kind, one-line ask, origin chat/item and age, ordered by priority then age;
+  quick actions (choose options capped at 3, Approve/Decline) go through the card relay/resolve path (idempotent,
+  banner/menu provenance). `fyi` doesn't banner by default; existing banner settings respected. Release run:
+  nextest passed, UI 2481/0.
 - **local_import flake fix** (2026-11-05 overnight, `flaky-local-import`, Terra; test code only): each local_import
   test runs in its own process with a private HOME and data dir. Root cause: background external-session adoption
   read the real HOME's sessions and raced the fixtures. Stress 1/20 → 20/20. Release run: nextest 1223/1224; the 1 =
@@ -934,7 +939,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2, cleanup-sweep-3, perf-sweep-3, cleanup-sweep-4, perf-sweep-4, flaky-local-import.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2, cleanup-sweep-3, perf-sweep-3, cleanup-sweep-4, perf-sweep-4, flaky-local-import, needs-you-phase-6.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
