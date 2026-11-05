@@ -3843,7 +3843,18 @@ impl DocHost {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
         let chat_id = &handle.chat_id;
-        if !self.inner.event_turns.is_event_message(&item.id) {
+        let is_wake = self.inner.event_turns.is_event_message(&item.id);
+        let archived = self.inner.workspace.get().and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.archived);
+        if is_wake && (archived || self.inner.event_turns.is_discarded_message(chat_id, &item.id)) {
+            self.inner.event_turns.discard_queued_message(chat_id, &item.id, handle.persistence.as_ref())
+                .map_err(EngineError::Other)?;
+            self.inner.event_turns.clear(chat_id);
+            self.inner.event_turns.schedule_prune(chat_id, &item.id);
+            tracing::info!(chat = %chat_id, "discarded queued wake for archived or disabled coordinator");
+            return Ok(());
+        }
+        if !is_wake {
             self.yield_event_turn_to_user(chat_id).await;
         }
         // Keep the queue row's identity when it becomes a real user message.
