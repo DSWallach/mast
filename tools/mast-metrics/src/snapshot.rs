@@ -44,6 +44,9 @@ pub fn read_snapshot(path: &Path) -> Result<Snapshot> {
         bail!("a live Mast data directory cannot be used as a snapshot");
     }
     let db = within(&root, &root.join("docs.sqlite3"))?;
+    if db.components().any(|c| c.as_os_str() == ".zeron") {
+        bail!("a live Mast database cannot be used as a snapshot");
+    }
     // URI immutable avoids WAL/shared-memory creation even on the copy.
     let uri = format!(
         "file:{}?immutable=1",

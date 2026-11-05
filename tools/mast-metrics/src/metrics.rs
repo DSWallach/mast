@@ -86,7 +86,7 @@ fn text(entry: &SessionMessageEntry) -> String {
         .join(" ")
 }
 
-fn resolution_category(r: &UserActionResolution) -> &'static str {
+fn resolution_category(r: &UserActionResolution, origin_chat: &str) -> &'static str {
     if r.outcome.as_deref() == Some("superseded") {
         return "superseded";
     }
@@ -96,8 +96,14 @@ fn resolution_category(r: &UserActionResolution) -> &'static str {
     match r.via.as_deref() {
         Some("card") | Some("banner") | Some("menu") => "card_reply_or_choice",
         Some("prMerged") => "pr_merged",
-        Some("agent") => "agent_self_resolve",
-        _ if r.by.kind == WorkOutlineActorKind::Agent => "agent_self_resolve",
+        Some("agent") if r.by.chat_id.as_deref() == Some(origin_chat) => "agent_self_resolve",
+        Some("agent") => "agent_other",
+        _ if r.by.kind == WorkOutlineActorKind::Agent
+            && r.by.chat_id.as_deref() == Some(origin_chat) =>
+        {
+            "agent_self_resolve"
+        }
+        _ if r.by.kind == WorkOutlineActorKind::Agent => "agent_other",
         _ => "unknown",
     }
 }
@@ -154,9 +160,18 @@ pub fn measure(
         })
         .collect();
     let mut projects = HashMap::new();
+    let mut item_projects = HashMap::new();
     let mut requests: Vec<UserActionRequestView> = Vec::new();
     for space in snapshot.registry.read_spaces()? {
         let outline = snapshot.registry.work_outline_snapshot(&space.id, true);
+        for item in &outline.items {
+            item_projects.insert(
+                item.id.clone(),
+                outline
+                    .project_root(&item.id)
+                    .map(|project| project.id.clone()),
+            );
+        }
         for assignment in &outline.assignments {
             let project = assignment
                 .work_item_id
@@ -181,7 +196,9 @@ pub fn measure(
             .get(request.chat_id.as_str())
             .copied()
             .unwrap_or("unknown");
-        let project = projects.get(&request.chat_id).and_then(Option::as_deref);
+        let project = item_projects
+            .get(&request.work_item_id)
+            .and_then(Option::as_deref);
         let group_keys = keys(&request.space_id, project, role);
         let kind = serde_json::to_value(request.effective_kind())?
             .as_str()
@@ -197,7 +214,7 @@ pub fn measure(
             && resolution.at < until.timestamp_millis()
             && let Some(duration) = elapsed_millis(request.created_at, resolution.at)
         {
-            let category = resolution_category(resolution).to_owned();
+            let category = resolution_category(resolution, &request.chat_id).to_owned();
             update(&mut groups, &group_keys, |a| {
                 a.durations
                     .entry(category.clone())
@@ -287,7 +304,7 @@ pub fn measure(
     let totals = groups.remove("all").unwrap_or_default().finish();
     Ok(Report { schema_version: 1, since: since.to_rfc3339(), until: until.to_rfc3339(), totals, groups: groups.into_iter().map(|(k, v)| (k, v.finish())).collect(), coverage: vec![
         "Window is UTC, inclusive since and exclusive until; request cohorts are based on creation time, resolved before until.".into(),
-        "Only the local profile snapshot is included. Deleted or absent chats and documents are unavailable; chat2 snapshots may contain only a transcript tail.".into(),
+            "Only the supplied profile snapshot is included. Deleted or absent chats and documents are unavailable; chat2 snapshots may contain only a transcript tail and pending outbox updates are not included.".into(),
         "Coordinator means a chat with a recorded child; worker means a child without its own recorded child; others are plain. Assignments and project ancestry reflect snapshot state, not historical state.".into(),
         "Prose questions are heuristics on the last assistant entry before the next user entry. Turn boundaries and request matching are inferred from timestamps; classifier counts are not audited decisions.".into(),
         "Reply word counts cover nonempty completed assistant entries, including intermediate entries; status checks exclude Mast relay and system messages.".into(),
@@ -295,4 +312,41 @@ pub fn measure(
         format!("Missing chat documents: {}; failed chat decodes: {}; malformed journal lines: {}; decoded journal events: {}.", snapshot.chats.len().saturating_sub(snapshot.transcripts.len()+snapshot.failed_transcripts), snapshot.failed_transcripts, snapshot.malformed_journal_lines, snapshot.journal_events),
         "Resolution provenance absent or unrecognized is unknown; duplicate resolved rows are counted individually. No message text or classifier examples are exported.".into(),
     ] })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mast_proto::work_outline::WorkOutlineActor;
+
+    #[test]
+    fn resolution_provenance_distinguishes_agents_and_user_answers() {
+        let mut resolution = UserActionResolution {
+            outcome: None,
+            values: None,
+            via: Some("agent".into()),
+            by: WorkOutlineActor {
+                kind: WorkOutlineActorKind::Agent,
+                device_id: String::new(),
+                chat_id: Some("worker".into()),
+                message_id: None,
+            },
+            at: 200,
+            note: None,
+            answer: None,
+        };
+        assert_eq!(
+            resolution_category(&resolution, "worker"),
+            "agent_self_resolve"
+        );
+        assert_eq!(resolution_category(&resolution, "other"), "agent_other");
+        resolution.outcome = Some("superseded".into());
+        assert_eq!(resolution_category(&resolution, "worker"), "superseded");
+        resolution.outcome = None;
+        resolution.via = Some("card".into());
+        assert_eq!(
+            resolution_category(&resolution, "worker"),
+            "card_reply_or_choice"
+        );
+    }
 }
