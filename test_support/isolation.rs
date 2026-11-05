@@ -14,6 +14,11 @@ fn isolate_test_home() {
     // when the inherited isolation marker is present and its paths are safe.
     if std::env::var_os("MAST_TEST_ORIGINAL_HOME").is_some() {
         if let Some(inherited_home) = std::env::var_os("HOME") {
+            assert!(
+                !std::path::Path::new(&inherited_home)
+                    .starts_with(std::path::Path::new(&original_home)),
+                "inherited test HOME reaches the original home"
+            );
             let original = std::fs::canonicalize(&original_home)
                 .unwrap_or_else(|_| PathBuf::from(&original_home));
             let inherited = std::fs::canonicalize(&inherited_home)
@@ -29,6 +34,11 @@ fn isolate_test_home() {
                 "ZERON_DATA_DIR",
             ] {
                 if let Some(value) = std::env::var_os(key) {
+                    assert!(
+                        !std::path::Path::new(&value)
+                            .starts_with(std::path::Path::new(&original_home)),
+                        "{key} reaches the original home"
+                    );
                     let path =
                         std::fs::canonicalize(&value).unwrap_or_else(|_| PathBuf::from(&value));
                     assert!(

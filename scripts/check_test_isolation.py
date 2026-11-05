@@ -10,7 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts/test_isolation_allowlist.jsonl"
 RISK = re.compile(
-    r'dirs::home_dir|\bhome_dir\s*\(|\$HOME|~[/\\]\.zeron|\.claude|\.codex|'
+    r'dirs::home_dir|\bhome_dir\s*\(|\$HOME|\.zeron|\.claude|\.codex|'
     r'CLAUDE_CONFIG_DIR|CODEX_HOME|(?:MAST|ZERON)_[A-Z_]*(?:DATA|DIR)[A-Z_]*|'
     r'tempdir_in\s*\(|TempDir::new_in\s*\(|["\']HOME["\']|'
     r'passwd_entry\s*\(|getpwuid|getpwnam|/Users/|'
@@ -24,10 +24,9 @@ def sources():
             parts = path.relative_to(ROOT).parts
             if "target" in parts or "target-clean" in parts:
                 continue
-            contents = path.read_text()
-            if ("tests" in parts or path.name == "tests.rs" or
-                    re.search(r'#\s*\[\s*(?:cfg\s*\(\s*test|(?:tokio::|gpui::)?test\b)', contents)):
-                yield path, contents
+            # Scan shared production files too: test helpers are often mixed
+            # into ordinary modules and do not reliably carry a test attribute.
+            yield path, path.read_text()
 
 
 def findings():

@@ -264,6 +264,8 @@ impl EngineCore {
         edge: Option<EdgeConfig>,
     ) -> Result<Self, EngineError> {
         let data_dir = profile.device_root();
+        mast_proto::env::assert_test_home_isolated(data_dir);
+        mast_proto::env::assert_test_home_isolated(profile.store_root());
         std::fs::create_dir_all(data_dir)?;
         // Single-instance guard: two engines on one data dir would race the
         // SQLite snapshots + journals. Taken before any store opens or the IPC
@@ -283,6 +285,8 @@ impl EngineCore {
         lock: InstanceLock,
     ) -> Result<Self, EngineError> {
         let data_dir = profile.device_root();
+        mast_proto::env::assert_test_home_isolated(data_dir);
+        mast_proto::env::assert_test_home_isolated(profile.store_root());
         std::fs::create_dir_all(data_dir)?;
         let legacy_uploads_root = profile.claim_legacy_uploads_root()?;
         let device_id = load_or_create_device_id(data_dir)?;
@@ -937,6 +941,7 @@ impl Engine {
     /// modes. A clean WorkOS boot deliberately avoids probing Edge: signed-out
     /// installations must be able to start locally without network access.
     pub async fn build_auth(config: &EngineConfig) -> Auth {
+        mast_proto::env::assert_test_home_isolated(&config.data_dir);
         let mut auth_config = AuthConfig::new(config.edge_url.clone(), config.data_dir.clone());
         auth_config.workos_client_id = config.workos_client_id.clone();
         if let Ok(base) = mast_proto::env::var("MAST_WORKOS_API_BASE")
@@ -1020,6 +1025,7 @@ impl Engine {
         config: &EngineConfig,
         workspace_scope: WorkspaceScope,
     ) -> Result<EngineInfo, EngineError> {
+        mast_proto::env::assert_test_home_isolated(&config.data_dir);
         std::fs::create_dir_all(&config.data_dir)?;
         Ok(EngineInfo {
             device_id: load_or_create_device_id(&config.data_dir)?,
@@ -1193,6 +1199,7 @@ impl Engine {
     /// relay + peer link cache (targetDeviceId routing).
     pub async fn run(self) -> anyhow::Result<()> {
         let config = self.config;
+        mast_proto::env::assert_test_home_isolated(&config.data_dir);
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
         std::fs::create_dir_all(&config.data_dir)?;

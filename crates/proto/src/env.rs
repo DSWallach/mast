@@ -38,10 +38,14 @@ pub fn var_os(name: &str) -> Option<OsString> {
 
 /// Reject a test process resolving a home-relative default against its original home.
 /// The test initializer sets the marker before changing HOME; ordinary application
-/// processes never set it. This check does not alter release builds.
-#[cfg(debug_assertions)]
+/// processes never set it, including in release builds.
 pub fn assert_test_home_isolated(home: &std::path::Path) {
     if let Some(original) = std::env::var_os("MAST_TEST_ORIGINAL_HOME") {
+        assert!(
+            !home.starts_with(std::path::Path::new(&original)),
+            "test attempted to use its original home: {}",
+            home.display()
+        );
         let original =
             std::fs::canonicalize(&original).unwrap_or_else(|_| std::path::PathBuf::from(original));
         let resolved = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
@@ -53,15 +57,11 @@ pub fn assert_test_home_isolated(home: &std::path::Path) {
     }
 }
 
-#[cfg(not(debug_assertions))]
-pub fn assert_test_home_isolated(_: &std::path::Path) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    #[cfg(debug_assertions)]
     fn test_process_home_is_isolated() {
         let original = std::env::var_os("MAST_TEST_ORIGINAL_HOME").unwrap();
         let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
@@ -82,6 +82,12 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| assert_test_home_isolated(std::path::Path::new(&original)))
                 .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_test_home_isolated(&std::path::PathBuf::from(&original).join(".zeron"));
+            })
+            .is_err()
         );
     }
 
