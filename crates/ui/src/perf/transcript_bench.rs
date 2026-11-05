@@ -219,6 +219,14 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         Cached(transcript)
     });
     let transcript = view.read_with(vcx, |view, _| view.0.clone());
+    let mut entries = long_chat(2000);
+    entries.last_mut().unwrap().status = Some(MessageStatus::Streaming);
+    let opening = mast_doc::TranscriptUpdate {
+        frame: mast_doc::TranscriptFrame::reset(&entries),
+        context_usage: None,
+        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
+    };
+    let started = std::time::Instant::now();
     state.update(vcx, |state, cx| {
         state.set_test_engine(crate::state::EngineHandle::from_test_client(
             mast_rpc::RpcClient::new(out, inbound),
@@ -233,13 +241,6 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         if request["method"] == mast_rpc::methods::WATCH_DOC_MESSAGES {
             break request["id"].clone();
         }
-    };
-    let mut entries = long_chat(2000);
-    entries.last_mut().unwrap().status = Some(MessageStatus::Streaming);
-    let opening = mast_doc::TranscriptUpdate {
-        frame: mast_doc::TranscriptFrame::reset(&entries),
-        context_usage: None,
-        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
     };
     let frame = |update: &mast_doc::TranscriptUpdate| {
         serde_json::json!({"id": request_id, "item": update}).to_string()
@@ -265,6 +266,39 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
     replies.try_send(frame(&opening)).unwrap();
     wait_for_revision(vcx, previous);
     draw(vcx);
+    eprintln!(
+        "BENCH transcript | selection through subscription replay and draw | ms={:.2}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    state.update(vcx, |state, cx| state.select_chat(None, cx));
+    let revisit = std::time::Instant::now();
+    state.update(vcx, |state, cx| state.select_chat(Some("chat".into()), cx));
+    assert!(
+        state.read_with(vcx, |state, _| state.transcript_replayed),
+        "revisit should restore cached transcript"
+    );
+    draw(vcx);
+    eprintln!(
+        "BENCH transcript | cached selection and draw | ms={:.2}",
+        revisit.elapsed().as_secs_f64() * 1000.0
+    );
+    // The selection starts a fresh watch. Reconnect the synthetic peer before
+    // measuring streaming, since the preceding watch was cancelled.
+    vcx.run_until_parked();
+    runtime.block_on(tokio::task::yield_now());
+    let request_id = loop {
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("revisit watch request")).unwrap();
+        if request["method"] == mast_rpc::methods::WATCH_DOC_MESSAGES {
+            break request["id"].clone();
+        }
+    };
+    let frame = |update: &mast_doc::TranscriptUpdate| {
+        serde_json::json!({"id": request_id, "item": update}).to_string()
+    };
+    let previous = state.read_with(vcx, |state, _| state.transcript_revision);
+    replies.try_send(frame(&opening)).unwrap();
+    wait_for_revision(vcx, previous);
     let retained = state.read_with(vcx, |state, _| {
         state.prepared_transcripts["chat"].rows["m0"].clone()
     });
