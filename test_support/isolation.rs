@@ -9,6 +9,37 @@ fn isolate_test_home() {
         .or_else(|| std::env::var_os("HOME"))
         .or_else(|| std::env::var_os("USERPROFILE"))
         .expect("test isolation requires an original home directory");
+    // A test may re-execute its own binary with a deliberately selected fake
+    // HOME or with individual config variables unset. Preserve that fixture
+    // when the inherited isolation marker is present and its paths are safe.
+    if std::env::var_os("MAST_TEST_ORIGINAL_HOME").is_some() {
+        if let Some(inherited_home) = std::env::var_os("HOME") {
+            let original = std::fs::canonicalize(&original_home)
+                .unwrap_or_else(|_| PathBuf::from(&original_home));
+            let inherited = std::fs::canonicalize(&inherited_home)
+                .unwrap_or_else(|_| PathBuf::from(&inherited_home));
+            assert!(
+                inherited.is_absolute() && !inherited.starts_with(&original),
+                "inherited test HOME reaches the original home"
+            );
+            for key in [
+                "CLAUDE_CONFIG_DIR",
+                "CODEX_HOME",
+                "MAST_DATA_DIR",
+                "ZERON_DATA_DIR",
+            ] {
+                if let Some(value) = std::env::var_os(key) {
+                    let path =
+                        std::fs::canonicalize(&value).unwrap_or_else(|_| PathBuf::from(&value));
+                    assert!(
+                        path.is_absolute() && !path.starts_with(&original),
+                        "{key} reaches the original home"
+                    );
+                }
+            }
+            return;
+        }
+    }
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before epoch")

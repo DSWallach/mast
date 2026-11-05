@@ -42,9 +42,11 @@ pub fn var_os(name: &str) -> Option<OsString> {
 #[cfg(debug_assertions)]
 pub fn assert_test_home_isolated(home: &std::path::Path) {
     if let Some(original) = std::env::var_os("MAST_TEST_ORIGINAL_HOME") {
-        assert_ne!(
-            home,
-            std::path::Path::new(&original),
+        let original =
+            std::fs::canonicalize(&original).unwrap_or_else(|_| std::path::PathBuf::from(original));
+        let resolved = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        assert!(
+            !resolved.starts_with(original),
             "test attempted to use its original home: {}",
             home.display()
         );
