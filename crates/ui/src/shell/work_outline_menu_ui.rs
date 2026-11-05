@@ -905,6 +905,25 @@ mod tests {
         shell.read_with(cx, |shell, _| shell.work_outline_menu.is_open())
     }
 
+    #[gpui::test]
+    fn hand_off_entry_requires_a_live_child(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::work_outline::store::fixture_snapshot("s1");
+        let (shell, _outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+        right_click(cx, &row_key::chat(CHAT_API));
+        assert!(!ids(&shell, cx).contains(&"hand-off-chat"));
+        press(cx, "escape");
+        settle(&shell, cx);
+        shell.update(cx, |shell, cx| shell.state.update(cx, |state, cx| {
+            let worker = state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap();
+            worker.parent_chat_id = Some(CHAT_API.into());
+            cx.notify();
+        }));
+        redraw(cx);
+        right_click(cx, &row_key::chat(CHAT_API));
+        assert!(ids(&shell, cx).contains(&"hand-off-chat"));
+    }
+
     fn menu_focused(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> bool {
         cx.update(|window, cx| {
             shell

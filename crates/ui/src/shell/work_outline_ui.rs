@@ -870,6 +870,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting()) {
+            return true;
+        }
         self.resolve_work_outline_modal(false, window, cx)
     }
 

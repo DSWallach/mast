@@ -14,6 +14,7 @@ pub(super) struct HandOffDialog {
 }
 
 impl HandOffDialog {
+    pub(super) fn is_submitting(&self) -> bool { self.submitting }
     pub(super) fn input_focus(&self, cx: &App) -> FocusHandle {
         self.input.read(cx).focus_handle(cx)
     }
@@ -27,17 +28,15 @@ impl Shell {
     pub(super) fn open_hand_off(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else { return };
-        let Some(space_id) = chat.space_id.as_deref() else { return };
-        let load = state.work_outline(space_id);
-        let Some(snapshot) = load.snapshot() else { return };
-        let item = crate::work_outline::instructions::assigned_chats(snapshot).remove(&chat_id)
-            .and_then(|id| snapshot.item(&id));
-        let Some(item) = item else { return };
-        let summary = format!("Continue as coordinator for {}. Read the work item, its instructions, and the worker list below.", item.title);
+        let load = chat.space_id.as_deref().map(|space_id| state.work_outline(space_id));
+        let snapshot = load.as_ref().and_then(|load| load.snapshot());
+        let item = snapshot.and_then(|snapshot| crate::work_outline::instructions::assigned_chats(snapshot).remove(&chat_id)
+            .and_then(|id| snapshot.item(&id)));
+        let summary = format!("Continue as coordinator for {}. Read the work item, its instructions, and the worker list below.", item.map(|item| item.title.as_str()).unwrap_or("this work item"));
         let workers: Vec<String> = state.chats.iter().filter(|worker| !worker.archived && worker.parent_chat_id.as_deref() == Some(chat_id.as_str())).map(|worker| {
             let status = state.sessions.iter().find(|session| session.chat_id == worker.id)
                 .map(|session| format!("{:?}", session.status)).unwrap_or_else(|| "Unknown".into());
-            let requests = snapshot.user_action_requests.iter().filter(|request| request.chat_id == worker.id && request.is_unresolved() && !request.deduped).count();
+            let requests = snapshot.map(|snapshot| snapshot.user_action_requests.iter().filter(|request| request.chat_id == worker.id && request.is_unresolved() && !request.deduped).count()).unwrap_or(0);
             format!("{} · {} · {} open requests", worker.title.as_deref().unwrap_or("Untitled"), status, requests)
         }).collect();
         if workers.is_empty() { return; }
@@ -100,7 +99,7 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
         })).child(SharedString::from(if dialog.archive { "☑ Archive this chat after hand-off" } else { "☐ Archive this chat after hand-off" })))
         .when_some(dialog.error.clone(), |card, error| card.child(div().mt(px(8.0)).text_color(theme.warning).child(SharedString::from(error))))
         .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
-            .child(popover::btn_ghost(theme, "Cancel", "hand-off-cancel").id("hand-off-cancel").on_click(cx.listener(|this, _, window, cx| { this.resolve_work_outline_modal(false, window, cx); })))
+            .child(popover::btn_ghost(theme, "Cancel", "hand-off-cancel").id("hand-off-cancel").on_click(cx.listener(|this, _, window, cx| { this.cancel_work_outline_modal(window, cx); })))
             .child(popover::btn_primary(theme, if dialog.submitting { "Handing off…" } else { "Hand off" }).id("hand-off-submit").on_click(cx.listener(|this, _, _, cx| this.submit_hand_off(cx)))))
         .into_any_element()
 }
@@ -109,6 +108,7 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
 mod tests {
     use super::*;
     use crate::work_outline::store::fixture_ids::{CHAT_API, CHAT_UI};
+    use std::sync::{Arc, Mutex};
 
     #[gpui::test]
     fn dialog_lists_live_workers_and_prefills_summary(cx: &mut gpui::TestAppContext) {
@@ -128,6 +128,59 @@ mod tests {
             assert!(dialog.workers[0].contains("Title of"));
             assert!(dialog.workers[0].contains("0 open requests"));
             assert!(!dialog.archive);
+        });
+    }
+
+    #[gpui::test]
+    fn submit_sends_summary_and_archives_after_success(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(move |method, params| {
+            recorded.lock().unwrap().push((method.to_owned(), params));
+            Ok(serde_json::json!({"chatId":"successor", "messageId":"m", "commandId":"c", "executionRoot":"/work", "state":"queued"}))
+        }));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().parent_chat_id = Some(CHAT_API.into());
+                state.work_outline_actions_override = Some(actions);
+            });
+            shell.open_hand_off(CHAT_API.into(), cx);
+            let Some(WorkOutlineModal::HandOff(dialog)) = shell.work_outline_modal.as_mut() else { panic!() };
+            dialog.input.update(cx, |input, cx| input.set_text("Continue coordinating", cx));
+            dialog.archive = true;
+            shell.submit_hand_off(cx);
+        });
+        cx.run_until_parked();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, mast_rpc::methods::HAND_OFF_ORCHESTRATOR);
+        assert_eq!(calls[0].1["chatId"], CHAT_API);
+        assert_eq!(calls[0].1["summary"], "Continue coordinating");
+        assert!(calls[0].1["operationId"].as_str().is_some());
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.work_outline_modal.is_none());
+            assert!(shell.mutations.iter().any(|mutation| mutation["op"] == "setChatArchived" && mutation["chatId"] == CHAT_API && mutation["archived"] == true));
+        });
+    }
+
+    #[gpui::test]
+    fn submit_error_keeps_dialog_open(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(|_, _| Err(mast_rpc::RpcError::Failed("transfer failed".into()))));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().parent_chat_id = Some(CHAT_API.into());
+                state.work_outline_actions_override = Some(actions);
+            });
+            shell.open_hand_off(CHAT_API.into(), cx);
+            shell.submit_hand_off(cx);
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            let Some(WorkOutlineModal::HandOff(dialog)) = &shell.work_outline_modal else { panic!() };
+            assert!(dialog.error.as_deref().unwrap().contains("transfer failed"));
+            assert!(!dialog.submitting);
         });
     }
 }

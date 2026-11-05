@@ -908,7 +908,7 @@ async fn user_hand_off_rpc_transfers_workers_and_replays() {
     let source = rig.core.doc_host.open(CHAT).unwrap();
     let entries = source.doc().read_entries().unwrap();
     let marker = format!("[Mast hand-off: {successor}]");
-    assert_eq!(entries.iter().filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_proto::MessagePart::Text { text, .. } if text == &marker))).count(), 1);
+    assert_eq!(entries.iter().filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text == &marker))).count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
