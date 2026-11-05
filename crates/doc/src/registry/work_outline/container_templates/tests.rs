@@ -187,6 +187,28 @@ fn editing_the_rules_propagates_and_never_deletes() {
 }
 
 #[test]
+fn planning_template_propagation_does_not_write() {
+    let mut d = doc();
+    let projects = create(&mut d, "projects-plan", None, "Projects");
+    set_rules(&mut d, "rules-plan", &projects, Some(projects_rules()));
+    let child = create(&mut d, "child-plan", Some(&projects), "Checkout");
+    let planning = child_titled(&snap(&d), &child, "Planning").id.clone();
+    let mut template = snap(&d).item(&projects).unwrap().container_template.clone().unwrap();
+    template.root.children[0].instructions[0].text = "Plan carefully".into();
+    let params = SetContainerTemplateParams {
+        operation_id: "update-plan".into(),
+        space_id: SPACE.into(),
+        work_item_id: projects.clone(),
+        template: Some(template),
+    };
+    let plan = d.plan_container_template(&params, &actor(WorkOutlineActorKind::User), NOW).unwrap();
+    assert!(!plan.is_empty());
+    assert_eq!(live_instructions(&snap(&d), &planning), vec!["Plan first"]);
+    d.set_container_template(&params, &actor(WorkOutlineActorKind::User), NOW).unwrap();
+    assert_eq!(live_instructions(&snap(&d), &planning), vec!["Plan carefully"]);
+}
+
+#[test]
 fn removing_a_node_keeps_its_instructions_on_the_detached_item() {
     let mut d = doc();
     let projects = create(&mut d, "op-projects", None, "Projects");

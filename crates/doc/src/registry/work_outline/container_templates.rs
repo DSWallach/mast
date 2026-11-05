@@ -174,6 +174,21 @@ impl RegistryDoc {
         actor: &WorkOutlineActor,
         now_ms: i64,
     ) -> Outcome<()> {
+        let plan = self.plan_container_template(p, actor, now_ms)?;
+        if plan.is_empty() {
+            return Ok(());
+        }
+        self.commit(plan, &[(KIND_WORK_ITEMS, p.work_item_id.as_str())])
+    }
+
+    /// Plan the same propagation as `setContainerTemplate`, so another
+    /// mutation can commit the rule change and its own bookkeeping together.
+    pub(super) fn plan_container_template(
+        &self,
+        p: &SetContainerTemplateParams,
+        actor: &WorkOutlineActor,
+        now_ms: i64,
+    ) -> Outcome<Vec<Planned>> {
         check_operation_id(&p.operation_id)?;
         if actor.kind == WorkOutlineActorKind::Agent && !self.admin_in_force() {
             return Err(WorkOutlineError::unauthorized(
@@ -227,7 +242,7 @@ impl RegistryDoc {
             }
         };
         if old == new {
-            return Ok(());
+            return Ok(Vec::new());
         }
         if let Some(new) = &new {
             let units = serde_json::to_string(new).map_err(|e| invalid(e.to_string()))?;
@@ -284,7 +299,7 @@ impl RegistryDoc {
                 ("updatedAt".to_owned(), json!(now_ms)),
             ]),
         ));
-        self.commit(plan, &[(KIND_WORK_ITEMS, p.work_item_id.as_str())])
+        Ok(plan)
     }
 
     /// `applyContainerTemplate`.
