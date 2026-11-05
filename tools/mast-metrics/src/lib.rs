@@ -1,5 +1,7 @@
 //! Classifiers and aggregate calculations for offline Mast measurements.
 
+pub mod snapshot;
+
 /// Detect a potential prose question; this is a heuristic, not a decision audit.
 pub fn is_question(text: &str) -> bool {
     let text = text.trim().to_lowercase();
@@ -12,17 +14,23 @@ pub fn is_question(text: &str) -> bool {
 /// Detect common status checks. Call only for human messages to coordinators.
 pub fn is_status_question(text: &str) -> bool {
     let text = text.to_lowercase();
-    ["status", "what's left", "what is left", "where are we", "any updates", "any update"]
-        .iter()
-        .any(|phrase| contains_phrase(&text, phrase))
+    [
+        "status",
+        "what's left",
+        "what is left",
+        "where are we",
+        "any updates",
+        "any update",
+    ]
+    .iter()
+    .any(|phrase| contains_phrase(&text, phrase))
 }
 
 fn contains_phrase(text: &str, phrase: &str) -> bool {
     text.match_indices(phrase).any(|(start, _)| {
         let before = text[..start].chars().next_back();
         let after = text[start + phrase.len()..].chars().next();
-        before.is_none_or(|c| !c.is_alphanumeric())
-            && after.is_none_or(|c| !c.is_alphanumeric())
+        before.is_none_or(|c| !c.is_alphanumeric()) && after.is_none_or(|c| !c.is_alphanumeric())
     })
 }
 

@@ -5207,6 +5207,17 @@ dependencies = [
 [[package]]
 name = "mast-metrics"
 version = "0.2.82"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "loro",
+ "mast-doc",
+ "mast-proto",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mast-preview"
