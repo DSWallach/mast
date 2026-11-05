@@ -3108,6 +3108,7 @@ impl RpcService for EngineRpc {
                         Err(error) => result.skipped.push(mast_proto::FrictionImportSkip { line: 0, reason: error.to_string() }),
                     }
                 }
+                if !p.preview { self.workspace.flush(); }
                 RpcReply::value(&result)
             }
             methods::SET_FRICTION_STATUS => {

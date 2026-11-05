@@ -212,7 +212,21 @@ pub fn parse_friction_markdown(markdown: &str) -> FrictionParseResult {
                 finish(entry, &mut result);
             }
             current = Some((index + 1, header.to_owned(), String::new()));
-        } else if let Some((_, _, body)) = current.as_mut() {
+        } else if let Some((start, header, body)) = current.as_mut() {
+            let is_friction = line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("- friction:");
+            let already_has_friction = body.lines().any(|line| {
+                line.trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("- friction:")
+            });
+            if is_friction && already_has_friction {
+                let entry = (*start, header.clone(), std::mem::take(body));
+                finish(entry, &mut result);
+                *start = index + 1;
+            }
             body.push_str(line);
             body.push('\n');
         }
@@ -226,6 +240,16 @@ pub fn parse_friction_markdown(markdown: &str) -> FrictionParseResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_multiple_friction_items_under_one_heading() {
+        let result = parse_friction_markdown(
+            "## 2026-01-02 Session\n- Friction: First\n- Workaround: One\n- Friction: Second\n- Workaround: Two\n",
+        );
+        assert_eq!(result.reports.len(), 2);
+        assert_eq!(result.reports[0].what_happened, "First");
+        assert_eq!(result.reports[1].workaround.as_deref(), Some("Two"));
+    }
 
     #[test]
     fn parses_synthetic_entries_and_skips_malformed_entries() {
