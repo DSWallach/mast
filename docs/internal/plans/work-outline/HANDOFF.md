@@ -616,6 +616,15 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Hand-off + quick wins** (2026-11-05, `hand-off-orchestrator`, `pr-merged-wake`, `diff-target-remove`,
+  `visual-compare-banner`, Terra): `hand_off_orchestrator` MCP tool stages a successor chat on the same item
+  (same harness/model/sandbox), reparents active workers before its first turn, moves held/queued wakes,
+  copies wake settings and the auto-continue override, records provenance, idempotent retry; first message
+  lists workers and open requests. PR-merged wake now fires on owned PR open→merged (deduped, persisted
+  marker; names open handoff requests for that branch). Changes picker: Remove per bound target (not the
+  primary), limit message points at it, missing target paths pruned. Visual compare: "compared the first N
+  px" banner in side-by-side and onion; onion follows shared zoom. Release runs: nextest 2318/2318 then
+  1196/1196, UI 2443/0 then 2445/0.
 - **Auto-continue** (2026-11-04, `auto-continue`, Terra, 3 slices): when a worker ends a clean turn with its item
   still open (no open Required Action, not awaiting input, no refused tool calls, no user send during the turn,
   nothing queued), Mast sends it a `[Mast: auto-continue n/3]` nudge; after 3 it queues one "worker stopped
@@ -797,28 +806,36 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-04 evening; coordinator chat 74bc70e5, compacted, not replaced)
+## In flight (snapshot 2026-11-05 ~03:00; coordinator chat 74bc70e5, compacted, not replaced)
 
-**Coordinator:** chat 74bc70e5 on Mast Dev (Opus). Workers report to it (parentChatId), so keep using it;
-a fresh chat wouldn't hear them until "Hand off to new chat" (item 6161edf6) exists. Release runs go
-DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`) because restarts kill session background shells;
-they don't wake the coordinator, so check logs when asked for status.
+**Coordinator:** chat 74bc70e5 on Mast Dev (Opus, thin; Mikey asked to run all implementation on Codex
+models to save Anthropic usage). Workers report to it (parentChatId). `hand_off_orchestrator` (MCP) now
+exists to move workers to a fresh coordinator; the UI menu item is a later slice. Release runs go
+DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n 4096`).
 
-**Running:** none. Auto-continue shipped; Mikey turns it on for this coordinator in the Team tab.
+**Running (Codex Terra):**
+- `durable-wakes` (chat 6adacaf4, items aa155e46 + 68b601a8): persisted wake/report store (≤500 per
+  orchestrator, atomic writes behind one lock), restore before any queue drain, `delivered` marked at the
+  transcript write and pruned only after the snapshot debounce, crash-window check against the last 50
+  transcript messages. Merge only if sound and cheap (Mikey's bar).
 
-**Queued (agreed with Mikey):**
-2. Hand off to new chat (item 6161edf6): reparent children, move held wakes/reports, post a summary.
-3. Quick wins from the feature audit: diff-target Remove button + prune missing paths; visual-compare
-   "compared first N px" banner; PR-merged wake (also enables handoff auto-resolve on landing).
+**Queued (agreed with Mikey 2026-11-05):**
+1. Terminology pass (item 48466e7d): "Blueprints" (one-time tree copy) vs "Child template" (live rules),
+   plus Space-vs-project glossary and copy pass across UI, MCP descriptions and docs.
+2. Hand-off UI slice: "Hand off to new chat…" on a chat.
+3. PR dashboard file paging (#5, files changed within a PR beyond the first 100): asked Mikey, unanswered.
 4. Coworker readiness: first-run smoke test on a throwaway profile; import the Cofactr friction log.
 5. Later: Needs-you phases 4–6, PR review phase 4 (walkthrough), rebindable outline shortcuts (3b6f9919),
-   the data/binary rename migration, `mast-doctor` branch (pushed, unmerged, awaiting Mikey's review).
+   data/binary rename migration, item-tab artifact surfacing (171cde5a), container templates phases 2+.
+   `mast-doctor` branch: pushed, unmerged, awaiting Mikey's review.
 
 **Terra working style:** it ends turns early ("can't complete in this turn") on anything that looks big.
 Give one or two concrete items per chat, say "partial progress is fine: commit and keep going", start a
 fresh chat per slice on the same branch, and archive the finished one. Build with
 `CARGO_TARGET_DIR=<worktree>/target-clean`; never seed the cache. Approve its unsandboxed test reruns
-(watcher/home-dir tests only pass outside Codex's sandbox).
+(watcher/home-dir tests only pass outside Codex's sandbox). Codex shells default to 256 open files: tell
+workers to `ulimit -n 4096` before tests; that fixes most nextest stalls and agent_tools failures. Have them
+complete their item BEFORE raising Ready to merge (an item with an open request can't be completed).
 
 **Disk:** prune `zeron/target/debug` when idle (`find deps -maxdepth 1 -type f -mmin +360 -delete`, same for
 build/ and .fingerprint/); delete merged worktrees' target-clean right after merging. Repo auto-gc is off.
@@ -851,19 +868,9 @@ Prompt, to adjust with Mikey:
 > Rules: archive, never delete; bulk changes go through the preview → Required Action; everything must
 > be undoable from Recent Changes.
 
-**Waiting on Mikey (Required Actions open):** PR review brief (mast-artifact:3e12f5d0be4cb1de57ed6b0f8be58992;
-suggested defaults: Linear-style guided order + always drop to free diff; viewed = manual + soft
-"seen"; ⌘O quick open, ⇧⌘F search, keep ⌘P = PR page; GitHub posting last, behind a setting,
-human-click only, batched, head-sha guarded, no footer), minimal-talk research (held until the admin
-chat runs stage 0), repo cleanup proposal (mast-artifact:bacfa5c96fe27d73a2821e8f4e2aa446), active-checkout
-design (mast-artifact:679f61de127b3519c16de37f8d90f99b).
-
-**Queued:** "Faster releases" (see Next, agreed but not started) — do it first in the new session, when
-nothing is mid-release. Container templates phases 2+ (see its plan artifact).
-
-**Known issues:** wake dedupe can deliver the same Ready to merge / resolved notice twice; full
-engine runs are slow and load-sensitive (several tests have hard timeouts) until nextest +
-quarantine land.
+**Waiting on Mikey (Required Actions open):** PR review brief (mast-artifact:3e12f5d0be4cb1de57ed6b0f8be58992),
+minimal-talk research (held until the admin chat runs stage 0), active-checkout design
+(mast-artifact:679f61de127b3519c16de37f8d90f99b), `mast-doctor` Ready to merge.
 
 **Coordinator lessons from this session:**
 - Design-only children never push, so check Required Actions whenever a child goes idle. Orchestrator
