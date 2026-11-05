@@ -616,6 +616,9 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   container-template set/apply/rule edits). Attribution "admin chat … (granted by Mikey)"; sent
   messages say they are not Mikey's own. Bulk batches raise a preview Required Action unless skipped;
   per-turn undo from Recent Changes.
+- **Cleanup sweep 3** (2026-11-05 overnight, `cleanup-sweep-3`, Terra): mechanical clippy fixes in mast-engine in
+  six module-group commits (no MCP changes needed; mast-mcp had 0); engine diagnostics 431 → 382. No API, serde,
+  protocol or behavior change. Release run: nextest 1224/1224, UI 2475/0.
 - **Perf sweep 2: startup** (2026-11-05 overnight, `perf-sweep-2`, Terra): font catalog inspection deferred until
   needed (registration 185 ms → 0.01 ms; installed font selections still resolve before drawing, picker complete);
   cached chat revisits skip the unused provisional tail. Initial shell draw on a 53 MB profile 203 → 132 ms. Note:
@@ -909,7 +912,7 @@ DETACHED (`nohup /tmp/mast-release/releaseN.sh & disown`, script sets `ulimit -n
 
 **Overnight run 2026-11-05 (Mikey: "same deal as last night", Terra only, caffeinate on 12 h; perf + cleanup until 8 am):**
 - Installed overnight: hand-off-ui, wake-label-fd-limit, perf-diff-navigation, friction-import, pr-files-paging,
-  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2.
+  first-run-audit, perf-sweep (List virtualization), rebindable-outline-shortcuts, first-run-followup, needs-you-phase-4, cleanup-sweep, flaky-tests, respond-to-input-validation, needs-you-phase-5-land, cleanup-sweep-2, perf-sweep-2, cleanup-sweep-3.
 - Running: `cleanup-sweep` (chat edf8933b,
   item e71201b1: warnings, clippy, stale docs/scripts, no behavior change), `needs-you-phase-4` (chat 5a9a26a4,
   item d0be64b2: answer ask/choose on the card, optional `options` field).
