@@ -391,10 +391,19 @@ impl Styled {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     OpenChat(String),
+    OpenRequest { space_id: String, request_id: String },
+    DecideRequest { space_id: String, request_id: String, decision: RequestDecision, via: &'static str },
     OpenMast,
     RestartWhenIdle,
     ResumeAll(Vec<String>),
     Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestDecision {
+    Approve,
+    Decline,
+    Choose(String),
 }
 
 /// What the AppKit glue reports back.
@@ -569,6 +578,66 @@ where
         }
     }
     items
+}
+
+/// An open request displayed in the menu bar.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestPreview {
+    pub space_id: String,
+    pub request_id: String,
+    pub group: crate::work_outline::required_actions::NeedsGroup,
+    pub kind: mast_proto::work_outline_user_actions::UserActionKind,
+    pub text: String,
+    pub origin: String,
+    pub created_at: i64,
+    pub actions: Vec<(String, RequestDecision)>,
+}
+
+pub(crate) fn request_actions(
+    kind: mast_proto::work_outline_user_actions::UserActionKind,
+    options: &[mast_proto::work_outline_user_actions::RequestOption],
+    chat_available: bool,
+) -> Vec<(String, RequestDecision)> {
+    use mast_proto::work_outline_user_actions::UserActionKind;
+    if !chat_available { return Vec::new(); }
+    match kind {
+        UserActionKind::Approve => vec![
+            ("Approve".into(), RequestDecision::Approve),
+            ("Decline".into(), RequestDecision::Decline),
+        ],
+        UserActionKind::Choose => options.iter().take(3)
+            .map(|option| (option.label.clone(), RequestDecision::Choose(option.id.clone())))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Insert requests in priority and age order ahead of the chat sections.
+pub(crate) fn insert_requests(view: &mut MenuView, mut requests: Vec<RequestPreview>, now: DateTime<Utc>) {
+    use mast_proto::work_outline_user_actions::UserActionKind;
+    if requests.is_empty() { return; }
+    requests.sort_by(|a, b| (a.group, a.created_at, &a.request_id).cmp(&(b.group, b.created_at, &b.request_id)));
+    let mut items = vec![Item::Section(format!("Requests · {}", requests.len()))];
+    for request in requests {
+        let label = match request.kind {
+            UserActionKind::Ask => "Ask", UserActionKind::Review => "Review",
+            UserActionKind::Approve => "Approve", UserActionKind::Choose => "Choose",
+            UserActionKind::Handoff => "Handoff", UserActionKind::Notice => "Notice",
+        };
+        let age = crate::work_outline::required_actions::age_label(request.created_at, now);
+        let text = request.text.lines().next().unwrap_or_default().trim();
+        items.push(Item::Action {
+            action: MenuAction::OpenRequest { space_id: request.space_id.clone(), request_id: request.request_id.clone() },
+            label: format!("{label} · {text} · {age} · {}", request.origin),
+        });
+        for (label, decision) in request.actions {
+            items.push(Item::Action {
+                action: MenuAction::DecideRequest { space_id: request.space_id.clone(), request_id: request.request_id.clone(), decision, via: "menu" },
+                label: format!("    {label}"),
+            });
+        }
+    }
+    view.items.splice(1..1, items);
 }
 
 /// The whole menu: headline, Needs you first, Running, Interrupted, Usage,

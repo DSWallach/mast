@@ -2,7 +2,7 @@
 //!
 //! - the user action notification detector, run from `on_state_changed`
 //!   next to the session detector: every watched Space's snapshot goes
-//!   through `UserActionNotifier` (zero-to-nonzero per work item, coalesced,
+//!   through `UserActionNotifier` (one notice per new request,
 //!   retries deduplicated), and each notice plays the existing `Request`
 //!   chime and posts the existing banner under the existing sound,
 //!   notification, and background-only settings. No new sound or color.
@@ -16,7 +16,7 @@ use crate::work_outline::required_actions::{self, notice_outputs};
 
 impl Shell {
     /// Diff every watched Space's outline against the last frame and notify
-    /// on each work item's zero-to-nonzero transition.
+    /// for each newly observed request.
     pub(super) fn notify_user_actions(
         &mut self,
         state: &Entity<AppState>,
@@ -50,8 +50,22 @@ impl Shell {
                 if sound {
                     crate::sound::play(crate::sound::Sound::Request);
                 }
-                if banner {
-                    crate::notify::post(&notice.title(), &notice.body(), notice.chat_id.as_deref());
+                if banner && notice.allows_banner() {
+                    let chat_title = notice.chat_id.as_deref().and_then(|id| {
+                        state
+                            .read(cx)
+                            .chats
+                            .iter()
+                            .find(|chat| chat.id == id)
+                            .and_then(|chat| chat.title.clone())
+                    });
+                    let title = match chat_title.filter(|title| !title.trim().is_empty()) {
+                        Some(chat_title) => format!("{} · {chat_title}", notice.title()),
+                        None => notice.title(),
+                    };
+                    let target = crate::notify::request_target(&notice.space_id, &notice.request_id);
+                    let actions = crate::menu_bar::request_actions(notice.kind, &notice.options, notice.chat_id.is_some());
+                    crate::notify::post_request(&title, &notice.body(), &target, &actions);
                 }
             }
         }

@@ -7064,6 +7064,26 @@ impl Overview {
         cx.notify();
     }
 
+    pub(crate) fn open_required_action(&mut self, request_id: String, cx: &mut Context<Self>) {
+        self.open_required_actions(cx);
+        if let Some(panel) = &self.required_actions_panel {
+            panel.update(cx, |panel, cx| panel.select_request(request_id, cx));
+        }
+    }
+
+    pub(crate) fn decide_required_action(&mut self, request_id: String, decision: crate::menu_bar::RequestDecision, via: &'static str, cx: &mut Context<Self>) {
+        self.open_required_actions(cx);
+        let spaces = self.required_action_spaces(cx);
+        let chats = self.outline_chats.clone();
+        if let Some(panel) = &self.required_actions_panel {
+            panel.update(cx, |panel, cx| {
+                panel.set_data(spaces, chats);
+                panel.select_request(request_id.clone(), cx);
+                panel.external_decision(request_id, decision, via, cx);
+            });
+        }
+    }
+
     pub(crate) fn close_required_actions(&mut self, cx: &mut Context<Self>) {
         if self.required_actions_panel.take().is_some() {
             self._required_actions_events = None;

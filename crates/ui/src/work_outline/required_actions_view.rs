@@ -219,10 +219,13 @@ pub(crate) struct RequiredActionsList {
     pub(crate) resolving: Option<String>,
     decision: Option<String>,
     info_open: HashSet<String>,
+    selected_request: Option<String>,
+    scroll: gpui::ScrollHandle,
     pub(crate) history_open: bool,
     /// One operation id per request, reused across retries of the same note.
     ops: HashMap<String, OperationSlot>,
     in_flight: HashSet<String>,
+    resolution_via: HashMap<String, String>,
     /// Reply & resolve intents by request id (kept until the resolve lands).
     pub(crate) replies: HashMap<String, ReplyIntent>,
     /// Requests answered by Reply & resolve here, newest last.
@@ -282,9 +285,12 @@ impl RequiredActionsList {
             resolving: None,
             decision: None,
             info_open: HashSet::new(),
+            selected_request: None,
+            scroll: gpui::ScrollHandle::new(),
             history_open: false,
             ops: HashMap::new(),
             in_flight: HashSet::new(),
+            resolution_via: HashMap::new(),
             replies: HashMap::new(),
             replied: Vec::new(),
             reply_notice: false,
@@ -304,6 +310,30 @@ impl RequiredActionsList {
 
     pub(crate) fn focus_handle(&self) -> &FocusHandle {
         &self.focus
+    }
+
+    pub(crate) fn select_request(&mut self, request_id: String, cx: &mut Context<Self>) {
+        self.selected_request = Some(request_id);
+        self.scroll.set_offset(gpui::Point::default());
+        cx.notify();
+    }
+
+    pub(crate) fn external_decision(&mut self, request_id: String, decision: crate::menu_bar::RequestDecision, via: &'static str, cx: &mut Context<Self>) {
+        use crate::menu_bar::RequestDecision;
+        use mast_proto::work_outline_user_actions::UserActionKind;
+        let Some(row) = self.open_row(&request_id) else { return; };
+        if !row.chat_available || row.system || self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() { return; }
+        let valid = match &decision {
+            RequestDecision::Approve | RequestDecision::Decline => row.kind == UserActionKind::Approve,
+            RequestDecision::Choose(id) => row.kind == UserActionKind::Choose && row.options.iter().any(|option| &option.id == id),
+        };
+        if !valid { return; }
+        self.resolution_via.insert(request_id.clone(), via.into());
+        match decision {
+            RequestDecision::Approve => self.decide(request_id, "approved".into(), String::new(), cx),
+            RequestDecision::Decline => self.decide(request_id, "declined".into(), String::new(), cx),
+            RequestDecision::Choose(id) => self.choose_option(request_id, id, cx),
+        }
     }
 
     pub(crate) fn rows(&self) -> RequiredActionRows {
@@ -785,7 +815,7 @@ impl RequiredActionsList {
             .resolve_user_action_request(ResolveUserActionRequestParams {
                 outcome,
                 values,
-                via: Some("card".into()),
+                via: Some(self.resolution_via.get(&request_id).cloned().unwrap_or_else(|| "card".into())),
                 user_action_request_id: request_id.clone(),
                 note,
                 answer: None,
@@ -799,6 +829,7 @@ impl RequiredActionsList {
                 this.in_flight.remove(&request_id);
                 match result {
                     Ok(_) => {
+                        this.resolution_via.remove(&request_id);
                         this.ops.remove(&request_id);
                         this.replies.remove(&request_id);
                         if let Some(replied) = replied {
@@ -1954,7 +1985,13 @@ impl RequiredActionsList {
         // Grouped Blocking → Ready to merge → FYI (rows arrive sorted that
         // way); a heading with its count opens each group that has rows.
         let mut group: Option<NeedsGroup> = None;
-        let open_rows = rows.open;
+        let mut open_rows = rows.open;
+        if let Some(id) = &self.selected_request {
+            if let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
+                let selected = open_rows.remove(index);
+                body = body.child(self.render_row(selected, now, theme, window, cx));
+            }
+        }
         let counts: Vec<usize> = NeedsGroup::ALL
             .iter()
             .map(|g| rows_in_group(&open_rows, *g))
@@ -2215,6 +2252,7 @@ impl Render for RequiredActionsList {
             .child(
                 div()
                     .id("required-actions-body")
+                    .track_scroll(&self.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
