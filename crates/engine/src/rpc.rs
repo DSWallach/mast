@@ -3068,6 +3068,60 @@ impl RpcService for EngineRpc {
                 rows.truncate(p.limit.unwrap_or(100).min(1000));
                 RpcReply::value(&rows)
             }
+            methods::IMPORT_FRICTION => {
+                let p: mast_proto::ImportFrictionParams = parse_params(params)?;
+                let filename = std::path::Path::new(&p.file_name).file_name().and_then(|s| s.to_str())
+                    .ok_or_else(|| RpcError::BadParams("invalid file name".into()))?;
+                let filename = mast_harness::redact::redact_secrets(filename);
+                let parsed = crate::friction_import::parse_friction_markdown(&p.markdown);
+                let mut result = mast_proto::ImportFrictionResult {
+                    added: 0, merged: 0,
+                    skipped: parsed.skipped.into_iter().map(|s| mast_proto::FrictionImportSkip { line: s.line, reason: s.reason }).collect(),
+                    entries: Vec::new(),
+                };
+                let mut identities = std::collections::HashMap::<String, usize>::new();
+                for entry in parsed.reports {
+                    result.entries.push(mast_proto::FrictionImportEntry { kind: entry.kind, summary: entry.summary.clone() });
+                    if p.preview { continue; }
+                    let identity = mast_proto::derive_id(&format!("{entry:?}"), "friction-import-entry");
+                    let ordinal = identities.entry(identity.clone()).or_default();
+                    *ordinal += 1;
+                    let import_id = mast_proto::derive_id(&format!("{filename}:{identity}:{ordinal}"), "friction-import-occurrence");
+                    let mut report = mast_proto::FrictionReport {
+                        id: String::new(), kind: entry.kind, summary: entry.summary,
+                        what_happened: entry.what_happened, workaround: entry.workaround,
+                        suggestion: entry.suggestion, approval: entry.approval, severity: entry.severity,
+                        links: entry.links, provenance: mast_proto::FrictionProvenance {
+                            chat_id: String::new(), harness: String::new(), model: None,
+                            space_id: p.space_id.clone(), work_item_id: None, branch: None,
+                            created_at: entry.created_at, source: mast_proto::FrictionSource::Import,
+                            file_name: Some(filename.clone()),
+                        }, fingerprint: String::new(), occurrences: 0, last_seen: entry.created_at,
+                        status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
+                    };
+                    let fingerprint = mast_doc::registry::friction::friction_fingerprint(&report);
+                    let mut existing = self.workspace.friction_reports(&p.space_id);
+                    existing.sort_by(|a, b| a.id.cmp(&b.id));
+                    let normalized = |summary: &str| summary.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+                    let matching = existing.iter().find(|r| r.fingerprint == fingerprint).or_else(|| {
+                        existing.iter().find(|r| r.kind == report.kind && normalized(&r.summary) == normalized(&report.summary))
+                    });
+                    if let Some(existing) = matching {
+                        // The historical fingerprint also includes the approval command. Use the
+                        // existing command so same-kind summaries merge as the import contract requires.
+                        report.approval = existing.approval.clone();
+                    }
+                    let exists = matching.is_some();
+                    match self.workspace.import_friction(report, &import_id) {
+                        Ok((_, false)) => result.skipped.push(mast_proto::FrictionImportSkip { line: 0, reason: "already imported".into() }),
+                        Ok((_, true)) if exists => result.merged += 1,
+                        Ok((_, true)) => result.added += 1,
+                        Err(error) => result.skipped.push(mast_proto::FrictionImportSkip { line: 0, reason: error.to_string() }),
+                    }
+                }
+                if !p.preview { self.workspace.flush(); }
+                RpcReply::value(&result)
+            }
             methods::SET_FRICTION_STATUS => {
                 let p: mast_proto::SetFrictionStatusParams = parse_params(params)?;
                 if p.status == mast_proto::FrictionStatus::Promoted { return Err(RpcError::BadParams("Use PromoteFrictionToItem to promote a report".into())); }

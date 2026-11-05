@@ -15,19 +15,43 @@ fn friction_markdown(reports: &[FrictionReport]) -> String {
     }
     reports.iter().map(|report| {
         let date = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(report.provenance.created_at)
-            .map(|date| date.format("%Y-%m-%d").to_string())
+            .map(|date| date.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "n/a".to_owned());
-        format!("## {date} {}\n- Friction: {}\n- Approval requested: {}\n- Why approval was needed: {}\n- Workaround used: {}\n- Suggested rule/tooling improvement: {}",
+        format!("## {date} {}\n- Friction: {}\n- Approval requested: {}\n- Why approval was needed: {}\n- Workaround used: {}\n- Suggested rule/tooling improvement: {}\n- Kind: {}\n- Severity: {}\n- Created at: {}\n- Links: {}",
             report.summary, value(Some(&report.what_happened)),
             value(report.approval.as_ref().map(|approval| approval.command.as_str())),
             value(report.approval.as_ref().map(|approval| approval.why.as_str())),
-            value(report.workaround.as_deref()), value(report.suggestion.as_deref()))
+            value(report.workaround.as_deref()), value(report.suggestion.as_deref()),
+            serde_json::to_value(report.kind).unwrap().as_str().unwrap_or("workflow"),
+            report.severity.map(|s| serde_json::to_value(s).unwrap().as_str().unwrap_or("n/a").to_owned()).unwrap_or_else(|| "n/a".into()), report.provenance.created_at, serde_json::to_string(&report.links).unwrap())
     }).collect::<Vec<_>>().join("\n\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn friction_export_import_preserves_fields() {
+        let report: FrictionReport = serde_json::from_value(serde_json::json!({
+            "id": "one", "kind": "bug", "summary": "Build failed", "whatHappened": "Compiler failed",
+            "workaround": "Retry", "suggestion": "Update docs", "severity": "high", "approval": null,
+            "links": [{"label":"guide", "target":{"type":"file", "path":"/tmp/guide.md"}}],
+            "provenance": {"chatId":"chat", "harness":"codex", "model":null, "spaceId":"space", "createdAt":123456, "source":"agent"},
+            "fingerprint":"one", "occurrences":1, "lastSeen":0, "status":"open"
+        })).unwrap();
+        let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(&[report.clone()]));
+        assert!(parsed.skipped.is_empty());
+        let entry = &parsed.reports[0];
+        assert_eq!(entry.kind, report.kind);
+        assert_eq!(entry.severity, report.severity);
+        assert_eq!(entry.summary, report.summary);
+        assert_eq!(entry.what_happened, report.what_happened);
+        assert_eq!(entry.workaround, report.workaround);
+        assert_eq!(entry.suggestion, report.suggestion);
+        assert_eq!(entry.links, report.links);
+        assert_eq!(entry.created_at, report.provenance.created_at);
+    }
 
     #[test]
     fn friction_export_markdown_snapshot() {
@@ -39,7 +63,7 @@ mod tests {
         })).unwrap();
         assert_eq!(
             friction_markdown(&[report]),
-            "## 1970-01-01 Build failed\n- Friction: Compiler failed\n- Approval requested: cargo build\n- Why approval was needed: Network access\n- Workaround used: Retry\n- Suggested rule/tooling improvement: n/a"
+            "## 1970-01-01 00:00 Build failed\n- Friction: Compiler failed\n- Approval requested: cargo build\n- Why approval was needed: Network access\n- Workaround used: Retry\n- Suggested rule/tooling improvement: n/a\n- Kind: bug\n- Severity: n/a\n- Created at: 0\n- Links: []"
         );
     }
 }
@@ -53,6 +77,7 @@ pub(super) struct FrictionDetailsState {
     expanded: HashSet<String>,
     picker: Option<String>,
     generation: u64,
+    import_preview: Option<(String, String, mast_proto::ImportFrictionResult)>,
 }
 
 impl WorkItemDetails {
@@ -92,6 +117,66 @@ impl WorkItemDetails {
         .detach();
     }
 
+    fn preview_friction_file(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true, directories: false, multiple: false, prompt: Some("Import Markdown friction log".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let path = match receiver.await { Ok(Ok(Some(mut paths))) => paths.pop(), _ => None };
+            let Some(path) = path else { return; };
+            let loaded = (|| -> Result<(String, String), String> {
+                if path.extension().and_then(|s| s.to_str()).is_none_or(|s| !s.eq_ignore_ascii_case("md")) {
+                    return Err("Choose a Markdown (.md) file".into());
+                }
+                let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+                if metadata.len() > 10 * 1024 * 1024 { return Err("File exceeds 10 MB".into()); }
+                let file_name = path.file_name().and_then(|s| s.to_str()).ok_or("Invalid file name")?.to_owned();
+                let markdown = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                Ok((file_name, markdown))
+            })();
+            this.update(cx, |this, cx| {
+                match loaded {
+                    Ok((file_name, markdown)) => {
+                        let task = this.state.read(cx).work_outline_actions().import_friction(mast_proto::ImportFrictionParams {
+                            space_id: this.space_id.clone(), file_name: file_name.clone(), markdown: markdown.clone(), preview: true,
+                        });
+                        cx.spawn(async move |this, cx| {
+                            let result = task.await;
+                            this.update(cx, |this, cx| {
+                                match result {
+                                    Ok(preview) => this.friction.import_preview = Some((file_name, markdown, preview)),
+                                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+                                }
+                                cx.notify();
+                            }).ok();
+                        }).detach();
+                    }
+                    Err(text) => cx.emit(DetailsEvent::Notice { text, error: true }),
+                }
+            }).ok();
+        }).detach();
+    }
+
+    fn import_friction_preview(&mut self, cx: &mut Context<Self>) {
+        let Some((file_name, markdown, _)) = self.friction.import_preview.take() else { return; };
+        let task = self.state.read(cx).work_outline_actions().import_friction(mast_proto::ImportFrictionParams {
+            space_id: self.space_id.clone(), file_name, markdown, preview: false,
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(result) => {
+                        cx.emit(DetailsEvent::Notice { text: format!("Friction import: {} added, {} merged, {} skipped", result.added, result.merged, result.skipped.len()), error: false });
+                        this.fetch_friction(cx);
+                    }
+                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     pub(super) fn render_friction_section(
         &mut self,
         theme: &Theme,
@@ -111,8 +196,27 @@ impl WorkItemDetails {
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
-                    .child("Friction"),
+                    .flex().items_center().justify_between()
+                    .child("Friction")
+                    .child(Self::small_button("friction-import", "Import…", theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.preview_friction_file(cx)))),
             );
+        if let Some((file_name, _, preview)) = &self.friction.import_preview {
+            let mut counts = Vec::new();
+            for (label, kind) in [("Bug", FrictionKind::Bug), ("Tool failure", FrictionKind::ToolFailure), ("Permission", FrictionKind::Permission), ("Environment", FrictionKind::Environment), ("Workflow", FrictionKind::Workflow), ("Docs", FrictionKind::Docs)] {
+                let count = preview.entries.iter().filter(|entry| entry.kind == kind).count();
+                if count > 0 { counts.push(format!("{label}: {count}")); }
+            }
+            let mut box_view = div().debug_selector(|| "friction-import-preview".into()).flex().flex_col().gap(px(3.0))
+                .child(SharedString::from(format!("Preview: {file_name}")))
+                .child(SharedString::from(counts.join(" · ")))
+                .child(SharedString::from(format!("{} entries, {} skipped", preview.entries.len(), preview.skipped.len())));
+            for entry in preview.entries.iter().take(10) { box_view = box_view.child(SharedString::from(entry.summary.clone())); }
+            box_view = box_view.child(div().flex().gap(px(6.0))
+                .child(Self::small_button("friction-import-confirm", "Import", theme).on_click(cx.listener(|this, _, _, cx| this.import_friction_preview(cx))))
+                .child(Self::small_button("friction-import-cancel", "Cancel", theme).on_click(cx.listener(|this, _, _, cx| { this.friction.import_preview = None; cx.notify(); }))));
+            section = section.child(box_view);
+        }
         let mut filters = div().flex().gap(px(6.0));
         for (index, (label, status)) in [
             ("Open", Some(FrictionStatus::Open)),
@@ -193,6 +297,7 @@ impl WorkItemDetails {
             let source = match report.provenance.source {
                 FrictionSource::Auto => "auto",
                 FrictionSource::Agent => "agent",
+                FrictionSource::Import => "import",
             };
             let mut row = div()
                 .debug_selector(move || selector.clone())
@@ -500,17 +605,21 @@ impl WorkItemDetails {
                         .child(propose)
                         .child(dismiss),
                 );
-                let chat_id = report.provenance.chat_id.clone();
-                details = details.child(
-                    div()
-                        .id(("friction-chat", index))
-                        .cursor_pointer()
-                        .text_color(theme.text)
-                        .child("Open provenance chat")
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(DetailsEvent::OpenChat(chat_id.clone()))
-                        })),
-                );
+                if let Some(file_name) = &report.provenance.file_name {
+                    details = details.child(SharedString::from(format!("Imported from {file_name}")));
+                } else {
+                    let chat_id = report.provenance.chat_id.clone();
+                    details = details.child(
+                        div()
+                            .id(("friction-chat", index))
+                            .cursor_pointer()
+                            .text_color(theme.text)
+                            .child("Open provenance chat")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenChat(chat_id.clone()))
+                            })),
+                    );
+                }
                 row = row.child(details);
             }
             section = section.child(row);

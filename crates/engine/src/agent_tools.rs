@@ -1132,7 +1132,7 @@ impl AgentToolsService {
                 work_item_id: context.current_item_id(),
                 branch: chat.branch,
                 created_at: now,
-                source: mast_proto::FrictionSource::Agent,
+                source: mast_proto::FrictionSource::Agent, file_name: None,
             },
             fingerprint: String::new(),
             occurrences: 0,

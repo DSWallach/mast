@@ -35,6 +35,7 @@ pub enum FrictionStatus {
 pub enum FrictionSource {
     Agent,
     Auto,
+    Import,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,8 @@ pub struct FrictionProvenance {
     pub branch: Option<String>,
     pub created_at: i64,
     pub source: FrictionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,4 +131,37 @@ impl Default for FrictionSettings {
     fn default() -> Self {
         Self { auto_capture: true }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFrictionParams {
+    pub space_id: String,
+    pub file_name: String,
+    pub markdown: String,
+    #[serde(default)]
+    pub preview: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrictionImportEntry {
+    pub kind: FrictionKind,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrictionImportSkip {
+    pub line: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFrictionResult {
+    pub added: usize,
+    pub merged: usize,
+    pub skipped: Vec<FrictionImportSkip>,
+    pub entries: Vec<FrictionImportEntry>,
 }

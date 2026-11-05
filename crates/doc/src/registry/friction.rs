@@ -123,10 +123,38 @@ impl RegistryDoc {
     }
 
     /// Record an occurrence with a per-device counter, so concurrent devices merge.
-    pub fn record_friction(
+    pub fn record_friction(&mut self, report: FrictionReport) -> Result<FrictionReport, DocError> {
+        self.record_friction_occurrence(report, None)
+            .map(|(report, _)| report)
+    }
+
+    /// Record one imported occurrence at most once per stable entry identifier.
+    pub fn import_friction(
+        &mut self,
+        report: FrictionReport,
+        import_id: &str,
+    ) -> Result<(FrictionReport, bool), DocError> {
+        let key = format!(
+            "{COUNTER_PREFIX}{}",
+            derive_id(import_id, "friction-import")
+        );
+        if let Some(existing) = self
+            .overlay_rows(KIND_FRICTION_REPORTS)
+            .iter()
+            .filter(|row| row.fields.contains_key(&key))
+            .filter_map(decode)
+            .find(|row| row.provenance.space_id == report.provenance.space_id)
+        {
+            return Ok((existing, false));
+        }
+        self.record_friction_occurrence(report, Some(import_id))
+    }
+
+    fn record_friction_occurrence(
         &mut self,
         mut report: FrictionReport,
-    ) -> Result<FrictionReport, DocError> {
+        import_id: Option<&str>,
+    ) -> Result<(FrictionReport, bool), DocError> {
         if report.summary.trim().is_empty()
             || report.summary.chars().count() > 140
             || report.what_happened.trim().is_empty()
@@ -147,10 +175,26 @@ impl RegistryDoc {
             return Err(DocError::Schema("friction report was deleted".into()));
         }
         let existing = self.overlay_row(KIND_FRICTION_REPORTS, &report.id);
-        let counter_key = format!(
-            "{COUNTER_PREFIX}{}",
-            derive_id(&self.device_id, "friction-device")
-        );
+        let counter_key = match import_id {
+            Some(id) => format!("{COUNTER_PREFIX}{}", derive_id(id, "friction-import")),
+            None => format!(
+                "{COUNTER_PREFIX}{}",
+                derive_id(&self.device_id, "friction-device")
+            ),
+        };
+        if import_id.is_some()
+            && existing
+                .as_ref()
+                .is_some_and(|row| row.fields.contains_key(&counter_key))
+        {
+            return Ok((
+                existing
+                    .as_ref()
+                    .and_then(decode)
+                    .ok_or_else(|| DocError::Schema("invalid friction report".into()))?,
+                false,
+            ));
+        }
         let counter = existing
             .as_ref()
             .and_then(|row| row.fields.get(&counter_key));
@@ -191,10 +235,12 @@ impl RegistryDoc {
         };
         check_op_size(&op)?;
         self.write_ops(vec![op])?;
-        self.overlay_row(KIND_FRICTION_REPORTS, &report.id)
+        let report = self
+            .overlay_row(KIND_FRICTION_REPORTS, &report.id)
             .as_ref()
             .and_then(decode)
-            .ok_or_else(|| DocError::Schema("friction report could not be read".into()))
+            .ok_or_else(|| DocError::Schema("friction report could not be read".into()))?;
+        Ok((report, true))
     }
 }
 
@@ -223,6 +269,7 @@ mod tests {
                 branch: None,
                 created_at: time,
                 source: FrictionSource::Agent,
+                file_name: None,
             },
             fingerprint: String::new(),
             occurrences: 0,

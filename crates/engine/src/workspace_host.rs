@@ -1007,6 +1007,10 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.record_friction(report))?)
     }
 
+    pub fn import_friction(&self, report: mast_proto::FrictionReport, import_id: &str) -> Result<(mast_proto::FrictionReport, bool), EngineError> {
+        Ok(self.mutate(|doc| doc.import_friction(report, import_id))?)
+    }
+
     pub fn answer_friction_approval(&self, id: &str, answer: bool) -> Result<(), EngineError> {
         Ok(self.mutate(|doc| doc.answer_friction_approval(id, answer))?)
     }
