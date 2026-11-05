@@ -60,9 +60,12 @@ pub(crate) fn shortcut_combo(keymap: &KeymapConfig, id: ShortcutId) -> Option<St
     if combo.is_empty() {
         return None;
     }
-    if Keystroke::parse(&platform_combo(combo)).is_ok() {
-        return Some(combo.to_string());
-    }
+    validated_combo(combo, id)
+}
+
+pub(crate) fn validated_combo(combo: &str, id: ShortcutId) -> Option<String> {
+    if combo.is_empty() { return None; }
+    if Keystroke::parse(&platform_combo(combo)).is_ok() { return Some(combo.to_string()); }
     let fallback = id.default_combo();
     (!fallback.is_empty()).then(|| fallback.to_string())
 }
@@ -87,7 +90,7 @@ pub(crate) fn hint_keys_on(mac: bool, keymap: &KeymapConfig, hint: HintKey) -> O
         HintKey::Command(command) => {
             command_combo(keymap, command).map(|combo| key_label_on(mac, &combo))
         }
-        HintKey::Outline(key) => outline_key_combo(key).map(|combo| key_label_on(mac, combo)),
+        HintKey::Outline(key) => shortcut_combo(keymap, key.shortcut_id()).map(|combo| key_label_on(mac, &combo)),
         HintKey::App(id) => shortcut_combo(keymap, id).map(|combo| key_label_on(mac, &combo)),
         HintKey::Find => Some(key_label_on(mac, crate::shell::FOCUS_OVERVIEW_SEARCH_COMBO)),
     }
@@ -266,10 +269,9 @@ pub(crate) fn shortcut_reference(keymap: &KeymapConfig) -> Vec<ShortcutGroup> {
 pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<ShortcutGroup> {
     // Every key of `key`, primary first.
     let all_keys = |key: OutlineNavKey| {
-        OUTLINE_NAVIGATION_KEYS
-            .iter()
-            .filter(|(_, other)| *other == key)
-            .map(|(combo, _)| key_label_on(mac, combo))
+        keymap.combos(key.shortcut_id())
+            .into_iter()
+            .map(|combo| key_label_on(mac, combo))
             .collect::<Vec<_>>()
             .join(" / ")
     };
@@ -288,7 +290,7 @@ pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<Sho
             })
             .map(|(_, (_, key))| ShortcutRow {
                 label: key.label(),
-                keys: Some(all_keys(*key)),
+                keys: { let keys = all_keys(*key); (!keys.is_empty()).then_some(keys) },
             })
             .collect(),
     };
@@ -309,7 +311,7 @@ pub(crate) fn shortcut_reference_on(mac: bool, keymap: &KeymapConfig) -> Vec<Sho
                 .chain(SPACE_MOVE_KEYS)
                 .map(|(label, key)| ShortcutRow {
                     label,
-                    keys: Some(all_keys(key)),
+                    keys: { let keys = all_keys(key); (!keys.is_empty()).then_some(keys) },
                 }),
         );
     let mut navigate = outline_group("Navigate", OutlineKeyGroup::Navigate);

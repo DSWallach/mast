@@ -214,6 +214,62 @@ pub(crate) enum OutlineKeyGroup {
 }
 
 impl OutlineNavKey {
+    pub(crate) const ALL: [Self; 22] = [
+        Self::SelectNext,
+        Self::SelectPrevious,
+        Self::SelectFirst,
+        Self::SelectLast,
+        Self::SelectNextSibling,
+        Self::SelectPreviousSibling,
+        Self::Expand,
+        Self::Collapse,
+        Self::OpenSelected,
+        Self::OpenDetails,
+        Self::StartChat,
+        Self::RenameSelected,
+        Self::CreateSibling,
+        Self::CreateChild,
+        Self::MoveItemUp,
+        Self::MoveItemDown,
+        Self::IndentItem,
+        Self::OutdentItem,
+        Self::GroupInto,
+        Self::Undo,
+        Self::Redo,
+        Self::ShowShortcuts,
+    ];
+
+    pub(crate) fn shortcut_id(self) -> crate::settings::ShortcutId {
+        crate::settings::ShortcutId::Outline(Self::ALL.iter().position(|key| *key == self).unwrap())
+    }
+
+    pub(crate) fn storage_key(self) -> &'static str {
+        match self {
+            Self::SelectNext => "SelectNext",
+            Self::SelectPrevious => "SelectPrevious",
+            Self::SelectFirst => "SelectFirst",
+            Self::SelectLast => "SelectLast",
+            Self::SelectNextSibling => "SelectNextSibling",
+            Self::SelectPreviousSibling => "SelectPreviousSibling",
+            Self::Expand => "Expand",
+            Self::Collapse => "Collapse",
+            Self::OpenSelected => "OpenSelected",
+            Self::OpenDetails => "OpenDetails",
+            Self::StartChat => "StartChat",
+            Self::RenameSelected => "RenameSelected",
+            Self::CreateSibling => "CreateSibling",
+            Self::CreateChild => "CreateChild",
+            Self::MoveItemUp => "MoveItemUp",
+            Self::MoveItemDown => "MoveItemDown",
+            Self::IndentItem => "IndentItem",
+            Self::OutdentItem => "OutdentItem",
+            Self::GroupInto => "GroupInto",
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
+            Self::ShowShortcuts => "ShowShortcuts",
+        }
+    }
+
     /// Short label (shortcut reference, tooltips).
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -406,7 +462,7 @@ pub(crate) fn log_restructure_keystroke(
 
 /// Binds [`OUTLINE_NAVIGATION_KEYS`] under [`OUTLINE_NAVIGATION_CONTEXT`] to
 /// the actions of `work_outline::outline_view`.
-pub(crate) fn bind_work_outline_navigation(cx: &mut App) {
+pub(crate) fn bind_work_outline_navigation(cx: &mut App, keymap: &KeymapConfig) {
     use crate::work_outline::outline_view::{
         Collapse, CreateChild, CreateSibling, Expand, IndentItem, MoveItemDown, MoveItemUp,
         OpenDetailsSelected, OpenSelected, OutdentItem, RedoChange, RenameSelected, SelectFirst,
@@ -414,10 +470,12 @@ pub(crate) fn bind_work_outline_navigation(cx: &mut App) {
         GroupSelected, StartChatSelected, UndoChange,
     };
     let context = Some(OUTLINE_NAVIGATION_CONTEXT);
-    cx.bind_keys(OUTLINE_NAVIGATION_KEYS.iter().map(|(keys, key)| {
-        let keys = platform_combo(keys);
+    cx.bind_keys(OutlineNavKey::ALL.into_iter().flat_map(|key| {
+        keymap.combos(key.shortcut_id()).into_iter().filter_map(move |combo| {
+        let combo = crate::work_outline::hints::validated_combo(combo, key.shortcut_id())?;
+        let keys = platform_combo(&combo);
         let keys = keys.as_str();
-        match key {
+        Some(match key {
             OutlineNavKey::SelectNext => KeyBinding::new(keys, SelectNext, context),
             OutlineNavKey::SelectPrevious => KeyBinding::new(keys, SelectPrevious, context),
             OutlineNavKey::SelectFirst => KeyBinding::new(keys, SelectFirst, context),
@@ -446,7 +504,8 @@ pub(crate) fn bind_work_outline_navigation(cx: &mut App) {
                 RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts),
                 context,
             ),
-        }
+        })
+        })
     }));
 }
 

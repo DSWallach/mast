@@ -231,7 +231,7 @@ impl ShortcutsPage {
                     cx.stop_propagation();
                     return;
                 }
-                if send_combo_is_reserved(self.composer_send_behavior, &combo) {
+                if !matches!(recording, ShortcutId::Outline(_)) && send_combo_is_reserved(self.composer_send_behavior, &combo) {
                     self.conflict_notice = Some(
                         format!("{} is reserved for the composer.", display_combo(&combo)).into(),
                     );
@@ -322,11 +322,18 @@ impl ShortcutsPage {
         let accent = theme.accent;
         let combo = self.keymap.get(id).to_string();
         let is_recording = recording == Some(id);
-        let non_default = combo != id.default_combo();
+        let non_default = match id {
+            ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index).is_some_and(|key| self.keymap.outline_shortcuts.contains_key(key.storage_key())),
+            _ => combo != id.default_combo(),
+        };
         let chip_text: SharedString = if is_recording {
             "Press keys…".into()
         } else {
-            display_combo(&combo).into()
+            if self.keymap.combos(id).is_empty() {
+                display_combo("").into()
+            } else {
+                self.keymap.combos(id).into_iter().map(display_combo).collect::<Vec<_>>().join(" / ").into()
+            }
         };
         div()
             .flex()
@@ -448,7 +455,7 @@ impl popover::ScrollRailHost for ShortcutsPage {
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
     ShortcutId::ALL
         .into_iter()
-        .find(|&other| other.available() && other != id && keymap.get(other) == combo)
+        .find(|&other| other.available() && other != id && keymap.combos(other).contains(&combo))
 }
 
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
@@ -464,13 +471,14 @@ pub fn modifier_send_label(is_macos: bool) -> &'static str {
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 9] = [
+const GROUP_ORDER: [&str; 10] = [
     "Files",
     "Browser",
     "Panels",
     "Sessions",
     "Spaces",
     "Work Outline",
+    "Outline",
     "Team",
     "Jump to session",
     "Appshots",
@@ -516,6 +524,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ShowOutlineShortcuts
         | ShortcutId::OpenLinear => "Work Outline",
         ShortcutId::OpenTeamTab => "Team",
+        ShortcutId::Outline(_) => "Outline",
         ShortcutId::JumpSession(_) => "Jump to session",
     }
 }
@@ -592,6 +601,7 @@ fn description(id: ShortcutId) -> &'static str {
              Overview (including the chat panel) it focuses the panel's search."
         }
         ShortcutId::OpenTeamTab => "Open the Team tab for a chat with workers.",
+        ShortcutId::Outline(_) => "Available when the Outline has focus.",
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.
         ShortcutId::JumpSession(_) => "Open the session at this place in the sidebar list.",

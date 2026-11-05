@@ -542,7 +542,7 @@ pub fn apply_keymap(
     // Work Outline commands (empty combos stay unbound).
     cx.bind_keys(work_outline_ui::work_outline_bindings(keymap));
     // Outline navigation keys, context `WorkOutline` minus text inputs.
-    work_outline_ui::bind_work_outline_navigation(cx);
+    work_outline_ui::bind_work_outline_navigation(cx, keymap);
     // Shift+F10 / Menu: the selected Outline row's context menu.
     cx.bind_keys(crate::work_outline::outline_view::context_menu::key_bindings());
 }
