@@ -7467,13 +7467,7 @@ impl Shell {
                         )
                         .into_any_element()
                 }
-                None => div()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .when(theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot, |el| el.flex().items_center().gap(px(8.0)).child(crate::status_style::indicator_for_theme(crate::status_style::Status::Idle, &theme)))
-                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
-                    .child(time_ago.clone())
-                    .into_any_element(),
+                None => crate::components::shell_parts::sidebar_idle_time(theme, time_ago.clone()),
             }
         };
         // One stable wrapper across both states (identity keeps the hover
@@ -7523,10 +7517,8 @@ impl Shell {
                 .into_any_element()
         };
         let mut corner = Some(corner);
-        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
-        let identity = theme.identity_color(&id);
-        let (hover, text) = (theme.glass_hover(), if area && selected { theme.identity_text(identity) } else { theme.text });
-        let selected_wash = if area { identity } else if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque { theme.element_active } else { crate::theme::glass_selected_bg() };
+        let (text, selected_wash, identity_dot) = crate::components::shell_parts::sidebar_row_colors(theme, &id, selected);
+        let hover = theme.glass_hover();
         let subline = if search_query.is_some() {
             theme.text_muted
         } else {
@@ -7672,7 +7664,7 @@ impl Shell {
                     } else {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
-                    .when(area, |el| el.child(div().flex_none().size(px(8.0)).rounded_full().bg(if selected { theme.identity_text(identity) } else { identity })))
+                    .children(identity_dot)
                     .children(compact_status)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
@@ -7752,18 +7744,7 @@ impl Shell {
                     })
                     .when(compact, |el| {
                         el.child(
-                            div()
-                                .debug_selector({
-                                    let id = id.clone();
-                                    move || format!("chat-time-{id}")
-                                })
-                                .w(px(30.0))
-                                .flex_none()
-                                .text_right()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(subline)
-                                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
-                                .child(compact_jump_label.unwrap_or(time_ago)),
+                            crate::components::shell_parts::sidebar_compact_time(theme, id.clone(), subline, compact_jump_label.unwrap_or(time_ago)),
                         )
                     }),
             )
@@ -8383,9 +8364,7 @@ impl Shell {
             .child(filter_row)
             .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                div().px(px(12.0)).pb(px(8.0)).child(crate::surface_chrome::grille(theme))
-            ))
+            .children(crate::components::shell_parts::sidebar_grille(theme))
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
@@ -10113,9 +10092,7 @@ impl Shell {
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
             .children(new_thread_background_layer)
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                crate::surface_chrome::grille(theme).absolute().right(px(32.0)).top(px(110.0))
-            ))
+            .children(crate::components::shell_parts::main_grille(theme))
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the

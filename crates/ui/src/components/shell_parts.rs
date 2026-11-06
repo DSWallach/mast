@@ -501,6 +501,148 @@ pub(crate) fn compact_sidebar_status(
         .into_any_element()
 }
 
+pub(crate) fn sidebar_idle_time(theme: &Theme, time: SharedString) -> AnyElement {
+    div()
+        .text_size(crate::typography::ui_rems(10.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .when(
+            theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot,
+            |el| {
+                el.flex().items_center().gap(px(8.0)).child(
+                    crate::status_style::indicator_for_theme(
+                        crate::status_style::Status::Idle,
+                        theme,
+                    ),
+                )
+            },
+        )
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(time)
+        .into_any_element()
+}
+
+pub(crate) fn sidebar_compact_time(
+    theme: &Theme,
+    id: String,
+    color: gpui::Hsla,
+    time: SharedString,
+) -> gpui::Div {
+    div()
+        .debug_selector(move || format!("chat-time-{id}"))
+        .w(px(30.0))
+        .flex_none()
+        .text_right()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(color)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(time)
+}
+
+pub(crate) fn sidebar_row_colors(
+    theme: &Theme,
+    id: &str,
+    selected: bool,
+) -> (gpui::Hsla, gpui::Hsla, Option<gpui::Div>) {
+    let identity = theme.identity_color(id);
+    let area = super::is_area(theme);
+    let text = if area && selected {
+        theme.identity_text(identity)
+    } else {
+        theme.text
+    };
+    let selected_wash = if area {
+        identity
+    } else if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque {
+        theme.element_active
+    } else {
+        crate::theme::glass_selected_bg()
+    };
+    let dot = area.then(|| {
+        div()
+            .flex_none()
+            .size(px(8.0))
+            .rounded_full()
+            .bg(if selected {
+                theme.identity_text(identity)
+            } else {
+                identity
+            })
+    });
+    (text, selected_wash, dot)
+}
+
+pub(crate) fn sidebar_grille(theme: &Theme) -> Option<gpui::Div> {
+    super::is_industrial(theme).then(|| {
+        div()
+            .px(px(12.0))
+            .pb(px(8.0))
+            .child(crate::surface_chrome::grille(theme))
+    })
+}
+
+pub(crate) fn main_grille(theme: &Theme) -> Option<gpui::Div> {
+    super::is_industrial(theme).then(|| {
+        crate::surface_chrome::grille(theme)
+            .absolute()
+            .right(px(32.0))
+            .top(px(110.0))
+    })
+}
+
+pub(crate) fn sidebar_action_frame(
+    id: &'static str,
+    theme: &Theme,
+    width: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
+    div()
+        .id(id)
+        .size(px(29.0))
+        .when(guided, |el| el.size(px(32.0)))
+        .when(guided && width >= 400.0, |el| {
+            el.w_auto().px(px(6.0)).gap(px(4.0))
+        })
+}
+
+pub(crate) fn sidebar_action_label(
+    theme: &Theme,
+    width: f32,
+    label: &'static str,
+    color: Option<gpui::Hsla>,
+) -> Option<gpui::Div> {
+    (theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All && width >= 400.0).then(
+        || {
+            div()
+                .text_size(crate::typography::ui_rems(11.0))
+                .when_some(color, |el, color| el.text_color(color))
+                .child(label)
+        },
+    )
+}
+
+pub(crate) fn shortcuts_footer(theme: &Theme, keymap: &crate::settings::KeymapConfig) -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_faint)
+        .child(crate::work_outline::hints::shortcuts_footer(keymap))
+        .when(
+            theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline,
+            |el| {
+                el.children(
+                    crate::work_outline::hints::shortcut_combo(
+                        keymap,
+                        crate::settings::ShortcutId::ShowOutlineShortcuts,
+                    )
+                    .map(|combo| crate::work_outline::hints::kbd_chip(theme, &combo)),
+                )
+            },
+        )
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(

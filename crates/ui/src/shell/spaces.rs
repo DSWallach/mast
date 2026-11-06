@@ -3842,18 +3842,13 @@ impl Shell {
         };
 
         let view_open = self.sidebar_view_menu.is_open();
-        let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
-        let guided_labels_fit = guided && self.sidebar_shown_width() >= 400.0;
+        let sidebar_width = self.sidebar_shown_width();
         let view_focus = self.sidebar_view_trigger_focus.clone();
-        let view_trigger = div()
-            .id("sidebar-view-options")
+        let view_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-view-options", theme, sidebar_width)
             .role(gpui::Role::Button)
             .aria_label("Sidebar view options")
             .aria_expanded(view_open)
             .track_focus(&view_focus)
-            .size(px(29.0))
-            .when(guided, |el| el.size(px(32.0)))
-            .when(guided_labels_fit, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
             .flex_none()
             .flex()
             .items_center()
@@ -3903,7 +3898,7 @@ impl Shell {
                     .size(px(16.0))
                     .text_color(theme.text_muted.opacity(0.6)),
             )
-            .when(guided_labels_fit, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).child("View options")));
+            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "View options", None));
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
@@ -3921,13 +3916,9 @@ impl Shell {
         // Same 29px glass-hover button idiom; lit while the overview is the
         // current route.
         let overview_active = self.is_overview_route();
-        let overview_trigger = div()
-            .id("sidebar-open-overview")
+        let overview_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-open-overview", theme, sidebar_width)
             .role(gpui::Role::Button)
             .aria_label("Open overview")
-            .size(px(29.0))
-            .when(guided, |el| el.size(px(32.0)))
-            .when(guided_labels_fit, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
             .flex_none()
             .flex()
             .items_center()
@@ -3952,7 +3943,7 @@ impl Shell {
                         theme.text_muted.opacity(0.6)
                     }),
             )
-            .when(guided_labels_fit, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child("Overview")));
+            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "Overview", Some(theme.text_muted)));
 
         div()
             .flex_none()
