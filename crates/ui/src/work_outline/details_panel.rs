@@ -1618,10 +1618,7 @@ impl Render for WorkItemDetails {
                         .on_click(cx.listener(move |this, _, _, cx| this.associate(id.clone(), cx)))
                 }))
         });
-        let chats_section = div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
+        let chats_section = crate::components::outline_details_list(&theme)
             .child(
                 div()
                     .flex()
@@ -1650,17 +1647,8 @@ impl Render for WorkItemDetails {
             .filter(|child| child.archived_at.is_none())
             .collect();
         let children_section = (!children.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("Items ({})", children.len()))),
-                )
+            crate::components::outline_details_list(&theme)
+                .child(crate::components::outline_list_heading(format!("Items ({})", children.len()), &theme))
                 .children(children.into_iter().enumerate().map(|(ix, child)| {
                     let (glyph, _, color) = chips::status_style(child.effective_status, &theme);
                     let space_id = self.space_id.clone();
@@ -1686,7 +1674,7 @@ impl Render for WorkItemDetails {
             .cloned()
             .collect();
         let refs_open = self.references_open || self.adding_reference;
-        let mut refs_section = div().flex().flex_col().gap(px(2.0)).child(
+        let mut refs_section = crate::components::outline_details_list(&theme).child(
             crate::components::outline_section_header(
                 "work-item-references-toggle",
                 format!("External references ({})", references.len()),

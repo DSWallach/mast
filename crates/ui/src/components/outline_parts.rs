@@ -1766,6 +1766,14 @@ pub fn outline_reference_link(index: usize, label: String, theme: &Theme) -> Sta
         .child(SharedString::from(label))
 }
 
+/// Compact list in an item-details section.
+pub fn outline_details_list(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
