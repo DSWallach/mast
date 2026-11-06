@@ -1016,7 +1016,16 @@ merge is unresolved, and never prune `target/debug` while one is running. Instal
 below). Answer Codex approvals with the real question id (get_chat → pendingInput); the installed build now errors on
 unknown ids instead of denying.
 
-**Running:** none.
+**Running (overnight 2026-11-06, Mikey asleep; release in batches, install, never restart Mast):**
+- Ready to merge: `template-proposals-button`.
+- Building: 4c-1 `review-this-work` (5ee440aa), 4c-2 `review-explain` (13355503), `overview-toolbar-cleanup`
+  (73cfb86a: drop List mode, restore top PR button, shortcuts button icon plus a scrollable popover, Hide stale/Show
+  archived into ⋯, remove Key).
+- Design/audit (no code, Required Actions for the morning): workflow pack (25090468), coworker readiness re-audit
+  (8cbf7377, lists "safe overnight" fixes to dispatch), UI styles (85726f6d, Sonnet).
+- Queued when slots free: bug c5dd5988 (multi-question ask drops answers), feature e4f25617 ("waiting until
+  <date>"), UI styles implementation on branch `ui-styles`. Mikey asked for it built tonight anyway; the setting
+  defaults to "minimal", so it rolls back by reverting.
 
 **Next up:** PR review phase 4c (item 035cd13b, pending): select a change → quick explanation (Mikey asked for
 this), ask about this step, and a "Review this work" button on worker chats/items calling `start_branch_review`.
