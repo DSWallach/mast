@@ -20,7 +20,7 @@ pub use conversation_parts::{
     conversation_question_chip, conversation_question_id, conversation_question_pill,
     conversation_answer_input,
     conversation_reveal, conversation_send_hint, conversation_send_key, conversation_skill_chip,
-    conversation_skill_remove, conversation_thought_line, conversation_tool_chip_frame,
+    conversation_skill_remove, conversation_subagent_chip_frame, conversation_thought_line, conversation_tool_chip_frame,
     conversation_tool_detail_frame, conversation_tool_group_header, conversation_tool_more_lines,
     conversation_tool_output_line,
     conversation_tool_header, conversation_tool_icon_tile,

@@ -8475,21 +8475,7 @@ fn subagent_chip(
             )
         })
         .child(
-            div()
-                .id(id)
-                .when(rail, |el| el.ml(px(12.0)))
-                .h(px(CHIP_CARD_HEIGHT))
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(crate::theme::hairline(0.07))
-                .bg(crate::theme::ink(0.03))
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
+            crate::components::conversation_subagent_chip_frame(id, rail, CHIP_CARD_HEIGHT)
                 .on_click(on_open)
                 .child(chip_header_row(
                     tool,
