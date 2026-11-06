@@ -637,18 +637,7 @@ impl WorkItemDetails {
             return None;
         }
         Some(
-            div()
-                .debug_selector(|| "work-item-execution-exceptions".into())
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child("Exceptions"),
-                )
+            crate::components::outline_exceptions_section(theme)
                 .children(exceptions.into_iter().enumerate().map(|(ix, binding)| {
                     let chat = self.chats.iter().find(|chat| chat.id == binding.chat_id);
                     let title = chat.map_or_else(
@@ -657,44 +646,7 @@ impl WorkItemDetails {
                     );
                     let open_id = binding.chat_id.clone();
                     let missing = chat.is_none();
-                    div()
-                        .id(("work-item-execution-exception", ix))
-                        .debug_selector(move || format!("work-item-execution-exception-{ix}"))
-                        .flex()
-                        .flex_col()
-                        .px(px(4.0))
-                        .rounded(px(4.0))
-                        .hover(|el| el.bg(theme.element_hover))
-                        .when(!missing, |el| el.cursor_pointer())
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(crate::typography::ui_rems(12.0))
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(title)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(crate::typography::ui_rems(10.5))
-                                        .text_color(theme.text_muted)
-                                        .child("uses a different configuration"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(exec::captured_summary(
-                                    &binding.resolved.configuration,
-                                ))),
-                        )
+                    crate::components::outline_exception_row(ix, title, exec::captured_summary(&binding.resolved.configuration), missing, theme)
                         .on_click(cx.listener(move |_, _, _, cx| {
                             if !missing {
                                 cx.emit(DetailsEvent::OpenChat(open_id.clone()));
@@ -729,20 +681,12 @@ impl WorkItemDetails {
             )
             .when_some(resolved.invalid_reason.clone(), |el, reason| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(format!(
-                            "This configuration can\u{2019}t be used: {reason}"
-                        ))),
+                    crate::components::outline_execution_line(format!("This configuration can’t be used: {reason}"), 11.0, theme.warning, theme),
                 )
             })
             .when(configuration.bindings.is_empty(), |el| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child("No repositories bound"),
+                    crate::components::outline_execution_line("No repositories bound".into(), 11.0, theme.text_faint, theme),
                 )
             })
             .children(

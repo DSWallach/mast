@@ -2528,6 +2528,48 @@ pub fn outline_validation_issue(
         ))
 }
 
+/// Execution exceptions list and row.
+pub fn outline_exceptions_section(theme: &Theme) -> Div {
+    outline_details_list(theme)
+        .debug_selector(|| "work-item-execution-exceptions".into())
+        .child(outline_list_heading("Exceptions".into(), theme))
+}
+pub fn outline_exception_row(
+    index: usize,
+    title: String,
+    summary: String,
+    missing: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(("work-item-execution-exception", index))
+        .debug_selector(move || format!("work-item-execution-exception-{index}"))
+        .flex()
+        .flex_col()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .hover(|el| el.bg(theme.element_hover))
+        .when(!missing, |el| el.cursor_pointer())
+        .child(
+            outline_action_row(theme)
+                .child(
+                    outline_execution_line(title, 12.0, theme.text, theme)
+                        .min_w_0()
+                        .truncate(),
+                )
+                .child(
+                    outline_execution_line(
+                        "uses a different configuration".into(),
+                        10.5,
+                        theme.text_muted,
+                        theme,
+                    )
+                    .flex_none(),
+                ),
+        )
+        .child(outline_execution_line(summary, 10.5, theme.text_faint, theme).truncate())
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
