@@ -1170,6 +1170,29 @@ pub fn outline_action_row(theme: &Theme) -> Div {
     div().flex().gap(px(6.0 * super::layout_spacing(theme)))
 }
 
+/// Section column with a selector for the host surface.
+pub fn outline_section(selector: &'static str, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.into())
+        .flex()
+        .flex_col()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+}
+
+/// Heading with room for a trailing action.
+pub fn outline_section_action_heading(label: &'static str, theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
