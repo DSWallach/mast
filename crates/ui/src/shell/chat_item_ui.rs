@@ -1189,35 +1189,12 @@ impl Shell {
                 .gap(px(2.0))
                 .child(section_label(theme, icon_path, label, icon_selector))
         };
-        let text = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text)
-                .child(SharedString::from(value))
-        };
-        let muted = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(value))
-        };
+        let text = |value: String| crate::components::shell_parts::panel_text(theme, value, false);
+        let muted = |value: String| crate::components::shell_parts::panel_text(theme, value, true);
         // Content links read as primary text with an underline; actions
         // (Edit, Answer, Add to outline) take the success tone.
         let link_with = |id: String, label: &'static str, color: gpui::Hsla, underline: bool| {
-            let selector = id.clone();
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(color)
-                .when(underline, |el| el.underline())
-                .hover(|el| el.bg(theme.element_hover))
+            crate::components::shell_parts::panel_link(theme, id, color, underline)
                 .when(!label.is_empty(), |el| el.child(label))
         };
         let link = |id: String, label: &'static str| link_with(id, label, theme.text, true);
