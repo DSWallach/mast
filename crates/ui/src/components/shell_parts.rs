@@ -20,6 +20,68 @@ pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
         })
 }
 
+pub(crate) fn settings_sidebar_heading(theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(Theme::SPACE_SM))
+        .pt(px(12.0))
+        .pb(px(4.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted.opacity(0.6))
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child("Settings")
+}
+
+pub(crate) fn settings_sidebar_row(
+    theme: &Theme,
+    id: SharedString,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let row = div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(8.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .px(px(Theme::SPACE_SM))
+        .py(px(6.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .when(selected, |el| {
+            el.bg(crate::theme::glass_selected_bg())
+                .font_weight(gpui::FontWeight::MEDIUM)
+        })
+        .text_color(if selected {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.glass_hover()).text_color(theme.text));
+    super::segmented_key(row, theme, selected)
+}
+
+pub(crate) fn settings_sidebar_back(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let row = div()
+        .id("settings-back")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(8.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .px(px(Theme::SPACE_SM))
+        .py(px(6.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.glass_hover()).text_color(theme.text));
+    super::segmented_key(row, theme, false)
+}
+
 pub(crate) fn update_strip(
     theme: &Theme,
     label: SharedString,

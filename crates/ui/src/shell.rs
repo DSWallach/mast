@@ -7156,14 +7156,7 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .child(
-                        div()
-                            .px(px(Theme::SPACE_SM))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from("Settings")),
+                        crate::components::shell_parts::settings_sidebar_heading(theme),
                     )
                     .child(
                         div().flex().flex_col().gap(px(2.0)).children(
@@ -7175,32 +7168,7 @@ impl Shell {
                                 })
                                 .map(|item| {
                                     let selected = item == section;
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "settings-nav-{}",
-                                            item.label()
-                                        )))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .rounded(px(8.0))
-                                        .px(px(Theme::SPACE_SM))
-                                        .py(px(6.0))
-                                        .text_size(crate::typography::ui_rems(13.0))
-                                        .when(selected, |el| {
-                                            // Same tokens as the main sidebar's session
-                                            // rows — the two sidebars must feel alike.
-                                            el.bg(crate::theme::glass_selected_bg())
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                        })
-                                        .text_color(if selected {
-                                            theme.text
-                                        } else {
-                                            theme.text_muted
-                                        })
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                                    crate::components::shell_parts::settings_sidebar_row(theme, SharedString::from(format!("settings-nav-{}", item.label())), selected)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.open_settings(item, cx)
                                         }))
@@ -7217,19 +7185,7 @@ impl Shell {
             // Back pinned to the bottom (zeron settings-sidebar.tsx).
             .child(
                 div().px(px(Theme::SPACE_SM)).pb(px(12.0)).child(
-                    div()
-                        .id("settings-back")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded(px(8.0))
-                        .px(px(Theme::SPACE_SM))
-                        .py(px(6.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                    crate::components::shell_parts::settings_sidebar_back(theme)
                         .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
                         .child(
                             // AltArrowLeft chevron (zeron settings-sidebar.tsx),
