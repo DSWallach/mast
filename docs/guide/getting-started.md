@@ -4,7 +4,7 @@ This gets you from a fresh install to a first chat running inside a work item.
 
 ## Install
 
-Follow the install steps in the [README](../../README.md). You need Rust, the Xcode command line tools and a signed-in agent CLI (Claude Code or Codex). The GitHub CLI (`gh`), signed in with `gh auth login`, is optional for PR features.
+Follow the install steps in the [README](../../README.md). For a source build you need Rust and the Xcode command line tools. Install an agent CLI (Claude Code or Codex) and sign in before using it. The GitHub CLI (`gh`), signed in with `gh auth login`, is optional for PR features.
 
 After building, run `target/installed/mast doctor` from the checkout to check your tools, sign-ins, storage and engine. Each warning or error includes a suggested fix; use `--json` for machine-readable output.
 
@@ -19,7 +19,7 @@ The Space's chats, outline, instructions and accounts all hang off this folder.
 
 ## Start a chat
 
-Press `⌘N` for a new session in the composer, pick a model, and send a message. This works without any work item. The outline is for when you want to keep track of more than one chat.
+Press `⌘N` for a new session in the composer, pick a model, and send a message. This works without any work item. If Mast detects that the selected account is signed out, choose **Sign in…** or **Start anyway**. If sign-in fails, check the selected account in [Accounts](accounts.md), or run `mast doctor` (use `target/installed/mast doctor` from a source checkout) for suggested fixes. The outline is for when you want to keep track of more than one chat.
 
 ## The outline in five minutes
 
@@ -29,7 +29,7 @@ Press `⌘N` for a new session in the composer, pick a model, and send a message
 4. Press `⌘↩`. The Start Chat dialog opens. Write the prompt and click **Start Chat**. The chat starts with the item's instructions and sits under the item.
 5. Press `⌘;` to jump between the chat and its row in the outline. Press `⇧⌘↩` to open the chat full screen.
 
-When the agent needs you, the item shows **User Action Required**. Open **Required actions** in the toolbar and answer it.
+When the agent needs you, open **Needs you** and answer the request.
 
 ## Try it
 
@@ -39,7 +39,6 @@ When the agent needs you, the item shows **User Action Required**. Open **Requir
 4. Press `?` in the outline to see every key.
 5. Right-click the row. Every entry shows its key.
 
-<!-- TODO(Mikey): a 60-second screen recording of steps 1-4 would be the best intro to this page. -->
 
 ## Next
 

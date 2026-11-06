@@ -24,11 +24,7 @@ You already run several agent chats at once. Mast gives them a place to live, so
 - **Side browser.** Web and PR links open beside the chat.
 - **Agent tools.** Every chat gets the `mast-agent` MCP server. See [docs/mcp.md](docs/mcp.md).
 
-<!-- TODO(Mikey): add real captures to docs/media/readme/ and uncomment.
-![The Work Outline with chats under items](docs/media/readme/outline.png)
-![The PR page](docs/media/readme/pr-page.png)
-![A plan with visual compare](docs/media/readme/plan.png)
--->
+
 
 ## Install
 
@@ -39,7 +35,7 @@ You need:
 - macOS with the Xcode command line tools (`xcode-select --install`).
 - Rust through [rustup](https://rustup.rs). `rust-toolchain.toml` pins the version.
 - At least one agent CLI, signed in: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`) or Codex (`codex`).
-- [`gh`](https://cli.github.com), signed in with `gh auth login`, for the PR page and PR sync.
+- Optional: [`gh`](https://cli.github.com), signed in with `gh auth login`, for the PR page and PR sync.
 
 ```bash
 git clone https://github.com/Pluto8195/mast.git
@@ -49,7 +45,7 @@ cargo build --profile installed -p mast   # optimised build, about 3 minutes the
 
 Run `target/installed/mast doctor` from the checkout for a prerequisite checklist and suggested fixes (`--json` emits machine-readable results).
 
-The binary is `target/installed/mast`. A `zeron` executable remains available for compatibility for one release.
+The binary is `target/installed/mast`.
 
 To get a normal app you can keep in `/Applications`, build the bundle and disk image. Packaging also needs Python 3, pip and the `dmgbuild` Python package. It builds the release profile separately, so the first packaging run compiles again:
 
@@ -57,7 +53,7 @@ To get a normal app you can keep in `/Applications`, build the bundle and disk i
 scripts/package-macos.sh
 ```
 
-The script attempts to install `dmgbuild` with pip if it is missing. It writes `target/package/Mast.app` and a `.dmg` next to it (or `package/` under `CARGO_TARGET_DIR` when set). Copy the app to `/Applications`. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open. Release file names keep the `zeron-` prefix on purpose.
+The script attempts to install `dmgbuild` with pip if it is missing. It writes `target/package/Mast.app` and a `.dmg` next to it (or `package/` under `CARGO_TARGET_DIR` when set). Copy the app to `/Applications`. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open.
 
 To try it without touching an installed Mast, run the isolated dev app:
 
@@ -67,11 +63,17 @@ scripts/run-macos-dev.sh
 
 It builds a debug binary and opens `Mast Dev.app` with its own data folder (`~/.mast-dev`, or an existing `~/.zeron-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
 
+## Getting Mast to a coworker
+
+On a trusted Mac, run `scripts/package-macos.sh` as described above. The DMG targets the build Mac’s architecture; transfer it to a compatible Mac and drag Mast into Applications. The default package is ad-hoc signed. On first launch, right-click Mast and choose **Open**. If macOS still blocks a trusted copy, remove its quarantine attribute with `xattr -dr com.apple.quarantine /Applications/Mast.app`, then open it. Notarised builds are not yet available.
+
+New installs store data in `~/.mast`. To update, build and transfer a new DMG, quit Mast, and replace the app in Applications; the data folder stays in place. Validate the hand-off on the recipient Mac.
+
 ## First run
 
 1. Open Mast. Add a Space with `⇧⌘N`, or **New Space…** in the Space picker, and choose your repo folder.
-2. Make sure an agent is signed in. Run `claude` or `codex` once in a terminal, or add an account for the Space (see [accounts](docs/guide/accounts.md)).
-3. Open the Outline with `⇧⌘L`, create an item with `⇧⌘I`, and start a chat in it with `⌘↩`.
+2. Sign in to an agent CLI, or add an account for the Space (see [accounts](docs/guide/accounts.md)). If Mast detects a signed-out account when starting a chat, it offers **Sign in…** and **Start anyway**.
+3. Press `⌘N`, choose a model, and send a message. Or open the Outline with `⇧⌘L`, create an item with `⇧⌘I`, and start a chat in it with `⌘↩`.
 4. Optional: for Linear, paste a personal API key in **Settings → Linear**, then switch on **Linear** in Space details. See [GitHub and Linear](docs/guide/github-and-linear.md).
 
 [Getting started](docs/guide/getting-started.md) walks through this with a first chat.
