@@ -26,25 +26,44 @@ pub fn button(
     size: ButtonSize,
     theme: &Theme,
 ) -> Stateful<Div> {
+    button_with_identity(id, label, variant, size, theme, theme.identity_color(""))
+}
+
+/// Use the caller's agent identity for Area's filled primary action.
+pub fn button_with_identity(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    size: ButtonSize,
+    theme: &Theme,
+    identity: gpui::Hsla,
+) -> Stateful<Div> {
     let label = label.into();
+    let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area;
     let (horizontal, vertical, font, radius) = match size {
         ButtonSize::Sm => (6.0, 1.0, 10.5, 4.0),
         ButtonSize::Md => (12.0, 6.0, 13.0, 8.0),
     };
-    let layout_metrics = crate::ui_style::UiStyle::resolve(
-        crate::ui_style::UiStyleId::Default,
-        theme.ui_style.layout,
-    )
-    .tokens;
-    let spacing_scale =
-        layout_metrics.control_size / crate::ui_style::UiStyle::MINIMAL.tokens.control_size;
+    let (spacing_scale, font_adjustment, height) = match theme.ui_style.layout {
+        crate::ui_style::UiLayout::Minimal => (1.0, 0.0, None),
+        crate::ui_style::UiLayout::Compact => (0.75, -1.0, Some(24.0)),
+        crate::ui_style::UiLayout::Guided => (1.0, 1.0, Some(34.0)),
+    };
     let button = div()
         .id(id)
         .flex_none()
         .px(px(horizontal * spacing_scale))
         .py(px(vertical * spacing_scale))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(radius)))
-        .text_size(crate::typography::ui_rems(font))
+        .when(area, |el| {
+            el.rounded_full().font_weight(gpui::FontWeight::SEMIBOLD)
+        })
+        .when(size == ButtonSize::Md, |el| {
+            el.when_some(height, |el, height| {
+                el.min_h(px(height)).flex().items_center()
+            })
+        })
+        .text_size(crate::typography::ui_rems(font + font_adjustment))
         .cursor_pointer();
     match variant {
         ButtonVariant::Secondary => {
@@ -62,7 +81,12 @@ pub fn button(
                 .text_color(theme.on_solid)
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .hover(|el| el.opacity(0.9));
-            let button = if key {
+            let button = if area {
+                button
+                    .bg(identity)
+                    .text_color(theme.identity_text(identity))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            } else if key {
                 crate::surface_chrome::segmented_key(button, theme, true)
                     .bg(theme.accent)
                     .text_color(theme.on_accent)
@@ -107,6 +131,10 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
             el.rounded(px(radius))
         })
+        .when(
+            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area,
+            |el| el.rounded_full(),
+        )
         .border_1()
         .border_color(theme.border)
         .text_size(crate::typography::ui_rems(10.5))
@@ -125,6 +153,10 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
             el.rounded(px(radius))
         })
+        .when(
+            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area,
+            |el| el.rounded_full(),
+        )
         .bg(emerald.opacity(0.12))
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(emerald_text.opacity(0.9))
@@ -423,9 +455,16 @@ pub fn status_dot(theme: &Theme, status: Status) -> Div {
 
 /// A single selectable segment. The caller owns selection and activation.
 pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div {
+    let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area;
+    let identity = theme.identity_color("");
     let item = div()
-        .when(selected, |el| {
-            el.px(px(8.0)).py(px(5.0)).bg(theme.surface_raised)
+        .when(selected || area, |el| el.px(px(8.0)).py(px(5.0)))
+        .when(selected && !area, |el| el.bg(theme.surface_raised))
+        .when(area, |el| {
+            el.rounded_full().font_weight(gpui::FontWeight::SEMIBOLD)
+        })
+        .when(area && selected, |el| {
+            el.bg(identity).text_color(theme.identity_text(identity))
         })
         .child(label.into());
     segmented_key(item, theme, selected)
@@ -548,5 +587,53 @@ pub fn text_input(theme: &Theme, input: AnyElement) -> Div {
             theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
             |el| el.bg(theme.input_bg),
         )
+        .when(
+            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area,
+            |el| el.bg(theme.identity_color("").opacity(0.12)),
+        )
         .child(input)
+}
+
+/// Icon action with a layout-controlled optional label.
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    icon: &'static str,
+    label: &'static str,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let labels = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
+    let control = div()
+        .id(id)
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .size(px(theme.ui_style.tokens.control_size))
+        .child(crate::icons::icon(icon).size(px(theme.ui_style.tokens.control_icon_size)));
+    let control = icon_key(control, theme, false);
+    control.when(labels, |el| el.w_auto().child(label))
+}
+
+/// Section title with optional guidance for the Guided layout.
+pub fn section_header(
+    theme: &Theme,
+    label: impl Into<SharedString>,
+    help: Option<&'static str>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(field_label(theme, label))
+        .when(theme.ui_style.behavior.help_cards, |el| {
+            el.when_some(help, |el, help| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(
+                            theme.ui_style.type_roles().secondary.unwrap_or(12.0),
+                        ))
+                        .text_color(theme.text_muted)
+                        .child(help),
+                )
+            })
+        })
 }
