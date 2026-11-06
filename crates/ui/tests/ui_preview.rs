@@ -185,3 +185,33 @@ fn render_ui_preview() -> anyhow::Result<()> {
     println!("{}", path.display());
     Ok(())
 }
+
+/// Compare Minimal-only contact sheets while excluding the preview's label bar.
+#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[test]
+#[ignore = "requires MAST_BASELINE_PREVIEW and MAST_CURRENT_PREVIEW paths"]
+fn compare_minimal_preview() -> anyhow::Result<()> {
+    let baseline = std::path::PathBuf::from(std::env::var("MAST_BASELINE_PREVIEW")?);
+    let current = std::path::PathBuf::from(std::env::var("MAST_CURRENT_PREVIEW")?);
+    for screen in ["controls", "details"] {
+        let expected = image::open(baseline.join(format!("{screen}.png")))?.into_rgba8();
+        let actual = image::open(current.join(format!("{screen}.png")))?.into_rgba8();
+        anyhow::ensure!(
+            expected.dimensions() == actual.dimensions(),
+            "{screen} dimensions differ"
+        );
+        let (width, height) = expected.dimensions();
+        let expected = image::imageops::crop_imm(&expected, 0, 30, width, height - 30).to_image();
+        let actual = image::imageops::crop_imm(&actual, 0, 30, width, height - 30).to_image();
+        let diff = image_compare::rgba_hybrid_compare(&expected, &actual)?;
+        println!("{screen} similarity: {}", diff.score);
+        diff.image
+            .to_color_map()
+            .save(current.join(format!("{screen}-diff.png")))?;
+        anyhow::ensure!(
+            diff.score >= 0.999,
+            "{screen} differs from Minimal baseline"
+        );
+    }
+    Ok(())
+}
