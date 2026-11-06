@@ -107,8 +107,25 @@ impl Render for Controls {
     }
 }
 
-fn initialize(data_dir: &std::path::Path, appearance: Appearance, theme_id: &str, cx: &mut App) {
-    let settings = mast_ui::settings::UiSettings::default();
+fn initialize(
+    data_dir: &std::path::Path,
+    style: UiStyleId,
+    appearance: Appearance,
+    theme_id: &str,
+    cx: &mut App,
+) {
+    let mut settings = mast_ui::settings::UiSettings::default();
+    settings.ui_style = style;
+    match appearance {
+        Appearance::Light => {
+            settings.appearance = mast_ui::appearance::AppearanceMode::Light;
+            settings.theme_selection.light = theme_id.to_owned();
+        }
+        Appearance::Dark => {
+            settings.appearance = mast_ui::appearance::AppearanceMode::Dark;
+            settings.theme_selection.dark = theme_id.to_owned();
+        }
+    }
     mast_ui::settings::init(settings.clone(), data_dir, cx);
     let fonts = mast_ui::typography::register_fonts(cx);
     mast_ui::typography::init(
@@ -192,7 +209,7 @@ pub fn render(
         style,
         appearance,
         move |_, cx| {
-            initialize(&data_dir, appearance, &theme_id, cx);
+            initialize(&data_dir, style, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => chat(data_dir, cx),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
