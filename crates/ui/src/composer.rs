@@ -8824,7 +8824,7 @@ impl Render for Composer {
                     .bg(tab_identity)
                     .text_color(theme.identity_text(tab_identity))
                     .when(!selected, |el| el.opacity(0.75))
-                    .cursor_pointer().child(crate::icons::icon(path).size(px(16.0)))
+                    .cursor_pointer().child(crate::icons::icon(path).size(px(16.0)).text_color(theme.identity_text(tab_identity)))
                     .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
                         pickers.pick_harness(harness, cx);
                         pickers.open_model_menu(window, cx);
