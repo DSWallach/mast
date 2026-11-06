@@ -415,7 +415,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::PROPOSE_APPROVAL_RULE,
-            description: "Propose a command approval rule for user review. Creates a Required Action; never enables a rule. The user can review and enter it in Space settings.",
+            description: "Propose a command approval rule for user review. Creates a Required Action; never enables a rule. The user can review and accept it there.",
             input_schema: json!({ "type": "object", "properties": {
                 "label": {"type": "string"}, "argvPrefix": {"type": "array", "items": {"type": "string"}},
                 "commandRegex": {"type": "string"}, "cwdScope": {"type": "string"},

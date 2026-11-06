@@ -2009,7 +2009,7 @@ impl AgentToolsService {
 
     fn propose_approval_rule(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
         let label = arguments.get("label").and_then(Value::as_str).unwrap_or("").trim();
-        if label.is_empty() || label.chars().count() > 100 { return Err(AgentToolError::invalid("label must contain 1 to 100 characters")); }
+        if label.is_empty() || label.chars().count() > 100 || label.chars().any(char::is_control) { return Err(AgentToolError::invalid("label must contain 1 to 100 printable characters")); }
         let prefix = arguments.get("argvPrefix").cloned().unwrap_or_else(|| json!([]));
         let Some(words) = prefix.as_array() else { return Err(AgentToolError::invalid("argvPrefix must be an array of strings")); };
         if words.iter().any(|word| word.as_str().is_none_or(str::is_empty)) { return Err(AgentToolError::invalid("argvPrefix must contain nonempty strings")); }
@@ -2021,7 +2021,7 @@ impl AgentToolsService {
         if cwd.is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return Err(AgentToolError::invalid("cwdScope must be absolute")); }
         let rule = json!({"label": label, "harness": harness, "argvPrefix": prefix, "commandRegex": regex, "cwdScope": cwd});
         let rationale = arguments.get("rationale").and_then(Value::as_str).unwrap_or("");
-        let detail = format!("Review this proposed rule and enter it in Space settings if approved. Rules are never enabled by this tool.\n\n{}\n\n{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
+        let detail = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{}\n\n{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
         let request = json!({"request": format!("Review proposed approval rule: {label}"), "detail": detail, "kind": "approve", "idempotencyKey": arguments.get("idempotencyKey")});
         self.create_user_action_request(context, &request)
     }

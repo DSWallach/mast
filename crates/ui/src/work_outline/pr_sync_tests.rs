@@ -254,6 +254,49 @@ fn approval_command_prefills_disabled_rule(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let state = overview.read_with(vcx, |overview, _| overview.state.clone());
+    state.update(vcx, |state, _| state.sessions = vec![mast_proto::Session {
+        last_completed_turn: None, last_turn_tool_failures: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
+        status: mast_proto::SessionStatus::AwaitingInput, started_at: None, updated_at: chrono::Utc::now(),
+        awaiting_input: Some(mast_proto::AwaitingInput { request_id: "pending-approval".into(), questions: vec![mast_proto::UserInputQuestion {
+            id: "question".into(), header: "Approve command".into(), question: "Allow pgrep? Reason: sandbox".into(),
+            options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,
+            command_approval: Some(mast_proto::CommandApproval { command: serde_json::json!(["pgrep", "cargo"]), cwd: Some(dir.path().to_string_lossy().into_owned()), reason: Some("sandbox".into()), sandbox_permissions: None }),
+        }] }),
+    }]);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    let id = mast_proto::derive_id("pending-approval", "question");
+    assert!(row_bounds(vcx, format!("approval-card-{id}")).is_some());
+    press(vcx, format!("approval-prefill-{id}"));
+    press(vcx, format!("approval-save-{id}"));
+    let changes = mutations(&calls, "setApprovalRule");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["pgrep", "cargo"]));
+    assert_eq!(changes[0]["rule"]["enabled"], true);
+}
+
+#[gpui::test]
+fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("rule-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Rust tests");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    request.info = Some("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{\"label\":\"Rust tests\",\"harness\":\"codex\",\"argvPrefix\":[\"cargo\",\"test\"],\"commandRegex\":null,\"cwdScope\":null}\n\n".into());
+    snapshot.user_action_requests = vec![request];
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, "required-actions-approve-rule-proposal".into());
+    assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["enabled"], true);
+    assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+}
+
+#[gpui::test]
 fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = sync_snapshot(None);

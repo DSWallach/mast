@@ -22,6 +22,19 @@ outline item marked as a project, with its own worker destination. A **Blueprint
 saves an item tree for a one-time copy; a **Child template** sets live rules on a
 parent that apply to its direct children.
 
+## Command approval rules
+
+Space-root details include **Approval rules**. Suggestions start off; enabling
+or creating a rule is a user action. Matching Codex command requests are answered
+and recorded in friction; requests that cannot be matched safely still ask.
+The command test uses Codex and the Space root as its working directory.
+Parsing rejects shell expansion, redirection and unrecognized command families.
+
+Automatic rule evaluation currently applies only to Codex. The Claude Code
+adapter does not currently surface an equivalent command approval request to
+this evaluator, so selecting Claude Code in a rule does not make it active for
+that harness. Claude Code's existing permission handling is unchanged.
+
 ## Quick start
 
 1. Open the Overview and choose **Outline**, or press `⇧⌘L` (`Ctrl+Shift+L`). The Overview has two views, List and
