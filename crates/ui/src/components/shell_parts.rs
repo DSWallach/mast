@@ -20,6 +20,45 @@ pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
         })
 }
 
+pub(crate) fn offline_indicator(theme: &Theme) -> AnyElement {
+    div()
+        .size(px(5.0))
+        .rounded_full()
+        .bg(theme.warning)
+        .into_any_element()
+}
+
+pub(crate) fn connection_line(theme: &Theme, label: SharedString, glyph: AnyElement) -> AnyElement {
+    crate::motion::fade_in(
+        "connection-pill",
+        div()
+            .id("connection-pill")
+            .mx(px(Theme::SPACE_SM + 4.0))
+            .mb(px(Theme::SPACE_SM))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .when(super::is_area(theme), |el| {
+                el.rounded_full().bg(theme.identity_color("").opacity(0.08))
+            })
+            .when(super::is_industrial(theme), |el| {
+                el.font_family(theme.font_mono.clone())
+                    .border_1()
+                    .border_color(theme.industrial_colors().rule)
+            })
+            .child(glyph)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(label),
+            ),
+    )
+    .into_any_element()
+}
+
 pub(crate) fn sidebar_section_label(theme: &Theme, label: SharedString) -> gpui::Div {
     let emphasized = super::is_industrial(theme) || super::is_area(theme);
     let label = if emphasized {

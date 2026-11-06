@@ -7926,11 +7926,7 @@ impl Shell {
             S::Disabled | S::Connected => return None,
             S::Offline => (
                 "Offline — sends are saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
+                crate::components::shell_parts::offline_indicator(theme),
             ),
             S::Reconnecting => (
                 "Reconnecting…".into(),
@@ -7944,28 +7940,7 @@ impl Shell {
                 .into_any_element(),
             ),
         };
-        Some(
-            crate::motion::fade_in(
-                "connection-pill",
-                div()
-                    .id("connection-pill")
-                    .mx(px(Theme::SPACE_SM + 4.0))
-                    .mb(px(Theme::SPACE_SM))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(glyph)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_faint)
-                            .child(label),
-                    ),
-            )
-            .into_any_element(),
-        )
+        Some(crate::components::shell_parts::connection_line(theme, label, glyph))
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
