@@ -540,6 +540,49 @@ pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) ->
         .border_color(gpui::transparent_black())
 }
 
+/// Overview filter menu trigger.
+pub fn outline_filter_trigger(theme: &Theme) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    let trigger = div()
+        .id("overview-filter-menu")
+        .debug_selector(|| "overview-filter-menu".into())
+        .relative()
+        .px(px(8.0 * scale))
+        .py(px(3.0 * scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .bg(theme.element_hover.opacity(0.5));
+    crate::surface_chrome::segmented_key(trigger, theme, false)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child("⋯")
+}
+
+/// Checkable overview filter menu row.
+pub fn outline_filter_row(
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    let row = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .px(px(8.0 * scale))
+        .py(px(5.0 * scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .hover(|el| el.bg(theme.element_hover));
+    crate::surface_chrome::segmented_key(row, theme, checked)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(format!("{}  {}", if checked { "✓" } else { "　" }, label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

@@ -5080,17 +5080,7 @@ impl Overview {
     }
 
     fn render_filter_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let trigger = div()
-            .id("overview-filter-menu")
-            .debug_selector(|| "overview-filter-menu".into())
-            .relative()
-            .px(px(8.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .text_color(theme.text_muted)
-            .bg(theme.element_hover.opacity(0.5))
-            .child("⋯")
+        let trigger = crate::components::outline_filter_trigger(theme)
             .hint("Overview filters", HintKey::None)
             .on_mouse_down(
                 MouseButton::Left,
@@ -5108,19 +5098,7 @@ impl Overview {
             return trigger.into_any_element();
         }
         let popup = theme.for_popup();
-        let row = |id: &'static str, label: &'static str, checked: bool| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .px(px(8.0))
-                .py(px(5.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(popup.text)
-                .hover(|el| el.bg(popup.element_hover))
-                .child(format!("{}  {}", if checked { "✓" } else { "　" }, label))
-        };
+        let row = |id, label, checked| crate::components::outline_filter_row(id, label, checked, &popup);
         let card = popover::popover_card(&popup)
             .w(px(180.0))
             .flex()
