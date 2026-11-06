@@ -448,11 +448,7 @@ impl WorkItemDetails {
         let list = instructions::live_instructions(snapshot, self.scope_item());
         let list: Vec<WorkItemInstructionView> = list.into_iter().cloned().collect();
         let open = self.instructions_open || self.instruction_draft.is_some();
-        let mut section = div()
-            .debug_selector(|| "work-item-instructions".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("work-item-instructions", theme)
             .child(
                 crate::components::outline_section_header(
                     "work-item-instructions-toggle",
@@ -472,34 +468,7 @@ impl WorkItemDetails {
         if let Some(item) = item.filter(|item| item.parent_work_item_id.is_some()) {
             let inherit = item.inherit_parent_instructions;
             section = section.child(
-                div()
-                    .id("work-item-inherit-toggle")
-                    .debug_selector(|| "work-item-inherit-toggle".into())
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.text_color(theme.text))
-                    .child(
-                        div()
-                            .size(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .border_1()
-                            .border_color(theme.border_strong)
-                            .when(inherit, |el| {
-                                el.child(
-                                    crate::icons::icon(crate::icons::CHECK)
-                                        .size(px(9.0))
-                                        .text_color(theme.text),
-                                )
-                            }),
-                    )
-                    .child("Inherit parent instructions")
+                crate::components::outline_inheritance_toggle(inherit, theme)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.set_inheritance(!inherit, cx)),
                     ),
@@ -538,26 +507,11 @@ impl WorkItemDetails {
             let line_height = crate::typography::ui_rems(LINE_HEIGHT_REMS);
             section =
                 section.child(
-                    div()
-                        .debug_selector(move || format!("work-item-instruction-{ix}"))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .px(px(4.0))
-                        .py(px(3.0))
-                        .rounded(px(4.0))
-                        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+                    crate::components::outline_instruction_row(ix, theme)
                         // Header: the number, the controls, and the provenance
                         // badge stay at the top whatever the text length.
                         .child(
-                            div()
-                                .debug_selector(move || {
-                                    format!("work-item-instruction-header-{ix}")
-                                })
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .text_size(crate::typography::ui_rems(12.0))
+                            crate::components::outline_instruction_header(ix, theme)
                                 .child(
                                     div()
                                         .flex_none()

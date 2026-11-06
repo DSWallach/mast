@@ -1304,6 +1304,63 @@ pub fn outline_plan_badge(theme: &Theme) -> Div {
         .child("Plan")
 }
 
+/// Inheritance checkbox in item instructions.
+pub fn outline_inheritance_toggle(inherit: bool, theme: &Theme) -> Stateful<Div> {
+    let check = div()
+        .size(px(12.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.border_strong)
+        .when(inherit, |el| {
+            el.child(
+                crate::icons::icon(crate::icons::CHECK)
+                    .size(px(9.0))
+                    .text_color(theme.text),
+            )
+        });
+    div()
+        .id("work-item-inherit-toggle")
+        .debug_selector(|| "work-item-inherit-toggle".into())
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text))
+        .child(check)
+        .child("Inherit parent instructions")
+}
+
+/// Instruction card and its action header.
+pub fn outline_instruction_row(index: usize, theme: &Theme) -> Div {
+    let scale = super::layout_spacing(theme);
+    div()
+        .debug_selector(move || format!("work-item-instruction-{index}"))
+        .flex()
+        .flex_col()
+        .gap(px(2.0 * scale))
+        .px(px(4.0 * scale))
+        .py(px(3.0 * scale))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+}
+pub fn outline_instruction_header(index: usize, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || format!("work-item-instruction-header-{index}"))
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
