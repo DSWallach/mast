@@ -811,27 +811,31 @@ impl PrReviewLauncher {
         }
         let path = PathBuf::from(&checkout);
         let check = tokio::task::spawn_blocking(move || {
-            git(
+            let head = git(
                 &path,
                 &["rev-parse", "--verify", &format!("{head}^{{commit}}")],
             )?;
-            git(
+            let base = git(
                 &path,
                 &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
             )?;
-            Ok::<_, String>(())
+            Ok::<_, String>((head, base))
         })
         .await
         .map_err(|e| invalid(e.to_string()))?;
-        check.map_err(|e| git_failed("Could not resolve review range", e))?;
+        let (head_commit, base_commit) = check.map_err(|e| git_failed("Could not resolve review range", e))?;
         let mut target = p.target.clone();
         if let mast_proto::ReviewTarget::Branch {
             repo,
             checkout_path,
+            base_sha,
+            head_sha,
             ..
         } = &mut target
         {
             *checkout_path = Some(checkout.clone());
+            *base_sha = Some(base_commit.clone());
+            *head_sha = head_commit.clone();
             if repo.as_deref().is_none_or(str::is_empty) {
                 let path = Path::new(&checkout);
                 *repo = git(path, &["remote", "get-url", "origin"])
@@ -872,12 +876,7 @@ impl PrReviewLauncher {
             .as_ref()
             .ok_or_else(|| invalid("diff targets unavailable"))?;
         targets
-            .bind(
-                &chat_id,
-                &checkout,
-                mast_proto::ChatDiffTargetSource::Manual,
-                None,
-            )
+            .bind_review_range(&chat_id, Path::new(&checkout), branch.as_deref().unwrap_or(&head_commit), &base_commit, &head_commit)
             .map_err(|e| invalid(format!("Could not bind checkout: {e}")))?;
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, &operation)?;
@@ -1157,6 +1156,12 @@ impl PrReviewLauncher {
             self_review,
         );
         let branch = head.head_ref_name.clone();
+        if matches!(p.action, PrReviewAction::CodeReview) {
+            let pr_key = format!("pr:{slug}#{}", p.number);
+            let branch_key = format!("branch:{slug}#{branch}");
+            self.workspace.inherit_diff_review_state(&pr_key, &branch_key)
+                .map_err(|error| invalid(format!("Could not carry branch review marks: {error}")))?;
+        }
         let mut notes = chosen.notes.clone();
         if behind > 0 {
             notes.push(format!(

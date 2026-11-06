@@ -243,6 +243,49 @@ struct Resolved {
 }
 
 impl DiffTargets {
+    /// Bind a fixed committed range without fetching or checking out a ref.
+    pub(crate) fn bind_review_range(
+        &self, chat_id: &str, path: &Path, branch: &str, base: &str, head: &str,
+    ) -> Result<RefBindOutcome, DiffTargetError> {
+        if [base, head].iter().any(|sha| {
+            !(sha.len() == 40 || sha.len() == 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit())
+        }) {
+            return Err(DiffTargetError::Invalid(
+                "Review range requires full commit SHAs.".into(),
+            ));
+        }
+        let chat = self.local_chat(chat_id)?;
+        let family = Family::resolve(&chat, false)?;
+        let checkout = family.member(path)?;
+        let facts = checkout_facts(&checkout.path)
+            .ok_or_else(|| DiffTargetError::NoCheckout("Review checkout is unavailable.".into()))?;
+        let repo_id = repository_id(&self.device_id, &facts.common_dir);
+        let id = mast_proto::derive_id(&format!("{repo_id}\0{branch}"), "review-range");
+        let target = StoredRefDiffTarget {
+            id: id.clone(), kind: RefDiffKind::Branch, path: path_string(&checkout.path), repo_id,
+            head_branch: branch.to_owned(), head_ref: head.to_owned(),
+            base_branch: base.to_owned(), base_ref: base.to_owned(),
+            pr_number: None, pr_url: None, bound_at: crate::now_ms(),
+        };
+        let changed = self.workspace.update_chat_diff_targets(chat_id, |row| {
+            if let Some(existing) = row.ref_targets.iter_mut().find(|item| item.id == id) {
+                *existing = target.clone();
+            } else {
+                if row.ref_targets.len() >= MAX_CHAT_REF_TARGETS {
+                    let keep = row.selected_ref.clone();
+                    if let Some(index) = row.ref_targets.iter()
+                        .position(|item| keep.as_deref() != Some(item.id.as_str())) {
+                        row.ref_targets.remove(index);
+                    }
+                }
+                row.ref_targets.push(target.clone());
+            }
+            row.selected_ref = Some(id.clone());
+            row.selected = None;
+        }).map_err(internal)?;
+        if changed { self.bump(); }
+        Ok(RefBindOutcome { reply: self.stored(chat_id), target })
+    }
     /// The repository checkouts of a chat's family: its own checkout and its
     /// submodules, one per repository.
     fn repo_checkouts(&self, family: &Family) -> Vec<RepoCheckout> {

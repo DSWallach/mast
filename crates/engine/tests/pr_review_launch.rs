@@ -235,7 +235,9 @@ async fn branch_review_launch_is_idempotent_and_binds_checkout() {
     assert!(reply.prompt.contains("baseRef"));
     assert_eq!(rig.client.start_branch_review(&p).await.unwrap(), reply);
     let targets = rig.core.workspace.chat_diff_targets(&reply.chat_id).unwrap().unwrap();
-    assert_eq!(targets.selected.as_deref(), Some(rig.flagship.to_str().unwrap()));
+    let selected = targets.ref_targets.iter().find(|target| Some(&target.id) == targets.selected_ref.as_ref()).unwrap();
+    assert_eq!(selected.path, rig.flagship.to_str().unwrap());
+    assert_eq!(selected.head_ref, git(&rig.flagship, &["rev-parse", "refs/remotes/origin/feature-x"]));
     let mut changed = p.clone();
     if let mast_proto::ReviewTarget::Branch { branch, .. } = &mut changed.target {
         *branch = Some("different".into());
@@ -259,6 +261,20 @@ async fn pr_state_can_inherit_branch_hunks() {
     })).await.unwrap();
     assert_eq!(reply["state"]["viewedHunks"], json!(["a".repeat(64)]));
     assert!(gh_calls(&rig).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starting_pr_review_inherits_existing_branch_hunks() {
+    let rig = rig().await;
+    let mut branch = mast_proto::DiffReviewState {
+        target: "branch:acme/flagship#feature-x".into(),
+        head_sha: Some("head".into()), ..Default::default()
+    };
+    branch.viewed_hunks.insert("b".repeat(64));
+    rig.core.workspace.put_diff_review_state(&branch).unwrap();
+    start(&rig, &params("inherit-branch", 7, PrReviewAction::CodeReview)).await.unwrap();
+    let pr = rig.core.workspace.diff_review_state("pr:acme/flagship#7").unwrap().unwrap();
+    assert_eq!(pr.viewed_hunks, branch.viewed_hunks);
 }
 
 fn write_view(dir: &Path, number: u64, branch: &str, cross: bool, title: &str) {
