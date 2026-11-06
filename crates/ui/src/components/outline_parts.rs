@@ -1396,6 +1396,46 @@ pub fn outline_effective_text(text: String, theme: &Theme) -> Div {
         .child(SharedString::from(text))
 }
 
+/// One line in an execution configuration summary.
+pub fn outline_execution_line(text: String, size: f32, color: gpui::Hsla, theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            size + super::layout_type_adjustment(theme),
+        ))
+        .text_color(color)
+        .child(SharedString::from(text))
+}
+
+/// Repository binding row in an execution summary.
+pub fn outline_execution_repository(
+    index: usize,
+    name: String,
+    summary: String,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(("work-item-execution-repo", index))
+        .debug_selector(move || format!("work-item-execution-repo-{index}"))
+        .flex()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            11.5 + super::layout_type_adjustment(theme),
+        ))
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme.text)
+                .child(SharedString::from(name)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_muted)
+                .child(SharedString::from(summary)),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

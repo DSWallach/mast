@@ -777,30 +777,14 @@ impl WorkItemDetails {
         let archived = self.item().is_some_and(|item| item.archived_at.is_some());
         let validating = self.in_flight.contains("execution:validate");
         let saving = self.in_flight.contains("execution:save");
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        crate::components::outline_detail_section(theme)
             .child(
-                div()
-                    .debug_selector(|| "work-item-execution-source".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format!("Source: {source}"))),
+                crate::components::outline_execution_line(format!("Source: {source}"), 11.0, theme.text_muted, theme)
+                    .debug_selector(|| "work-item-execution-source".into()),
             )
             .child(
-                div()
-                    .debug_selector(|| "work-item-execution-root".into())
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(
-                        if configuration.execution_root.is_empty() {
-                            "No execution root".to_owned()
-                        } else {
-                            configuration.execution_root.clone()
-                        },
-                    )),
+                crate::components::outline_execution_line(if configuration.execution_root.is_empty() { "No execution root".to_owned() } else { configuration.execution_root.clone() }, 12.0, theme.text, theme)
+                    .debug_selector(|| "work-item-execution-root".into()).truncate(),
             )
             .when_some(resolved.invalid_reason.clone(), |el, reason| {
                 el.child(
@@ -827,32 +811,12 @@ impl WorkItemDetails {
                     .enumerate()
                     .map(|(ix, binding)| {
                         let tip: SharedString = binding.checkout_path().to_owned().into();
-                        div()
-                            .id(("work-item-execution-repo", ix))
-                            .debug_selector(move || format!("work-item-execution-repo-{ix}"))
-                            .flex()
-                            .gap(px(6.0))
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(exec::path_name(&binding.repo_path))),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(exec::binding_summary(binding))),
-                            )
+                        crate::components::outline_execution_repository(ix, exec::path_name(&binding.repo_path), exec::binding_summary(binding), theme)
                             .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
                     }),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(6.0))
+                crate::components::outline_action_row(theme)
                     .when(!archived, |el| {
                         el.child(
                             crate::work_outline::hints::details_button("work-item-execution-edit", "Edit", theme)
