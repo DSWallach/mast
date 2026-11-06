@@ -475,6 +475,39 @@ pub struct WorkOutlineSpaceSettings {
     /// Editable prompt templates for PR launches; absent on an unmigrated Space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_review_prompts: Option<PrReviewPrompts>,
+    /// Command approval rules. Missing settings never enable approvals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_rules: Vec<ApprovalRule>,
+}
+
+/// A user-configured command approval rule. Evaluation must fail closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRule {
+    pub id: String,
+    pub label: String,
+    pub created_by: String,
+    pub harness: ApprovalRuleHarness,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub argv_prefix: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_regex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_scope: Option<String>,
+    #[serde(default)]
+    pub hit_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalRuleHarness {
+    Codex,
+    ClaudeCode,
+    Any,
 }
 
 fn default_resolve_merged_handoffs() -> bool {
@@ -492,6 +525,7 @@ impl Default for WorkOutlineSpaceSettings {
             pr_review_sync_work_item_id: None,
             linear_assigned_work_item_id: None,
             pr_review_prompts: None,
+            approval_rules: Vec::new(),
         }
     }
 }
@@ -2717,5 +2751,18 @@ mod tests {
         assert_eq!(limits::MAX_CHILDREN_PER_PARENT, 2_000);
         assert_eq!(limits::MAX_ORDER_KEY_LEN, 64);
         assert!(limits::MAX_OP_UTF16_UNITS < 16 * 1024);
+    }
+
+    #[test]
+    fn approval_rules_default_to_disabled() {
+        let settings: WorkOutlineSpaceSettings = serde_json::from_value(json!({})).unwrap();
+        assert!(settings.approval_rules.is_empty());
+        let rule: ApprovalRule = serde_json::from_value(json!({
+            "id": "r", "label": "Tests", "createdBy": "user", "harness": "claude-code",
+            "argvPrefix": ["cargo", "test"]
+        })).unwrap();
+        assert!(!rule.enabled);
+        assert_eq!(rule.harness, ApprovalRuleHarness::ClaudeCode);
+        assert_eq!(serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(), rule);
     }
 }
