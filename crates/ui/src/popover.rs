@@ -921,14 +921,15 @@ pub fn tracked_upper(label: &str) -> String {
 
 /// Hairline divider between menu sections (zeron `MenuSeparator`:
 /// `mx-1 my-1 h-px bg-white/[0.07]`).
-pub fn menu_separator() -> gpui::Div {
+pub fn menu_separator(theme: &Theme) -> gpui::Div {
     // Full-bleed: negative margins cancel the card's inset so the hairline
     // runs border to border (user request).
     div()
-        .h(px(1.0))
+        .h(px(theme.ui_style.tokens.rule_width.unwrap_or(1.0)))
         .mx(px(-CARD_INSET))
         .my(px(MENU_GAP))
         .bg(hairline(0.07))
+        .when(theme.ui_style.tokens.rule_width.is_some(), |el| el.bg(theme.border))
 }
 
 /// The recessed band tone for a palette/picker header or footer strip — a

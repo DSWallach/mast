@@ -1241,7 +1241,7 @@ impl AccountFlow {
                         .child(SharedString::from(SAVED_NOTE)),
                 )
             })
-            .child(popover::menu_separator())
+            .child(popover::menu_separator(&theme))
             .child(
                 popover::menu_row(theme, false, "account-pick-add")
                     .id("account-pick-add")

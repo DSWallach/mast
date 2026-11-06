@@ -744,7 +744,7 @@ impl Shell {
         }
         if !snapshot.importable_actions.is_empty() {
             card = card
-                .child(popover::menu_separator())
+                .child(popover::menu_separator(&theme))
                 .child(popover::menu_heading(&theme, "Import from project file"));
             for draft in snapshot.importable_actions.clone() {
                 let import = draft.clone();
@@ -774,7 +774,7 @@ impl Shell {
                     .child(SharedString::from(issue)),
             );
         }
-        card.child(popover::menu_separator())
+        card.child(popover::menu_separator(&theme))
             .child(
                 popover::menu_row(&theme, false, "project-actions-add-row")
                     .id("project-actions-add-row")
@@ -1095,14 +1095,14 @@ mod project_actions_scroll_tests {
                 );
             }
             menu = menu
-                .child(popover::menu_separator())
+                .child(popover::menu_separator(&theme))
                 .child(popover::menu_heading(theme, "Import from project file"))
                 .child(
                     popover::menu_row(theme, false, "import")
                         .id("import")
                         .child("Import action"),
                 )
-                .child(popover::menu_separator())
+                .child(popover::menu_separator(&theme))
                 .child(
                     popover::menu_row(theme, false, "add")
                         .id("add")

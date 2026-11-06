@@ -650,7 +650,7 @@ impl FilesSurface {
                 editor::EditorContextAction::Paste,
                 cx,
             ))
-            .child(crate::popover::menu_separator())
+            .child(crate::popover::menu_separator(&theme))
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-select-all",

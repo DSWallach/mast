@@ -8768,7 +8768,7 @@ impl Shell {
                                 .into_any_element()
                         }
                     };
-                    menu.child(row).child(popover::menu_separator())
+                    menu.child(row).child(popover::menu_separator(&theme))
                 })
                 .child(
                     popover::menu_row(theme, false, "user-menu-settings")
@@ -9545,7 +9545,7 @@ impl Shell {
                                     .text_color(theme.text_muted),
                             ),
                     )
-                    .child(popover::menu_separator())
+                    .child(popover::menu_separator(&theme))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                             .id("chat-menu-delete")
@@ -9596,7 +9596,7 @@ impl Shell {
                             )
                             .child(SharedString::from("Back")),
                     )
-                    .child(popover::menu_separator())
+                    .child(popover::menu_separator(&theme))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-copy-zeron-{chat_id}"))
                             .id("chat-copy-zeron")
