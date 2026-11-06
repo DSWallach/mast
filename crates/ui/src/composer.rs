@@ -8941,6 +8941,7 @@ impl Render for Composer {
         let pill_surface = div()
             .relative()
             .id("composer-surface")
+            .debug_selector(|| "composer-surface".into())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
             .child({
                 let measured = self.surface_bounds.clone();
