@@ -361,6 +361,11 @@ pub struct WorkItemView {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Unix timestamp in milliseconds at which the waiting period ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_until: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_reason: Option<String>,
     #[serde(default)]
     pub status: WorkItemStatus,
     #[serde(default)]
@@ -450,7 +455,10 @@ impl WorkItemView {
 #[serde(rename_all = "camelCase")]
 pub struct WorkOutlineSpaceSettings {
     /// Resolve handoff requests when their pull request merges (default on).
-    #[serde(default = "default_resolve_merged_handoffs", skip_serializing_if = "is_true")]
+    #[serde(
+        default = "default_resolve_merged_handoffs",
+        skip_serializing_if = "is_true"
+    )]
     pub resolve_merged_handoffs: bool,
     /// Linear integration is on for this Space (default off).
     #[serde(default)]
@@ -469,14 +477,22 @@ pub struct WorkOutlineSpaceSettings {
     pub pr_review_prompts: Option<PrReviewPrompts>,
 }
 
-fn default_resolve_merged_handoffs() -> bool { true }
-fn is_true(value: &bool) -> bool { *value }
+fn default_resolve_merged_handoffs() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
+}
 
 impl Default for WorkOutlineSpaceSettings {
     fn default() -> Self {
-        Self { resolve_merged_handoffs: true, linear_enabled: false,
-            pr_review_sync_work_item_id: None, linear_assigned_work_item_id: None,
-            pr_review_prompts: None }
+        Self {
+            resolve_merged_handoffs: true,
+            linear_enabled: false,
+            pr_review_sync_work_item_id: None,
+            linear_assigned_work_item_id: None,
+            pr_review_prompts: None,
+        }
     }
 }
 
@@ -1096,6 +1112,10 @@ pub struct WorkItemChanges {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "FieldPatch::is_unchanged")]
     pub description: FieldPatch<String>,
+    #[serde(default, skip_serializing_if = "FieldPatch::is_unchanged")]
+    pub waiting_until: FieldPatch<i64>,
+    #[serde(default, skip_serializing_if = "FieldPatch::is_unchanged")]
+    pub waiting_reason: FieldPatch<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<WorkItemStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2069,9 +2089,20 @@ mod tests {
             json!({"description":"d"})
         );
 
+        let waiting: WorkItemChanges = serde_json::from_value(json!({
+            "waitingUntil": 1800000000000_i64, "waitingReason": null
+        })).unwrap();
+        assert_eq!(waiting.waiting_until, FieldPatch::Set(1800000000000));
+        assert_eq!(waiting.waiting_reason, FieldPatch::Clear);
+        assert_eq!(serde_json::to_value(waiting).unwrap(), json!({
+            "waitingUntil": 1800000000000_i64, "waitingReason": null
+        }));
+
         let all = WorkItemChanges {
             title: Some("T".into()),
             description: FieldPatch::Set("d".into()),
+            waiting_until: FieldPatch::Unchanged,
+            waiting_reason: FieldPatch::Unchanged,
             status: Some(WorkItemStatus::Completed),
             inherit_parent_instructions: Some(false),
             resolve_open_requests: false,
@@ -2107,6 +2138,8 @@ mod tests {
                 title: "Ship".into(),
                 description: Some("Ship it".into()),
                 status: WorkItemStatus::Active,
+                waiting_until: None,
+                waiting_reason: None,
                 effective_status: WorkItemEffectiveStatus::UserActionRequired,
                 archived_at: Some(1_700_000_000_500),
                 archived_by: Some(actor()),
@@ -2470,6 +2503,8 @@ mod tests {
                 changes: WorkItemChanges {
                     title: Some("T".into()),
                     description: FieldPatch::Clear,
+                    waiting_until: FieldPatch::Unchanged,
+                    waiting_reason: FieldPatch::Unchanged,
                     status: Some(WorkItemStatus::Completed),
                     inherit_parent_instructions: Some(true),
                     resolve_open_requests: false,

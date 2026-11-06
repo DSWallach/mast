@@ -29,6 +29,8 @@ fn item(id: &str, parent: Option<&str>, title: &str, inherit: bool) -> WorkItemV
         title: title.into(),
         description: None,
         status: Default::default(),
+        waiting_until: None,
+        waiting_reason: None,
         effective_status: Default::default(),
         archived_at: None,
         archived_by: None,

@@ -598,6 +598,31 @@ fn auto_continue_worker(rig: &Rig, chat: &str, status: &str) -> String {
     item
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waiting_period_raises_one_notice_without_starting_a_worker() {
+    let rig = Rig::new().await;
+    let item = auto_continue_worker(&rig, "waiting-worker", "active");
+    let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::User,
+        device_id: rig.core.device_id.clone(), ..Default::default() };
+    let until = chrono::Utc::now().timestamp_millis() + 86_400_000;
+    let mutation: mast_proto::WorkOutlineMutation = serde_json::from_value(serde_json::json!({
+        "op": "updateWorkItem", "workItemId": item, "changes": {"waitingUntil": until, "waitingReason": "Observation"}, "operationId": "wait"
+    })).unwrap();
+    rig.core.workspace.work_outline_mutate(&mutation, &actor, &[]).unwrap();
+    rig.clock.store(until - 1, Ordering::SeqCst);
+    rig.wakes.notify_due_waiting_items();
+    let snapshot = || mast_doc::materialize_work_outline("space-auto", &rig.core.workspace.work_outline_inputs("space-auto"));
+    assert!(snapshot().user_action_requests.is_empty());
+    rig.clock.store(until, Ordering::SeqCst);
+    rig.wakes.notify_due_waiting_items();
+    rig.wakes.notify_due_waiting_items();
+    let requests = snapshot().user_action_requests;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].text, "Waiting period ended: Observation");
+    assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
 async fn auto_continue_finish(rig: &Rig, chat: &str) {
     rig.wakes
         .ingest_sessions(&[session(chat, SessionStatus::Working)])

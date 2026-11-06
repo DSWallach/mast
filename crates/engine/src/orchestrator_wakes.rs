@@ -725,6 +725,16 @@ impl OrchestratorWakes {
         });
         let this = self.clone();
         tokio::spawn(async move {
+            loop {
+                let worker = this.clone();
+                let _ = tokio::task::spawn_blocking(move || worker.notify_due_waiting_items()).await;
+                if this.watch_ended(tokio::time::sleep(std::time::Duration::from_secs(30)).map(Ok::<(), ()>)).await {
+                    break;
+                }
+            }
+        });
+        let this = self.clone();
+        tokio::spawn(async move {
             let mut changes = this.inner.workspace.watch_changes();
             let mut markers: HashMap<String, (u64, u64, bool)> = HashMap::new();
             loop {
@@ -764,6 +774,34 @@ impl OrchestratorWakes {
                 }
             }
         });
+    }
+
+    #[doc(hidden)]
+    pub fn notify_due_waiting_items(&self) {
+        use mast_proto::work_outline_user_actions::{UserActionKind, UserActionPriority};
+        use mast_proto::{CreateUserActionRequestParams, UserActionOriginKind, UserActionRequestOrigin, WorkOutlineActor, WorkOutlineMutation};
+        let workspace = &self.inner.workspace;
+        let device_id = workspace.device_id();
+        let actor = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: device_id.to_owned(), chat_id: None, message_id: None };
+        for space in workspace.read_spaces().unwrap_or_default() {
+            if space.device_id != device_id { continue; }
+            let snapshot = mast_doc::materialize_work_outline(&space.id, &workspace.work_outline_inputs(&space.id));
+            if !snapshot.available { continue; }
+            for item in snapshot.items.iter().filter(|item| item.archived_at.is_none() && item.status != mast_proto::WorkItemStatus::Completed) {
+                let Some(until) = item.waiting_until.filter(|until| *until <= self.now()) else { continue; };
+                let operation_id = mast_proto::work_outline::derive_id(&format!("{}\0{}\0{}", space.id, item.id, until), "waiting-due");
+                let reason = item.waiting_reason.as_deref().filter(|reason| !reason.trim().is_empty()).unwrap_or("ready to review");
+                let mutation = WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+                    options: vec![], links: vec![], facts: vec![],
+                    kind: Some(UserActionKind::Notice), priority: Some(UserActionPriority::Fyi),
+                    work_item_id: item.id.clone(),
+                    origin: UserActionRequestOrigin { kind: UserActionOriginKind::System, ..Default::default() },
+                    text: format!("Waiting period ended: {}", reason.chars().take(150).collect::<String>()),
+                    info: None, dedupe_key: Some(operation_id.clone()), operation_id,
+                });
+                let _ = workspace.work_outline_mutate(&mutation, &actor, &[]);
+            }
+        }
     }
 
     /// Wait for `next`; true when the watch closed or the service shut down.
@@ -1184,6 +1222,7 @@ impl OrchestratorWakes {
                 enabled: settings.enabled && settings.auto_continue,
                 item_open: item.status != mast_proto::WorkItemStatus::Completed
                     && item.archived_at.is_none(),
+                item_waiting: item.waiting_until.is_some(),
                 action_open,
                 completed: session.last_completed_turn.is_some()
                     && session.last_completed_turn != start.last_completed_turn,

@@ -923,9 +923,9 @@ impl RegistryDoc {
             WorkOutlineMutation::DeleteWorkItemTemplate(p) => {
                 self.delete_work_item_template(p).map(|_| empty)
             }
-            WorkOutlineMutation::SetContainerTemplate(p) => self
-                .set_container_template(p, actor, now_ms)
-                .map(|_| empty),
+            WorkOutlineMutation::SetContainerTemplate(p) => {
+                self.set_container_template(p, actor, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::ApplyContainerTemplate(p) => self
                 .apply_container_template(p, actor, now_ms)
                 .map(|_| empty),
@@ -1081,6 +1081,35 @@ impl RegistryDoc {
                 check_description(description)?;
                 if item.description.as_deref() != Some(description.as_str()) {
                     set.insert("description".to_owned(), json!(description));
+                }
+            }
+        }
+        match &p.changes.waiting_until {
+            FieldPatch::Unchanged => {}
+            FieldPatch::Clear => {
+                if item.waiting_until.is_some() {
+                    set.insert("waitingUntil".to_owned(), Value::Null);
+                }
+            }
+            FieldPatch::Set(until) => {
+                if item.waiting_until != Some(*until) {
+                    set.insert("waitingUntil".to_owned(), json!(until));
+                }
+            }
+        }
+        match &p.changes.waiting_reason {
+            FieldPatch::Unchanged => {}
+            FieldPatch::Clear => {
+                if item.waiting_reason.is_some() {
+                    set.insert("waitingReason".to_owned(), Value::Null);
+                }
+            }
+            FieldPatch::Set(reason) => {
+                if reason.chars().count() > 200 {
+                    return Err(invalid("Waiting reason must be at most 200 characters"));
+                }
+                if item.waiting_reason.as_deref() != Some(reason.as_str()) {
+                    set.insert("waitingReason".to_owned(), json!(reason));
                 }
             }
         }

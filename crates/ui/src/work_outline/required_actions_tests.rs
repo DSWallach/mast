@@ -251,6 +251,19 @@ fn completion_reply(params: &serde_json::Value) -> Result<serde_json::Value, mas
     Ok(serde_json::json!({}))
 }
 
+#[gpui::test]
+fn waiting_control_sends_a_deadline(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), completion_reply);
+    let _details = open_details(&overview, vcx, UI);
+    draw(vcx);
+    assert!(row_bounds(vcx, "work-item-waiting-control".into()).is_some());
+    click(vcx, "waiting-tomorrow".into());
+    vcx.run_until_parked();
+    let recorded = calls.lock().unwrap();
+    assert!(recorded.iter().any(|call| call["changes"]["waitingUntil"].is_i64()));
+}
+
 /// Completing an item with open requests asks first, then sends
 /// `resolveOpenRequests`; without requests it completes directly; a host
 /// refusal (`openUserActionRequests`) asks with the host's count.

@@ -200,6 +200,7 @@ pub(crate) struct WorkItemDetails {
     editing_title: bool,
     description_open: bool,
     description_input: Entity<ComposerInput>,
+    waiting_input: Entity<ComposerInput>,
     editing_description: bool,
     references_open: bool,
     reference_input: Entity<ComposerInput>,
@@ -302,6 +303,10 @@ impl WorkItemDetails {
             ComposerInput::new("Description", cx)
                 .with_text_metrics(12.5, 18.0)
                 .with_auto_grow()
+        });
+        let waiting_input = cx.new(|cx| {
+            ComposerInput::with_context("YYYY-MM-DD", crate::composer::PALETTE_SEARCH_CONTEXT, cx)
+                .with_single_line().with_text_metrics(12.0, 18.0)
         });
         let reference_input = cx.new(|cx| {
             ComposerInput::with_context(
@@ -440,6 +445,7 @@ impl WorkItemDetails {
             editing_title: false,
             description_open: false,
             description_input,
+            waiting_input,
             editing_description: false,
             references_open: false,
             reference_input,
@@ -983,6 +989,25 @@ impl WorkItemDetails {
             cx,
             |_| {},
         );
+    }
+
+    fn set_waiting_until(&mut self, until: Option<i64>, cx: &mut Context<Self>) {
+        self.update_item("waiting", WorkItemChanges {
+            waiting_until: until.map_or(FieldPatch::Clear, FieldPatch::Set),
+            waiting_reason: if until.is_none() { FieldPatch::Clear } else { FieldPatch::Unchanged },
+            ..Default::default()
+        }, cx, |_| {});
+    }
+
+    fn save_waiting_date(&mut self, cx: &mut Context<Self>) {
+        use chrono::TimeZone;
+        let text = self.waiting_input.read(cx).text().trim().to_owned();
+        let until = chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d").ok()
+            .and_then(|date| date.and_hms_opt(9, 0, 0))
+            .and_then(|date| chrono::Local.from_local_datetime(&date).single())
+            .map(|date| date.timestamp_millis());
+        if let Some(until) = until { self.set_waiting_until(Some(until), cx); }
+        else { self.error = Some("Enter a date as YYYY-MM-DD".into()); cx.notify(); }
     }
 
     pub(crate) fn disassociate(&mut self, chat_id: String, cx: &mut Context<Self>) {
@@ -1974,6 +1999,24 @@ impl Render for WorkItemDetails {
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))
                 .child(status_row)
+                .child(div().debug_selector(|| "work-item-waiting-control".into())
+                    .flex().flex_col().gap(px(4.0))
+                    .child(div().text_color(theme.text_muted).text_size(crate::typography::ui_rems(11.0)).child("Waiting until…"))
+                    .when_some(item.waiting_until, |el, until| {
+                        let date = chrono::DateTime::from_timestamp_millis(until)
+                            .map(|date| date.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string()).unwrap_or_default();
+                        let reason = item.waiting_reason.as_deref().filter(|reason| !reason.is_empty())
+                            .map(|reason| format!(" · {reason}")).unwrap_or_default();
+                        el.child(div().text_color(theme.text_muted).child(SharedString::from(format!("{date}{reason}"))))
+                    })
+                    .child(div().flex().gap(px(6.0))
+                        .child(Self::small_button("waiting-tomorrow", "Tomorrow", &theme).debug_selector(|| "waiting-tomorrow".into()).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 86_400_000), cx))))
+                        .child(Self::small_button("waiting-week", "1 week", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 604_800_000), cx))))
+                        .child(Self::small_button("waiting-clear", "Clear", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(None, cx))))
+                    )
+                    .child(div().flex().gap(px(6.0)).child(Self::input_frame(&self.waiting_input, &theme))
+                        .child(Self::small_button("waiting-custom", "Set date", &theme).on_click(cx.listener(|this, _, _, cx| this.save_waiting_date(cx)))))
+                )
                 .child(required_actions)
                 .children(linear)
                 .children(pull_request)

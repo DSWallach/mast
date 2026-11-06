@@ -225,6 +225,8 @@ fn apply_create(
         title: title.to_owned(),
         description: None,
         status,
+        waiting_until: None,
+        waiting_reason: None,
         effective_status: match status {
             WorkItemStatus::Active => WorkItemEffectiveStatus::Active,
             WorkItemStatus::Completed => WorkItemEffectiveStatus::Completed,

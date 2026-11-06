@@ -28,6 +28,8 @@ pub struct Turn<'a> {
     pub last_message_id: Option<&'a str>,
     pub enabled: bool,
     pub item_open: bool,
+    /// A scheduled item remains paused until the waiting field is cleared.
+    pub item_waiting: bool,
     pub action_open: bool,
     pub completed: bool,
     pub awaiting_input: bool,
@@ -55,6 +57,7 @@ impl AutoContinue {
         }
         if !turn.enabled
             || !turn.item_open
+            || turn.item_waiting
             || turn.action_open
             || !turn.completed
             || turn.awaiting_input
@@ -87,6 +90,7 @@ mod tests {
             last_message_id: Some("message"),
             enabled: true,
             item_open: true,
+            item_waiting: false,
             action_open: false,
             completed: true,
             awaiting_input: false,
@@ -94,6 +98,13 @@ mod tests {
             user_sent_during_turn: false,
             queue_nonempty: false,
         }
+    }
+
+    #[test]
+    fn waiting_does_not_consume_a_continuation() {
+        let mut state = AutoContinue::default();
+        assert_eq!(state.decide(Turn { item_waiting: true, ..turn() }), Decision::None);
+        assert_eq!(state.decide(turn()), Decision::Continue(1));
     }
 
     #[test]

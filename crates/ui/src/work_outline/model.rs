@@ -121,6 +121,7 @@ pub(crate) struct ItemRow {
     pub space_id: String,
     pub item_id: String,
     pub title: String,
+    pub waiting_until: Option<i64>,
     pub status: WorkItemStatus,
     pub effective_status: WorkItemEffectiveStatus,
     pub unresolved_actions: u32,
@@ -676,6 +677,7 @@ fn item_node<'s>(
                 item.title.clone()
             },
             status: item.status,
+            waiting_until: item.waiting_until,
             effective_status: item.effective_status,
             unresolved_actions: item.rollup.unresolved_user_action_count,
             chat_count: item
