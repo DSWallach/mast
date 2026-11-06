@@ -1512,6 +1512,29 @@ pub fn outline_binding_choice(
         .child(SharedString::from(label))
 }
 
+/// Count of execution exceptions on an item.
+pub fn outline_execution_exception_marker(count: usize, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("work-item-execution-exceptions-marker")
+        .debug_selector(|| "work-item-execution-exceptions-marker".into())
+        .flex()
+        .items_center()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .child(
+            crate::icons::icon(crate::icons::FOLDER_WITH_FILES)
+                .size(px(10.0))
+                .text_color(theme.accent),
+        )
+        .child(SharedString::from(format!(
+            "{count} exception{}",
+            if count == 1 { "" } else { "s" }
+        )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

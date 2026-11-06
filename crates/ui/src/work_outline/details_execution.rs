@@ -1047,9 +1047,7 @@ impl WorkItemDetails {
                 ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(6.0))
+                crate::components::outline_action_row(theme)
                     .child(
                         crate::work_outline::hints::details_button(
                             "work-item-execution-save",
@@ -1097,10 +1095,7 @@ impl WorkItemDetails {
         } else {
             "Execution"
         };
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
+        let header = crate::components::outline_detail_row(theme)
             .child(
                 crate::components::outline_section_header("work-item-execution-toggle", title.into(), open, theme)
                     .debug_selector(|| "work-item-execution-toggle".into())
@@ -1112,31 +1107,11 @@ impl WorkItemDetails {
             .when(exception_count > 0, |el| {
                 let tip = exec::exception_tooltip(exception_count);
                 el.child(
-                    div()
-                        .id("work-item-execution-exceptions-marker")
-                        .debug_selector(|| "work-item-execution-exceptions-marker".into())
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.accent)
-                        .child(
-                            crate::icons::icon(crate::icons::FOLDER_WITH_FILES)
-                                .size(px(10.0))
-                                .text_color(theme.accent),
-                        )
-                        .child(SharedString::from(format!(
-                            "{exception_count} exception{}",
-                            if exception_count == 1 { "" } else { "s" }
-                        )))
+                    crate::components::outline_execution_exception_marker(exception_count, theme)
                         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
                 )
             });
-        let mut section = div()
-            .debug_selector(|| "work-item-execution".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("work-item-execution", theme)
             .child(header);
         if !open {
             return section.into_any_element();
@@ -1156,11 +1131,8 @@ impl WorkItemDetails {
             .children(self.render_exceptions(snapshot, theme, cx))
             .when_some(self.execution_error.clone(), |el, error| {
                 el.child(
-                    div()
-                        .debug_selector(|| "work-item-execution-error".into())
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(error)),
+                    crate::components::outline_execution_line(error, 11.0, theme.warning, theme)
+                        .debug_selector(|| "work-item-execution-error".into()),
                 )
             })
             .into_any_element()
