@@ -624,4 +624,36 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn suggested_rules_are_disabled_until_enabled() {
+        let root = tempfile::tempdir().unwrap();
+        let mut rules = mast_proto::work_outline::suggested_approval_rules("space");
+        let check = |command: &str, rules: &[ApprovalRule]| {
+            matching_rules(
+                &json!(command),
+                ApprovalRuleHarness::Codex,
+                root.path(),
+                &[root.path()],
+                rules,
+            )
+            .is_some()
+        };
+        assert!(!check("ps -ax", &rules));
+        rules.iter_mut().for_each(|rule| rule.enabled = true);
+        assert!(check("ps -ax", &rules));
+        assert!(check("pgrep cargo", &rules));
+        assert!(check("scripts/ui-preview.sh", &rules));
+        assert!(check(
+            "cargo test --offline --features snapshot --test offscreen_snapshot",
+            &rules
+        ));
+        assert!(!check("cargo test --offline", &rules));
+        let isolated = tempfile::tempdir_in("/tmp").unwrap();
+        let path = isolated.path().to_str().unwrap();
+        assert!(check(
+            &format!("HOME={path} CLAUDE_CONFIG_DIR={path} CODEX_HOME={path} cargo test --offline"),
+            &rules
+        ));
+    }
 }

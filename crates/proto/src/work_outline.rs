@@ -513,6 +513,20 @@ pub enum ApprovalRuleHarness {
     Any,
 }
 
+/// Neutral, disabled suggestions. The user must explicitly enable one.
+pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
+    [
+        ("rust-tests", "Rust tests with isolated HOME", r"^cargo (test|nextest)( |$)", true),
+        ("ui-preview", "UI preview and snapshots", r"^(scripts/ui-preview\.sh|cargo test .*--features snapshot .*offscreen_snapshot)( |$)", false),
+        ("process-inspection", "Process inspection", r"^(ps|pgrep)( |$)", false),
+    ].into_iter().map(|(key, label, pattern, isolated)| ApprovalRule {
+        id: crate::derive_id(space_id, key), label: label.into(), created_by: "built-in".into(),
+        harness: ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
+        command_regex: Some(pattern.into()), cwd_scope: None, require_isolated_home: isolated,
+        hit_count: 0, last_used_at: None,
+    }).collect()
+}
+
 fn default_resolve_merged_handoffs() -> bool {
     true
 }
@@ -2778,5 +2792,9 @@ mod tests {
         assert!(!rule.enabled);
         assert_eq!(rule.harness, ApprovalRuleHarness::ClaudeCode);
         assert_eq!(serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(), rule);
+        let suggestions = suggested_approval_rules("space-1");
+        assert_eq!(suggestions.len(), 3);
+        assert!(suggestions.iter().all(|rule| !rule.enabled));
+        assert_ne!(suggestions[0].id, suggested_approval_rules("space-2")[0].id);
     }
 }
