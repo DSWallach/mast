@@ -551,22 +551,12 @@ impl WorkItemDetails {
     // ----------------------------------------------------------------------
 
     fn render_validation(&self, theme: &Theme, cx: &gpui::App) -> Option<AnyElement> {
-        let block = div()
-            .debug_selector(|| "work-item-execution-validation".into())
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .p(px(6.0))
-            .rounded(px(4.0))
-            .bg(theme.element_hover.opacity(0.4));
+        let block = crate::components::outline_validation_panel(theme);
         let element = match &self.execution_validation {
             ValidationState::Idle => return None,
             ValidationState::Running => block.child(crate::components::outline_muted_line("Validating\u{2026}", theme)),
             ValidationState::Failed(message) => block.child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(message.clone())),
+                crate::components::outline_execution_line(message.clone(), 11.0, theme.warning, theme),
             ),
             ValidationState::Done(reply) => {
                 let headline = exec::validation_headline(reply);
@@ -608,12 +598,7 @@ impl WorkItemDetails {
                     ValidationHeadline::Blocked { .. } => "blocked",
                 };
                 let mut block = block.child(
-                    div()
-                        .debug_selector(move || format!("work-item-execution-validation-{kind}"))
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(color)
-                        .child(SharedString::from(text)),
+                    crate::components::outline_validation_headline(kind, text, color, theme),
                 );
                 if let Some(validated) = reply.validated.as_ref() {
                     block = block.children(validated.repositories.iter().map(|repo| {
@@ -630,22 +615,7 @@ impl WorkItemDetails {
                 }
                 block.children(exec::validation_issues(reply).into_iter().enumerate().map(
                     |(ix, issue)| {
-                        div()
-                            .debug_selector(move || format!("work-item-execution-issue-{ix}"))
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(issue.message)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(issue.remediation)),
-                            )
+                        crate::components::outline_validation_issue(ix, issue.message, issue.remediation, theme)
                     },
                 ))
             }

@@ -2487,6 +2487,47 @@ pub fn outline_revision_comparison(theme: &Theme) -> Div {
         .gap(px(10.0 * super::layout_spacing(theme)))
 }
 
+/// Execution validation results container.
+pub fn outline_validation_panel(theme: &Theme) -> Div {
+    let scale = super::layout_spacing(theme);
+    div()
+        .debug_selector(|| "work-item-execution-validation".into())
+        .flex()
+        .flex_col()
+        .gap(px(3.0 * scale))
+        .p(px(6.0 * scale))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+        .bg(theme.element_hover.opacity(0.4))
+}
+pub fn outline_validation_headline(
+    kind: &'static str,
+    text: String,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> Div {
+    outline_execution_line(text, 11.5, color, theme)
+        .debug_selector(move || format!("work-item-execution-validation-{kind}"))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+}
+pub fn outline_validation_issue(
+    index: usize,
+    message: String,
+    remediation: String,
+    theme: &Theme,
+) -> Div {
+    div()
+        .debug_selector(move || format!("work-item-execution-issue-{index}"))
+        .flex()
+        .flex_col()
+        .child(outline_execution_line(message, 11.0, theme.text, theme))
+        .child(outline_execution_line(
+            remediation,
+            10.5,
+            theme.text_muted,
+            theme,
+        ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
