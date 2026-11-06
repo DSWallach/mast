@@ -7992,13 +7992,10 @@ impl Composer {
     fn render_send_button(
         &mut self,
         mode: SendButtonMode,
+        identity: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
-        let identity_key = self.pickers.read(cx).effective_harness(cx)
-            .map(|harness| format!("harness:{harness:?}"))
-            .unwrap_or_default();
-        let identity = theme.identity_color(&identity_key);
         let stop = mode == SendButtonMode::Stop;
         let blocked = !stop && self.send_blocked(cx);
         crate::components::conversation_send_key(theme, identity, stop, mode == SendButtonMode::Queue)
@@ -8043,8 +8040,7 @@ impl Render for Composer {
         }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
-        let identity_key = self.pickers.read(cx).effective_harness(cx).map(|harness| format!("harness:{harness:?}")).unwrap_or_default();
-        let identity = theme.identity_color(&identity_key);
+        let identity = theme.identity_color(&self.current_key);
         let identity_text = crate::components::conversation_input_text_color(&theme, identity);
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
@@ -8521,7 +8517,7 @@ impl Render for Composer {
             }
         });
 
-        let send_button = self.render_send_button(mode, cx);
+        let send_button = self.render_send_button(mode, identity, cx);
         // Attach button — opens the native image picker (the original's hidden
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. The leading utility group owns the spacing between

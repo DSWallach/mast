@@ -4,6 +4,39 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+fn conversation_industrial_icon_key<
+    T: gpui::Styled + gpui::ParentElement + gpui::StatefulInteractiveElement,
+>(
+    element: T,
+    theme: &Theme,
+    signal: bool,
+) -> T {
+    let colors = theme.industrial_colors();
+    let fill = if signal { colors.signal } else { colors.key };
+    let ring = crate::theme::flatten(theme.text.opacity(0.18), fill);
+    let pressed = if signal {
+        gpui::hsla(fill.h, fill.s, fill.l * 0.8, fill.a)
+    } else {
+        colors.pressed
+    };
+    let radius = theme.ui_style.tokens.control_radius.unwrap_or(4.0);
+    element
+        .rounded(px(radius))
+        .bg(fill)
+        .border_1()
+        .border_color(colors.rule)
+        .relative()
+        .active(move |style| style.bg(pressed))
+        .child(
+            div()
+                .absolute()
+                .inset(px(3.0))
+                .rounded(px((radius - 3.0).max(0.0)))
+                .border_1()
+                .border_color(ring),
+        )
+}
+
 pub fn conversation_picker_label(label: SharedString) -> Div {
     div().min_w_0().truncate().child(label)
 }
@@ -955,12 +988,10 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
                     .relative()
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .justify_end()
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .absolute()
-                            .left_0()
-                            .top(px(6.0))
                             .flex()
                             .items_center()
                             .gap(px(2.0))
@@ -968,15 +999,14 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
                             .child(attach)
                             .child("Attach"),
                     )
-                    .child(send)
+                    .child(div().flex_1())
                     .child(
                         div()
-                            .absolute()
-                            .right_0()
-                            .top(px(4.0))
+                            .min_w_0()
                             .max_w(px(surface_width * 0.35))
                             .children(area_model),
-                    ),
+                    )
+                    .child(send),
             )
             .into_any_element();
     }
@@ -1243,7 +1273,7 @@ pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
         ))
         .when(
             theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
-            |el| crate::surface_chrome::icon_key(el, theme, false),
+            |el| conversation_industrial_icon_key(el, theme, false),
         )
         .on_hover(crate::motion::hover_listener("composer-attach"))
         .child(
@@ -1404,7 +1434,7 @@ pub fn conversation_send_key(
             el.rounded(px(radius))
         })
         .bg(fill)
-        .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
+        .when(key, |el| conversation_industrial_icon_key(el, theme, true))
         .flex()
         .items_center()
         .justify_center()
