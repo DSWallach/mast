@@ -2012,6 +2012,7 @@ pub struct Changes {
     explanation_panel: Option<explanation::ExplanationPanel>,
     explanation_task: Option<Task<()>>,
     explanation_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    explanation_shell: Option<gpui::WeakEntity<crate::shell::Shell>>,
     seen_task: Option<Task<()>>,
     seen_last_render: std::time::Instant,
     seen_scroll_epoch: u64,
@@ -2256,6 +2257,7 @@ impl Changes {
             explanation_panel: None,
             explanation_task: None,
             explanation_cancelled: None,
+            explanation_shell: None,
             seen_task: None,
             seen_last_render: std::time::Instant::now(),
             seen_scroll_epoch: 0,
@@ -8111,6 +8113,65 @@ index 1111111..2222222 160000
             changes.go_to_line(2, cx);
             assert!(changes.list.logical_scroll_top().item_ix >= replacement);
         }).unwrap();
+    }
+
+    #[gpui::test]
+    fn explaining_focused_hunk_selects_it_without_sending(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window.update(cx, |changes, _, cx| {
+            let files = parse_patch(PATCH);
+            let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |_| false);
+            let hunk_row = rows.iter().position(|row| matches!(row, DiffRow::HunkHeader { file: 0, hunk: 0 })).unwrap();
+            changes.list.reset_with_uniform_height(rows.len(), px(20.0));
+            changes.rows = rows;
+            changes.row_ranges = ranges.into_iter().map(Some).collect();
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 0, deletions: 0, file_count: files.len(), horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes.list.scroll_to(gpui::ListOffset { item_ix: hunk_row, offset_in_item: px(0.0) });
+            changes.explain_focused_hunk(cx);
+            assert_eq!(changes.explanation_hunk, Some((0, 0)));
+            assert!(changes.explanation_selection.is_some());
+            assert!(changes.explanation_panel.is_none());
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn explaining_selected_lines_sends_the_diff_to_the_owner(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (view, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(Arc::new(move |method, params| {
+                    recorded.lock().unwrap().push((method.to_owned(), params));
+                    Ok(serde_json::json!({"id":"message"}))
+                })));
+                state
+            });
+            let mut changes = Changes::new(state, cx);
+            changes.owner = Some(ChangesTarget { chat_id: "owner".into(), device_id: "local".into(), cwd: None, checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false, range: None });
+            let files = parse_patch("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n");
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes
+        });
+        view.update(vcx, |changes, cx| {
+            changes.select_explanation_line("a.rs", SourceSide::New, 1, false, cx);
+            changes.explain_selection(cx);
+        });
+        vcx.run_until_parked();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, mast_rpc::methods::QUEUE_MESSAGE);
+        assert_eq!(calls[0].1["chatId"], "owner");
+        let text = calls[0].1["text"].as_str().unwrap();
+        assert!(text.contains("File: a.rs\nSide: new\nLines: 1–1"));
+        assert!(text.ends_with("+new\n"));
     }
 
     fn diff(checkout: &str, device: &str, cwd: &str, patch: &str) -> CheckoutDiff {

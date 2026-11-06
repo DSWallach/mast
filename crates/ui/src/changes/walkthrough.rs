@@ -93,6 +93,7 @@ impl ReviewHost {
     ) -> Self {
         let changes = cx.new(|cx| {
             let mut changes = Changes::for_chat(state.clone(), chat_id.clone(), cx);
+            changes.explanation_shell = Some(shell.clone());
             if changes.scope == super::DiffScope::WorkingTree {
                 changes.set_scope(super::DiffScope::Branch, cx);
             }
@@ -745,10 +746,10 @@ impl Render for Walkthrough {
                         super::explanation::ExplanationPanel::Answer { chat_id, text } => (text.clone(), Some(chat_id.clone()), false),
                         super::explanation::ExplanationPanel::Error(error) => (error.clone(), None, false),
                     };
-                    let mut reply = div().id("review-step-reply").p_2().bg(theme.surface_raised).flex().flex_col().gap_2().child(label);
+                    let mut reply = div().id("review-step-reply").debug_selector(|| "review-step-reply".into()).p_2().bg(theme.surface_raised).flex().flex_col().gap_2().child(label);
                     if waiting { reply = reply.child(crate::loaders::gradient_spinner("step-question-spinner", &theme, 2.0, cx.entity_id(), cx)); }
                     if let Some(chat_id) = chat_id { reply = reply.child(div().id("review-step-open-chat").cursor_pointer().child("Open in chat").on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(changes) = &this.changes { let state = changes.read(cx).state.clone(); state.update(cx, |state, cx| state.select_chat(Some(chat_id.clone()), cx)); }
+                        if let Some(changes) = &this.changes { changes.update(cx, |changes, cx| changes.open_explanation_chat(chat_id.clone(), cx)); }
                     }))); }
                     reply = reply.child(div().id("review-step-close").cursor_pointer().child(if waiting { "Cancel" } else { "Close" }).on_click(cx.listener(|this, _, _, cx| { this.cancel_step_question(); cx.notify(); })));
                     el.child(reply)
@@ -1015,6 +1016,13 @@ mod tests {
         });
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("review-stale").is_some());
+        view.update(vcx, |view, cx| {
+            view.stale_head = None;
+            view.step_panel = Some(super::super::explanation::ExplanationPanel::Answer { chat_id: "chat".into(), text: "A short answer".into() });
+            cx.notify();
+        });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("review-step-reply").is_some());
     }
 
     #[gpui::test]
@@ -1124,10 +1132,10 @@ mod tests {
             let focus = gpui::Focusable::focus_handle(filter.read(cx), cx);
             window.focus(&focus, cx);
         });
-        vcx.simulate_keystrokes("n v t");
+        vcx.simulate_keystrokes("n v t e");
         assert_eq!(
             filter.read_with(vcx, |input, _| input.text().to_owned()),
-            "nvt"
+            "nvte"
         );
         assert!(!view.read_with(vcx, |view, _| view.tour));
     }

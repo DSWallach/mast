@@ -128,7 +128,9 @@ pub(super) fn review_chat_for_target<T: 'static>(
         .artifacts
         .iter()
         .filter(|artifact| {
-            artifact.kind == mast_proto::ArtifactKind::Review && artifact.chat_id.is_some()
+            artifact.kind == mast_proto::ArtifactKind::Review
+                && artifact.chat_id.is_some()
+                && artifact.archived_at.is_none()
         })
         .collect();
     artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.updated_at));
@@ -203,53 +205,21 @@ pub(super) fn send_question<T: 'static>(
         });
         (busy, supported, state.work_outline_actions())
     };
-    if busy && !supported {
+    if !supported {
         return gpui::Task::ready(Err(
             "Update the chat's engine to queue messages during a response.".into(),
         ));
     }
-    let executor = cx.background_executor().clone();
     cx.background_spawn(async move {
-        if busy {
-            let message_id = actions
-                .queue_message(&chat_id, &message)
-                .await
-                .map_err(|error| error.message)?;
-            return Ok(SentQuestion {
-                message_id,
-                queued: true,
-            });
-        }
-        let params = mast_proto::ContinueChatForWorkItemParams {
-            chat_id,
-            prompt: mast_proto::WorkItemPrompt {
-                text: message,
-                attachments: Vec::new(),
-            },
-            operation_id: uuid::Uuid::new_v4().to_string(),
-        };
-        let mut reply = actions
-            .continue_chat_for_work_item(params.clone())
+        // A held queue row drains immediately when the chat is idle and also
+        // works for chats that have no Work Outline assignment.
+        let message_id = actions
+            .queue_message(&chat_id, &message)
             .await
             .map_err(|error| error.message)?;
-        for _ in 0..6 {
-            if reply.state != mast_proto::WorkItemLaunchState::Queued {
-                break;
-            }
-            executor.timer(std::time::Duration::from_millis(500)).await;
-            reply = actions
-                .continue_chat_for_work_item(params.clone())
-                .await
-                .map_err(|error| error.message)?;
-        }
-        if reply.state == mast_proto::WorkItemLaunchState::Rejected {
-            return Err(reply
-                .detail
-                .unwrap_or_else(|| "Message was rejected".into()));
-        }
         Ok(SentQuestion {
-            message_id: reply.message_id,
-            queued: reply.state == mast_proto::WorkItemLaunchState::Queued,
+            message_id,
+            queued: busy,
         })
     })
 }
@@ -332,9 +302,22 @@ impl DiffSelection {
 }
 
 impl Changes {
+    pub(super) fn open_explanation_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if let Some(shell) = self
+            .explanation_shell
+            .as_ref()
+            .and_then(|shell| shell.upgrade())
+        {
+            shell.update(cx, |shell, cx| shell.open_chat(chat_id, cx));
+        } else {
+            self.state
+                .update(cx, |state, cx| state.select_chat(Some(chat_id), cx));
+        }
+    }
+
     pub(super) fn explain_focused_hunk(&mut self, cx: &mut Context<Self>) {
         if self.explanation_selection.is_some() {
-            self.explain_selection(cx);
+            cx.notify();
             return;
         }
         let top = self
@@ -389,11 +372,45 @@ impl Changes {
         self.explanation_selection = Some(DiffSelection {
             path: file.path.clone(),
             side,
-            anchor: *first,
-            extent: *last,
+            anchor: *last,
+            extent: *first,
         });
         self.explanation_hunk = Some((file_index, hunk_index));
-        self.explain_selection(cx);
+        if let Some(row) = self.rows.iter().position(|row| match row {
+            super::DiffRow::Line {
+                file, hunk, line, ..
+            } if *file as usize == file_index && *hunk as usize == hunk_index => {
+                let line = &self.parsed.as_ref().unwrap().files[file_index].hunks[hunk_index].lines
+                    [*line as usize];
+                (match side {
+                    SourceSide::Old => line.old_no,
+                    SourceSide::New => line.new_no,
+                }) == Some(*first)
+            }
+            super::DiffRow::SplitLine {
+                file,
+                hunk,
+                left,
+                right,
+            } if *file as usize == file_index && *hunk as usize == hunk_index => {
+                let index = match side {
+                    SourceSide::Old => *left,
+                    SourceSide::New => *right,
+                };
+                index.is_some_and(|index| {
+                    let line = &self.parsed.as_ref().unwrap().files[file_index].hunks[hunk_index]
+                        .lines[index as usize];
+                    (match side {
+                        SourceSide::Old => line.old_no,
+                        SourceSide::New => line.new_no,
+                    }) == Some(*first)
+                })
+            }
+            _ => false,
+        }) {
+            self.list.scroll_to_reveal_item(row);
+        }
+        cx.notify();
     }
 
     pub(super) fn render_explanation(
@@ -456,9 +473,7 @@ impl Changes {
                             .cursor_pointer()
                             .child("Open in chat")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |state, cx| {
-                                    state.select_chat(Some(chat_id.clone()), cx)
-                                });
+                                this.open_explanation_chat(chat_id.clone(), cx);
                             })),
                     );
                 }
@@ -528,18 +543,25 @@ impl Changes {
             return;
         };
         let owner_chat = owner.chat_id.clone();
-        let head = owner
-            .range
-            .as_ref()
-            .and_then(|range| range.head_sha.clone());
-        let target = self
+        let head = self
             .commit
             .as_ref()
             .map(|commit| commit.sha.clone())
-            .or_else(|| head.clone())
+            .or_else(|| {
+                owner
+                    .range
+                    .as_ref()
+                    .and_then(|range| range.head_sha.clone())
+            });
+        let target = head
+            .clone()
             .unwrap_or_else(|| self.scope.label().to_owned());
         let message = selection_question(
-            &selection.path,
+            if selection.side == SourceSide::Old {
+                file.old_path.as_deref().unwrap_or(&selection.path)
+            } else {
+                &selection.path
+            },
             selection.side,
             selection.anchor,
             selection.extent,
@@ -717,7 +739,7 @@ pub(super) fn selection_question(
 /// Include stable step identity and anchors with the reader's question.
 pub(super) fn step_question(step: &ReviewStep, question: &str) -> String {
     let mut message = format!(
-        "Question about review step {}: {}\nFile: {}\nHunks:",
+        "Answer briefly (≤5 lines).\n\nQuestion about review step {}: {}\nFile: {}\nHunks:",
         step.id, step.title, step.file
     );
     for hunk in &step.hunks {
@@ -735,6 +757,115 @@ pub(super) fn step_question(step: &ReviewStep, question: &str) -> String {
 mod tests {
     use super::*;
     use mast_proto::{ReviewHunk, ReviewRisk};
+
+    #[test]
+    fn explanation_shortcut_is_persisted_and_rebindable() {
+        let mut keymap = crate::settings::KeymapConfig::default();
+        assert_eq!(keymap.get(crate::settings::ShortcutId::ExplainDiff), "e");
+        keymap.set(crate::settings::ShortcutId::ExplainDiff, "x".into());
+        let restored: crate::settings::KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.get(crate::settings::ShortcutId::ExplainDiff), "x");
+    }
+
+    #[gpui::test]
+    fn review_chat_matches_target_and_head(cx: &mut gpui::TestAppContext) {
+        use futures::FutureExt as _;
+        let artifact: mast_proto::ArtifactView = serde_json::from_value(serde_json::json!({"id":"review", "spaceId":"space", "deviceId":"device", "chatId":"review-chat", "kind":"review"})).unwrap();
+        let snapshot = mast_proto::ArtifactsSnapshot {
+            space_id: "space".into(),
+            revision: 1,
+            artifacts: vec![artifact],
+        };
+        let state = cx.new(|_| {
+            let mut state = crate::state::AppState::new();
+            state.local_device_id = Some("device".into());
+            state.set_test_artifacts(snapshot);
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(std::sync::Arc::new(|_, _| Ok(serde_json::json!({"artifactId":"review", "encoding":"utf8", "content": "{\"target\":{\"kind\":\"pr\",\"repo\":\"Org/Repo\",\"number\":42,\"headSha\":\"abc\",\"baseSha\":\"base\"}}"})))));
+            state
+        });
+        struct TestView;
+        impl gpui::Render for TestView {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+        let (view, vcx) = cx.add_window_view(|_, _| TestView);
+        let task = view.update(vcx, |_, cx| {
+            review_chat_for_target(state.clone(), "space", "pr:org/repo#42", Some("abc"), cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            task.now_or_never().unwrap().unwrap().as_deref(),
+            Some("review-chat")
+        );
+        let task = view.update(vcx, |_, cx| {
+            review_chat_for_target(state, "space", "pr:org/repo#42", Some("different"), cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(task.now_or_never().unwrap().unwrap(), None);
+    }
+
+    #[gpui::test]
+    fn sends_question_and_queues_when_chat_is_busy(cx: &mut gpui::TestAppContext) {
+        use futures::FutureExt as _;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+        });
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let state = cx.new(|_| {
+            let mut state = crate::state::AppState::new();
+            state.work_outline_actions_override =
+                Some(crate::work_outline::WorkOutlineActions::scripted(
+                    std::sync::Arc::new(move |method, params| {
+                        recorded.lock().unwrap().push((method.to_owned(), params));
+                        Ok(serde_json::json!({"id":"queued-id"}))
+                    }),
+                ));
+            state
+        });
+        struct TestView;
+        impl gpui::Render for TestView {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+        let (view, vcx) = cx.add_window_view(|_, _| TestView);
+        let line = DiffLine {
+            kind: LineKind::Add,
+            old_no: None,
+            new_no: Some(7),
+            text: "change".into(),
+        };
+        let message = selection_question("a.rs", SourceSide::New, 7, 7, &[&line], "base..head");
+        let task = view.update(vcx, |_, cx| {
+            send_question(state.clone(), "chat".into(), message, cx)
+        });
+        vcx.run_until_parked();
+        let result = task.now_or_never().unwrap().unwrap();
+        assert_eq!(result.message_id, "queued-id");
+        assert!(!result.queued);
+        state.update(vcx, |state, _| {
+            state.begin_pending_send("chat", "pending", chrono::Utc::now())
+        });
+        let task = view.update(vcx, |_, cx| {
+            send_question(state.clone(), "chat".into(), "another question".into(), cx)
+        });
+        vcx.run_until_parked();
+        let result = task.now_or_never().unwrap().unwrap();
+        assert_eq!(result.message_id, "queued-id");
+        assert!(result.queued);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0].0, mast_rpc::methods::QUEUE_MESSAGE);
+        let sent_text = calls[0].1["text"].as_str().unwrap();
+        assert!(sent_text.contains("Target: base..head\nFile: a.rs\nSide: new\nLines: 7–7"));
+        assert!(sent_text.ends_with("+change\n"));
+        assert_eq!(calls[1].0, mast_rpc::methods::QUEUE_MESSAGE);
+        assert_eq!(calls[1].1["text"], "another question");
+        assert_eq!(calls[1].1["holdForTurnEnd"], true);
+    }
 
     #[test]
     fn reply_is_correlated_to_the_sent_message_and_waits_for_the_turn() {
