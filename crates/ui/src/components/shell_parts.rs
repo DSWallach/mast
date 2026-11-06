@@ -2411,6 +2411,30 @@ pub(crate) fn start_chat_note(
         .child(text.into())
 }
 
+pub(crate) fn start_chat_validation_issue(
+    theme: &Theme,
+    index: usize,
+    message: String,
+    remediation: String,
+) -> gpui::Div {
+    div()
+        .debug_selector(move || format!("start-chat-issue-{index}"))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text)
+                .child(SharedString::from(message)),
+        )
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(remediation)),
+        )
+}
+
 pub(crate) fn start_chat_worktree_input(theme: &Theme) -> gpui::Div {
     div()
         .ml(px(22.0))

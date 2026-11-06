@@ -1245,22 +1245,7 @@ pub(super) fn start_chat_card(
             execution = execution.child(note(selector, text, color));
             for (ix, issue) in exec::validation_issues(reply).into_iter().enumerate() {
                 execution = execution.child(
-                    div()
-                        .debug_selector(move || format!("start-chat-issue-{ix}"))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(11.5))
-                                .text_color(theme.text)
-                                .child(SharedString::from(issue.message)),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(issue.remediation)),
-                        ),
+                    crate::components::shell_parts::start_chat_validation_issue(theme, ix, issue.message, issue.remediation),
                 );
             }
             if !reply.ok {
