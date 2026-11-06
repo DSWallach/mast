@@ -12,6 +12,37 @@ pub enum UiStyleId {
     Industrial,
 }
 
+impl UiStyleId {
+    pub const ALL: &'static [Self] = &[Self::Minimal, Self::Dense, Self::Guided, Self::Industrial];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Minimal => "Minimal",
+            Self::Dense => "Dense",
+            Self::Guided => "Guided",
+            Self::Industrial => "Industrial",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Minimal => "Current spacing",
+            Self::Dense => "More on screen",
+            Self::Guided => "More labels and guidance",
+            Self::Industrial => "Instrument panel",
+        }
+    }
+
+    pub const fn preview_gap(self) -> f32 {
+        match self {
+            Self::Minimal => 4.0,
+            Self::Dense => 2.0,
+            Self::Guided => 6.0,
+            Self::Industrial => 8.0,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for UiStyleId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match String::deserialize(deserializer)?.as_str() {
@@ -346,6 +377,19 @@ pub fn help_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registry_has_unique_labels_and_round_trips() {
+        let mut labels = std::collections::HashSet::new();
+        for &id in UiStyleId::ALL {
+            assert!(!id.label().is_empty());
+            assert!(labels.insert(id.label()));
+            assert_eq!(
+                serde_json::from_str::<UiStyleId>(&serde_json::to_string(&id).unwrap()).unwrap(),
+                id
+            );
+            assert_eq!(UiStyle::of(id).id, id);
+        }
+    }
     #[gpui::test]
     fn industrial_switch_restores_saved_themes(cx: &mut gpui::TestAppContext) {
         use gpui::{Context, Render, Window, div};
