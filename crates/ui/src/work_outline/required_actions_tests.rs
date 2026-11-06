@@ -1001,6 +1001,33 @@ fn space_proposal_chip_opens_container_proposals(cx: &mut gpui::TestAppContext) 
 }
 
 #[gpui::test]
+fn container_template_button_shows_and_applies_proposal(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    snapshot.items.iter_mut().find(|item| item.id == LAUNCH).unwrap().container_template = Some(mast_proto::ContainerTemplate {
+        root: mast_proto::RuleNode { id: "root".into(), ..Default::default() }, ..Default::default()
+    });
+    let mut proposal = m4::proposal("inline", "s1", Some(UI), CHAT_UI, "Rule");
+    proposal.target.scope = mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate;
+    proposal.target.container_work_item_id = Some(LAUNCH.into());
+    proposal.target.rule_node_id = Some("root".into());
+    snapshot.instruction_proposals = vec![proposal];
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, proposal_reply);
+    overview.update(vcx, |o, cx| o.open_work_item_details("s1".into(), LAUNCH.into(), cx));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(row_bounds(vcx, "work-item-template-proposals-inline".into()).is_none());
+    click(vcx, "work-item-template-proposals".into());
+    assert!(row_bounds(vcx, "work-item-template-proposals-inline".into()).is_some());
+    click(vcx, "template-apply-inline".into());
+    vcx.run_until_parked();
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded[0]["proposalId"], "inline");
+    assert_eq!(recorded[0]["op"], "approveWorkItemInstructionProposal");
+    assert!(recorded[0].get("projectOnly").is_none());
+}
+
+#[gpui::test]
 fn legacy_template_proposal_only_enables_a_resolvable_root(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");
