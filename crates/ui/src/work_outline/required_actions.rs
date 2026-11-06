@@ -561,7 +561,7 @@ pub(crate) fn is_pending(proposal: &WorkItemInstructionProposalView) -> bool {
     proposal.status == InstructionProposalStatus::Pending
 }
 
-/// Proposals (any outcome) targeting `item_id` (`None` = the Space root),
+/// Proposals (any outcome) targeting `item_id` (`None` = the whole Space),
 /// in snapshot order.
 pub(crate) fn proposals_for<'a>(
     snapshot: &'a WorkOutlineSnapshot,
@@ -571,15 +571,19 @@ pub(crate) fn proposals_for<'a>(
         .instruction_proposals
         .iter()
         .filter(move |proposal| match (proposal.target.scope, item_id) {
-            (ProposalTargetScope::SpaceRoot, None) => true,
-            (ProposalTargetScope::WorkItem | ProposalTargetScope::ChildTemplate, Some(id)) => {
+            (_, None) => true,
+            (ProposalTargetScope::WorkItem, Some(id)) => {
                 proposal.target.work_item_id.as_deref() == Some(id)
+            }
+            (ProposalTargetScope::ChildTemplate, Some(id)) => {
+                proposal.target.work_item_id.as_deref() == Some(id)
+                    || proposal.target.container_work_item_id.as_deref() == Some(id)
             }
             _ => false,
         })
 }
 
-/// Pending proposals targeting `item_id` (`None` = the Space root).
+/// Pending proposals targeting `item_id` (`None` = the whole Space).
 pub(crate) fn pending_proposal_count(
     snapshot: &WorkOutlineSnapshot,
     item_id: Option<&str>,
@@ -1228,12 +1232,24 @@ mod tests {
     fn proposals_are_counted_per_target_and_chat() {
         let snapshot = snapshot("s1");
         assert_eq!(pending_proposal_count(&snapshot, Some(UI)), 1);
-        assert_eq!(pending_proposal_count(&snapshot, None), 1);
+        assert_eq!(pending_proposal_count(&snapshot, None), 2);
         assert_eq!(pending_proposal_count(&snapshot, Some(API)), 0);
         assert_eq!(proposals_for(&snapshot, Some(API)).count(), 1);
         assert_eq!(pending_proposals_from_chat(&snapshot, CHAT_API).len(), 1);
         assert_eq!(proposals_label(1), "1 proposed instruction");
         assert_eq!(proposals_label(3), "3 proposed instructions");
+    }
+
+    #[test]
+    fn child_template_proposals_appear_on_container_and_item() {
+        let mut snapshot = snapshot("s1");
+        let mut proposal = proposal("template", "s1", Some(UI), CHAT_UI, "Follow the template.");
+        proposal.target.scope = ProposalTargetScope::ChildTemplate;
+        proposal.target.container_work_item_id = Some(LAUNCH.into());
+        snapshot.instruction_proposals.push(proposal);
+        assert_eq!(pending_proposal_count(&snapshot, Some(UI)), 2);
+        assert_eq!(pending_proposal_count(&snapshot, Some(LAUNCH)), 1);
+        assert_eq!(pending_proposal_count(&snapshot, None), 3);
     }
 
     fn base() -> WorkOutlineSnapshot {

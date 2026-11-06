@@ -634,16 +634,13 @@ impl WorkItemDetails {
                     .child("No pending proposals"),
             );
         }
-        let target_label = match scope_item {
-            Some(id) => model::path_label(
-                model::item_path(snapshot, id)
-                    .iter()
-                    .map(|item| item.title.as_str()),
-            ),
-            None => "Space root".to_owned(),
-        };
-        let reach = instructions::affected_descendant_count(snapshot, scope_item);
         for group in proposal_diff::group_pending(pending) {
+            let target_item = required_actions::proposal_target_item(&group.proposals[0]);
+            let target_label = match target_item {
+                Some(id) => model::path_label(model::item_path(snapshot, id).iter().map(|item| item.title.as_str())),
+                None => "Space root".to_owned(),
+            };
+            let reach = instructions::affected_descendant_count(snapshot, target_item);
             section = section.child(self.render_proposal_group(
                 group,
                 snapshot,
@@ -968,8 +965,11 @@ impl WorkItemDetails {
             } else {
                 div().child(SharedString::from(proposal.text.clone())).into_any_element()
             };
+            let container = proposal.target.container_work_item_id.as_deref()
+                .and_then(|id| snapshot.item(id))
+                .map(|item| item.title.as_str()).unwrap_or("Unknown");
             return row.child(div().debug_selector(|| "child-template-proposal".into())
-                .child(SharedString::from(format!("Child template · applies to {count} items"))))
+                .child(SharedString::from(format!("For the {container} child template · applies to {count} items"))))
                 .child(body)
                 .child(div().flex().gap(px(6.0))
                     .child(Self::small_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
