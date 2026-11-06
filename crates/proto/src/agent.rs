@@ -770,6 +770,17 @@ mod input_answer_tests {
         assert!(validate_input_answers(&[question], &mut answers).is_ok());
         assert_eq!(answers[0].labels, ["custom"]);
     }
+
+    #[test]
+    fn custom_answer_permission_round_trips_and_defaults_to_false() {
+        let mut question: UserInputQuestion = serde_json::from_value(serde_json::json!({
+            "id":"q", "header":"Question", "question":"Choose", "options":["A"]
+        })).unwrap();
+        assert!(!question.allow_custom);
+        question.allow_custom = true;
+        let restored: UserInputQuestion = serde_json::from_value(serde_json::to_value(&question).unwrap()).unwrap();
+        assert_eq!(restored, question);
+    }
 }
 
 /// Engine-authenticated agent tools (Work Outline Milestone 4): the wire
