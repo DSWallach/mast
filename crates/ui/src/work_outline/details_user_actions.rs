@@ -1136,7 +1136,7 @@ impl WorkItemDetails {
             row = row.child(
                 div()
                     .debug_selector(|| "work-item-proposal-reason".into())
-                    .child(Self::input_frame(&self.reason_input, theme)),
+                    .child(crate::components::outline_input_frame(&self.reason_input, theme)),
             );
         }
         row.child(

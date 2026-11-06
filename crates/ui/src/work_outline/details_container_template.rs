@@ -670,7 +670,7 @@ impl WorkItemDetails {
                     div()
                         .flex_1()
                         .min_w(px(80.0))
-                        .child(Self::input_frame(input, theme)),
+                        .child(crate::components::outline_input_frame(input, theme)),
                 ),
                 None => head,
             }
@@ -749,7 +749,7 @@ impl WorkItemDetails {
                     .flex()
                     .items_start()
                     .gap(px(4.0))
-                    .child(div().flex_1().min_w_0().child(Self::input_frame(input, theme)))
+                    .child(div().flex_1().min_w_0().child(crate::components::outline_input_frame(input, theme)))
                     .child(
                         crate::work_outline::hints::details_button(
                             ("work-item-ct-instruction-remove", instruction.key as usize),

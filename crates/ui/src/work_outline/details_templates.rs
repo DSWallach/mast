@@ -264,7 +264,7 @@ impl WorkItemDetails {
                         window.prevent_default();
                     }
                 }))
-                .child(Self::input_frame(&self.template_name_input, theme))
+                .child(crate::components::outline_input_frame(&self.template_name_input, theme))
                 .into_any_element(),
         );
         if let Some(error) = &self.templates.error {

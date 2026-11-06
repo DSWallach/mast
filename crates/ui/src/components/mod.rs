@@ -2,7 +2,7 @@
 //! appearance determines their treatment.
 
 mod outline_parts;
-pub use outline_parts::{outline_chat_indicator, outline_item_indicator, outline_section_header, outline_status_word, outline_first_use_button, outline_start_chat_button, outline_toolbar_button, outline_shortcuts_button, outline_status_totals};
+pub use outline_parts::{outline_chat_indicator, outline_item_indicator, outline_section_header, outline_status_word, outline_first_use_button, outline_start_chat_button, outline_toolbar_button, outline_shortcuts_button, outline_status_totals, outline_input_frame, outline_details_close};
 
 use crate::motion;
 use crate::theme::{Theme, hairline, ink};

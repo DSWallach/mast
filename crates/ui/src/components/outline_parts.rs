@@ -251,6 +251,63 @@ pub fn outline_status_totals(id: SharedString, theme: &Theme) -> Stateful<Div> {
         })
 }
 
+/// Frame for an inline item-details editor.
+pub fn outline_input_frame(
+    input: &gpui::Entity<crate::composer::ComposerInput>,
+    theme: &Theme,
+) -> Div {
+    let industrial = super::is_industrial(theme);
+    div()
+        .w_full()
+        .min_h(px(24.0))
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(if industrial {
+            theme.border
+        } else {
+            theme.accent
+        })
+        .bg(if industrial {
+            theme.input_bg
+        } else {
+            theme.surface
+        })
+        .child(input.clone())
+}
+
+/// Close action for item details, including the Guided label.
+pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
+    let labels = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
+    div()
+        .id("work-item-details-close")
+        .flex_none()
+        .size(px(22.0))
+        .when(labels, |el| {
+            el.h(px(32.0)).w_auto().px(px(6.0)).gap(px(4.0))
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .child(
+            crate::icons::icon(crate::icons::CLOSE)
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+        )
+        .when(labels, |el| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child("Close"),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

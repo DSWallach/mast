@@ -506,7 +506,7 @@ impl WorkItemDetails {
             section = section.child(
                 div()
                     .debug_selector(|| "work-item-artifacts-register-input".into())
-                    .child(Self::input_frame(&input, theme)),
+                    .child(crate::components::outline_input_frame(&input, theme)),
             );
         }
         if let Some(status) = self.artifacts.status.clone() {

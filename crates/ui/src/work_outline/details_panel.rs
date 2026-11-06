@@ -1261,24 +1261,13 @@ impl WorkItemDetails {
         selector: &'static str,
         theme: &Theme,
     ) -> gpui::Div {
-        Self::input_frame(input, theme)
+        crate::components::outline_input_frame(input, theme)
             .relative()
             .debug_selector(move || selector.into())
             .child(skills.clone())
     }
 
-    fn input_frame(input: &Entity<ComposerInput>, theme: &Theme) -> gpui::Div {
-        div()
-            .w_full()
-            .min_h(px(24.0))
-            .px(px(6.0))
-            .py(px(3.0))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
-            .border_1()
-            .border_color(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { theme.border } else { theme.accent })
-            .bg(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { theme.input_bg } else { theme.surface })
-            .child(input.clone())
-    }
+
 }
 
 impl Render for WorkItemDetails {
@@ -1334,27 +1323,7 @@ impl Render for WorkItemDetails {
                 cx.stop_propagation();
                 cx.notify();
             }));
-        let close = div()
-            .id("work-item-details-close")
-            .flex_none()
-            .size(px(22.0))
-            .when(theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All, |el| {
-                el.h(px(32.0)).w_auto().px(px(6.0)).gap(px(4.0))
-            })
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover))
-            .child(
-                crate::icons::icon(crate::icons::CLOSE)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-            )
-            .when(theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All, |el| {
-                el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child("Close"))
-            })
+        let close = crate::components::outline_details_close(&theme)
             .on_click(cx.listener(|this, _, _, cx| this.request_close(cx)));
         if self.is_space_root() {
             return self.render_space_root(shell_frame, close, &theme, cx);
@@ -1460,7 +1429,7 @@ impl Render for WorkItemDetails {
                         window.prevent_default();
                     }
                 }))
-                .child(Self::input_frame(&self.title_input, &theme))
+                .child(crate::components::outline_input_frame(&self.title_input, &theme))
                 .into_any_element()
         } else {
             div()
@@ -1602,7 +1571,7 @@ impl Render for WorkItemDetails {
             if self.editing_description {
                 description = description
                     .child(
-                        Self::input_frame(&self.description_input, &theme)
+                        crate::components::outline_input_frame(&self.description_input, &theme)
                             .debug_selector(|| "work-item-description-editor".into()),
                     )
                     .child(
@@ -1935,7 +1904,7 @@ impl Render for WorkItemDetails {
                                     }
                                 },
                             ))
-                            .child(Self::input_frame(&self.reference_input, &theme)),
+                            .child(crate::components::outline_input_frame(&self.reference_input, &theme)),
                     )
                     .child(
                         div()
@@ -2024,7 +1993,7 @@ impl Render for WorkItemDetails {
                         .child(crate::work_outline::hints::details_button("waiting-week", "1 week", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 604_800_000), cx))))
                         .child(crate::work_outline::hints::details_button("waiting-clear", "Clear", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(None, cx))))
                     )
-                    .child(div().flex().gap(px(6.0)).child(Self::input_frame(&self.waiting_input, &theme))
+                    .child(div().flex().gap(px(6.0)).child(crate::components::outline_input_frame(&self.waiting_input, &theme))
                         .child(crate::work_outline::hints::details_button("waiting-custom", "Set date", &theme).on_click(cx.listener(|this, _, _, cx| this.save_waiting_date(cx)))))
                 )
                 .child(required_actions)

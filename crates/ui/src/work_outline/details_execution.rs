@@ -1068,7 +1068,7 @@ impl WorkItemDetails {
                 )
             })
             .when_some(ref_input, |el, input| {
-                el.child(Self::input_frame(&input, theme).border_color(theme.border))
+                el.child(crate::components::outline_input_frame(&input, theme).border_color(theme.border))
             })
             .into_any_element()
     }
@@ -1101,7 +1101,7 @@ impl WorkItemDetails {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Self::input_frame(&self.execution_root_input, theme)),
+                            .child(crate::components::outline_input_frame(&self.execution_root_input, theme)),
                     )
                     .child(
                         crate::work_outline::hints::details_button(

@@ -975,7 +975,7 @@ impl WorkItemDetails {
             ] {
                 section = section
                     .child(div().text_color(theme.text).child(label))
-                    .child(Self::input_frame(input, theme));
+                    .child(crate::components::outline_input_frame(input, theme));
             }
             section
                 .child(
@@ -1107,7 +1107,7 @@ impl WorkItemDetails {
         }
         if let Some(draft) = &self.approval_rule_draft {
             for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input)] {
-                section = section.child(div().text_color(theme.text_muted).child(label)).child(Self::input_frame(input, theme));
+                section = section.child(div().text_color(theme.text_muted).child(label)).child(crate::components::outline_input_frame(input, theme));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
             section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
@@ -1126,7 +1126,7 @@ impl WorkItemDetails {
             })));
         }
         section = section.child(div().text_color(theme.text_muted).child("Test as Codex in the Space root"))
-            .child(Self::input_frame(&self.approval_test_input, theme))
+            .child(crate::components::outline_input_frame(&self.approval_test_input, theme))
             .child(approval_rule_button("approval-rule-test", "Test command", theme).on_click(cx.listener(|this, _, _, cx| this.test_approval_command(cx))))
             .child(approval_rule_button("approval-rule-prefill", "Create rule from command…", theme).on_click(cx.listener(|this, _, _, cx| this.prefill_approval_command(cx))));
         if let Some(result) = &self.approval_test_result {
