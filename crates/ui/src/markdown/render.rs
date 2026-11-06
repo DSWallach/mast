@@ -3032,12 +3032,14 @@ mod tests {
 
     #[test]
     fn area_code_tokens_remain_readable_on_inverse_panel() {
-        let mut theme = Theme::for_selection(crate::theme::Appearance::Light, "area-light", Default::default(), mast_theme::SurfacePreference::Opaque)
+        for id in ["area-light", "industrial-light"] {
+        let mut theme = Theme::for_selection(crate::theme::Appearance::Light, id, Default::default(), mast_theme::SurfacePreference::Opaque)
             .with_ui_style(crate::ui_style::UiStyle::AREA);
         theme.bg = theme.solid;
         theme.text = theme.identity_text(theme.bg);
         for kind in [HighlightKind::Comment, HighlightKind::Keyword, HighlightKind::String, HighlightKind::Function] {
             assert!(crate::theme::contrast_ratio(token_color(kind, &theme), theme.bg) >= 7.0);
+        }
         }
     }
 
