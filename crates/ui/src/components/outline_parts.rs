@@ -817,6 +817,42 @@ pub fn outline_proposal_button(id: SharedString, count: usize, theme: &Theme) ->
         .child(SharedString::from(format!("{count} proposed")))
 }
 
+/// One segment of an outline tree guide.
+pub fn outline_guide_segment(top: f32, bottom: f32, color: gpui::Hsla) -> Div {
+    div()
+        .absolute()
+        .left(px(3.0))
+        .top(px(top))
+        .w(px(1.0))
+        .h(px(bottom - top))
+        .bg(color)
+}
+
+/// Horizontal arm of an outline tree guide.
+pub fn outline_guide_arm(selector: String, top: f32, width: f32, color: gpui::Hsla) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .left(px(3.0))
+        .top(px(top))
+        .w(px(width))
+        .h(px(1.0))
+        .bg(color)
+}
+
+/// Hit target containing the segments of a tree guide.
+pub fn outline_guide_cell(id: SharedString, x: f32, height: f32) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .left(px(x - 3.0))
+        .top(px(-1.0))
+        .w(px(7.0))
+        .h(px(height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

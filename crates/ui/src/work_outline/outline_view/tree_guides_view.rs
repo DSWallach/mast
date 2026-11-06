@@ -244,15 +244,7 @@ impl OutlineView {
         // the rows' 1px borders so lines join up. Child y = row y + 1.
         let full = height + 2.0;
         let elbow = mid + 1.0;
-        let segment = |top: f32, bottom: f32, color: gpui::Hsla| {
-            div()
-                .absolute()
-                .left(px(3.0))
-                .top(px(top))
-                .w(px(1.0))
-                .h(px(bottom - top))
-                .bg(color)
-        };
+        let segment = crate::components::outline_guide_segment;
         let upper_end = match cell.kind {
             GuideKind::Continue => full,
             GuideKind::Tee | GuideKind::Last => elbow + 1.0,
@@ -266,23 +258,9 @@ impl OutlineView {
         let arm = (cell.kind != GuideKind::Continue).then(|| {
             let arm_selector = format!("outline-guide-arm-{key}");
             let min = if compact { 3.0 } else { 4.0 };
-            div()
-                .debug_selector(move || arm_selector.clone())
-                .absolute()
-                .left(px(3.0))
-                .top(px(elbow))
-                .w(px((arm_end - x).max(min)))
-                .h(px(1.0))
-                .bg(upper)
+            crate::components::outline_guide_arm(arm_selector, elbow, (arm_end - x).max(min), upper)
         });
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .absolute()
-            .left(px(x - 3.0))
-            .top(px(-1.0))
-            .w(px(7.0))
-            .h(px(full))
+        crate::components::outline_guide_cell(SharedString::from(selector), x, full)
             .child(upper_line)
             .children(lower_line)
             .children(arm)
