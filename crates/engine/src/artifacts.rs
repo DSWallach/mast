@@ -2167,7 +2167,7 @@ impl ArtifactsService {
         artifacts.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
         for artifact in artifacts {
             let bytes = self.current_bytes(&artifact)?;
-            let review: mast_proto::ReviewSidecar = serde_json::from_slice(&bytes)
+            let mut review: mast_proto::ReviewSidecar = serde_json::from_slice(&bytes)
                 .map_err(|e| ArtifactError::invalid(format!("invalid stored review: {e}")))?;
             if let Some(pr) = &requested {
                 if review.pr.number != pr.number
@@ -2177,6 +2177,26 @@ impl ArtifactsService {
                         .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
                 {
                     continue;
+                }
+            }
+            // Older sidecars used a context-sensitive patch hash. Recompute
+            // identities on read when the reviewed commits are available;
+            // keep the stored review intact if the checkout has disappeared.
+            let checkout = match &review.target {
+                Some(mast_proto::ReviewTarget::Branch { checkout_path, .. }) => checkout_path.clone(),
+                _ => None,
+            }.or_else(|| self.workspace().chat_diff_targets(&caller.chat_id).ok().flatten().and_then(|row| {
+                row.ref_targets.into_iter().find(|target| target.pr_number == Some(review.pr.number)
+                    && target.pr_url.as_deref().and_then(crate::work_outline_pr_links::pull_request_from_url)
+                        .is_some_and(|pr| review.pr.repo.eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))))
+                    .map(|target| target.path).or(row.selected)
+            }))
+             .or_else(|| self.workspace().chat(&caller.chat_id).ok().flatten().and_then(|chat| chat.cwd));
+            if let Some(checkout) = checkout {
+                let head = review.pr.head_sha.clone();
+                let mut normalized = review.clone();
+                if crate::review_sidecar::validate_review(Path::new(&checkout), &mut normalized, &head).is_ok() {
+                    review = normalized;
                 }
             }
             let current_head = self
