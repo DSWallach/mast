@@ -28,7 +28,7 @@ use mast_proto::{AuthState, WorkspaceScope};
 use mast_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
-use crate::components::shell_parts::{header_icon_button, linux_caption_button, nav_history_button, window_control_button, windows_caption_button};
+use crate::components::shell_parts::{sidebar_faded_label, header_icon_button, linux_caption_button, nav_history_button, window_control_button, windows_caption_button};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
 use crate::icons::{self, icon};
@@ -896,28 +896,6 @@ const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-
-/// Keep the fade short so only the last few glyphs recede. Tracking clipped
-/// content lets the shared paint-time overflow gate leave fitting labels intact.
-fn sidebar_faded_label(id: SharedString, fill: bool, label: impl IntoElement) -> impl IntoElement {
-    let overflow = gpui::ScrollHandle::new();
-    crate::edge_fade::edge_faded(
-        20.0,
-        false,
-        false,
-        div()
-            .id(id.clone())
-            .debug_selector(move || id.to_string())
-            .when(fill, |el| el.flex_1())
-            .min_w_0()
-            .overflow_hidden()
-            .track_scroll(&overflow)
-            .flex()
-            .child(div().flex_none().whitespace_nowrap().child(label)),
-    )
-    .fade_right(true)
-    .fade_label_overflow(&overflow)
-}
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).

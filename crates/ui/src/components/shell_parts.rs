@@ -2671,3 +2671,29 @@ pub(crate) fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
         })
         .child(SharedString::from(label.to_string()))
 }
+
+/// Keep the fade short so only the last few glyphs recede. Tracking clipped
+/// content lets the shared paint-time overflow gate leave fitting labels intact.
+pub(crate) fn sidebar_faded_label(
+    id: SharedString,
+    fill: bool,
+    label: impl IntoElement,
+) -> impl IntoElement {
+    let overflow = gpui::ScrollHandle::new();
+    crate::edge_fade::edge_faded(
+        20.0,
+        false,
+        false,
+        div()
+            .id(id.clone())
+            .debug_selector(move || id.to_string())
+            .when(fill, |el| el.flex_1())
+            .min_w_0()
+            .overflow_hidden()
+            .track_scroll(&overflow)
+            .flex()
+            .child(div().flex_none().whitespace_nowrap().child(label)),
+    )
+    .fade_right(true)
+    .fade_label_overflow(&overflow)
+}
