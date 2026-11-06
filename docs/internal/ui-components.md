@@ -1159,3 +1159,66 @@ all inline expressions were eliminated; future migrations can reduce the
 ratchet further. A direct scan of the owned production files found no branches
 on `UiStyleId`, `UiLayout`, or the appearance control, surface, status,
 conversation, and behavior variants.
+### Conversation and composer: initial audit (incomplete)
+
+Line numbers refer to integration commit `d68928981`. This is a starting map,
+not a complete inventory of every inline element.
+
+- Transcript: user body and expander `transcript.rs:5478`, `:5617`; attachments
+  `:5748`; row and style-specific message shells `:6203`, `:6211`, `:6334`,
+  `:6344`, `:6345`, `:6573`; tool group `:6845`; error and input chips `:7776`,
+  `:7795`; tool headers and chips `:8147`, `:8412`, `:8603`, `:8668`.
+- Composer: skill, comment and attachment chips `composer.rs:4937`, `:5300`,
+  `:5328`, `:5420`; input `:6062`; attach button and footer `:6432`, `:6479`;
+  wizard surface `:7985`, `:7989`; send variants and layout `:8097`, `:8103`;
+  main render style, radius, key, hints, readout and body branches `:8200`,
+  `:8627`, `:8693`, `:8742`, `:8774`, `:8803`, `:8846`; dock `composer_dock.rs:323`.
+- Markdown: block layout and body tokens `markdown/render.rs:478`, `:2332`;
+  code panel and actions `:2448`, `:2507`, `:2542`, `:2590`, `:2637`,
+  `:2684`; Area-specific code treatments `:2458`, `:2585`, `:2598`, `:2654`,
+  `:2975`; question cards `:675`.
+- Further audit is needed for inline message actions, all tool details, composer
+  tabs and selectors, and the rest of `composer/` and `markdown/`.
+- Additional candidates: `composer/skill_completion.rs:638` completion rows;
+  `composer/instruction_reset.rs:643` reset prompt; `markdown/link_destination.rs:26`
+  destination card; `markdown/render.rs:565` answer button, `:596` answer
+  affordance, `:674` question card, `:945` block contents, `:1220` table,
+  `:2534` code copy action and `:2604` code source; `transcript.rs:7821`
+  tool-patch header, `:7877` detail body, `:8015` more-lines row, `:8087`
+  tool header, `:8443` activity rail and `:8543` tool chip. These references
+  are from `d68928981` and need individual review as migration continues.
+
+#### Remaining conversation call sites at `78e1a10a8`
+
+These are grouped by semantic surface; line numbers identify the owning render
+function or its first inline element, rather than every child `div`.
+
+- User content: source header and compact relay `transcript.rs:6202`; attachment
+  strip `:5747`; expanded body and disclosure `:5477`, `:5616`; inline mention
+  text and underlays `:7430`; generated image and visualization cards `:5677`,
+  `:7520`; metadata lane `:6550`.
+- Tools and thought: group disclosure and tree `transcript.rs:6784`; expanded
+  invocation, output and thought body `:7810`; patch file header `:7744`;
+  truncation row `:7938`; chip content `:8010`, `:8246`; connector and reveal
+  geometry `:8320`; tool and subagent rows `:8437`, `:8483`.
+- Composer: skill chip row `composer.rs:4937`; comments badge `:5271`;
+  attachment and appshot strips `:5299`, `:5391`; mention and slash menus
+  `:5895`, `:6281`, `:6403`, `:6450`; editable input `:3854`, `:6033`;
+  question wizard controls `:7865`; composer and footer assembly `:8109`;
+  completion rows `composer/skill_completion.rs:638` and reset prompt
+  `composer/instruction_reset.rs:643`. `composer_dock.rs:323` owns the custom
+  docking geometry rather than a separate visible control.
+- Markdown: answer controls and question cards `markdown/render.rs:565`, `:596`,
+  `:674`; blocks, inline formatting and tables `:945`, `:1220`, `:1381`;
+  code source and selection `:2536`, `:2558`; link preview card
+  `markdown/link_destination.rs:26`.
+- The production slice has no direct style or layout variant comparisons at
+  this revision. `markdown/render.rs:2906` is an Area-specific test setup.
+  Theme-only and semantic state branches remain; a component wrapper does not
+  by itself migrate all of the child elements listed above.
+- Composer-facing picker audit (`0401e0448`): approval chip `pickers.rs:1389`,
+  model/harness trigger `:3731`, footer triggers `:3812`, locked footer labels
+  `:4057`, `:4150`, `:4161`, footer assembly `:4085`, and model/approval chip
+  assembly `:6019`. Their visual frames now live in `conversation_parts.rs`;
+  picker popover and menu bodies remain outside this slice. No direct style or
+  layout comparisons were present in these picker sites before migration.

@@ -9,6 +9,36 @@ use crate::motion;
 use crate::theme::{Theme, hairline, ink};
 use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
+mod conversation_parts;
+pub use conversation_parts::{
+    ConversationComposerBody, agent_message_theme, conversation_add_harness_key, conversation_answer_button,
+    conversation_appshot_card, conversation_appshot_remove, conversation_appshot_strip,
+    conversation_attachment_remove, conversation_attachment_strip, conversation_attachment_thumb,
+    conversation_attach_key, conversation_code_copy_action, conversation_code_frame,
+    conversation_code_icon_action, conversation_code_theme,
+    conversation_code_token_color, conversation_column, conversation_composer_body,
+    conversation_composer_content_height, conversation_composer_expanded,
+    conversation_composer_text_size, conversation_composer_width, conversation_error_chip, conversation_footer_slot,
+    conversation_harness_tab, conversation_harness_tabs, conversation_input_surface,
+    conversation_input_text_color,
+    conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
+    conversation_message_expander,
+    conversation_model_picker, conversation_panel_radius, conversation_question_card,
+    conversation_picker_approval, conversation_picker_footer_chip, conversation_picker_footer_content,
+    conversation_picker_footer_label, conversation_picker_footer_row, conversation_picker_label,
+    conversation_picker_suffix, conversation_picker_trigger,
+    conversation_question_chip, conversation_question_id, conversation_question_pill,
+    conversation_answer_input,
+    conversation_reveal, conversation_send_hint, conversation_send_key, conversation_skill_chip,
+    conversation_skill_remove, conversation_subagent_chip_frame, conversation_thought_line, conversation_tool_chip_frame,
+    conversation_tool_detail_frame, conversation_tool_group_header, conversation_tool_more_lines,
+    conversation_tool_output_line,
+    conversation_tool_file_badge, conversation_tool_header, conversation_tool_icon_tile, conversation_tool_patch_header,
+    conversation_tool_stat_row,
+    conversation_tool_panel, conversation_tool_theme, conversation_user_bubble,
+    conversation_wizard_surface, user_message_theme,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonVariant {
     Primary,
