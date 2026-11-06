@@ -4,6 +4,216 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_send_hint(
+    theme: &Theme,
+    enabled: bool,
+    width: f32,
+    shortcut: &str,
+) -> Option<Div> {
+    (theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline
+        && enabled
+        && width >= 480.0)
+        .then(|| crate::work_outline::hints::kbd_chip(theme, shortcut))
+}
+
+pub struct ConversationComposerBody {
+    pub pill: Div,
+    pub input: AnyElement,
+    pub strips: Vec<AnyElement>,
+    pub attach: AnyElement,
+    pub send: AnyElement,
+    pub model: Option<AnyElement>,
+    pub area_model: Option<AnyElement>,
+    pub send_hint: Option<AnyElement>,
+    pub expanded: bool,
+    pub pill_height: f32,
+    pub textarea_height: f32,
+    pub text_padding: f32,
+    pub cluster_offset: f32,
+    pub expanded_inset: f32,
+    pub compact_inset: f32,
+    pub text_glide: f32,
+    pub surface_width: f32,
+}
+
+pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody) -> AnyElement {
+    use crate::composer::{
+        ACTION_PRIMARY_GAP, ACTION_UTILITY_GAP, ACTIONS_ROW_HEIGHT, COMPACT_TOTAL_HEIGHT,
+        PILL_BORDER_V,
+    };
+    let ConversationComposerBody {
+        pill,
+        input,
+        strips,
+        attach,
+        send,
+        model,
+        area_model,
+        send_hint,
+        expanded,
+        pill_height,
+        textarea_height,
+        text_padding,
+        cluster_offset,
+        expanded_inset,
+        compact_inset,
+        text_glide,
+        surface_width,
+    } = body;
+    if theme.ui_style.conversation == ConversationVariant::Area {
+        return div()
+            .flex()
+            .flex_col()
+            .child(
+                pill.h(px(pill_height))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .children(strips)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .px(px(16.0))
+                            .pt(px(text_padding))
+                            .child(input),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(40.0))
+                    .w_full()
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
+                            .text_color(theme.text_muted)
+                            .child(attach)
+                            .child("Attach"),
+                    )
+                    .child(send)
+                    .child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .top(px(4.0))
+                            .max_w(px(surface_width * 0.35))
+                            .children(area_model),
+                    ),
+            )
+            .into_any_element();
+    }
+    if expanded {
+        pill.h(px(pill_height))
+            .overflow_hidden()
+            .relative()
+            .flex()
+            .flex_col()
+            .children(strips)
+            .child(
+                div()
+                    .h(px(textarea_height))
+                    .flex_none()
+                    .overflow_hidden()
+                    .px(px(16.0))
+                    .pt(px(text_padding))
+                    .pb(px(4.0))
+                    .child(input),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-cluster_offset))
+                    .h(px(ACTIONS_ROW_HEIGHT))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(ACTION_PRIMARY_GAP))
+                    .pl(px(12.0))
+                    .pr(px(expanded_inset))
+                    .pt(px(2.0))
+                    .pb(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(ACTION_UTILITY_GAP))
+                            .child(attach)
+                            .children(model),
+                    )
+                    .children(send_hint)
+                    .child(send),
+            )
+            .into_any_element()
+    } else {
+        let has_send_hint = send_hint.is_some();
+        pill.h(px(pill_height))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .children(strips)
+            .child(
+                div()
+                    .h(px(COMPACT_TOTAL_HEIGHT - PILL_BORDER_V))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_none()
+                            .pl(px(12.0))
+                            .relative()
+                            .top(px(-cluster_offset))
+                            .child(attach),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(8.0))
+                            .relative()
+                            .top(px(-text_glide))
+                            .child(input),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(px(surface_width * 0.45))
+                            .relative()
+                            .top(px(-cluster_offset))
+                            .children(model),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .pl(px(ACTION_PRIMARY_GAP))
+                            .pr(px(compact_inset))
+                            .relative()
+                            .top(px(-cluster_offset))
+                            .when(has_send_hint, |el| el.flex().items_center().gap(px(4.0)))
+                            .children(send_hint)
+                            .child(send),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
 pub fn conversation_input_text_color(theme: &Theme, identity: Hsla) -> Option<Hsla> {
     (theme.ui_style.conversation == ConversationVariant::Area)
         .then(|| theme.identity_text(identity))

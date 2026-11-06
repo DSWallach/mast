@@ -8143,7 +8143,6 @@ impl Render for Composer {
         }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
-        let area = matches!(theme.ui_style.conversation, crate::ui_style::ConversationVariant::Area);
         let identity_key = self.pickers.read(cx).effective_harness(cx).map(|harness| format!("harness:{harness:?}")).unwrap_or_default();
         let identity = theme.identity_color(&identity_key);
         let identity_text = crate::components::conversation_input_text_color(&theme, identity);
@@ -8690,13 +8689,11 @@ impl Render for Composer {
             .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
                 f32::from(bounds.size.width)
             });
-        let send_hint = (theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline
-            && mode != SendButtonMode::Stop && surface_width >= 480.0)
-            .then(|| crate::work_outline::hints::kbd_chip(&theme, match crate::settings::current(cx).composer_send_behavior {
+        let send_hint = crate::components::conversation_send_hint(&theme, mode != SendButtonMode::Stop, surface_width,
+            match crate::settings::current(cx).composer_send_behavior {
                 crate::settings::ComposerSendBehavior::Enter => "enter",
                 crate::settings::ComposerSendBehavior::ModEnter => "mod-enter",
-            }));
-        let has_send_hint = send_hint.is_some();
+            });
         let model_travel = (surface_width
             - PILL_BORDER_V
             - 12.0
@@ -8741,147 +8738,31 @@ impl Render for Composer {
                     .into_any_element();
             crate::components::conversation_harness_tabs(&theme, tabs, add)
         };
-        let body = match theme.ui_style.conversation {
-        crate::ui_style::ConversationVariant::Area => {
-            div().flex().flex_col()
-                .child(pill.h(px(pill_height)).overflow_hidden().flex().flex_col()
-                    .children(comments_chip).children(skill_chips).children(appshot_strip).children(strip)
-                    .child(div().flex_1().min_h_0().overflow_hidden().px(px(16.0)).pt(px(text_pt)).child(self.render_input_with_completion())))
-                .child(div().h(px(40.0)).w_full().relative().flex().items_center().justify_center()
-                    .child(div().absolute().left_0().top(px(6.0)).flex().items_center().gap(px(2.0))
-                        .text_color(theme.text_muted).child(attach).child("Attach"))
-                    .child(send_button)
-                    .child(div().absolute().right_0().top(px(4.0)).max_w(px(surface_width * 0.35)).children(area_picker)))
-        },
-        crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Industrial => if expanded {
-            // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
-            // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
-            // stationary bottom — constant screen-y through the morph, with
-            // the 4.5px compact↔expanded centering delta gliding out. The
-            // text viewport follows the animated height so it cannot paint
-            // over the controls. Its width stays fixed (no tween rewraps);
-            // top padding eases 12→16. Attachment and Send stay on the bottom
-            // anchor while the model chip fades between its horizontal slots.
-            pill.h(px(pill_height))
-                .overflow_hidden()
-                .relative()
-                .flex()
-                .flex_col()
-                .children(comments_chip)
-                .children(skill_chips)
-                .children(appshot_strip)
-                .children(strip)
-                .child(
-                    div()
-                        .h(px(textarea_height))
-                        .flex_none()
-                        .overflow_hidden()
-                        .px(px(16.0))
-                        .pt(px(text_pt))
-                        .pb(px(4.0))
-                        .child(self.render_input_with_completion()),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(-cluster_dy))
-                        .h(px(ACTIONS_ROW_HEIGHT))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        // Shared group geometry (see CLUSTER_X_DELTA): the
-                        // attachment belongs to the utility pickers, while
-                        // Send has a larger structural separation.
-                        .gap(px(ACTION_PRIMARY_GAP))
-                        .pl(px(12.0))
-                        .pr(px(morph_cluster_inset(true, layout_morph_t)))
-                        .pt(px(2.0))
-                        .pb(px(12.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach)
-                                .children(model_picker),
-                        )
-                        .children(send_hint)
-                        .child(send_button),
-                )
+        let text_glide = if self.dock_frame.is_some_and(|frame| frame.active) {
+            collapse_text_glide(dock_height(0.0), dock_amount)
         } else {
-            // Compact pill: attachment on the left, input in the middle,
-            // then model and Send on the right, all on one 47px line.
-            // The row is BOTTOM-justified: during the collapse morph the pill
-            // top sweeps down over a stationary row, the text walks down from
-            // its expanded resting place via a decaying relative offset, and
-            // attachment/Send hold their spots (4.5px centering delta gliding
-            // in), with the model handoff sharing that same timeline.
-            let text_glide = if self.dock_frame.is_some_and(|frame| frame.active) {
-                collapse_text_glide(dock_height(0.0), dock_amount)
-            } else {
-                match self.flip_morph {
-                    Some(m) if morphing => collapse_text_glide(m.from, morph_t),
-                    _ => 0.0,
-                }
-            };
-            pill.h(px(pill_height))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .children(comments_chip)
-                .children(skill_chips)
-                .children(appshot_strip)
-                .children(strip)
-                .child(
-                    div()
-                        .h(px(COMPACT_TOTAL_HEIGHT - PILL_BORDER_V))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex_none()
-                                .pl(px(12.0))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .child(attach),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px(px(8.0))
-                                .relative()
-                                .top(px(-text_glide))
-                                .child(self.render_input_with_completion()),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(surface_width * 0.45))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .children(model_picker),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .pl(px(ACTION_PRIMARY_GAP))
-                                .pr(px(morph_cluster_inset(false, layout_morph_t)))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .when(has_send_hint, |el| el.flex().items_center().gap(px(4.0)))
-                                .children(send_hint)
-                                .child(send_button),
-                        ),
-                )
-        }};
+            match self.flip_morph {
+                Some(m) if morphing => collapse_text_glide(m.from, morph_t),
+                _ => 0.0,
+            }
+        };
+        let strips = comments_chip.into_iter().map(|el| el.into_any_element())
+            .chain(skill_chips.into_iter().map(|el| el.into_any_element()))
+            .chain(appshot_strip)
+            .chain(strip.into_iter().map(|el| el.into_any_element()))
+            .collect();
+        let body = crate::components::conversation_composer_body(&theme, crate::components::ConversationComposerBody {
+            pill, input: self.render_input_with_completion().into_any_element(), strips,
+            attach: attach.into_any_element(), send: send_button,
+            model: model_picker.map(|el| el.into_any_element()),
+            area_model: area_picker.map(|el| el.into_any_element()),
+            send_hint: send_hint.map(|el| el.into_any_element()),
+            expanded, pill_height, textarea_height, text_padding: text_pt,
+            cluster_offset: cluster_dy,
+            expanded_inset: morph_cluster_inset(true, layout_morph_t),
+            compact_inset: morph_cluster_inset(false, layout_morph_t),
+            text_glide, surface_width,
+        });
         let new_thread_target_selectors = (new_thread_chrome_opacity > 0.0).then(|| {
             self.pickers.update(cx, |pickers, cx| {
                 pickers.render_new_thread_target_selectors(cx)

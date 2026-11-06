@@ -7,13 +7,15 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 
 mod conversation_parts;
 pub use conversation_parts::{
-    agent_message_theme, conversation_attach_key, conversation_code_copy_label, conversation_code_frame,
-    conversation_code_theme, conversation_code_token_color, conversation_column,
+    ConversationComposerBody, agent_message_theme, conversation_attach_key,
+    conversation_code_copy_label, conversation_code_frame, conversation_code_theme,
+    conversation_code_token_color, conversation_column, conversation_composer_body,
     conversation_composer_content_height, conversation_composer_expanded,
-    conversation_composer_text_size, conversation_composer_width, conversation_harness_tab, conversation_input_surface,
-    conversation_harness_tabs, conversation_input_text_color, conversation_message_copy_button, conversation_model_picker,
-    conversation_panel_radius, conversation_send_key, conversation_tool_panel,
-    conversation_tool_theme, conversation_user_bubble, conversation_wizard_surface, user_message_theme,
+    conversation_composer_text_size, conversation_composer_width, conversation_harness_tab,
+    conversation_harness_tabs, conversation_input_surface, conversation_input_text_color,
+    conversation_message_copy_button, conversation_model_picker, conversation_panel_radius,
+    conversation_send_hint, conversation_send_key, conversation_tool_panel, conversation_tool_theme,
+    conversation_user_bubble, conversation_wizard_surface, user_message_theme,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
