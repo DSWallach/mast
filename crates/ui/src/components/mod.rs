@@ -1,6 +1,8 @@
 //! Shared interface primitives. Callers supply semantic intent; the active
 //! appearance determines their treatment.
 
+pub(crate) mod shell_parts;
+
 use crate::motion;
 use crate::theme::{Theme, hairline, ink};
 use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px};
