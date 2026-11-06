@@ -29,6 +29,22 @@ look metrics retain each primitive's established Default/Minimal fallback.
 Some components still use legacy metrics and need a per-surface audit before
 the token migration can be considered complete.
 
+## Audited helper examples
+
+Counts below are textual call expressions at commit `d9f3253b8`; test calls
+are called out separately. The inventory below remains a candidate index and
+is not an exhaustive inventory of inline controls.
+
+| Target | Definition | Calls | Screen owner |
+| --- | --- | ---: | --- |
+| Icon button | `crates/ui/src/shell.rs:12112` `header_icon_button` | 4 production, 2 test | Shell tabs (`shell/tabs.rs`) |
+| Button | `crates/ui/src/linear/panel.rs:1086` `small_button` | 12 | Linear panel and project picker |
+| Button | `crates/ui/src/linear/settings_page.rs:164` `button` | 4 | Linear settings |
+| Button | `crates/ui/src/work_outline/required_actions_view.rs:920` `button` | 12 | Required Actions |
+| Icon button | `crates/ui/src/browser/view.rs:8` `button` | 4 | Browser |
+| Section header | `crates/ui/src/work_outline/details_panel.rs:1205` `section_header` | 2 | Work item details |
+| Button (migrated) | `crates/ui/src/work_outline/hints.rs` `details_button` | 93 | Details and its submodules |
+
 ## Named control candidates and call-site counts
 
 This mechanical index lists a filtered set of functions whose names match control vocabulary, including tests, state logic and false positives. Counts are textual call expressions across `crates/ui/src`, excluding one declaration per entry; overloaded names can share a count. It does **not** identify inline ad-hoc elements, so the component inventory remains incomplete and needs a manual screen-by-screen audit. Locations refer to the current branch and will move with edits.
