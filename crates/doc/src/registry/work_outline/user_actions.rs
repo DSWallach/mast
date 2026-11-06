@@ -1848,6 +1848,8 @@ impl RegistryDoc {
                 }
                 match changes.status {
                     Some(WorkItemStatus::Active | WorkItemStatus::Completed) => {}
+                    None if !changes.waiting_until.is_unchanged()
+                        || !changes.waiting_reason.is_unchanged() => {}
                     _ => {
                         return Err(unauthorized(
                             "Agents may only mark a work item active or completed",

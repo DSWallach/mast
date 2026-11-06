@@ -39,6 +39,8 @@ fn item(id: &str, parent: Option<&str>) -> WorkItemView {
         title: id.into(),
         description: None,
         status: WorkItemStatus::Pending,
+        waiting_until: None,
+        waiting_reason: None,
         effective_status: WorkItemEffectiveStatus::Pending,
         archived_at: None,
         archived_by: None,

@@ -220,6 +220,8 @@ pub(crate) fn fixture_item(
         title: title.into(),
         description: None,
         status,
+        waiting_until: None,
+        waiting_reason: None,
         effective_status: match status {
             WorkItemStatus::Active => WorkItemEffectiveStatus::Active,
             WorkItemStatus::Completed => WorkItemEffectiveStatus::Completed,

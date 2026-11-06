@@ -96,6 +96,36 @@ fn snap(doc: &RegistryDoc) -> WorkOutlineSnapshot {
     doc.work_outline_snapshot(SPACE, true)
 }
 
+#[test]
+fn waiting_fields_are_written_and_cleared() {
+    let mut doc = doc_with_spaces("dev-a");
+    let id = create(&mut doc, "create-waiting", None, "Observe");
+    let update = |operation_id: &str, waiting_until, waiting_reason| {
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: id.clone(),
+            changes: mast_proto::WorkItemChanges {
+                waiting_until,
+                waiting_reason,
+                ..Default::default()
+            },
+            operation_id: operation_id.into(),
+        })
+    };
+    apply(&mut doc, update("set-waiting", FieldPatch::Set(1_800_000_000_000), FieldPatch::Set("Observation".into()))).unwrap();
+    let snapshot = snap(&doc);
+    let item = snapshot.item(&id).unwrap();
+    assert_eq!(item.waiting_until, Some(1_800_000_000_000));
+    assert_eq!(item.waiting_reason.as_deref(), Some("Observation"));
+    let row = doc.overlay_row(KIND_WORK_ITEMS, &id).unwrap();
+    assert!(row.clocks.contains_key("waitingUntil"));
+    assert!(row.clocks.contains_key("waitingReason"));
+    apply(&mut doc, update("clear-waiting", FieldPatch::Clear, FieldPatch::Clear)).unwrap();
+    let snapshot = snap(&doc);
+    let item = snapshot.item(&id).unwrap();
+    assert_eq!(item.waiting_until, None);
+    assert_eq!(item.waiting_reason, None);
+}
+
 /// Titles of the effective children of `parent` (`None` = roots), in order.
 fn titles(snapshot: &WorkOutlineSnapshot, parent: Option<&str>) -> Vec<String> {
     let ids = match parent {
