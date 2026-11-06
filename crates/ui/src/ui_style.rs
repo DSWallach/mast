@@ -29,6 +29,43 @@ pub struct StyleTokens {
     pub outline_row_delta: f32,
     pub control_size: f32,
     pub control_icon_size: f32,
+    /// `None` preserves the primitive's existing geometry.
+    pub control_radius: Option<f32>,
+    pub panel_radius: Option<f32>,
+    pub chip_radius: Option<f32>,
+    pub rule_width: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceModel {
+    ThemeDefault,
+    Opaque,
+    Glass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlVariant {
+    Minimal,
+    Key,
+    FlatOutline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusIndicator {
+    Minimal,
+    Dot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontPreference {
+    UserDefault,
+    Geist,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairedTheme {
+    pub light: &'static str,
+    pub dark: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +108,11 @@ pub struct UiStyle {
     pub id: UiStyleId,
     pub tokens: StyleTokens,
     pub behavior: StyleBehavior,
+    pub surface: SurfaceModel,
+    pub controls: ControlVariant,
+    pub status_indicator: StatusIndicator,
+    pub font_preference: FontPreference,
+    pub paired_theme: Option<PairedTheme>,
 }
 
 impl UiStyle {
@@ -83,7 +125,16 @@ impl UiStyle {
             outline_row_delta: 0.0,
             control_size: 28.0,
             control_icon_size: 16.0,
+            control_radius: None,
+            panel_radius: None,
+            chip_radius: None,
+            rule_width: None,
         },
+        surface: SurfaceModel::ThemeDefault,
+        controls: ControlVariant::Minimal,
+        status_indicator: StatusIndicator::Minimal,
+        font_preference: FontPreference::UserDefault,
+        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
             reveal: Reveal::Hover,
@@ -105,7 +156,16 @@ impl UiStyle {
             outline_row_delta: -4.0,
             control_size: 24.0,
             control_icon_size: 14.0,
+            control_radius: None,
+            panel_radius: None,
+            chip_radius: None,
+            rule_width: None,
         },
+        surface: SurfaceModel::ThemeDefault,
+        controls: ControlVariant::Minimal,
+        status_indicator: StatusIndicator::Minimal,
+        font_preference: FontPreference::UserDefault,
+        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::Primary,
             reveal: Reveal::Always,
@@ -127,7 +187,16 @@ impl UiStyle {
             outline_row_delta: 6.0,
             control_size: 32.0,
             control_icon_size: 16.0,
+            control_radius: None,
+            panel_radius: None,
+            chip_radius: None,
+            rule_width: None,
         },
+        surface: SurfaceModel::ThemeDefault,
+        controls: ControlVariant::Minimal,
+        status_indicator: StatusIndicator::Minimal,
+        font_preference: FontPreference::UserDefault,
+        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::All,
             reveal: Reveal::Always,
@@ -224,7 +293,7 @@ pub fn help_card(
             .child(
                 div()
                     .id(gpui::SharedString::from(format!("dismiss-help-{id}")))
-                .debug_selector(move || format!("dismiss-help-{id}"))
+                    .debug_selector(move || format!("dismiss-help-{id}"))
                     .flex_none()
                     .cursor_pointer()
                     .child("Dismiss")
@@ -250,7 +319,7 @@ mod tests {
     use super::*;
     #[gpui::test]
     fn help_card_dismissal_persists(cx: &mut gpui::TestAppContext) {
-        use gpui::{div, prelude::*, Context, Render, Window};
+        use gpui::{Context, Render, Window, div, prelude::*};
         struct Host;
         impl Render for Host {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
@@ -267,11 +336,31 @@ mod tests {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("dismiss-help-test-card").is_none());
-        assert_eq!(crate::settings::UiSettings::load(directory.path()).dismissed_help_cards, ["test-card"]);
+        assert_eq!(
+            crate::settings::UiSettings::load(directory.path()).dismissed_help_cards,
+            ["test-card"]
+        );
     }
     #[test]
     fn minimal_preserves_existing_metrics() {
         let t = UiStyle::MINIMAL.tokens;
+        assert_eq!(
+            (
+                t.control_radius,
+                t.panel_radius,
+                t.chip_radius,
+                t.rule_width
+            ),
+            (None, None, None, None)
+        );
+        assert_eq!(UiStyle::MINIMAL.surface, SurfaceModel::ThemeDefault);
+        assert_eq!(UiStyle::MINIMAL.controls, ControlVariant::Minimal);
+        assert_eq!(UiStyle::MINIMAL.status_indicator, StatusIndicator::Minimal);
+        assert_eq!(
+            UiStyle::MINIMAL.font_preference,
+            FontPreference::UserDefault
+        );
+        assert_eq!(UiStyle::MINIMAL.paired_theme, None);
         assert_eq!(
             (
                 t.type_scale,
