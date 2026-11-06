@@ -48,7 +48,6 @@ use crate::markdown::parser::{
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _};
-use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
@@ -5625,38 +5624,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let toggle_key = row_id.clone();
-        let glyph = if expanded {
-            crate::icons::ALT_ARROW_UP
-        } else {
-            crate::icons::ALT_ARROW_DOWN
-        };
-        let label = if expanded { "Show less" } else { "Show more" };
-        let button = div()
-            .id(SharedString::from(format!("{row_id}-expander")))
-            .debug_selector({ let selector = format!("{row_id}-expander"); move || selector.clone() })
-            .group("user-message-toggle")
-            .role(gpui::Role::Button)
-            .aria_label(if expanded {
-                "Collapse message"
-            } else {
-                "Expand message"
-            })
-            .aria_expanded(expanded)
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .text_size(crate::typography::ui_rems(14.0))
-            .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-            .text_color(theme.text_muted)
-            .cursor_pointer()
-            .hover(|s| s.text_color(theme.text))
-            .child(label)
-            .child(
-                crate::icons::icon(glyph)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .group_hover("user-message-toggle", |s| s.text_color(theme.text)),
-            )
+        let button = crate::components::conversation_message_expander(theme, row_id, expanded, USER_LINE_HEIGHT)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_user_fold(
                     toggle_key.clone(),
@@ -6208,8 +6176,6 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        let conversation = theme.ui_style.conversation;
-        let area = matches!(conversation, crate::ui_style::ConversationVariant::Area);
         let identity = theme.identity_color(self.chat_id.as_deref().unwrap_or(""));
         let workspace_root = {
             let state = self.state.read(cx);
@@ -6330,14 +6296,9 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
-                    let mut bubble_theme = theme.clone();
-                    if matches!(conversation, crate::ui_style::ConversationVariant::Area) {
-                        bubble_theme.text = theme.identity_text(identity);
-                        bubble_theme.code_wash = bubble_theme.text;
-                        bubble_theme.code_text = identity;
-                    }
+                    let bubble_theme = crate::components::user_message_theme(&theme, identity);
                     let content = self.render_user_body(&row.id, ix, text, mentions, false, &bubble_theme, window, cx);
-                    let bubble = crate::components::user_message_bubble(
+                    let bubble = crate::components::conversation_user_bubble(
                         &theme, identity, self.content_width, USER_LINE_HEIGHT, pending, content,
                     );
                     column = column.child(div().w_full().flex().justify_end().child(bubble));
@@ -6345,11 +6306,7 @@ impl Transcript {
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
-                let mut theme = theme.clone();
-                if area {
-                    theme.font_sans = "EB Garamond".into();
-                    theme.text = theme.identity_foreground(identity);
-                }
+                let theme = crate::components::agent_message_theme(&theme, identity);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6384,11 +6341,7 @@ impl Transcript {
                 content
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
-                let mut theme = theme.clone();
-                if area {
-                    theme.font_sans = "EB Garamond".into();
-                    theme.text = theme.identity_foreground(identity);
-                }
+                let theme = crate::components::agent_message_theme(&theme, identity);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6480,29 +6433,12 @@ impl Transcript {
                 auto_open,
                 summary,
             } => {
-                if area {
-                    let mut panel_theme = theme.clone();
-                    let panel = if theme.appearance.is_dark() { theme.surface_raised } else { theme.solid };
-                    let foreground = theme.identity_text(panel);
-                    panel_theme.bg = panel;
-                    panel_theme.surface = panel;
-                    panel_theme.surface_raised = panel;
-                    panel_theme.text = foreground;
-                    panel_theme.text_muted = foreground.opacity(0.8);
-                    panel_theme.text_faint = foreground.opacity(0.7);
-                    let body = self.render_tool_group(&row.id, tools, summary, *auto_open, &panel_theme, cx);
-                    div().rounded(px(14.0)).bg(panel).px(px(16.0)).py(px(12.0))
-                        .child(div().w_full().flex().justify_center().items_center().gap(px(6.0))
-                            .text_color(panel_theme.identity_foreground(identity)).font_family("EB Garamond")
-                            .text_size(crate::typography::ui_rems(16.0))
-                            .child(div().size(px(10.0)).rounded_full().bg(identity)).child("Tools"))
-                        .child(body).into_any_element()
-                } else {
-                    self.render_tool_group(&row.id, tools, summary, *auto_open, &theme, cx)
-                }
+                let panel_theme = crate::components::conversation_tool_theme(&theme);
+                let body = self.render_tool_group(&row.id, tools, summary, *auto_open, &panel_theme, cx);
+                crate::components::conversation_tool_panel(&panel_theme, identity, body)
             },
             RowKind::InputChip { header, resolved } => {
-                input_chip(header.clone(), *resolved, &theme)
+                crate::components::conversation_question_chip(header.clone(), *resolved, &theme)
             }
             RowKind::GeneratedImage {
                 owner,
@@ -6545,7 +6481,7 @@ impl Transcript {
                             .and_then(|chat| chat.config.as_ref())
                             .is_some_and(|config| crate::managed_accounts::supports_accounts(config.harness))
                 });
-                div().child(error_chip(message.clone(), &theme))
+                div().child(crate::components::conversation_error_chip(&theme, message.clone()))
                     .when_some(action, |el, chat_id| el.child(
                         div().id(SharedString::from(format!("{}-sign-in-again", row.id)))
                             .debug_selector({ let selector = format!("{}-sign-in-again", row.id); move || selector.clone() })
@@ -6583,35 +6519,10 @@ impl Transcript {
                 .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
-                let fade_key = format!("copy-message-hover-{entry_id}");
-                div()
-                    .id(SharedString::from(format!("copy-message-{entry_id}")))
-                    .size(px(Theme::SPACE_MD * 2.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .cursor_pointer()
-                    // Same quiet icon-button treatment as the copy action
-                    // over transcript code blocks.
-                    .bg(motion::hover_blend(
-                        &fade_key,
-                        gpui::transparent_black(),
-                        crate::theme::ink(0.08),
-                    ))
-                    .on_hover(motion::hover_listener(fade_key))
+                crate::components::conversation_message_copy_button(&theme, &entry_id, copied_message)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
-                    .child(
-                        crate::icons::icon(if copied_message {
-                            crate::icons::CHECK
-                        } else {
-                            crate::icons::COPY
-                        })
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
-                    )
             });
             let metadata = div()
                 .flex()
@@ -6677,10 +6588,7 @@ impl Transcript {
             // Keep side gutters as the configurable column shrinks to fit.
             .px(px(48.0))
             .child(
-                div()
-                    .w_full()
-                    .max_w(px(self.content_width))
-                    .min_w_0()
+                crate::components::conversation_column(&theme, self.content_width)
                     .child(inner)
                     .children(strip)
                     .children(trailer),
@@ -7124,25 +7032,15 @@ impl Transcript {
         let toggle_id = row_id.clone();
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
-        let header = div()
-            .id(SharedString::from(format!("{row_id}-hdr")))
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .pr(px(4.0))
-            .h(px(TOOL_GROUP_HEADER_HEIGHT))
-            .cursor_pointer()
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        let header = crate::components::conversation_tool_group_header(
+            theme, SharedString::from(format!("{row_id}-hdr")), TOOL_GROUP_HEADER_HEIGHT,
+            TOOL_LABEL_SIZE, TOOL_LABEL_LINE_HEIGHT,
+        )
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
             // chips (destructive tint, zeron tool-chip.tsx) and in the
             // summary's "· N failed" count.
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open);
@@ -7766,25 +7664,6 @@ fn visualization_card(
         .into_any_element()
 }
 
-/// The transcript ErrorChip — the shared [`notice_chip`] in its tile
-/// treatment (a port of zeron chat-view.tsx `ErrorChip`, restacked for long
-/// payloads: header row with the red-washed tile and the medium "Error"
-/// label, then the human message below). Unlike the web port, the message
-/// WRAPS instead of truncating: startup-crash errors carry the agent's exit
-/// status and stderr, and a one-line ellipsis was exactly what made
-/// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
-    div()
-        .py(px(4.0))
-        .w_full()
-        .child(
-            notice_chip(theme, false, "Error", message, Tile)
-                .overflow_hidden()
-                .w_full(),
-        )
-        .into_any_element()
-}
-
 /// A passive one-line chip marking a question the agent asked — the
 /// interactive controls live in the composer (chat-view.tsx `InputChip`):
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
@@ -7792,63 +7671,6 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 /// ChatRoundLine, the medium "Question" label, then the truncating value —
 /// the first question's header once resolved, "Awaiting your answer…" while
 /// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved {
-        header
-    } else {
-        "Awaiting your answer…".into()
-    };
-    div()
-        .py(px(4.0))
-        .w_full()
-        .child(
-            div()
-                .h(px(34.0))
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .overflow_hidden()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(crate::theme::hairline(0.08))
-                .bg(crate::theme::ink(0.045))
-                .px(px(8.0))
-                .text_size(px(12.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(20.0))
-                        .rounded(px(6.0))
-                        .bg(crate::theme::ink(0.09))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Question")),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_color(theme.text.opacity(0.9))
-                        .child(value),
-                ),
-        )
-        .into_any_element()
-}
-
 /// A small glyph standing in for the tool's icon (zeron uses an icon set; a
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
@@ -7878,56 +7700,6 @@ fn file_badge_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-fn tool_patch_file_header(file: &crate::changes::FileDiff, theme: &Theme) -> AnyElement {
-    div()
-        .h(px(TOOL_PATCH_FILE_HEADER_HEIGHT))
-        .w_full()
-        .min_w_0()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .px(px(8.0))
-        .border_b_1()
-        .border_color(crate::theme::hairline(0.07))
-        .bg(crate::theme::ink(0.025))
-        .font_family(theme.font_sans_fixed.clone())
-        .text_size(px(TOOL_TEXT_SIZE))
-        .child(
-            crate::file_icons::icon(
-                crate::file_icons::FileIconIdentity::file(&file.path),
-                theme.appearance,
-            )
-            .size(px(14.0))
-            .flex_none(),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .truncate()
-                .text_color(theme.text.opacity(0.9))
-                .child(SharedString::from(file.path.clone())),
-        )
-        .when(file.additions > 0, |row| {
-            row.child(
-                div()
-                    .flex_none()
-                    .text_color(theme.success)
-                    .child(SharedString::from(format!("+{}", file.additions))),
-            )
-        })
-        .when(file.deletions > 0, |row| {
-            row.child(
-                div()
-                    .flex_none()
-                    .text_color(theme.danger)
-                    .child(SharedString::from(format!("−{}", file.deletions))),
-            )
-        })
-        .into_any_element()
-}
-
 /// The body of an expanded chip card, under the header's separator. Diffs
 /// render through the changes pane's section body — the real component, with
 /// hunk headers, dual line-number gutters, accent bars, row washes, and
@@ -7940,7 +7712,7 @@ fn detail_body(
     scroll_id: SharedString,
     theme: &Theme,
 ) -> AnyElement {
-    let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
+    let body = crate::components::conversation_tool_detail_frame();
     match detail {
         // No comment layer: an inline tool diff is a record of what the
         // agent already did, not a review surface.
@@ -7958,7 +7730,7 @@ fn detail_body(
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(tool_patch_file_header(file, theme))
+                    .child(crate::components::conversation_tool_patch_header(file, theme, TOOL_PATCH_FILE_HEADER_HEIGHT, TOOL_TEXT_SIZE))
                     .child(crate::changes::render_file_body_with_syntax(
                         file, None, theme,
                     ))
@@ -7969,41 +7741,7 @@ fn detail_body(
             .font_family(theme.font_mono.clone())
             .text_size(px(TOOL_TEXT_SIZE))
             .children(stats.iter().map(|stat| {
-                div()
-                    .h(px(OUTPUT_LINE_HEIGHT))
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        crate::file_icons::icon(
-                            crate::file_icons::FileIconIdentity::file(&stat.path),
-                            theme.appearance,
-                        )
-                        .size(px(14.0))
-                        .flex_none(),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(stat.path.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.success)
-                            .child(SharedString::from(format!("+{}", stat.additions))),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.danger)
-                            .child(SharedString::from(format!("−{}", stat.deletions))),
-                    )
+                crate::components::conversation_tool_stat_row(theme, &stat.path, stat.additions, stat.deletions, OUTPUT_LINE_HEIGHT)
             }))
             .into_any_element(),
         ToolDetail::Output {
@@ -8023,16 +7761,10 @@ fn detail_body(
                 .font_family(theme.font_mono.clone())
                 .text_size(px(TOOL_TEXT_SIZE))
                 .children(lines.iter().map(|line| {
-                    div()
-                        .h(px(OUTPUT_LINE_HEIGHT))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .text_color(theme.text_faint)
-                        .child(line.clone())
+                    crate::components::conversation_tool_output_line(theme, OUTPUT_LINE_HEIGHT, line.clone())
                 }))
                 .when(*truncated_by > 0, |block| {
-                    block.child(more_lines_row(*truncated_by, theme))
+                    block.child(crate::components::conversation_tool_more_lines(theme, *truncated_by, OUTPUT_LINE_HEIGHT, TOOL_TEXT_SIZE))
                 });
             let mut viewport = body.id(scroll_id).overflow_x_scroll().child(content);
             // Vertical transcript scrolling must continue through the local
@@ -8047,12 +7779,7 @@ fn detail_body(
             .py(px(6.0))
             .text_size(px(TOOL_TEXT_SIZE))
             .children(lines.iter().map(|line| {
-                let row = div()
-                    .h(px(OUTPUT_LINE_HEIGHT))
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center();
+                let row = crate::components::conversation_thought_line(OUTPUT_LINE_HEIGHT);
                 let Some((text, runs)) = thought_line_text(line, theme) else {
                     return row; // blank separator row
                 };
@@ -8065,21 +7792,10 @@ fn detail_body(
                 )
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
+                block.child(crate::components::conversation_tool_more_lines(theme, *truncated_by, OUTPUT_LINE_HEIGHT, TOOL_TEXT_SIZE))
             })
             .into_any_element(),
     }
-}
-
-/// The counted-tail row under a truncated Output/Thought detail.
-fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
-    div()
-        .h(px(OUTPUT_LINE_HEIGHT))
-        .flex()
-        .items_center()
-        .text_size(px(TOOL_TEXT_SIZE))
-        .text_color(theme.text_faint)
-        .child(SharedString::from(format!("… {truncated_by} more lines")))
 }
 
 /// Shape one flattened thought line into gpui text runs — the detail-body
@@ -8177,45 +7893,16 @@ fn chip_header_row(
     } else {
         theme.text_muted
     };
-    div()
-        .group("tool-header")
-        .h(px(if activity {
+    crate::components::conversation_tool_header(activity, if activity {
             CHIP_CARD_HEIGHT
         } else {
             CHIP_HEADER_HEIGHT
+        }, TOOL_LABEL_SIZE, TOOL_LABEL_LINE_HEIGHT)
+        .children(crate::components::conversation_tool_icon_tile(theme, activity, if tool.is_thought {
+            crate::icons::CHAT_ROUND_LINE
+        } else {
+            tool_icon_path(&tool.call)
         }))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(if activity { 0.0 } else { 8.0 }))
-        .text_size(px(TOOL_LABEL_SIZE))
-        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
-        .when(!activity, |row| {
-            row.child(
-                // Subagent icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
-                // icon size-3).
-                div()
-                    .size(px(18.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.08))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::icons::icon(if tool.is_thought {
-                            crate::icons::CHAT_ROUND_LINE
-                        } else {
-                            tool_icon_path(&tool.call)
-                        })
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
-                    ),
-            )
-        })
         .child(
             div()
                 .flex_none()
@@ -8259,58 +7946,9 @@ fn chip_header_row(
                     theme.text.opacity(0.85)
                 })
                 .child(if let Some(path) = file_path {
-                    let badge = div()
-                        .min_w_0()
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .overflow_hidden()
-                        .gap(px(6.0))
-                        .rounded(px(5.0))
-                        .bg(theme.ink(0.06))
-                        .pl(px(1.0))
-                        .pr(px(6.0))
-                        .text_color(if failed {
-                            theme.danger
-                        } else {
-                            theme.text.opacity(0.85)
-                        })
-                        .child(
-                            div()
-                                .size(px(20.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.0))
-                                .bg(crate::file_icons::well_bg(theme))
-                                .child(
-                                    crate::file_icons::icon(
-                                        crate::file_icons::FileIconIdentity::file(path),
-                                        theme.appearance,
-                                    )
-                                    .size(px(14.0)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .child(SharedString::from(file_badge_name(path).to_owned())),
-                        )
-                        .map(|badge| {
-                            if hover_text {
-                                badge
-                                    .id("tool-file-badge")
-                                    .group_hover("tool-header", |style| {
-                                        style.text_color(theme.text)
-                                    })
-                                    .into_any_element()
-                            } else {
-                                badge.into_any_element()
-                            }
-                        });
-                    crate::frost::frosted(5.0, 16.0, badge).into_any_element()
+                    crate::components::conversation_tool_file_badge(
+                        theme, path, SharedString::from(file_badge_name(path).to_owned()), failed, hover_text,
+                    )
                 } else {
                     div()
                         .min_w_0()
@@ -8635,26 +8273,7 @@ fn tool_chip(
             ))
         })
         .child(
-            div()
-                .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
-                .my(px((row_height - CHIP_CARD_HEIGHT) / 2.0))
-                .h(px(CHIP_CARD_HEIGHT))
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .when(!rail, |card| {
-                    card.rounded(px(9.0))
-                        .border_1()
-                        .border_color(crate::theme::hairline(0.07))
-                        .bg(crate::theme::ink(0.03))
-                })
-                .when(rail && content_reveal < 1.0, |card| {
-                    card.relative()
-                        .top(px(4.0 * (1.0 - content_reveal)))
-                        .opacity(content_reveal)
-                })
+            crate::components::conversation_tool_chip_frame(rail, row_height, CHIP_CARD_HEIGHT, ACTIVITY_TEXT_GAP, content_reveal)
                 .child(chip_header_row(tool, None, theme, view, cx)),
         )
         .into_any_element()
@@ -8692,21 +8311,7 @@ fn subagent_chip(
             )
         })
         .child(
-            div()
-                .id(id)
-                .when(rail, |el| el.ml(px(12.0)))
-                .h(px(CHIP_CARD_HEIGHT))
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(crate::theme::hairline(0.07))
-                .bg(crate::theme::ink(0.03))
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
+            crate::components::conversation_subagent_chip_frame(id, rail, CHIP_CARD_HEIGHT)
                 .on_click(on_open)
                 .child(chip_header_row(
                     tool,
