@@ -1216,7 +1216,7 @@ impl Render for Walkthrough {
                                 .flex_col()
                                 .gap_3()
                                 .when(
-                                    theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+                                    theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area,
                                     |el| {
                                         el.bg(theme.surface)
                                             .p(px(8.0))

@@ -12830,7 +12830,8 @@ impl Render for Shell {
                             ),
                     )
                     .child(div().absolute().top_0().left_0().right_0()
-                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_b_1().border_color(theme.border))
+                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
+                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_b_1().border_color(theme.border))
                         .child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);

@@ -8780,14 +8780,14 @@ impl Render for Composer {
             - morph_cluster_inset(expanded, layout_morph_t))
         .max(0.0);
         let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
-        let model_offset = (model_side - compact_target) * model_travel + model_drift;
+        let model_offset = if area { 0.0 } else { (model_side - compact_target) * model_travel + model_drift };
         let measured_model_bounds = self.model_bounds.clone();
         let model_picker = div()
             .min_w_0()
             .max_w(px(surface_width * 0.45))
             .relative()
             .left(px(model_offset))
-            .opacity(model_opacity)
+            .opacity(if area { 1.0 } else { model_opacity })
             .child(self.pickers.clone())
             .child(
                 gpui::canvas(
