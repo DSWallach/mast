@@ -398,6 +398,12 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
             Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
             mast_ui::snapshot::walkthrough_fixture(cx)
         })?;
+        let data_dir = directory.path().to_path_buf();
+        mast_ui::snapshot::render_to_png(&format!("matrix-artifact-{name}"), size(px(900.), px(700.)), style, appearance, move |window, cx| {
+            mast_ui::settings::init(mast_ui::settings::UiSettings::default(), data_dir, cx);
+            Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
+            mast_ui::snapshot::artifact_fixture(window, cx)
+        })?;
     }
     Ok(())
 }

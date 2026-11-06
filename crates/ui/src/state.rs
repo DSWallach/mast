@@ -2851,7 +2851,7 @@ impl AppState {
     }
 
     /// Tests: install a Space's artifacts without a watch.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "snapshot"))]
     pub(crate) fn set_test_artifacts(&mut self, snapshot: mast_proto::ArtifactsSnapshot) {
         let space_id = snapshot.space_id.clone();
         self.artifacts.set(

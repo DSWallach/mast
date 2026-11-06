@@ -475,6 +475,24 @@ fn revision_picker_loads_that_revision(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn area_footer_and_revision_navigation_use_existing_actions(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    cx.update(|cx| cx.set_global(Theme::default().with_ui_style(crate::ui_style::UiStyle::AREA)));
+    let reply: Reply = Arc::new(|_, params| {
+        let revision = params["revision"].as_u64().unwrap_or(2) as u32;
+        Ok(content_reply(ArtifactKind::HtmlPage, revision, "<p>Review</p>", ArtifactContentEncoding::Utf8))
+    });
+    let (tab, calls, _, vcx) = open_tab(cx, artifact(&id(1), "Review", ArtifactKind::HtmlPage), reply);
+    assert!(vcx.debug_bounds("area-artifact-reveal").is_some());
+    assert!(vcx.debug_bounds("area-artifact-open").is_some());
+    let previous = vcx.debug_bounds("artifact-previous-revision").expect("previous revision");
+    vcx.simulate_click(previous.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(content_calls(&calls).last().unwrap()["revision"], 1);
+    assert_eq!(tab.read_with(vcx, |tab, _| tab.shown_revision()), Some(1));
+}
+
+#[gpui::test]
 fn compare_source_tab_uses_the_revision_text_diff(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     let reply: Reply = Arc::new(|_, params| {
