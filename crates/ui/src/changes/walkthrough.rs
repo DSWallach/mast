@@ -868,7 +868,7 @@ impl Render for Walkthrough {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(13.0)))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(step.title.clone()),
                         )
