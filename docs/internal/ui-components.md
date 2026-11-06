@@ -1101,3 +1101,15 @@ foundation owner before concurrent screen migrations begin.
 Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
+
+## Outline and item details migration audit (partial)
+
+Locations refer to foundation commit `d68928981`. This is a starting inventory,
+not a completed screen-by-screen audit. All listed renderers still need their
+inline elements checked against the shared components.
+
+- `work_outline/outline_view.rs:2524,2587,2718,2776,2824,3365,3549,3597,3803,3848`: row geometry, first-use prompt, artifact/drift/proposal chips, row body, totals and status indicators. Style/layout branches occur at 2624, 3145, 3152, 3565, 3649, 3895 and 4100; style tokens also control row geometry at 2673 and 3211–3219. Tree guide geometry is in `work_outline/outline_view/tree_guides_view.rs:180`.
+- `work_outline/details_panel.rs:1224`: collapsible section header applies tracked caps whenever a label-size token exists, including Area. Controls and layout branch at 1317–1318, 1338, 1380, 1394, 1488, 1540–1542, 1578, 1590, 1827 and 2026–2046; the title and status control are at 1509 and 1540. Check Archive in the same renderer.
+- `work_outline/details_instructions.rs:441,757,958,1082,1138`: instruction, effective instruction, PR prompt and approval rule sections. `details_templates.rs:231,309,405`, `details_container_template.rs:509,649`, and `details_template_review.rs:283,377`: template controls, editor rows and review.
+- `work_outline/details_user_actions.rs:456,502,585,678,707,899,1184`: required-action and proposal sections and rows. `required_actions_view.rs:1022,1052,1107,1127,1823`: ad-hoc buttons, links and action cards. `chips.rs:38,218` and `hints.rs:24,479`: chips, details buttons and shortcut badge. Check `context_menu.rs` and the other `details_*` modules for inline controls.
+- `overview.rs:3271,5522`: status-indicator branches; 3390, 3450, 4534, 4884: buttons; 3481: item/chat panel content; 5303, 5449, 5494: lane header and list rows; 5831, 5988: outline toolbar and filter. Inspect `overview_grouping.rs` and `overview_positions.rs` for remaining presentation decisions.
