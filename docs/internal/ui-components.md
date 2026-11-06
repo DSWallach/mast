@@ -1101,3 +1101,24 @@ foundation owner before concurrent screen migrations begin.
 Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
+
+### Conversation and composer: initial audit (incomplete)
+
+Line numbers refer to integration commit `d68928981`. This is a starting map,
+not a complete inventory of every inline element.
+
+- Transcript: user body and expander `transcript.rs:5478`, `:5617`; attachments
+  `:5748`; row and style-specific message shells `:6203`, `:6211`, `:6334`,
+  `:6344`, `:6345`, `:6573`; tool group `:6845`; error and input chips `:7776`,
+  `:7795`; tool headers and chips `:8147`, `:8412`, `:8603`, `:8668`.
+- Composer: skill, comment and attachment chips `composer.rs:4937`, `:5300`,
+  `:5328`, `:5420`; input `:6062`; attach button and footer `:6432`, `:6479`;
+  wizard surface `:7985`, `:7989`; send variants and layout `:8097`, `:8103`;
+  main render style, radius, key, hints, readout and body branches `:8200`,
+  `:8627`, `:8693`, `:8742`, `:8774`, `:8803`, `:8846`; dock `composer_dock.rs:323`.
+- Markdown: block layout and body tokens `markdown/render.rs:478`, `:2332`;
+  code panel and actions `:2448`, `:2507`, `:2542`, `:2590`, `:2637`,
+  `:2684`; Area-specific code treatments `:2458`, `:2585`, `:2598`, `:2654`,
+  `:2975`; question cards `:675`.
+- Further audit is needed for inline message actions, all tool details, composer
+  tabs and selectors, and the rest of `composer/` and `markdown/`.
