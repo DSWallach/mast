@@ -5822,22 +5822,7 @@ impl Overview {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let pill = |id: &'static str, label: String, active: bool| {
-            div()
-                .id(id)
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .bg(theme.element_hover.opacity(0.5))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .hover(|el| el.text_color(theme.text))
-                .child(SharedString::from(label))
-        };
+        let pill = |id, label, active| crate::components::outline_toolbar_button(id, label, active, theme);
         let mut out = vec![
             pill("outline-new-item", "New item".into(), false)
                 .debug_selector(|| "outline-new-item".into())
@@ -5886,21 +5871,7 @@ impl Overview {
         // The shortcut reference, on demand (also `?` in the Outline and the
         // palette's Show Outline Shortcuts).
         out.push(
-            div()
-                .id("outline-shortcuts")
-                .debug_selector(|| "outline-shortcuts".into())
-                .aria_label("Keyboard shortcuts")
-                .flex()
-                .items_center()
-                .px(px(6.0))
-                .py(px(4.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .bg(theme.element_hover.opacity(0.5))
-                .text_color(theme.text_muted)
-                .hover(|el| el.text_color(theme.text))
-                .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
-                .child("?")
+            crate::components::outline_shortcuts_button(theme)
                 .hint(
                     "Keyboard shortcuts",
                     HintKey::Outline(crate::shell::work_outline_ui::OutlineNavKey::ShowShortcuts),

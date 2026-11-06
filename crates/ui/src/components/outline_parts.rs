@@ -178,6 +178,56 @@ pub fn outline_start_chat_button(id: SharedString, theme: &Theme) -> Stateful<Di
         .child("Start Chat")
 }
 
+/// Selectable action in the outline toolbar.
+pub fn outline_toolbar_button(
+    id: &'static str,
+    label: String,
+    active: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    let button = div()
+        .id(id)
+        .px(px(8.0 * scale))
+        .py(px(3.0 * scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .bg(theme.element_hover.opacity(0.5))
+        .when(active, |el| {
+            el.bg(theme.element_active).text_color(theme.text)
+        })
+        .when(!active, |el| el.text_color(theme.text_muted))
+        .hover(|el| el.text_color(theme.text));
+    crate::surface_chrome::segmented_key(button, theme, active)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(SharedString::from(label))
+}
+
+/// Keyboard shortcut action in the outline toolbar.
+pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    let button = div()
+        .id("outline-shortcuts")
+        .debug_selector(|| "outline-shortcuts".into())
+        .aria_label("Keyboard shortcuts")
+        .flex()
+        .items_center()
+        .px(px(6.0 * scale))
+        .py(px(4.0 * scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .bg(theme.element_hover.opacity(0.5))
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text));
+    crate::surface_chrome::segmented_key(button, theme, false)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
+        .child("?")
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
