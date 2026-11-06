@@ -306,7 +306,7 @@ impl WorkItemDetails {
             .map(|artifact| (artifact.id.clone(), artifact.device_id.clone()))
             .collect();
         let open = !self.artifacts.collapsed;
-        let header = Self::section_header(
+        let header = crate::components::outline_section_header(
             "work-item-artifacts-header",
             if rows.is_empty() {
                 "Artifacts".to_owned()

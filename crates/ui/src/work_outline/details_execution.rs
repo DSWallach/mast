@@ -1190,7 +1190,7 @@ impl WorkItemDetails {
             .items_center()
             .gap(px(6.0))
             .child(
-                Self::section_header("work-item-execution-toggle", title.into(), open, theme)
+                crate::components::outline_section_header("work-item-execution-toggle", title.into(), open, theme)
                     .debug_selector(|| "work-item-execution-toggle".into())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.execution_open = !this.execution_open;

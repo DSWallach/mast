@@ -454,7 +454,7 @@ impl WorkItemDetails {
             .flex_col()
             .gap(px(4.0))
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-instructions-toggle",
                     format!("Instructions ({})", list.len()),
                     open,
@@ -769,7 +769,7 @@ impl WorkItemDetails {
             .flex_col()
             .gap(px(4.0))
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-effective-toggle",
                     format!("Effective instructions ({})", effective.entry_count),
                     open,

@@ -539,7 +539,7 @@ impl WorkItemDetails {
             .flex_col()
             .gap(px(4.0))
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-required-actions-toggle",
                     format!("Required actions ({open_count})"),
                     open,
@@ -607,7 +607,7 @@ impl WorkItemDetails {
             .flex_col()
             .gap(px(4.0))
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-proposals-toggle",
                     if pending.is_empty() {
                         "Proposed instructions".to_owned()
