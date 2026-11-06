@@ -15915,6 +15915,14 @@ mod shortcut_focus_regressions {
     }
 }
 
+#[cfg(feature = "snapshot")]
+impl Shell {
+    /// Skip the startup splash for deterministic offscreen fixtures.
+    pub fn fixture_snapshot_ready(&mut self) {
+        self.splash = SplashPhase::Gone;
+    }
+}
+
 /// Native visual QA uses the production shell with isolated fixture data.
 #[cfg(feature = "appshots-fixture")]
 impl Shell {
