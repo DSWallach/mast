@@ -9,7 +9,10 @@ mod render;
 #[ignore = "requires macOS Metal and access to macOS services"]
 fn render_ui_preview() -> anyhow::Result<()> {
     use image::{RgbaImage, imageops};
-    use mast_ui::{theme::Appearance, ui_style::UiStyleId};
+    use mast_ui::{
+        theme::Appearance,
+        ui_style::{UiLayout, UiStyleId},
+    };
     use std::path::PathBuf;
 
     fn selection(variable: &str, defaults: &[&str]) -> Vec<String> {
@@ -44,6 +47,16 @@ fn render_ui_preview() -> anyhow::Result<()> {
         !styles.is_empty() && styles.iter().all(|s| style_names.contains(s)),
         "invalid or empty style selection"
     );
+    let layout_names: Vec<String> = UiLayout::ALL
+        .iter()
+        .map(|layout| layout.label().to_ascii_lowercase())
+        .collect();
+    let layout_defaults: Vec<&str> = layout_names.iter().map(String::as_str).collect();
+    let layouts = selection("MAST_PREVIEW_LAYOUTS", &layout_defaults);
+    anyhow::ensure!(
+        !layouts.is_empty() && layouts.iter().all(|layout| layout_names.contains(layout)),
+        "invalid or empty layout selection"
+    );
     let mut themes = vec!["mast-light".to_string(), "mast-dark".to_string()];
     for theme in selection("MAST_PREVIEW_THEMES", &[]) {
         if !themes.contains(&theme) {
@@ -66,16 +79,22 @@ fn render_ui_preview() -> anyhow::Result<()> {
     let _guard = runtime.enter();
     let screen_refs: Vec<&str> = screens.iter().map(String::as_str).collect();
     let style_refs: Vec<&str> = styles.iter().map(String::as_str).collect();
+    let layout_refs: Vec<&str> = layouts.iter().map(String::as_str).collect();
     let theme_refs: Vec<&str> = themes.iter().map(String::as_str).collect();
-    let cells = matrix::matrix(&screen_refs, &style_refs, &theme_refs);
-    let (cell_width, cell_height) =
-        matrix::cell_size(1440, 900, themes.len() as u32, styles.len() as u32, 4096)
-            .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
+    let cells = matrix::matrix(&screen_refs, &style_refs, &layout_refs, &theme_refs);
+    let (cell_width, cell_height) = matrix::cell_size(
+        1440,
+        900,
+        themes.len() as u32,
+        (styles.len() * layouts.len()) as u32,
+        4096,
+    )
+    .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
     let mut sheets = Vec::new();
     for (screen_index, screen) in screens.iter().enumerate() {
         let mut sheet = RgbaImage::new(
             cell_width * themes.len() as u32,
-            cell_height * styles.len() as u32,
+            cell_height * (styles.len() * layouts.len()) as u32,
         );
         for (index, cell) in cells
             .iter()
@@ -83,6 +102,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
             .enumerate()
         {
             let style = UiStyleId::ALL[style_names.iter().position(|s| s == cell.style).unwrap()];
+            let layout = UiLayout::ALL[layout_names.iter().position(|s| s == cell.layout).unwrap()];
             let variant = registry.variant(cell.theme).unwrap();
             let appearance = match variant.appearance {
                 mast_theme::Appearance::Light => Appearance::Light,
@@ -91,6 +111,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
             let path = render::render(
                 cell.screen,
                 style,
+                layout,
                 cell.theme,
                 appearance,
                 cell.label.clone(),

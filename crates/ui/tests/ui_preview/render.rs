@@ -1,7 +1,7 @@
 use gpui::{AnyView, App, Entity, Render, Window, div, prelude::*, px, size};
 use mast_ui::{
     theme::{Appearance, Theme},
-    ui_style::UiStyleId,
+    ui_style::{UiLayout, UiStyleId},
 };
 use std::path::PathBuf;
 
@@ -52,13 +52,27 @@ impl Render for Controls {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(mast_ui::popover::btn_primary(t, "Primary"))
-                    .child(mast_ui::popover::btn_ghost(
+                    .child(mast_ui::components::button(
+                        "preview-primary",
+                        "Primary",
+                        mast_ui::components::ButtonVariant::Primary,
+                        mast_ui::components::ButtonSize::Md,
                         t,
-                        "Secondary",
-                        "preview-secondary",
                     ))
-                    .child(mast_ui::popover::btn_danger(t, "Delete"))
+                    .child(mast_ui::components::button(
+                        "preview-secondary",
+                        "Secondary",
+                        mast_ui::components::ButtonVariant::Secondary,
+                        mast_ui::components::ButtonSize::Md,
+                        t,
+                    ))
+                    .child(mast_ui::components::button(
+                        "preview-danger",
+                        "Delete",
+                        mast_ui::components::ButtonVariant::Danger,
+                        mast_ui::components::ButtonSize::Md,
+                        t,
+                    ))
                     .child(mast_ui::settings::widgets::toggle_switch(t, true))
                     .child(mast_ui::settings::widgets::toggle_switch(t, false))
                     .child(mast_ui::settings::widgets::badge(t, "Draft"))
@@ -110,12 +124,14 @@ impl Render for Controls {
 fn initialize(
     data_dir: &std::path::Path,
     style: UiStyleId,
+    layout: UiLayout,
     appearance: Appearance,
     theme_id: &str,
     cx: &mut App,
 ) {
     let mut settings = mast_ui::settings::UiSettings::default();
     settings.ui_style = style;
+    settings.ui_layout = layout;
     match appearance {
         Appearance::Light => {
             settings.appearance = mast_ui::appearance::AppearanceMode::Light;
@@ -195,6 +211,7 @@ fn chat(data_dir: PathBuf, cx: &mut App) -> AnyView {
 pub fn render(
     screen: &str,
     style: UiStyleId,
+    layout: UiLayout,
     theme_id: &str,
     appearance: Appearance,
     label: String,
@@ -203,13 +220,14 @@ pub fn render(
 ) -> anyhow::Result<PathBuf> {
     let screen = screen.to_owned();
     let theme_id = theme_id.to_owned();
-    mast_ui::snapshot::render_to_png(
+    mast_ui::snapshot::render_to_png_with_layout(
         name,
         size(px(1440.), px(900.)),
         style,
+        layout,
         appearance,
         move |_, cx| {
-            initialize(&data_dir, style, appearance, &theme_id, cx);
+            initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => chat(data_dir, cx),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),

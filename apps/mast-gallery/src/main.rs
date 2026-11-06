@@ -116,14 +116,19 @@ impl Render for Gallery {
                         cx.notify();
                     }
                     key => {
-                        let Some(index) = key.parse::<usize>().ok().filter(|n| (1..=9).contains(n))
+                        let key = match key { "!" => "1", "@" => "2", "#" => "3", other => other };
+                        let Some(index) = key.parse::<usize>().ok().filter(|n| (1..=3).contains(n))
                         else {
                             return;
                         };
-                        let Some(&style) = gallery_styles().get(index - 1) else {
-                            return;
-                        };
-                        switch_style(style, window, cx);
+                        if event.keystroke.modifiers.shift {
+                            let Some(&layout) = ui_style::UiLayout::ALL.get(index - 1) else { return; };
+                            ui_style::set_layout_in_memory(layout, cx);
+                            window.set_rem_size(px(typography::effective_rem_px(cx)));
+                        } else {
+                            let Some(&style) = gallery_styles().get(index - 1) else { return; };
+                            switch_style(style, window, cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -186,6 +191,15 @@ impl Render for Gallery {
                                         .child(format!("{} {:?}", index + 1, id))
                                 },
                             ))
+                            .children(ui_style::UiLayout::ALL.iter().copied().enumerate().map(|(index, layout)| {
+                                div().id(("layout", index)).cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        ui_style::set_layout_in_memory(layout, cx);
+                                        window.set_rem_size(px(typography::effective_rem_px(cx)));
+                                        cx.notify();
+                                    }))
+                                    .child(format!("⇧{} {}", index + 1, layout.label()))
+                            }))
                             .child(
                                 div()
                                     .id("light")
