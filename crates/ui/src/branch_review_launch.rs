@@ -2,7 +2,12 @@
 
 use std::collections::HashMap;
 
-use mast_proto::{ChatConfig, DiffCheckoutCandidate, ReviewTarget, StartBranchReviewParams};
+use mast_proto::{
+    ChatConfig, DiffCheckoutCandidate, ReviewTarget, StartBranchReviewParams,
+    StartBranchReviewReply,
+};
+
+use crate::state::EngineHandle;
 
 /// Construct a target only for a bound branch with commits beyond its merge base.
 /// The caller resolves the base locally; no refs are fetched by this function.
@@ -62,6 +67,18 @@ impl BranchReviewOperations {
             target_device_id,
         }
     }
+}
+
+/// Start the review on the Space's owning engine.
+pub(crate) async fn start(
+    engine: EngineHandle,
+    params: StartBranchReviewParams,
+) -> Result<StartBranchReviewReply, String> {
+    engine
+        .client()
+        .start_branch_review(&params)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
