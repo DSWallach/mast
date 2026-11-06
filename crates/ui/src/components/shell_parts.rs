@@ -258,6 +258,31 @@ pub(crate) fn sidebar_frame(
         .into_any_element()
 }
 
+pub(crate) fn item_hover_card(theme: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("chat-item-card")
+        .debug_selector(|| "chat-item-card".into())
+        .absolute()
+        .top_full()
+        .left(px(12.0))
+        .w(px(width))
+        .max_w_full()
+        .mt(px(4.0))
+        .p(px(10.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.surface_raised)
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
+            |el| el.shadow_md(),
+        )
+        .occlude()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(
