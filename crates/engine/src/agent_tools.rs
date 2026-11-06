@@ -669,6 +669,19 @@ fn in_agent_scope(snapshot: &mast_proto::WorkOutlineSnapshot, root: &str, target
             .is_some_and(|project| snapshot.is_within(&project.id, target))
 }
 
+fn resolve_id<'a>(id: &str, ids: impl Iterator<Item = &'a str>, kind: &str) -> Result<String, AgentToolError> {
+    let id = id.trim();
+    let ids: Vec<_> = ids.collect();
+    if ids.contains(&id) { return Ok(id.to_owned()); }
+    if id.chars().count() < 6 { return Err(AgentToolError::invalid(format!("{kind} id prefix must be at least 6 characters"))); }
+    let matches: Vec<_> = ids.into_iter().filter(|candidate| candidate.starts_with(id)).collect();
+    match matches.as_slice() {
+        [matched] => Ok((*matched).to_owned()),
+        [] => Err(AgentToolError::invalid(format!("{kind} not found"))),
+        _ => Err(AgentToolError::invalid(format!("ambiguous: matches {}", matches.join(", ")))),
+    }
+}
+
 /// Most attachments a child's first Turn may carry.
 const MAX_CHILD_ATTACHMENTS: usize = 16;
 /// Longest `read_current` waits for a Linear issue that is not cached.
@@ -1107,6 +1120,30 @@ impl AgentToolsService {
             .mutate_as_admin(mutation, &actor, context.admin_space.as_deref())?)
     }
 
+    fn resolve_work_item_id(&self, context: &CallContext, id: &str) -> Result<String, AgentToolError> {
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        resolve_id(id, snapshot.items.iter().map(|item| item.id.as_str()), "work item")
+    }
+
+    fn resolve_request_id(&self, context: &CallContext, id: &str) -> Result<String, AgentToolError> {
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let root = context.current_item_id();
+        let requests: Vec<_> = snapshot.user_action_requests.iter().filter(|request| {
+            context.admin_space.as_deref() == Some(request.space_id.as_str())
+                || request.chat_id == context.grant.chat_id
+                || self.workspace.chat(&request.chat_id).ok().flatten().is_some_and(|chat| chat.parent_chat_id.as_deref() == Some(context.grant.chat_id.as_str()))
+                || root.as_deref().is_some_and(|root| in_agent_scope(&snapshot, root, &request.work_item_id))
+        }).collect();
+        match resolve_id(id, requests.iter().map(|request| request.id.as_str()), "request") {
+            Ok(id) => Ok(id),
+            Err(AgentToolError::Refused { ref message, .. }) if message.contains("not found") => {
+                let open = requests.iter().filter(|request| request.is_open()).map(|request| request.id.as_str()).collect::<Vec<_>>().join(", ");
+                Err(AgentToolError::invalid(format!("request not found; open requests in your scope: {}", if open.is_empty() { "(none)" } else { &open })))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     // ---- tools ---------------------------------------------------------------
 
     fn report_friction(
@@ -1348,7 +1385,7 @@ impl AgentToolsService {
         // destination, anything else under the Chat's own item.
         let mut to_destination = false;
         let parent = match non_empty(args.parent_work_item_id) {
-            Some(id) => Some(id),
+            Some(id) => Some(self.resolve_work_item_id(context, &id)?),
             None => context.current_item_id().map(|current| {
                 let snapshot = self.work_outline.snapshot(&context.grant.space_id);
                 match snapshot.worker_destination_for(&current) {
@@ -1383,7 +1420,8 @@ impl AgentToolsService {
         context: &CallContext,
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
-        let args: AssociateArgs = parse_args(arguments)?;
+        let mut args: AssociateArgs = parse_args(arguments)?;
+        args.work_item_id = self.resolve_work_item_id(context, &args.work_item_id)?;
         let operation_id = context.operation_id_or_derived(arguments, || {
             let assigned = context.row_stamp(
                 mast_doc::work_outline::KIND_WORK_ITEM_CHAT_ASSIGNMENTS,
@@ -1409,7 +1447,8 @@ impl AgentToolsService {
         context: &CallContext,
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
-        let args: AssociateArgs = parse_args(arguments)?;
+        let mut args: AssociateArgs = parse_args(arguments)?;
+        args.work_item_id = self.resolve_work_item_id(context, &args.work_item_id)?;
         let target = args.work_item_id;
         let operation_id = context.operation_id_or_derived(arguments, || {
             let updated = context.row_stamp(
@@ -1450,7 +1489,7 @@ impl AgentToolsService {
             }
         };
         let target = match non_empty(args.work_item_id) {
-            Some(id) => id,
+            Some(id) => self.resolve_work_item_id(context, &id)?,
             None => context.require_item("changing status")?,
         };
         let waiting_changed = !args.waiting_until.is_unchanged() || !args.waiting_reason.is_unchanged();
@@ -1724,6 +1763,7 @@ impl AgentToolsService {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| AgentToolError::invalid("requestId is required"))?;
+        let id = self.resolve_request_id(context, id)?;
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         let request = snapshot
             .user_action_requests
@@ -1755,10 +1795,11 @@ impl AgentToolsService {
         context: &CallContext,
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
-        let args: ResolveUserActionRequestArgs = parse_args(arguments)?;
+        let mut args: ResolveUserActionRequestArgs = parse_args(arguments)?;
         if args.user_action_request_id.trim().is_empty() {
             return Err(AgentToolError::invalid("userActionRequestId is empty"));
         }
+        args.user_action_request_id = self.resolve_request_id(context, &args.user_action_request_id)?;
         // Resolving is terminal, so the request id alone identifies the change.
         let operation_id = context.operation_id_or_derived(arguments, || {
             Ok(agent_tools::derived_idempotency_key(
@@ -1844,7 +1885,7 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: AnswerUserActionRequestArgs = parse_args(arguments)?;
-        let request_id = args.request_id.trim().to_owned();
+        let request_id = self.resolve_request_id(context, &args.request_id)?;
         let message_id = args.user_message_id.trim().to_owned();
         if request_id.is_empty() {
             return Err(AgentToolError::invalid("requestId is empty"));
@@ -2065,7 +2106,7 @@ impl AgentToolsService {
             "childTemplate" => InstructionProposalTarget {
                 scope: mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate,
                 work_item_id: Some(item.clone()),
-                container_work_item_id: non_empty(args.container_work_item_id),
+                container_work_item_id: non_empty(args.container_work_item_id).map(|id| self.resolve_work_item_id(context, &id)).transpose()?,
                 rule_node_id: non_empty(args.rule_node_id),
                 rule_instruction_id: None,
                 rule_node_path: args.rule_node_path,
@@ -2240,7 +2281,7 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: ReadSubtreeArgs = parse_args(arguments)?;
-        let target_arg = non_empty(args.work_item_id);
+        let target_arg = non_empty(args.work_item_id).map(|id| self.resolve_work_item_id(context, &id)).transpose()?;
         let root = match (context.admin_space.is_some(), context.current_item_id()) {
             (_, Some(item)) => item,
             (true, None) => target_arg.clone().ok_or_else(|| {
@@ -2314,7 +2355,8 @@ impl AgentToolsService {
     ) -> Result<mast_proto::CreateChatForWorkItemParams, AgentToolError> {
         let context = self.context(&params.token)?;
         let operation_id = context.operation_id(&params.arguments)?;
-        let args: LaunchChildArgs = parse_args(&params.arguments)?;
+        let mut args: LaunchChildArgs = parse_args(&params.arguments)?;
+        args.work_item_id = self.resolve_work_item_id(&context, &args.work_item_id)?;
         if args.prompt.trim().is_empty() {
             return Err(AgentToolError::invalid(
                 "a prompt is required to start a chat for a work item",
