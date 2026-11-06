@@ -162,6 +162,11 @@ fn isolated_configuration(assignments: &[String]) -> bool {
 /// These checks are deliberately stricter than the minimum policy.
 fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
     for segment in segments {
+        if segment.argv.iter().any(|arg| arg == "sudo")
+            || segment.argv.windows(2).any(|pair| pair[0] == "git" && pair[1] == "push")
+        {
+            return false;
+        }
         if segment.argv.iter().any(|arg| {
             let lower = arg.to_ascii_lowercase();
             [".claude", ".codex", ".zeron"]
@@ -562,6 +567,8 @@ mod tests {
             "cargo test --offline; rm -rf /tmp/x",
             "cargo test --offline && rm -rf /tmp/x",
             "cargo test --offline;sudo ps",
+            "cargo test --offline -- sudo",
+            "cargo test --offline -- git push",
             "cargo test --offline | sh",
             "cargo test --offline | bash",
             "cargo test --offline $(rm -rf /tmp/x)",
