@@ -283,6 +283,78 @@ pub(crate) fn item_hover_card(theme: &Theme, width: f32) -> gpui::Stateful<gpui:
         .gap(px(8.0))
 }
 
+pub(crate) fn main_panel(theme: &Theme, main: AnyElement) -> AnyElement {
+    let main = if super::is_industrial(theme) {
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.industrial_colors().rule)
+            .bg(theme.bg)
+            .child(main)
+            .into_any_element()
+    } else {
+        main
+    };
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .overflow_hidden()
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.bg),
+        )
+        .when(super::is_industrial(theme), |el| {
+            el.p(px(8.0)).rounded(px(12.0)).bg(theme.surface)
+        })
+        .child(main)
+        .into_any_element()
+}
+
+pub(crate) fn sidebar_tone(theme: &Theme, width: f32, corner: f32) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(px(width))
+        .when(corner > 0.0, |el| {
+            if width >= 2.0 * corner {
+                el.rounded_tl(px(corner)).rounded_bl(px(corner))
+            } else {
+                el.top(px(corner)).bottom(px(corner))
+            }
+        })
+        .bg(crate::theme::wash(0.05))
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface),
+        )
+        .border_r_1()
+        .border_color(theme.border)
+}
+
+pub(crate) fn titlebar_overlay(theme: &Theme, title_bar: AnyElement) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface),
+        )
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
+                && !super::is_area(theme),
+            |el| el.border_b_1().border_color(theme.border),
+        )
+        .child(title_bar)
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(

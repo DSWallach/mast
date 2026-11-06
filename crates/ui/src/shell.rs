@@ -12578,7 +12578,6 @@ impl Render for Shell {
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let theme = Theme::of(cx).clone();
-                let border_color = theme.border;
                 // No inset cards (user request): the conversation column sits
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
@@ -12594,20 +12593,7 @@ impl Render for Shell {
                 } else {
                     main
                 };
-                let main = if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-                    div().flex_1().min_w_0().overflow_hidden().border_1()
-                        .border_color(theme.industrial_colors().rule).bg(theme.bg).child(main).into_any_element()
-                } else { main };
-                let card: AnyElement = div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .overflow_hidden()
-                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.bg))
-                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.p(px(8.0)).rounded(px(12.0)).bg(theme.surface))
-                    .child(main)
-                    .into_any_element();
+                let card = crate::components::shell_parts::main_panel(&theme, main);
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
                 // arriving from the splash or any gate fades the page in; the
@@ -12658,24 +12644,7 @@ impl Render for Shell {
                 // sliver vertically to where the curve begins, so its tips
                 // never float over the transparent corner cutouts.
                 let window_corner = Self::window_corner_radius(window);
-                let sidebar_tone = div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(sidebar_now))
-                    .when(window_corner > 0.0, |el| {
-                        if sidebar_now >= 2.0 * window_corner {
-                            el.rounded_tl(px(window_corner))
-                                .rounded_bl(px(window_corner))
-                        } else {
-                            el.top(px(window_corner)).bottom(px(window_corner))
-                        }
-                    })
-                    .bg(crate::theme::wash(0.05))
-                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-                    .border_r_1()
-                    .border_color(border_color);
+                let sidebar_tone = crate::components::shell_parts::sidebar_tone(&theme, sidebar_now, window_corner);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -12712,10 +12681,7 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
-                    .child(div().absolute().top_0().left_0().right_0()
-                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_b_1().border_color(theme.border))
-                        .child(title_bar))
+                    .child(crate::components::shell_parts::titlebar_overlay(&theme, title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
                 root.child(sidebar_tone)
