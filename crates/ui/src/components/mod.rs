@@ -534,3 +534,19 @@ pub fn agent_message_bubble(
         content
     }
 }
+
+/// Frame an existing input entity while retaining its focus and editing behavior.
+pub fn text_input(theme: &Theme, input: AnyElement) -> Div {
+    div()
+        .p(px(8.0))
+        .border_1()
+        .border_color(theme.border)
+        .when_some(theme.ui_style.radius_roles().control, |el, radius| {
+            el.rounded(px(radius))
+        })
+        .when(
+            theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+            |el| el.bg(theme.input_bg),
+        )
+        .child(input)
+}

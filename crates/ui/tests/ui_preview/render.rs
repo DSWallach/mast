@@ -62,7 +62,7 @@ impl Render for Controls {
                     .child(mast_ui::components::button(
                         "preview-secondary",
                         "Secondary",
-                        mast_ui::components::ButtonVariant::Secondary,
+                        mast_ui::components::ButtonVariant::Ghost,
                         mast_ui::components::ButtonSize::Md,
                         t,
                     ))
@@ -102,7 +102,7 @@ impl Render for Controls {
             )
             .child("Input")
             .child(
-                mast_ui::components::dialog_field(t, self.input.clone().into_any_element()).w(px(360.)),
+                mast_ui::components::text_input(t, self.input.clone().into_any_element()).w(px(360.)),
             )
     }
 }
