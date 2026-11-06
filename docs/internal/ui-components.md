@@ -1147,6 +1147,20 @@ row still needs a complete comparison with the normal row for project, branch,
 remote and other metadata. Remaining inline controls in the shell and its
 submodules are not yet inventoried or migrated; this slice is not complete.
 
+Additional Item/Team candidates on shell branch `731363824` (locations move as
+the migration proceeds):
+
+| Control | Location |
+| --- | --- |
+| Chat title, breadcrumb and breadcrumb buttons | `shell/chat_item_ui.rs:241`, `312`, `338` |
+| Attention badges | `shell/chat_item_ui.rs:370` |
+| Item accordion header and toggle | `shell/chat_item_ui.rs:736`, `742` |
+| Item links, path segments and identifier buttons | `shell/chat_item_ui.rs:815`, `1711`, `1745`, `1850`, `1937` |
+| Item team roll-up and open-Team action | `shell/team_ui.rs:218`, `236` |
+| Team row status, unseen badge, activity, report toggle and jump action | `shell/team_ui.rs:328`, `343`, `382`, `404`, `417`, `645` |
+| Team archive confirmation and show-archived toggle | `shell/team_ui.rs:690`, `773`, `816`, `842` |
+| Wake toggle chip and held-event delivery action | `shell/wake_ui.rs:194`, `273` |
+
 Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.

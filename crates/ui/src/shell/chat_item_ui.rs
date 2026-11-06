@@ -237,14 +237,7 @@ impl Shell {
         let admin_badge = self.render_admin_badge(&chat_id, "chat-header", theme, cx);
         let chips = self.render_header_chips(&facts, theme, cx);
         let menu_chat_id = chat_id.clone();
-        let title = div()
-            .debug_selector(|| "chat-header-title".into())
-            .min_w_0()
-            .truncate()
-            .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(15.0)))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text)
-            .child(SharedString::from(facts.title.clone()));
+        let title = crate::components::shell_parts::chat_header_title(theme, facts.title.clone());
         let stacked = crumbs.is_some();
         self.chat_header_extra_clearance = if stacked {
             CHAT_HEADER_STACKED_CLEARANCE

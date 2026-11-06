@@ -164,6 +164,19 @@ pub(crate) fn chat_header_frame(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         )
 }
 
+pub(crate) fn chat_header_title(theme: &Theme, title: String) -> gpui::Div {
+    div()
+        .debug_selector(|| "chat-header-title".into())
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.tokens.title_size.unwrap_or(15.0),
+        ))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(SharedString::from(title))
+}
+
 pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let menu = div()
         .id("chat-header-menu")
