@@ -427,6 +427,86 @@ pub fn outline_status_readout(label: &'static str, theme: &Theme) -> Option<Div>
     })
 }
 
+/// Item-details panel frame.
+pub fn outline_details_frame(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("work-item-details")
+        .debug_selector(|| "work-item-details".into())
+        .flex_none()
+        .w_full()
+        .h_full()
+        .flex()
+        .flex_col()
+        .border_l_1()
+        .border_color(theme.border)
+        .when(super::is_industrial(theme), |el| {
+            el.border_l_2().border_color(theme.industrial_colors().rule)
+        })
+        .bg(theme.surface)
+}
+
+/// Scrollable item-details body.
+pub fn outline_details_body(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("work-item-details-body")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(
+            theme.ui_style.tokens.grid.unwrap_or(12.0) * super::layout_spacing(theme)
+        ))
+        .px(px(if theme.ui_style.tokens.grid.is_some() {
+            16.0
+        } else {
+            14.0
+        }))
+        .py(px(
+            theme.ui_style.tokens.grid.unwrap_or(10.0) * super::layout_spacing(theme)
+        ))
+}
+
+/// Title in the item panel.
+pub fn outline_details_title(title: String, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("work-item-title")
+        .debug_selector(|| "work-item-title".into())
+        .cursor_text()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.tokens.title_size.unwrap_or(15.0) + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(SharedString::from(title))
+}
+
+/// Item section heading with a count.
+pub fn outline_list_heading(label: String, theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(SharedString::from(label))
+}
+
+/// Decorative Industrial panel marks.
+pub fn outline_panel_marks(theme: &Theme) -> Option<Div> {
+    super::is_industrial(theme).then(|| {
+        div().flex().gap(px(2.0)).children((0..5).map(|_| {
+            div()
+                .w(px(2.0))
+                .h(px(10.0))
+                .bg(theme.industrial_colors().rule)
+        }))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

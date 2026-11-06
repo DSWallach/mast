@@ -1274,19 +1274,8 @@ impl Render for WorkItemDetails {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         self.sync_skill_sources(cx);
-        let shell_frame = div()
-            .id("work-item-details")
-            .debug_selector(|| "work-item-details".into())
+        let shell_frame = crate::components::outline_details_frame(&theme)
             .track_focus(&self.focus)
-            .flex_none()
-            .w_full()
-            .h_full()
-            .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(theme.border)
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.border_l_2().border_color(theme.industrial_colors().rule))
-            .bg(theme.surface)
             .children(crate::ui_style::help_card("item-details", "Use item details to manage instructions, references, and work status.", &theme, cx))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key != "escape" {
@@ -1415,9 +1404,7 @@ impl Render for WorkItemDetails {
                     .text_color(theme.text_muted)
                     .children(crumbs),
             )
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                div().flex().gap(px(2.0)).children((0..5).map(|_| div().w(px(2.0)).h(px(10.0)).bg(theme.industrial_colors().rule)))
-            ))
+            .children(crate::components::outline_panel_marks(&theme))
             .child(close);
 
         let title: AnyElement = if self.editing_title {
@@ -1432,14 +1419,7 @@ impl Render for WorkItemDetails {
                 .child(crate::components::outline_input_frame(&self.title_input, &theme))
                 .into_any_element()
         } else {
-            div()
-                .id("work-item-title")
-                .debug_selector(|| "work-item-title".into())
-                .cursor_text()
-                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(15.0)))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(SharedString::from(item.title.clone()))
+            crate::components::outline_details_title(item.title.clone(), &theme)
                 .on_click(cx.listener(|this, _, window, cx| this.begin_title_edit(window, cx)))
                 .into_any_element()
         };
@@ -1715,15 +1695,7 @@ impl Render for WorkItemDetails {
                     .items_center()
                     .justify_between()
                     .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_muted)
-                            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
-                            .child(SharedString::from(format!(
-                                "Chats ({})",
-                                item.chat_ids.len()
-                            ))),
+                        crate::components::outline_list_heading(format!("Chats ({})", item.chat_ids.len()), &theme),
                     )
                     .child(
                         crate::work_outline::hints::details_button("work-item-associate-toggle", "Associate…", &theme)
@@ -1929,16 +1901,7 @@ impl Render for WorkItemDetails {
         let proposals = self.render_proposals_section(&snapshot, &theme, cx);
         let error = self.error.clone();
         shell_frame.child(header).child(
-            div()
-                .id("work-item-details-body")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(theme.ui_style.tokens.grid.unwrap_or(12.0)))
-                .px(px(if theme.ui_style.tokens.grid.is_some() { 16.0 } else { 14.0 }))
-                .py(px(theme.ui_style.tokens.grid.unwrap_or(10.0)))
+            crate::components::outline_details_body(&theme)
                 .child(title)
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))
