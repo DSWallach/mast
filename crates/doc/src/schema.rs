@@ -296,12 +296,17 @@ fn image_part(
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
+    /// Serializes local queue list operations; never held across an await.
+    pub(crate) queue_mutation: std::sync::Mutex<()>,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        Self {
+            doc,
+            queue_mutation: std::sync::Mutex::new(()),
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -311,7 +316,10 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self {
+            doc,
+            queue_mutation: std::sync::Mutex::new(()),
+        })
     }
 
     pub fn doc(&self) -> &LoroDoc {
