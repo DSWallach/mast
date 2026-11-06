@@ -14,7 +14,7 @@ Every Claude Code and Codex chat in a project gets the `mast-agent` MCP server. 
 - `work_outline_resolve_user_action_request` resolves a request a direct child raised.
 - `archive_chat` archives a worker once it is finished (see below).
 
-Workers cannot message their coordinator. They finish by raising a Required Action, and the coordinator finds it with `work_outline_read_subtree`.
+Workers can report back to their coordinator. They can also raise a Required Action, which the coordinator finds with `work_outline_read_subtree`.
 
 ## The Ready-to-merge flow
 
@@ -25,6 +25,10 @@ Workers cannot message their coordinator. They finish by raising a Required Acti
 5. Meanwhile the status light and Dock badge show you which chats are working and which need you. A **Ready to merge** action counts as ready, not as needing you.
 
 The merge step belongs to one chat. Say so in the instructions on the coordinator's item.
+
+## Hand off a coordinator
+
+When a coordinator has live workers, choose **Hand off to new chat…** from its chat menu or header overflow. Review the prefilled summary and worker list, choose whether to archive the source, and confirm. Mast selects the successor, transfers active workers and queued wakes, and links the old chat to the successor. The successor starts on the same item with the summary, workers and open requests.
 
 ## Archive finished workers
 
@@ -93,5 +97,3 @@ An admin chat can do what you can do in the app, across one Space, so it can reo
 3. Watch both appear under the item in the outline.
 4. When a worker raises **Ready to merge**, open the Required Actions list and read it.
 5. Ask the coordinator to merge it and resolve the action.
-
-<!-- TODO(Mikey): a recording of steps 2-4 (two workers appearing, the status light changing, the Ready to merge action) would make this page much clearer. -->

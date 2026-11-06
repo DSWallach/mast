@@ -18,4 +18,4 @@ delay for the [runway performance comparison](../../docs/internal/performance-ru
 
 `transcript-selection-stream.jsonl` is a synthetic short reply in six-character
 chunks. A 1200 ms replay delay leaves time to expand/collapse a long prompt and
-select live text. See the [native regression recordings](../../docs/transcript-selection-regressions.md).
+select live text. See the [native regression recordings](../../docs/internal/transcript-selection-regressions.md).

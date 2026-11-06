@@ -38,5 +38,3 @@ An options artifact shows alternatives. **Side by side** puts 2–4 of them in e
 3. Answer one in the card. Answer the other from Required Actions.
 4. Ask the agent to apply your answers and republish.
 5. Click the "Updated since you last viewed" chip and look at the compare view.
-
-<!-- TODO(Mikey): a screenshot of a plan with question cards, and one of the compare view with Highlight changes. -->
