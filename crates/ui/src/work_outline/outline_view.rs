@@ -2521,8 +2521,8 @@ impl OutlineView {
     // Rendering
     // ----------------------------------------------------------------------
 
-    fn row_height(compact: bool) -> f32 {
-        if compact { 24.0 } else { 28.0 }
+    fn row_height(compact: bool, tokens: crate::ui_style::StyleTokens) -> f32 {
+        (if compact { 24.0 } else { 28.0 }) + tokens.outline_row_delta
     }
 
     fn render_rows(
@@ -2662,7 +2662,7 @@ impl OutlineView {
         div()
             .id("outline-row-editor")
             .debug_selector(|| "outline-row-editor".into())
-            .h(px(Self::row_height(compact)))
+            .h(px(Self::row_height(compact, theme.ui_style.tokens)))
             .w_full()
             .flex()
             .items_center()
@@ -3196,7 +3196,7 @@ impl OutlineView {
         div()
             .id(SharedString::from(format!("outline-row-{key}")))
             .debug_selector(move || selector.clone())
-            .h(px(Self::row_height(compact)))
+            .h(px(Self::row_height(compact, theme.ui_style.tokens)))
             .w_full()
             .flex()
             .items_center()
@@ -4231,6 +4231,13 @@ mod tests {
     use super::super::store::fixture_ids::*;
     use super::super::store::fixture_snapshot;
     use super::*;
+
+    #[test]
+    fn minimal_outline_row_heights_match_existing_values() {
+        let tokens = crate::ui_style::UiStyle::MINIMAL.tokens;
+        assert_eq!(OutlineView::row_height(true, tokens), 24.0);
+        assert_eq!(OutlineView::row_height(false, tokens), 28.0);
+    }
 
     #[test]
     fn create_slot_follows_the_anchor() {

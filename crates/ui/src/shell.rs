@@ -873,11 +873,11 @@ pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f
         47.0 + metadata_height
     }
 }
-fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -> f32 {
+fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool, tokens: crate::ui_style::StyleTokens) -> f32 {
     if compact {
-        29.0
+        tokens.sidebar_row_compact_h
     } else {
-        chat_row_height(branch, pr) - if show_label { 0.0 } else { 16.0 }
+        chat_row_height(branch, pr) - (if show_label { 0.0 } else { 16.0 }) + tokens.sidebar_row_extra_h
     }
 }
 
@@ -7573,6 +7573,7 @@ impl Shell {
                 show_label,
                 branch.is_some(),
                 change_request.is_some(),
+                theme.ui_style.tokens,
             )))
             .flex()
             .flex_col()
@@ -12015,14 +12016,18 @@ fn nav_history_button(
 fn header_icon_button(
     id: &'static str,
     icon_path: &'static str,
+    label: &'static str,
+    labels_fit: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let muted = theme.text_muted;
+    let show_label = labels_fit && theme.ui_style.behavior.labels != crate::ui_style::LabelMode::IconOnly;
     let fade_key = format!("header-icon-{id}");
     div()
         .id(id)
-        .size(px(28.0))
+        .size(px(theme.ui_style.tokens.control_size))
+        .when(show_label, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
         .flex_none()
         .flex()
         .items_center()
@@ -12030,12 +12035,13 @@ fn header_icon_button(
         .rounded(px(6.0))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
-        .bg(motion::hover_blend(
-            &fade_key,
-            crate::theme::wash(0.0),
-            crate::theme::wash(0.11),
-        ))
-        .on_hover(motion::hover_listener(fade_key))
+        .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft, |el| {
+            el.bg(motion::hover_blend(&fade_key, crate::theme::wash(0.0), crate::theme::wash(0.11)))
+                .on_hover(motion::hover_listener(fade_key))
+        })
+        .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Instant, |el| {
+            el.hover(|el| el.bg(crate::theme::wash(0.11)))
+        })
         // Same occlusion + click-swallowing as [`window_control_button`]: this
         // button sits inside the chat header's titlebar drag region, so its
         // rect must be carved out of the strip's drag/double-click surface.
@@ -12045,7 +12051,8 @@ fn header_icon_button(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
-        .child(icon(icon_path).size(px(16.0)).text_color(muted))
+        .child(icon(icon_path).size(px(theme.ui_style.tokens.control_icon_size)).text_color(muted))
+        .when(show_label, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(muted).child(label)))
 }
 
 impl Render for Shell {
@@ -13718,6 +13725,40 @@ mod tests {
 
     fn keys(list: &[(&str, f32)]) -> Vec<(String, f32)> {
         list.iter().map(|(k, h)| (k.to_string(), *h)).collect()
+    }
+
+    #[gpui::test]
+    fn header_buttons_render_for_each_style(cx: &mut gpui::TestAppContext) {
+        struct StyleHost;
+        impl gpui::Render for StyleHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let styles = [crate::ui_style::UiStyle::MINIMAL, crate::ui_style::UiStyle::DENSE, crate::ui_style::UiStyle::GUIDED];
+                div().flex().children(styles.into_iter().enumerate().map(|(index, style)| {
+                    let theme = Theme::default().with_ui_style(style);
+                    let id = ["style-minimal", "style-dense", "style-guided"][index];
+                    header_icon_button(id, icons::PEN, "Rename", true, &theme, |_, _, _| {})
+                        .debug_selector(move || id.into())
+                }))
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| StyleHost);
+        vcx.update(|window, cx| window.draw(cx).clear());
+        for id in ["style-minimal", "style-dense", "style-guided"] {
+            assert!(vcx.debug_bounds(id).is_some());
+        }
+    }
+
+    #[test]
+    fn sidebar_style_metrics_preserve_minimal_and_keep_rows_positive() {
+        let minimal = crate::ui_style::UiStyle::MINIMAL.tokens;
+        assert_eq!(sidebar_row_height(true, true, false, false, minimal), 29.0);
+        assert_eq!(sidebar_row_height(false, true, false, false, minimal), 45.0);
+        assert_eq!(sidebar_row_height(false, false, true, false, minimal), 45.0);
+        for style in [crate::ui_style::UiStyle::MINIMAL, crate::ui_style::UiStyle::DENSE, crate::ui_style::UiStyle::GUIDED] {
+            let compact = sidebar_row_height(true, true, false, false, style.tokens);
+            let expanded = sidebar_row_height(false, true, false, false, style.tokens);
+            assert!(compact > 0.0 && compact < expanded);
+        }
     }
 
     #[test]

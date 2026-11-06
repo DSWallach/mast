@@ -3640,8 +3640,7 @@ impl GitHistory {
                 .border_color(color.opacity(0.32))
                 .bg(theme.bg.opacity(0.96))
                 .cursor_pointer()
-                .opacity(if collapsed { 1.0 } else { 0.0 })
-                .group_hover("history-graph-tip", |style| style.opacity(1.0))
+                .when(true, |el| crate::ui_style::reveal_on_hover(el, "history-graph-tip", theme.ui_style, collapsed))
                 .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -4240,8 +4239,7 @@ impl Render for GitHistory {
             .justify_center()
             .rounded(px(5.0))
             .cursor_pointer()
-            .opacity(0.0)
-            .group_hover("history-column-header", |style| style.opacity(1.0))
+            .when(true, |el| crate::ui_style::reveal_on_hover(el, "history-column-header", theme.ui_style, false))
             .when(self.column_menu.is_open(), |button| button.opacity(1.0))
             .hover(|style| style.bg(crate::theme::ink(0.08)))
             .on_mouse_down(

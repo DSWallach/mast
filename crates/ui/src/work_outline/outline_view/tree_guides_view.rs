@@ -177,7 +177,7 @@ impl OutlineView {
         }
         let highlights = self.guide_highlights();
         // The row's content box (inside its 1px border).
-        let height = Self::row_height(compact) - 2.0;
+        let height = Self::row_height(compact, theme.ui_style.tokens) - 2.0;
         let mid = (height / 2.0).floor();
         let base = if tree_guides::dim_guides(row) {
             theme.border.opacity(0.55)

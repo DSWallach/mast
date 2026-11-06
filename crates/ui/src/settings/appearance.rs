@@ -2994,6 +2994,60 @@ impl Render for AppearancePage {
             })
             .collect::<Vec<_>>();
 
+        let style_cards = [
+            (
+                crate::ui_style::UiStyleId::Minimal,
+                "Minimal",
+                "Current spacing",
+                4.0,
+            ),
+            (
+                crate::ui_style::UiStyleId::Dense,
+                "Dense",
+                "More on screen",
+                2.0,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, label, description, gap)| {
+            let preview = div()
+                .size_full()
+                .rounded(px(widgets::OPTION_CARD_RADIUS))
+                .bg(theme.surface)
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(gap))
+                .children((0..4).map(|_| {
+                    div()
+                        .h(px(12.0))
+                        .w_full()
+                        .rounded(px(3.0))
+                        .bg(theme.surface_raised)
+                }))
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(description),
+                )
+                .into_any_element();
+            widgets::option_card(
+                &theme,
+                icons::MONITOR,
+                label,
+                ui_settings.ui_style == id,
+                preview,
+            )
+            .id(SharedString::from(format!("style-{label}")))
+            .on_click(cx.listener(move |_, _, window, cx| {
+                crate::ui_style::set_style(id, window, cx);
+                cx.notify();
+            }))
+        })
+        .collect::<Vec<_>>();
+
         let mut theme_rows = Vec::new();
         for (index, appearance_kind) in [Appearance::Light, Appearance::Dark]
             .into_iter()
@@ -3463,6 +3517,15 @@ impl Render for AppearancePage {
                                     .gap(px(12.0))
                                     .child(widgets::field_label(&theme, "Appearance"))
                                     .child(widgets::option_card_row().children(cards)),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(24.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(12.0))
+                                    .child(widgets::field_label(&theme, "Style"))
+                                    .child(widgets::option_card_row().children(style_cards)),
                             )
                             .child(widgets::section_card(&theme).children(settings_rows))
                             .child(font_section)
