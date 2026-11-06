@@ -356,6 +356,9 @@ pub struct UserInputQuestion {
     pub options: Vec<String>,
     #[serde(default)]
     pub multi_select: bool,
+    /// Whether answers may include text outside the listed options.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_custom: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -390,9 +393,11 @@ pub fn validate_input_answers(
                 return Err(format!("answer for {} requires an option: {}", question.id, question.options.join(", ")));
             }
             for label in &mut answer.labels {
-                let option = question.options.iter().find(|option| option.eq_ignore_ascii_case(label))
-                    .ok_or_else(|| format!("invalid option {:?} for {}; options: {}", label, question.id, question.options.join(", ")))?;
-                *label = option.clone();
+                if let Some(option) = question.options.iter().find(|option| option.eq_ignore_ascii_case(label)) {
+                    *label = option.clone();
+                } else if !question.allow_custom || label.trim().is_empty() {
+                    return Err(format!("invalid option {:?} for {}; options: {}", label, question.id, question.options.join(", ")));
+                }
             }
         }
     }
@@ -746,6 +751,24 @@ mod generated_image_tests {
         assert_eq!(value["type"], "generatedImage");
         assert_eq!(value["mimeType"], "image/png");
         assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+    }
+}
+
+#[cfg(test)]
+mod input_answer_tests {
+    use super::*;
+
+    #[test]
+    fn custom_answers_require_explicit_permission() {
+        let mut question = UserInputQuestion {
+            id: "approval".into(), header: "Approval".into(), question: "Allow?".into(),
+            options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,
+        };
+        let mut answers = vec![UserInputAnswer { question_id: question.id.clone(), labels: vec!["custom".into()] }];
+        assert!(validate_input_answers(&[question.clone()], &mut answers).is_err());
+        question.allow_custom = true;
+        assert!(validate_input_answers(&[question], &mut answers).is_ok());
+        assert_eq!(answers[0].labels, ["custom"]);
     }
 }
 

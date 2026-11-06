@@ -1977,6 +1977,7 @@ fn elicitation_question(params: &Value) -> UserInputQuestion {
         .map(|schema| format!("\nRequested form: {schema}"))
         .unwrap_or_default();
     UserInputQuestion {
+        allow_custom: false,
         id: new_message_id(),
         header: "MCP server request".into(),
         question: format!("{server}: {message}{url}{schema}"),
@@ -2007,6 +2008,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                 if id.is_empty() { format!("q{ix}") } else { id }
             };
             let question = UserInputQuestion {
+                allow_custom: false,
                 id: new_message_id(),
                 header: {
                     let h = field(["header", "title", "label"]);
@@ -2129,6 +2131,7 @@ fn approval_question(
         question.push_str(&format!(" Reason: {reason}"));
     }
     UserInputQuestion {
+        allow_custom: false,
         id: new_message_id(),
         header: if from_subagent {
             format!("{header} (subagent)")
