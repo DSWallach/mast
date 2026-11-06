@@ -262,6 +262,12 @@ fn template_proposals_propagate_or_add_an_own_instruction() {
                 allow_stale: false, project_only, operation_id: op.into() },
         )).unwrap();
     };
+    let mut legacy = d.instruction_proposal(&default_target).unwrap().target;
+    legacy.rule_node_id = None;
+    d.commit(vec![super::super::Planned::update(super::super::user_actions::KIND_WORK_ITEM_INSTRUCTION_PROPOSALS, &default_target,
+        std::collections::BTreeMap::from([("target".into(), serde_json::json!(legacy))]))], &[]).unwrap();
+    approve(&mut d, default_target, "approve-legacy-root", "Review the project", false);
+    assert!(live_instructions(&snap(&d), &second).contains(&"Review the project".to_owned()));
     let edit = propose(&mut d, "proposal-edit", ProposalAction::Edit, Some(row.id.clone()), InstructionProposalTarget::default(), "Plan carefully");
     assert_eq!(d.instruction_proposal(&edit).unwrap().target.scope, ProposalTargetScope::ChildTemplate);
     assert_eq!(d.instruction_proposal(&edit).unwrap().instruction_id.as_deref(), Some("i-plan"));

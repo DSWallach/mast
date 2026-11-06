@@ -1227,10 +1227,15 @@ impl RegistryDoc {
         }
         let target = &proposal.target;
         let container = target.container_work_item_id.as_deref().ok_or_else(|| invalid("The proposal has no template container"))?;
-        let node_id = target.rule_node_id.as_deref().ok_or_else(|| invalid("The proposal has no template rule"))?;
         let mut template = self.live_item(container)?.container_template.ok_or_else(|| invalid("The child template no longer exists"))?;
+        let legacy_root = target.rule_node_id.is_none() && target.rule_node_path.is_empty()
+            && proposal.action == ProposalAction::Add
+            && target.work_item_id.as_deref().is_some_and(|id|
+                self.outline_tree(&proposal.space_id).parent.get(id).and_then(|parent| parent.as_deref()) == Some(container));
+        let node_id = target.rule_node_id.as_deref().or_else(|| legacy_root.then_some(template.root.id.as_str()))
+            .ok_or_else(|| invalid("The proposal's template rule cannot be resolved"))?.to_owned();
         let root_rule = template.root.id == node_id;
-        let node = find_mut(&mut template.root, node_id).ok_or_else(|| invalid("The template rule no longer exists"))?;
+        let node = find_mut(&mut template.root, &node_id).ok_or_else(|| invalid("The template rule no longer exists"))?;
         if proposal.action != ProposalAction::Add {
             let rule_id = target.rule_instruction_id.as_deref().ok_or_else(|| invalid("The proposal has no template instruction"))?;
             let current = node.instructions.iter().find(|i| i.id == rule_id).ok_or_else(|| invalid("The template instruction no longer exists"))?;

@@ -953,9 +953,16 @@ impl WorkItemDetails {
                     .map(|item| usize::from(node.id == target) + node.children.iter().map(|child| count_followers(snapshot, &item.id, child, target)).sum::<usize>())
                     .sum()
             }
+            let legacy_root = proposal.target.rule_node_id.is_none() && proposal.target.rule_node_path.is_empty()
+                && proposal.action == ProposalAction::Add
+                && proposal.target.work_item_id.as_deref().and_then(|id| snapshot.item(id))
+                    .is_some_and(|item| item.parent_work_item_id == proposal.target.container_work_item_id);
+            let rule = proposal.target.rule_node_id.as_deref().or_else(|| legacy_root.then(||
+                proposal.target.container_work_item_id.as_deref().and_then(|id| snapshot.item(id))
+                    .and_then(|item| item.container_template.as_ref()).map(|template| template.root.id.as_str())).flatten());
             let count = proposal.target.container_work_item_id.as_deref()
                 .and_then(|id| snapshot.item(id).map(|item| (id, item)))
-                .and_then(|(id, item)| item.container_template.as_ref().zip(proposal.target.rule_node_id.as_deref()).map(|(template, rule)| count_followers(snapshot, id, &template.root, rule)))
+                .and_then(|(id, item)| item.container_template.as_ref().zip(rule).map(|(template, rule)| count_followers(snapshot, id, &template.root, rule)))
                 .unwrap_or(0);
             let template_id = id.clone();
             let project_id = id.clone();
@@ -968,16 +975,22 @@ impl WorkItemDetails {
             let container = proposal.target.container_work_item_id.as_deref()
                 .and_then(|id| snapshot.item(id))
                 .map(|item| item.title.as_str()).unwrap_or("Unknown");
+            let applies = if rule.is_none() { "Template rule cannot be resolved; apply is unavailable".to_owned() }
+                else if legacy_root { "applies to the template root".to_owned() }
+                else { format!("applies to {count} items") };
+            let resolved = rule.is_some();
             return row.child(div().debug_selector(|| "child-template-proposal".into())
-                .child(SharedString::from(format!("For the {container} child template · applies to {count} items"))))
+                .child(div().debug_selector(move || if !resolved { "template-rule-unresolved".into() } else if legacy_root { "template-rule-root".into() } else { "template-rule-resolved".into() })
+                    .child(SharedString::from(format!("For the {container} child template · {applies}")))))
                 .child(body)
                 .child(div().flex().gap(px(6.0))
-                    .child(Self::small_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
+                    .when(rule.is_some(), |buttons| buttons.child(Self::small_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
                         .debug_selector({ let selector = format!("template-apply-{id}"); move || selector.clone() })
-                        .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&template_id, false, cx))))
+                        .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&template_id, false, cx)))))
+                    .when(rule.is_some(), |buttons| buttons
                     .child(Self::small_button(SharedString::from(format!("project-apply-{id}")), "This project only", theme)
                         .debug_selector({ let selector = format!("project-apply-{id}"); move || selector.clone() })
-                        .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&project_id, true, cx))))
+                        .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&project_id, true, cx)))))
                     .child(Self::small_button(SharedString::from(format!("template-dismiss-{id}")), "Dismiss", theme)
                         .on_click(cx.listener(move |this, _, _, cx| this.dismiss_proposal(&dismiss_id, cx)))))
                 .into_any_element();
