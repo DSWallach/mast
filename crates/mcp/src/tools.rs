@@ -305,7 +305,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::SET_STATUS,
-            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item with open requests fails. Defaults to your chat's item; descendants are also allowed.",
+            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item with open requests fails. Defaults to your chat's item; descendants are also allowed. Work item IDs accept unique prefixes of at least 6 characters.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -351,12 +351,12 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::GET_USER_ACTION_REQUEST,
-            description: "Read a request in your scope, including its kind and resolution outcome and values. Required: requestId.",
+            description: "Read a request in your scope, including its kind and resolution outcome and values. Required: requestId; a unique prefix of at least 6 characters is accepted.",
             input_schema: json!({"type": "object", "properties": {"requestId": {"type": "string"}}, "required": ["requestId"]}),
         },
         ToolDef {
             name: agent_tool_names::RESOLVE_USER_ACTION_REQUEST,
-            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Within your project you may also resolve requests of chats you did not create. When the user answered YOU in chat (not in Required Actions), use `answer_user_action_request` so their answer reaches the request's chat with provenance. Required: userActionRequestId. Optional: resolution (a note), outcome (done, superseded, declined), idempotencyKey (derived when omitted).",
+            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Within your project you may also resolve requests of chats you did not create. When the user answered YOU in chat (not in Required Actions), use `answer_user_action_request` so their answer reaches the request's chat with provenance. Required: userActionRequestId (a unique prefix of at least 6 characters is accepted). Optional: resolution (a note), outcome (done, superseded, declined), idempotencyKey (derived when omitted).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -370,7 +370,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::ANSWER_USER_ACTION_REQUEST,
-            description: "Carry the user's own answer to an open Required Action. When the user answers a request in YOUR chat (for example they tell you to go ahead), call this with the request id and the id of their message instead of relaying their wording with `send_message` (a relayed message is never accepted as approval). You pass only pointers: `userMessageId` must be a message the user typed in your own chat (find its id with `read_chat` on yourself), written after the request; assistant messages, messages from other agents, and Mast system or wake messages are refused. Mast delivers it to the request's origin chat as the user's own `Re: \"…\"` reply and resolves the request as the user's answer. Reaches requests of your own chat, chats you created, and items in your item's subtree or your project. Required: requestId, userMessageId, idempotencyKey.",
+            description: "Carry the user's own answer to an open Required Action. When the user answers a request in YOUR chat (for example they tell you to go ahead), call this with the request id and the id of their message instead of relaying their wording with `send_message` (a relayed message is never accepted as approval). You pass only pointers: `userMessageId` must be a message the user typed in your own chat (find its id with `read_chat` on yourself), written after the request; assistant messages, messages from other agents, and Mast system or wake messages are refused. Mast delivers it to the request's origin chat as the user's own `Re: \"…\"` reply and resolves the request as the user's answer. Reaches requests of your own chat, chats you created, and items in your item's subtree or your project. Required: requestId (a unique prefix of at least 6 characters is accepted), userMessageId, idempotencyKey.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4025,7 +4025,11 @@ mod tests {
             agent.call(name, json!({})).await.unwrap();
             assert_eq!(world.agent_calls(name).len(), 1);
         }
+        let request = work_outline_catalog().into_iter().find(|def| def.name == agent_tool_names::CREATE_USER_ACTION_REQUEST).unwrap();
+        assert!(request.description.contains("40 characters") && request.description.contains("120"));
         let definitions = friction_catalog();
+        let dismiss = definitions.iter().find(|def| def.name == agent_tool_names::DISMISS_FRICTION).unwrap();
+        assert_eq!(dismiss.input_schema["required"], json!(["id", "reason"]));
         assert_eq!(definitions[0].input_schema["properties"]["links"]["items"]["properties"]["target"]["oneOf"].as_array().unwrap().len(), 6);
     }
 

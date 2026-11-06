@@ -1142,7 +1142,7 @@ impl AgentToolsService {
             Ok(id) => Ok(id),
             Err(AgentToolError::Refused { ref message, .. }) if message.contains("not found") => {
                 let open = requests.iter().filter(|request| request.is_open()).map(|request| request.id.as_str()).collect::<Vec<_>>().join(", ");
-                Err(AgentToolError::invalid(format!("request not found; open requests in your scope: {}", if open.is_empty() { "(none)" } else { &open })))
+                Err(WorkOutlineError::new(mast_proto::work_outline::WorkOutlineErrorCode::NotFound, format!("request not found; open requests in your scope: {}", if open.is_empty() { "(none)" } else { &open })).into())
             }
             Err(error) => Err(error),
         }
@@ -1237,7 +1237,12 @@ impl AgentToolsService {
         if id.is_empty() || reason.is_empty() || reason.chars().count() > 1000 {
             return Err(AgentToolError::invalid("id and reason (at most 1000 characters) are required"));
         }
-        let orchestrator = self.workspace.read_chats().map_err(|error| AgentToolError::invalid(error.to_string()))?.iter().any(|chat| chat.space_id.as_deref() == Some(&context.grant.space_id) && chat.parent_chat_id.as_deref() == Some(&context.grant.chat_id));
+        let direct_children = self.workspace.read_chats().map_err(|error| AgentToolError::invalid(error.to_string()))?.iter().any(|chat| chat.space_id.as_deref() == Some(&context.grant.space_id) && chat.parent_chat_id.as_deref() == Some(&context.grant.chat_id));
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let project_workers = context.current_item_id().and_then(|item| snapshot.worker_destination_for(&item)).is_some_and(|destination| {
+            snapshot.assignments.iter().any(|assignment| assignment.chat_id != context.grant.chat_id && assignment.work_item_id.as_deref().is_some_and(|item| snapshot.is_within(destination, item)))
+        });
+        let orchestrator = direct_children || project_workers;
         if context.admin_space.as_deref() != Some(&context.grant.space_id) && !orchestrator {
             return Err(WorkOutlineError::unauthorized("Only orchestrator or admin chats may dismiss friction").into());
         }
@@ -1523,9 +1528,9 @@ impl AgentToolsService {
             let own_item = context.require_item("changing status")?;
             let snapshot = self.work_outline.snapshot(&context.grant.space_id);
             if !in_subtree(&snapshot, &own_item, &target) {
-                let allowed = snapshot.items.iter().filter(|item| in_subtree(&snapshot, &own_item, &item.id)).map(|item| format!("{} ({})", item.title, item.id)).collect::<Vec<_>>().join(", ");
-                let target_title = snapshot.item(&target).map(|item| item.title.as_str()).unwrap_or("unknown");
-                let own_title = snapshot.item(&own_item).map(|item| item.title.as_str()).unwrap_or("unknown");
+                let allowed = snapshot.items.iter().filter(|item| in_subtree(&snapshot, &own_item, &item.id)).map(|item| format!("{} ({})", item.title.replace(['\n', '\r'], " "), item.id)).collect::<Vec<_>>().join(", ");
+                let target_title = snapshot.item(&target).map(|item| item.title.replace(['\n', '\r'], " ")).unwrap_or_else(|| "unknown".into());
+                let own_title = snapshot.item(&own_item).map(|item| item.title.replace(['\n', '\r'], " ")).unwrap_or_else(|| "unknown".into());
                 return Err(WorkOutlineError::unauthorized(format!("Cannot change {target_title} ({target}); your item is {own_title} ({own_item}); allowed subtree: {allowed}")).into());
             }
         }
@@ -2649,6 +2654,15 @@ fn child_run_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifiers_require_unique_prefixes() {
+        let ids = ["abcdef111", "abcdef222", "123456789"];
+        assert_eq!(resolve_id("123456", ids.into_iter(), "request").unwrap(), "123456789");
+        let error = resolve_id("abcdef", ids.into_iter(), "request").unwrap_err().to_wire_message();
+        assert!(error.contains("ambiguous: matches abcdef111, abcdef222"), "{error}");
+        assert!(resolve_id("abcde", ids.into_iter(), "request").is_err());
+    }
 
     fn arc() -> Arc<AgentTokens> {
         AgentTokens::new()
