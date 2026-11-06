@@ -1211,7 +1211,7 @@ pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
         .py(px(6.0))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .bg(theme.text)
-        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.rounded_full().bg(theme.accent).border_1().border_color(theme.border).relative().child(div().absolute().left(px(5.0)).right(px(5.0)).bottom_0().h(px(2.0)).bg(crate::surface_chrome::key_ledge(theme))))
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.rounded(px(4.0)).bg(theme.accent).border_1().border_color(theme.border).shadow(vec![gpui::BoxShadow { color: crate::surface_chrome::key_ledge(theme), offset: gpui::point(px(0.0), px(2.0)), blur_radius: px(0.0), spread_radius: px(0.0), inset: false }]))
         .text_size(crate::typography::ui_rems(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { theme.on_accent } else { theme.on_solid })

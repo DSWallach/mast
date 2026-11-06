@@ -56,7 +56,7 @@ pub(super) fn toolbar_button(id: &'static str, label: &'static str, theme: &crat
                 .child(div().min_w_0().truncate().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label))
         })
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(TOOLBAR_BUTTON_RADIUS)))
-        .when(true, |element| crate::surface_chrome::segmented_key(element, theme, false))
+        .when(true, |element| crate::surface_chrome::icon_key(element, theme, false))
         .flex()
         .items_center()
         .justify_center()

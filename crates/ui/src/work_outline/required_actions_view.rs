@@ -1320,6 +1320,7 @@ impl RequiredActionsList {
                                 !busy,
                                 theme,
                             )
+                            .when(true, |el| crate::surface_chrome::confirm_key(el, theme))
                             .debug_selector({
                                 let selector = format!("required-actions-approve-{id}");
                                 move || selector.clone()

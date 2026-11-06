@@ -27,7 +27,7 @@ use mast_proto::work_outline_container_templates::{
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{AgentToolError, AgentToolErrorCode, AgentToolsService, CallContext, non_empty};
+use super::{AgentToolError, AgentToolErrorCode, AgentToolsService, CallContext, non_empty, resolve_id};
 
 /// Most steps (after `group` expansion) one call may carry.
 const MAX_STEPS: usize = 200;
@@ -99,7 +99,10 @@ impl Ctx<'_> {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| invalid(format!("unknown ref ${name}: define it with an earlier create/group step"))),
-            None => Ok(raw.to_owned()),
+            None => match resolve_id(raw, self.snapshot.items.iter().map(|item| item.id.as_str()), "work item") {
+                Err(AgentToolError::Refused { ref message, .. }) if message.contains("not found") => Ok(raw.to_owned()),
+                result => result,
+            },
         }
     }
 
@@ -560,7 +563,14 @@ fn build(ctx: &Ctx, step: &Map<String, Value>, op: &str) -> Result<Built, AgentT
             ))
         }
         "resolve_request" => {
-            let id = text(step, "requestId")?;
+            let raw = text(step, "requestId")?;
+            let id = match resolve_id(&raw, snap.user_action_requests.iter().map(|request| request.id.as_str()), "request") {
+                Err(AgentToolError::Refused { ref message, .. }) if message.contains("not found") => {
+                    let open = snap.user_action_requests.iter().filter(|request| request.is_open()).map(|request| request.id.as_str()).collect::<Vec<_>>().join(", ");
+                    return Err(invalid(format!("request not found; open requests in your scope: {}", if open.is_empty() { "(none)" } else { &open })));
+                }
+                result => result?,
+            };
             let about = snap
                 .user_action_requests
                 .iter()

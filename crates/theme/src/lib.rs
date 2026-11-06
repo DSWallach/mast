@@ -859,6 +859,7 @@ mod tests {
         for id in ["industrial-light", "industrial-dark"] {
             let variant = ThemeRegistry::builtin().variant(id).unwrap();
             assert_eq!(variant.accent.activity, signal);
+            assert_eq!(variant.colors.success, "#38d059".parse().unwrap());
             assert_ne!(variant.colors.danger, signal);
             assert!(variant.syntax.values().all(|color| *color != signal));
         }

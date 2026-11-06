@@ -90,6 +90,9 @@ impl Harness for HeldHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // Publish the prompt only after the completion receiver exists: tests
+        // use its appearance as the signal that the turn can be finished.
+        let mut finish = self.finish.subscribe();
         self.prompts.lock().unwrap().push(request.prompt.clone());
         self.requests.lock().unwrap().push(request.clone());
         if self.asks {
@@ -104,7 +107,6 @@ impl Harness for HeldHarness {
                 multi_select: false,
             }]);
         }
-        let mut finish = self.finish.subscribe();
         let mut steering = controls.steering;
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::Mock,
@@ -646,7 +648,7 @@ async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
 
     harness.finish.send(()).unwrap();
     wait_for(
-        || user_messages(&core).iter().any(|m| m == "first queued"),
+        || prompts.lock().unwrap().iter().any(|p| p == "first queued"),
         "first queued turn",
     )
     .await;
@@ -1146,6 +1148,31 @@ async fn concurrent_drains_release_one_message() {
         "the agent was handed exactly one prompt"
     );
 
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn append_during_drain_delivers_each_message_once() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host.queue_message(CHAT, "first", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "first turn").await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let host = core.doc_host.clone();
+    let append_barrier = barrier.clone();
+    let append = tokio::spawn(async move {
+        append_barrier.wait().await;
+        host.queue_message(CHAT, "second", Vec::new()).unwrap();
+    });
+    barrier.wait().await;
+    core.doc_host.drain_queue(&handle).await;
+    append.await.unwrap();
+    assert_eq!(queue_texts(&core), vec!["second"]);
+    harness.finish.send(()).unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 2, "second turn").await;
+    assert_eq!(*prompts.lock().unwrap(), vec!["first", "second"]);
+    assert!(queue_texts(&core).is_empty());
     let _ = harness.finish.send(());
     core.shutdown().await;
 }

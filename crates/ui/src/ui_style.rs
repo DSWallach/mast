@@ -100,6 +100,14 @@ pub enum ControlVariant {
     FlatOutline,
 }
 
+/// Conversation and composer presentation, independent of theme colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationVariant {
+    Standard,
+    Industrial,
+    Area,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusIndicator {
     Minimal,
@@ -154,6 +162,7 @@ pub struct UiStyle {
     pub behavior: StyleBehavior,
     pub surface: SurfaceModel,
     pub controls: ControlVariant,
+    pub conversation: ConversationVariant,
     pub status_indicator: StatusIndicator,
     pub font_preference: FontPreference,
 }
@@ -180,6 +189,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
@@ -215,6 +225,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
@@ -250,6 +261,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
@@ -282,6 +294,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::Opaque,
         controls: ControlVariant::Key,
+        conversation: ConversationVariant::Industrial,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
         behavior: StyleBehavior {
@@ -307,6 +320,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::Opaque,
         controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Area,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
         behavior: StyleBehavior {
@@ -433,6 +447,12 @@ pub fn help_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conversation_variants_keep_styles_independent() {
+        assert_eq!(UiStyle::MINIMAL.conversation, ConversationVariant::Standard);
+        assert_eq!(UiStyle::INDUSTRIAL.conversation, ConversationVariant::Industrial);
+        assert_eq!(UiStyle::AREA.conversation, ConversationVariant::Area);
+    }
     #[test]
     fn registry_has_unique_labels_and_round_trips() {
         let mut labels = std::collections::HashSet::new();

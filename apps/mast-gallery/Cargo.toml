@@ -10,6 +10,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 gpui-base.workspace = true
 mast-ui.workspace = true
+mast-theme.workspace = true
 mast-doc.workspace = true
 tempfile.workspace = true
 

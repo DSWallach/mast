@@ -305,7 +305,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::SET_STATUS,
-            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item with open requests fails. Defaults to your chat's item; descendants are also allowed.",
+            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item with open requests fails. Defaults to your chat's item; descendants are also allowed. Work item IDs accept unique prefixes of at least 6 characters.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -321,7 +321,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::CREATE_USER_ACTION_REQUEST,
-            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Use kind to distinguish ask, review, approve, choose, handoff (finished work), and notice (FYI); optional priority is blocking, normal, or fyi. Optional: kind, priority, options, links, facts, detail, dedupeKey, toolCallId. Options have an id, label, and optional detail. Links target artifact, file, diff, pr, chat, or https url; at most eight links and eight facts.",
+            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Use kind to distinguish ask, review, approve, choose, handoff (finished work), and notice (FYI); optional priority is blocking, normal, or fyi. Optional: kind, priority, options, links, facts, detail, dedupeKey, toolCallId. Options have an id, label, and optional detail. Links target artifact, file, diff, pr, chat, or https url; at most eight links and eight facts. Labels are limited to 40 characters and fact values to 120; longer text is truncated with a warning.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -351,12 +351,12 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::GET_USER_ACTION_REQUEST,
-            description: "Read a request in your scope, including its kind and resolution outcome and values. Required: requestId.",
+            description: "Read a request in your scope, including its kind and resolution outcome and values. Required: requestId; a unique prefix of at least 6 characters is accepted.",
             input_schema: json!({"type": "object", "properties": {"requestId": {"type": "string"}}, "required": ["requestId"]}),
         },
         ToolDef {
             name: agent_tool_names::RESOLVE_USER_ACTION_REQUEST,
-            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Within your project you may also resolve requests of chats you did not create. When the user answered YOU in chat (not in Required Actions), use `answer_user_action_request` so their answer reaches the request's chat with provenance. Required: userActionRequestId. Optional: resolution (a note), outcome (done, superseded, declined), idempotencyKey (derived when omitted).",
+            description: "Resolve a user action request your chat, or a chat it created (a child started with `create_chat`), raised once the user has answered, in chat or via a chat message starting `Re: \"…\"` from Required Actions' Reply & resolve, if it is still open (see `work_outline_read_current`). Do not leave answered requests open. Within your project you may also resolve requests of chats you did not create. When the user answered YOU in chat (not in Required Actions), use `answer_user_action_request` so their answer reaches the request's chat with provenance. Required: userActionRequestId (a unique prefix of at least 6 characters is accepted). Optional: resolution (a note), outcome (done, superseded, declined), idempotencyKey (derived when omitted).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -370,7 +370,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::ANSWER_USER_ACTION_REQUEST,
-            description: "Carry the user's own answer to an open Required Action. When the user answers a request in YOUR chat (for example they tell you to go ahead), call this with the request id and the id of their message instead of relaying their wording with `send_message` (a relayed message is never accepted as approval). You pass only pointers: `userMessageId` must be a message the user typed in your own chat (find its id with `read_chat` on yourself), written after the request; assistant messages, messages from other agents, and Mast system or wake messages are refused. Mast delivers it to the request's origin chat as the user's own `Re: \"…\"` reply and resolves the request as the user's answer. Reaches requests of your own chat, chats you created, and items in your item's subtree or your project. Required: requestId, userMessageId, idempotencyKey.",
+            description: "Carry the user's own answer to an open Required Action. When the user answers a request in YOUR chat (for example they tell you to go ahead), call this with the request id and the id of their message instead of relaying their wording with `send_message` (a relayed message is never accepted as approval). You pass only pointers: `userMessageId` must be a message the user typed in your own chat (find its id with `read_chat` on yourself), written after the request; assistant messages, messages from other agents, and Mast system or wake messages are refused. Mast delivers it to the request's origin chat as the user's own `Re: \"…\"` reply and resolves the request as the user's answer. Reaches requests of your own chat, chats you created, and items in your item's subtree or your project. Required: requestId (a unique prefix of at least 6 characters is accepted), userMessageId, idempotencyKey.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -564,6 +564,11 @@ fn friction_catalog() -> Vec<ToolDef> {
                 "since":{"type":"integer"}, "limit":{"type":"integer","minimum":1,"maximum":500}
             }}),
         },
+        ToolDef {
+            name: agent_tool_names::DISMISS_FRICTION,
+            description: "Dismiss a Space friction report with a reason, for orchestrator and admin chats.",
+            input_schema: json!({"type":"object", "properties": {"id":{"type":"string"}, "reason":{"type":"string","maxLength":1000}}, "required":["id","reason"]}),
+        },
     ]
 }
 
@@ -574,6 +579,7 @@ fn is_engine_agent_tool(name: &str) -> bool {
         || DIFF_TARGET_TOOLS.contains(&name)
         || name == agent_tool_names::REPORT_FRICTION
         || name == agent_tool_names::LIST_FRICTION
+        || name == agent_tool_names::DISMISS_FRICTION
         || name == agent_tool_names::HAND_OFF_ORCHESTRATOR
 }
 
@@ -4013,13 +4019,17 @@ mod tests {
         let world = Arc::new(World::default());
         let anonymous = tools(world.clone(), None);
         let agent = tools(world.clone(), Some(BETA_TOKEN));
-        for name in [agent_tool_names::REPORT_FRICTION, agent_tool_names::LIST_FRICTION] {
+        for name in [agent_tool_names::REPORT_FRICTION, agent_tool_names::LIST_FRICTION, agent_tool_names::DISMISS_FRICTION] {
             assert!(!anonymous.has(name));
             assert!(agent.has(name));
             agent.call(name, json!({})).await.unwrap();
             assert_eq!(world.agent_calls(name).len(), 1);
         }
+        let request = work_outline_catalog().into_iter().find(|def| def.name == agent_tool_names::CREATE_USER_ACTION_REQUEST).unwrap();
+        assert!(request.description.contains("40 characters") && request.description.contains("120"));
         let definitions = friction_catalog();
+        let dismiss = definitions.iter().find(|def| def.name == agent_tool_names::DISMISS_FRICTION).unwrap();
+        assert_eq!(dismiss.input_schema["required"], json!(["id", "reason"]));
         assert_eq!(definitions[0].input_schema["properties"]["links"]["items"]["properties"]["target"]["oneOf"].as_array().unwrap().len(), 6);
     }
 

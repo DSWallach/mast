@@ -18,13 +18,48 @@ pub(crate) fn key_ledge(theme: &Theme) -> gpui::Hsla {
 
 pub(crate) fn segmented_key<T: gpui::Styled + gpui::ParentElement>(element: T, theme: &Theme, active: bool) -> T {
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-        element.rounded_full()
+        element.rounded(px(4.0))
             .bg(if active { theme.industrial_colors().pressed } else { theme.industrial_colors().key })
-            .border_1().border_color(theme.industrial_colors().rule).relative()
-            .child(div().absolute().left(px(5.0)).right(px(5.0)).bottom_0().h(px(2.0)).bg(key_ledge(theme)))
+            .border_1().border_color(theme.industrial_colors().rule)
+            .shadow(vec![gpui::BoxShadow { color: key_ledge(theme), offset: gpui::point(px(0.0), px(2.0)), blur_radius: px(0.0), spread_radius: px(0.0), inset: false }])
     } else {
         element
     }
+}
+
+/// Circular key with a recessed inner ring for icon-only actions.
+pub(crate) fn icon_key<T: gpui::Styled + gpui::ParentElement + gpui::StatefulInteractiveElement>(element: T, theme: &Theme, signal: bool) -> T {
+    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+        let colors = theme.industrial_colors();
+        let fill = if signal { colors.signal } else { colors.key };
+        let ring = crate::theme::flatten(theme.text.opacity(0.18), fill);
+        let pressed = if signal { gpui::hsla(fill.h, fill.s, fill.l * 0.8, fill.a) } else { colors.pressed };
+        element.rounded_full().bg(fill).border_1().border_color(colors.rule).relative()
+            .active(move |style| style.bg(pressed))
+            .child(div().absolute().inset(px(3.0)).rounded_full().border_1().border_color(ring))
+    } else { element }
+}
+
+pub(crate) fn display(theme: &Theme) -> Div {
+    let background = if theme.appearance.is_dark() { theme.bg } else { theme.solid };
+    div().px(px(8.0)).py(px(3.0)).border_1().border_color(theme.industrial_colors().rule)
+        .bg(background).text_color(if theme.appearance.is_dark() { theme.text } else { theme.on_solid })
+        .font_family(theme.font_mono.clone()).text_size(crate::typography::ui_rems(10.0))
+}
+
+/// Low-contrast perforations for otherwise empty faceplate areas.
+pub(crate) fn grille(theme: &Theme) -> Div {
+    let color = theme.text.opacity(0.12);
+    div().flex().flex_col().gap(px(4.0)).children((0..6).map(move |_| {
+        div().flex().gap(px(4.0)).children((0..18).map(move |_| div().size(px(2.0)).rounded_full().bg(color)))
+    }))
+}
+
+pub(crate) fn confirm_key<T: gpui::Styled>(element: T, theme: &Theme) -> T {
+    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+        let fg = if crate::theme::contrast_ratio(theme.text, theme.success) >= crate::theme::contrast_ratio(theme.bg, theme.success) { theme.text } else { theme.bg };
+        element.bg(theme.success).text_color(fg).border_1().border_color(theme.industrial_colors().rule)
+    } else { element }
 }
 
 pub(crate) fn active_key_dot(theme: &Theme, active: bool) -> Option<Div> {

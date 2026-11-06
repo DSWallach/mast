@@ -140,6 +140,10 @@ impl SessionDoc {
 
     /// Append to the back of the queue.
     pub fn push_queued(&self, item: &QueuedMessage) -> Result<(), DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if item.id.trim().is_empty() {
             return Err(DocError::Schema("queued message id required".into()));
         }
@@ -158,6 +162,10 @@ impl SessionDoc {
     /// the back of the queue, so a failed "send now" doesn't demote the message
     /// the user just called urgent.
     pub fn insert_queued(&self, index: usize, item: &QueuedMessage) -> Result<(), DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if item.id.trim().is_empty() {
             return Err(DocError::Schema("queued message id required".into()));
         }
@@ -178,6 +186,10 @@ impl SessionDoc {
         if text.trim().is_empty() {
             return self.remove_queued(id);
         }
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -206,6 +218,10 @@ impl SessionDoc {
         id: &str,
         gate: Option<&QueueDeliveryGate>,
     ) -> Result<bool, DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -255,6 +271,10 @@ impl SessionDoc {
         if replacement.is_some_and(|text| text.trim().is_empty()) {
             return self.remove_queued(id);
         }
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -289,6 +309,10 @@ impl SessionDoc {
     /// Move a row to `to` (clamped to the queue's bounds). `false` when the row
     /// is missing or already sits there.
     pub fn move_queued(&self, id: &str, to: usize) -> Result<bool, DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(from) = index_of(&queue, id) else {
             return Ok(false);
@@ -304,6 +328,10 @@ impl SessionDoc {
 
     /// Drop a row. `false` when it was already gone (another device took it).
     pub fn remove_queued(&self, id: &str) -> Result<bool, DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -317,6 +345,10 @@ impl SessionDoc {
     /// `None` when it is already gone, which is the race we want: two devices
     /// popping the same row means exactly one of them gets it.
     pub fn take_queued(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(None);
@@ -345,6 +377,10 @@ impl SessionDoc {
         item: &QueuedMessage,
         instructions: Option<&mast_proto::InstructionRevisionPin>,
     ) -> Result<(), DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if item.id.trim().is_empty() {
             return Err(DocError::Schema("queued message id required".into()));
         }
@@ -383,6 +419,10 @@ impl SessionDoc {
         id: &str,
         instructions: &mast_proto::InstructionRevisionPin,
     ) -> Result<bool, DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -403,6 +443,10 @@ impl SessionDoc {
     /// then runs under its Execution Session's revision. `false` when there
     /// is no such row.
     pub fn clear_queued_instructions(&self, id: &str) -> Result<bool, DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -439,6 +483,10 @@ impl SessionDoc {
         id: &str,
         confirmed: bool,
     ) -> Result<bool, DocError> {
+        let _queue = self
+            .queue_mutation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -550,6 +598,33 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn append_waits_for_queue_removal() {
+        use std::sync::{Arc, Barrier};
+
+        let doc = Arc::new(super::SessionDoc::init("chat").unwrap());
+        doc.push_queued(&super::QueuedMessage::new("first", "first", "dev"))
+            .unwrap();
+        let guard = doc.queue_mutation.lock().unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_doc = doc.clone();
+        let worker_barrier = barrier.clone();
+        let worker = std::thread::spawn(move || {
+            worker_barrier.wait();
+            worker_doc.push_queued(&super::QueuedMessage::new("second", "second", "dev"))
+        });
+        barrier.wait();
+        // Model the drain's list removal while it holds the mutation lock.
+        doc.doc().get_movable_list("queue").delete(0, 1).unwrap();
+        doc.doc().commit();
+        drop(guard);
+        worker.join().unwrap().unwrap();
+        let rows = doc.read_queue().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "second");
+        assert_eq!(doc.take_queued("second").unwrap().unwrap().text, "second");
+        assert!(doc.take_queued("second").unwrap().is_none());
+    }
     use super::*;
 
     #[test]

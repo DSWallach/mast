@@ -14,6 +14,8 @@ struct Gallery {
     toggled: bool,
     menu_open: bool,
     tab: usize,
+    dark: bool,
+    themes: mast_theme::ThemeSelection,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,16 +44,48 @@ fn switch_style(id: ui_style::UiStyleId, window: &mut Window, cx: &mut App) {
     window.set_rem_size(px(typography::effective_rem_px(cx)));
 }
 
+#[cfg(test)]
 fn switch_appearance(mode: appearance::AppearanceMode, cx: &mut App) {
     let settings = settings::current(cx);
-    appearance::init(
-        mode,
-        settings.theme_selection,
-        settings.accent,
-        settings.surface,
-        cx,
-    );
+    apply_themes(mode, settings.theme_selection, cx);
+}
+
+fn apply_themes(mode: appearance::AppearanceMode, themes: mast_theme::ThemeSelection, cx: &mut App) {
+    let settings = settings::current(cx);
+    appearance::init(mode, themes, settings.accent, settings.surface, cx);
     cx.refresh_windows();
+}
+
+impl Gallery {
+    fn mode(&self) -> appearance::AppearanceMode {
+        if self.dark { appearance::AppearanceMode::Dark } else { appearance::AppearanceMode::Light }
+    }
+
+    fn set_dark(&mut self, dark: bool, cx: &mut App) {
+        self.dark = dark;
+        apply_themes(self.mode(), self.themes.clone(), cx);
+    }
+
+    /// Cycles the active appearance through every built-in theme variant.
+    fn cycle_theme(&mut self, cx: &mut App) {
+        let appearance = if self.dark { mast_theme::Appearance::Dark } else { mast_theme::Appearance::Light };
+        let ids: Vec<String> = mast_theme::ThemeRegistry::builtin()
+            .variants_for(appearance)
+            .map(|variant| variant.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self.themes.variant_id(appearance).to_owned();
+        let next = ids.iter().position(|id| *id == current).map_or(0, |ix| (ix + 1) % ids.len());
+        self.themes.set_variant(appearance, ids[next].clone());
+        apply_themes(self.mode(), self.themes.clone(), cx);
+    }
+
+    fn theme_label(&self) -> String {
+        let appearance = if self.dark { mast_theme::Appearance::Dark } else { mast_theme::Appearance::Light };
+        format!("Theme: {} (T)", self.themes.variant_id(appearance))
+    }
 }
 
 impl Render for Gallery {
@@ -73,10 +107,14 @@ impl Render for Gallery {
             .text_color(theme.text)
             .font_family(theme.font_sans.clone())
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
-                    "l" => switch_appearance(appearance::AppearanceMode::Light, cx),
-                    "d" => switch_appearance(appearance::AppearanceMode::Dark, cx),
+                    "l" => this.set_dark(false, cx),
+                    "d" => this.set_dark(true, cx),
+                    "t" => {
+                        this.cycle_theme(cx);
+                        cx.notify();
+                    }
                     key => {
                         let Some(index) = key.parse::<usize>().ok().filter(|n| (1..=9).contains(n))
                         else {
@@ -152,19 +190,25 @@ impl Render for Gallery {
                                 div()
                                     .id("light")
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        switch_appearance(appearance::AppearanceMode::Light, cx)
-                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_dark(false, cx)))
                                     .child("Light (L)"),
                             )
                             .child(
                                 div()
                                     .id("dark")
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        switch_appearance(appearance::AppearanceMode::Dark, cx)
-                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_dark(true, cx)))
                                     .child("Dark (D)"),
+                            )
+                            .child(
+                                div()
+                                    .id("theme-cycle")
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cycle_theme(cx);
+                                        cx.notify();
+                                    }))
+                                    .child(self.theme_label()),
                             ),
                     )
                     .when(self.story == Story::Chat, |el| {
@@ -349,6 +393,8 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
         toggled: false,
         menu_open: false,
         tab: 0,
+        dark: false,
+        themes: settings::current(cx).theme_selection,
     }
 }
 

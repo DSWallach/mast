@@ -8101,8 +8101,11 @@ impl Composer {
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
         let guided = theme.ui_style.id == crate::ui_style::UiStyleId::Guided;
-        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
-        let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
+        let (area, key) = match theme.ui_style.conversation {
+            crate::ui_style::ConversationVariant::Area => (true, false),
+            crate::ui_style::ConversationVariant::Industrial => (false, true),
+            crate::ui_style::ConversationVariant::Standard => (false, false),
+        };
         // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
@@ -8116,7 +8119,7 @@ impl Composer {
                 .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                 .bg(theme.text)
                 .when(area, |el| el.bg(theme.text_muted))
-                .when(key, |el| el.rounded_full().bg(theme.accent).border_b_2().border_color(theme.industrial_colors().key_ledge))
+                .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -8141,7 +8144,7 @@ impl Composer {
                     .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                     .bg(theme.text)
                     .when(area, |el| el.bg(theme.text_muted))
-                    .when(key, |el| el.rounded_full().bg(theme.accent).border_b_2().border_color(theme.industrial_colors().key_ledge))
+                    .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -8194,7 +8197,7 @@ impl Render for Composer {
         }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
-        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
+        let area = matches!(theme.ui_style.conversation, crate::ui_style::ConversationVariant::Area);
         let identity_key = self.pickers.read(cx).effective_harness(cx).map(|harness| format!("harness:{harness:?}")).unwrap_or_default();
         let identity = theme.identity_color(&identity_key);
         let identity_text = area.then(|| theme.identity_text(identity));
@@ -8687,6 +8690,7 @@ impl Render for Composer {
                 gpui::transparent_black(),
                 crate::theme::ink(0.10),
             ))
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| crate::surface_chrome::icon_key(el, &theme, false))
             .on_hover(motion::hover_listener("composer-attach"))
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
             .child(
@@ -8796,6 +8800,9 @@ impl Render for Composer {
             .relative()
             .left(px(model_offset))
             .opacity(if area { 1.0 } else { model_opacity })
+            .when(theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial, |el| el.child(
+                div().absolute().top(px(-8.0)).left(px(4.0)).right(px(4.0)).flex().justify_between().text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL").child("MODE")
+            ))
             .child(self.pickers.clone())
             .child(
                 gpui::canvas(
@@ -8836,7 +8843,8 @@ impl Render for Composer {
                     .text_color(theme.text_muted).cursor_pointer().child("+")
                     .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx)))))
         });
-        let body = if area {
+        let body = match theme.ui_style.conversation {
+        crate::ui_style::ConversationVariant::Area => {
             div().flex().flex_col()
                 .child(pill.h(px(pill_height)).overflow_hidden().flex().flex_col()
                     .children(comments_chip).children(skill_chips).children(appshot_strip).children(strip)
@@ -8846,7 +8854,8 @@ impl Render for Composer {
                         .text_color(theme.text_muted).child(attach).child("Attach"))
                     .child(send_button)
                     .child(div().absolute().right_0().top(px(4.0)).max_w(px(surface_width * 0.35)).children(area_picker)))
-        } else if expanded {
+        },
+        crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Industrial => if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
             // stationary bottom — constant screen-y through the morph, with
@@ -8974,7 +8983,7 @@ impl Render for Composer {
                                 .child(send_button),
                         ),
                 )
-        };
+        }};
         let new_thread_target_selectors = (new_thread_chrome_opacity > 0.0).then(|| {
             self.pickers.update(cx, |pickers, cx| {
                 pickers.render_new_thread_target_selectors(cx)

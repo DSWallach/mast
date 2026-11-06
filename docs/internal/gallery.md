@@ -5,7 +5,7 @@ with default settings in a temporary directory and does not bootstrap an engine.
 It does not load the installed app's settings or data. The temporary directory
 is removed when the process exits.
 
-Choose a style in the toolbar or press 1–9; press L or D for light or dark.
+Choose a style in the toolbar or press 1–9; press L or D for light or dark, and T to cycle through every built-in theme for that appearance (e.g. Industrial Light/Dark).
 The left rail selects the story. Controls uses Mast button, toggle, badge and
 menu primitives, the composer input, and a message badge. Chat mounts the real
 transcript and composer on an in-memory app state with fixture messages.

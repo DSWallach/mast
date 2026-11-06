@@ -379,6 +379,10 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
                     })
                 },
         )?;
+        mast_ui::snapshot::render_to_png(&format!("matrix-walkthrough-{name}"), size(px(900.), px(800.)), style, appearance, move |_, cx| {
+            Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
+            mast_ui::snapshot::walkthrough_fixture(cx)
+        })?;
         mast_ui::snapshot::render_to_png(&format!("matrix-hardware-{name}"), size(px(640.), px(300.)), style, appearance, move |_, cx| {
             Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
             cx.new(|_| HardwareFixture)
