@@ -1713,6 +1713,59 @@ pub fn outline_child_title(title: String, theme: &Theme) -> Div {
         .child(SharedString::from(title))
 }
 
+/// Selectable worker destination on a project.
+pub fn outline_destination_choice(
+    index: usize,
+    title: String,
+    selected: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    let choice = div()
+        .id(("work-item-worker-destination", index))
+        .px(px(6.0 * scale))
+        .py(px(scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(if selected { theme.accent } else { theme.border })
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if selected {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .hover(|el| el.bg(theme.element_hover));
+    crate::surface_chrome::segmented_key(choice, theme, selected)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(SharedString::from(title))
+}
+
+/// External reference row and link.
+pub fn outline_reference_row(theme: &Theme) -> Div {
+    div()
+        .h(px(22.0 * super::layout_spacing(theme)))
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(4.0 * super::layout_spacing(theme)))
+}
+pub fn outline_reference_link(index: usize, label: String, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(("work-item-reference", index))
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .child(SharedString::from(label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

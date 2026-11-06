@@ -803,17 +803,8 @@ impl WorkItemDetails {
     ) -> gpui::Div {
         let is_project = item.is_project;
         let mut section = crate::components::outline_detail_section(theme).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child("Project"),
-                )
+            crate::components::outline_detail_row(theme)
+                .child(crate::components::outline_list_heading("Project".into(), theme))
                 .child(
                     crate::work_outline::hints::details_button(
                         "work-item-project-toggle",
@@ -859,10 +850,7 @@ impl WorkItemDetails {
         }
         if !is_project {
             return section.child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child("Chats inside a project can create and read items anywhere in it."),
+                crate::components::outline_secondary_text("Chats inside a project can create and read items anywhere in it.".into(), theme),
             );
         }
         for element in self.render_template_review(item, theme, cx) {
@@ -877,22 +865,7 @@ impl WorkItemDetails {
             let selected = current.as_deref() == Some(child_id.as_str());
             let id = child_id.clone();
             buttons = buttons.child(
-                div()
-                    .id(("work-item-worker-destination", ix))
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(if selected { theme.accent } else { theme.border })
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(SharedString::from(child.title.clone()))
+                crate::components::outline_destination_choice(ix, child.title.clone(), selected, theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let next = (!selected).then(|| id.clone());
                         this.set_worker_destination(next, cx)
@@ -901,12 +874,7 @@ impl WorkItemDetails {
         }
         section = section
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(
-                        "Worker destination: where workers created by chats on this project go.",
-                    ),
+                crate::components::outline_secondary_text("Worker destination: where workers created by chats on this project go.".into(), theme),
             )
             .child(buttons);
         section
@@ -1741,27 +1709,14 @@ impl Render for WorkItemDetails {
                         format!("{} · {}", reference.provider, reference.url).into();
                     let url = reference.url.clone();
                     let id = reference.id.clone();
-                    div()
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(4.0))
+                    crate::components::outline_reference_row(&theme)
                         .child(
                             crate::icons::icon(crate::icons::GLOBAL)
                                 .size(px(10.0))
                                 .text_color(theme.text_faint),
                         )
                         .child(
-                            div()
-                                .id(("work-item-reference", ix))
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .cursor_pointer()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.accent)
-                                .child(SharedString::from(label))
+                            crate::components::outline_reference_link(ix, label, &theme)
                                 .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.open_reference(url.clone(), window, cx)
