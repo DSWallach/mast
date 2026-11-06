@@ -6,6 +6,7 @@
 //! panel itself (not a text field inside it) holds focus. Both do nothing for
 //! a chat without workers.
 use super::*;
+use crate::components::shell_parts::team_button;
 
 use crate::shell::chat_item_ui::{ChipTone, chip_palette};
 use crate::team::{
@@ -680,35 +681,6 @@ impl Shell {
 }
 
 /// Small text button used by the Team tab's archive controls.
-fn team_button(
-    theme: &Theme,
-    id: impl Into<String>,
-    label: String,
-    primary: bool,
-) -> gpui::Stateful<gpui::Div> {
-    let color = if primary {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
-    let id: String = id.into();
-    let selector = id.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .px(px(7.0))
-        .py(px(2.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(color)
-        .cursor_pointer()
-        .hover(|el| el.bg(color.opacity(0.12)))
-        .child(SharedString::from(label))
-}
-
 impl Shell {
     /// "Archive finished (N)", the N >= 3 suggestion, and the confirmation.
     fn render_team_archive_block(

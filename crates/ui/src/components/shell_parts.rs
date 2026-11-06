@@ -2,8 +2,8 @@
 
 use crate::{icons::icon, motion, theme::Theme};
 use gpui::{
-    AnyElement, App, IntoElement, MouseButton, SharedString, Window, WindowControlArea, div,
-    prelude::*, px,
+    AnyElement, App, Div, ElementId, IntoElement, MouseButton, SharedString, Window,
+    WindowControlArea, div, prelude::*, px,
 };
 
 pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
@@ -1108,4 +1108,107 @@ pub(crate) fn linux_caption_button(
                     style.text_color(hover_fg)
                 }),
         )
+}
+
+/// A section label: icon, then the name in small muted semibold caps.
+pub(crate) fn section_label(
+    theme: &Theme,
+    icon_path: &'static str,
+    label: &str,
+    icon_selector: String,
+) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .child(
+            div()
+                .debug_selector(move || icon_selector.clone())
+                .flex_none()
+                .child(
+                    crate::icons::icon(icon_path)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted),
+                ),
+        )
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(10.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted)
+                .when(super::is_industrial(theme), |el| {
+                    el.font_family(theme.font_mono.clone())
+                })
+                .child(SharedString::from(label.to_uppercase())),
+        )
+}
+
+pub(crate) fn team_button(
+    theme: &Theme,
+    id: impl Into<String>,
+    label: String,
+    primary: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let color = if primary {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+    let id: String = id.into();
+    let selector = id.clone();
+    let button = div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(|el| el.bg(color.opacity(0.12)))
+        .child(SharedString::from(label));
+    super::segmented_key(button, theme, primary)
+}
+
+pub(crate) fn interrupted_label(label: &'static str, count: usize, theme: &Theme) -> Div {
+    div()
+        .px(px(8.0))
+        .pt(px(4.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("{label} \u{b7} {count}")))
+}
+
+pub(crate) fn running_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    primary: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    let button = div()
+        .id(id)
+        .px(px(10.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .border_1()
+        .text_size(crate::typography::ui_rems(12.0));
+    let button = if primary {
+        button
+            .border_color(theme.accent)
+            .bg(theme.accent)
+            .text_color(theme.on_accent)
+    } else {
+        button
+            .border_color(theme.border_strong)
+            .hover(|el| el.bg(theme.glass_hover()))
+    }
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .child(SharedString::from(label));
+    super::segmented_key(button, theme, primary)
 }

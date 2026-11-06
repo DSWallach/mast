@@ -7,6 +7,7 @@
 //! the keyboard), and the facts come from the same state slices the old header
 //! already read, so the Shell's observer gating stays as it was.
 use super::*;
+use crate::components::shell_parts::section_label;
 
 use crate::chat_item::{CardTimer, ChatItemFacts, FactsInput, ItemSection, PathSegment, facts};
 use crate::work_outline::hints::{HintKey, WithHint};
@@ -60,36 +61,6 @@ fn section_icon(name: &str) -> &'static str {
         "work-item" => crate::icons::PLUS,
         _ => crate::icons::TAG,
     }
-}
-
-/// A section label: icon, then the name in small muted semibold caps.
-fn section_label(
-    theme: &Theme,
-    icon_path: &'static str,
-    label: &str,
-    icon_selector: String,
-) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(5.0))
-        .child(
-            div()
-                .debug_selector(move || icon_selector.clone())
-                .flex_none()
-                .child(
-                    crate::icons::icon(icon_path)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted),
-                ),
-        )
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(10.5))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .child(SharedString::from(label.to_uppercase())),
-        )
 }
 
 /// The Item tab's embedded Needs-you list (the Details panel's Required
