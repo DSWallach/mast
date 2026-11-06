@@ -87,6 +87,10 @@ pub(crate) enum DetailsEvent {
         space_id: String,
         item_id: String,
     },
+    OpenProposals {
+        space_id: String,
+        item_id: String,
+    },
     /// Start a Chat in this work item (Milestone 3).
     StartChat {
         space_id: String,

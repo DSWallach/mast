@@ -3434,6 +3434,33 @@ async fn an_admin_turn_is_audited_as_one_entry_and_undone_in_one_step() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn child_template_proposal_resolves_an_unlinked_direct_child() {
+    let rig = rig().await;
+    let container = create_item(&rig, "proposal-container", "Projects", None).await;
+    let child = create_item(&rig, "proposal-child", "Project", Some(&container)).await;
+    assign_chat(&rig, "proposal-chat", CHAT, &child).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "proposal-run", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    let missing = tool(&rig, token, "work_outline_propose_instruction", json!({
+        "target": "childTemplate", "text": "Rule", "idempotencyKey": "missing"
+    })).await.unwrap_err();
+    assert!(missing.contains("not a direct child of a template container"), "{missing}");
+    grant(&rig, CHAT, Some(3600), false).await;
+    admin(&rig, token, json!({ "idempotencyKey": "set-template", "steps": [
+        { "op": "template_set", "itemId": container, "template": { "root": {} } }
+    ]})).await.unwrap();
+    let result = tool(&rig, token, "work_outline_propose_instruction", json!({
+        "target": "childTemplate", "containerWorkItemId": container, "text": "Rule", "idempotencyKey": "proposal"
+    })).await.unwrap();
+    let snap = snapshot(&rig);
+    let proposal = snap.instruction_proposals.iter().find(|p| Some(p.id.as_str()) == result["proposalId"].as_str()).unwrap();
+    let root = &snap.item(&container).unwrap().container_template.as_ref().unwrap().root.id;
+    assert_eq!(proposal.target.rule_node_id.as_deref(), Some(root.as_str()));
+    assert_eq!(result["target"]["ruleNodeId"].as_str(), Some(root.as_str()));
+    assert_eq!(proposal.target.work_item_id.as_deref(), Some(child.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_admin_configures_a_container_template_and_applies_it_to_existing_items() {
     let rig = rig().await;
     let admin_item = create_item(&rig, "op-admin", "Admin work", None).await;

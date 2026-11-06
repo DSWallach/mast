@@ -548,6 +548,20 @@ impl WorkItemDetails {
             }
         }
         let mut section = div().flex().flex_col().gap(px(4.0)).child(header);
+        let proposals = super::super::required_actions::proposals_for(snapshot, Some(&item.id))
+            .filter(|proposal| proposal.target.scope == mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate
+                && proposal.target.container_work_item_id.as_deref() == Some(item.id.as_str())
+                && super::super::required_actions::is_pending(proposal))
+            .count();
+        if proposals > 0 {
+            section = section.child(
+                Self::small_button("work-item-template-proposals", "Review proposed instructions", theme)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.proposals_open = true;
+                        cx.notify();
+                    })),
+            );
+        }
         if state.has_rules && !editing {
             section = section.child(
                 div()
