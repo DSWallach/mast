@@ -601,11 +601,7 @@ impl WorkItemDetails {
             .partition(required_actions::is_pending);
         let open = self.proposals_open || self.proposal_review.is_some();
         let now = chrono::Utc::now();
-        let mut section = div()
-            .debug_selector(|| "work-item-proposals".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_proposal_section(theme)
             .child(
                 crate::components::outline_section_header(
                     "work-item-proposals-toggle",
@@ -627,30 +623,14 @@ impl WorkItemDetails {
         }
         if pending.is_empty() {
             section = section.child(
-                div()
-                    .pl(px(14.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_faint)
-                    .child("No pending proposals"),
+                crate::components::outline_section_message("No pending proposals".into(), theme.text_faint, theme),
             );
         }
         section = section.children(self.render_pending_proposal_groups(pending, snapshot, theme, cx));
         if !reviewed.is_empty() {
             let history_open = self.proposal_history_open;
             section = section.child(
-                div()
-                    .id("work-item-proposals-history-toggle")
-                    .debug_selector(|| "work-item-proposals-history-toggle".into())
-                    .pl(px(14.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.text_color(theme.text))
-                    .child(SharedString::from(format!(
-                        "{} History ({})",
-                        if history_open { "\u{25be}" } else { "\u{25b8}" },
-                        reviewed.len()
-                    )))
+                crate::components::outline_proposal_history(reviewed.len(), history_open, theme)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.proposal_history_open = !this.proposal_history_open;
                         cx.notify();
@@ -664,12 +644,8 @@ impl WorkItemDetails {
         }
         if let Some(error) = self.proposals_error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-proposals-error".into())
-                    .pl(px(14.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_section_message(error, theme.warning, theme)
+                    .debug_selector(|| "work-item-proposals-error".into()),
             );
         }
         Some(section.into_any_element())

@@ -1009,6 +1009,44 @@ pub fn outline_approval_card(selector: String, theme: &Theme) -> Div {
         })
 }
 
+/// Proposal section in item details.
+pub fn outline_proposal_section(theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "work-item-proposals".into())
+        .flex()
+        .flex_col()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+}
+
+/// Collapsed proposal history control.
+pub fn outline_proposal_history(count: usize, open: bool, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("work-item-proposals-history-toggle")
+        .debug_selector(|| "work-item-proposals-history-toggle".into())
+        .pl(px(14.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text))
+        .child(SharedString::from(format!(
+            "{} History ({count})",
+            if open { "▾" } else { "▸" }
+        )))
+}
+
+/// Indented explanation or error inside a details section.
+pub fn outline_section_message(text: String, color: gpui::Hsla, theme: &Theme) -> Div {
+    div()
+        .pl(px(14.0))
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(color)
+        .child(SharedString::from(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
