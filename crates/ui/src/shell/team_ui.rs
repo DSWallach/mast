@@ -134,28 +134,16 @@ impl Shell {
             .any(|chat| chat.id == chat_id && chat.archived)
         {
             col = col.child(
-                div()
-                    .debug_selector(|| "team-coordinator-archived".into())
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .child("Coordinator archived — hand off or unarchive"),
+                crate::components::shell_parts::team_notice(&theme, "team-coordinator-archived", "Coordinator archived — hand off or unarchive"),
             );
         }
         if team.is_empty() {
             col = col.child(
-                div()
-                    .debug_selector(|| "team-empty".into())
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .child("This chat has no workers."),
+                crate::components::shell_parts::team_notice(&theme, "team-empty", "This chat has no workers."),
             );
         } else {
             col = col.child(
-                div()
-                    .debug_selector(|| "team-rollup".into())
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                crate::components::shell_parts::team_rollup(&theme)
                     .child(Self::render_team_summary(&team, &theme, cx)),
             );
             col = col.child(self.render_team_wake_header(&chat_id, &theme, cx));
@@ -210,16 +198,7 @@ impl Shell {
             .flex_col()
             .gap(px(4.0))
             .child(
-                div()
-                    .id("chat-item-team-rollup")
-                    .debug_selector(|| "chat-item-team-rollup".into())
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .hover(|el| el.text_color(theme.accent))
-                    .flex().items_center().gap(px(4.0))
-                    .child("Team ·")
+                crate::components::shell_parts::item_team_rollup(theme)
                     .child(Self::render_team_summary(team, theme, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
@@ -228,16 +207,7 @@ impl Shell {
         }
         if team.live().count() > ITEM_TAB_WORKERS {
             block = block.child(
-                div()
-                    .id("chat-item-team-all")
-                    .debug_selector(|| "chat-item-team-all".into())
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.accent)
-                    .child(SharedString::from(format!(
-                        "All {} workers \u{2192} Team",
-                        team.live().count()
-                    )))
+                crate::components::shell_parts::item_team_all(theme, team.live().count())
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
         }

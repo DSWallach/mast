@@ -1408,6 +1408,50 @@ pub(crate) fn worker_title(theme: &Theme, title: String) -> gpui::Div {
         .child(SharedString::from(title))
 }
 
+pub(crate) fn team_notice(theme: &Theme, selector: &'static str, text: &'static str) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.into())
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text_faint)
+        .child(text)
+}
+
+pub(crate) fn team_rollup(theme: &Theme) -> gpui::Div {
+    div()
+        .debug_selector(|| "team-rollup".into())
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+}
+
+pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let row = div()
+        .id("chat-item-team-rollup")
+        .debug_selector(|| "chat-item-team-rollup".into())
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .hover(|el| el.text_color(theme.accent))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .child("Team ·")
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(row, theme, false)
+}
+
+pub(crate) fn item_team_all(theme: &Theme, count: usize) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("chat-item-team-all")
+        .debug_selector(|| "chat-item-team-all".into())
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.accent)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(SharedString::from(format!("All {count} workers → Team")))
+}
+
 pub(crate) fn worker_metadata(theme: &Theme, label: String, color: gpui::Hsla) -> gpui::Div {
     div()
         .flex_none()
