@@ -18,6 +18,14 @@ pub enum ButtonSize {
     Md,
 }
 
+fn layout_spacing(theme: &Theme) -> f32 {
+    match theme.ui_style.layout {
+        crate::ui_style::UiLayout::Minimal => 1.0,
+        crate::ui_style::UiLayout::Compact => 0.75,
+        crate::ui_style::UiLayout::Guided => 1.25,
+    }
+}
+
 /// A button without an event handler. Callers attach their action after building.
 pub fn button(
     id: impl Into<ElementId>,
@@ -256,13 +264,13 @@ pub fn field_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
 pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
     div()
         .px(px(20.0))
-        .py(px(14.0))
+        .py(px(14.0 * layout_spacing(theme)))
         .when(!first, |el| el.border_t_1().border_color(theme.border))
         .hover(|s| s.bg(ink(0.015)))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(14.0))
+        .gap(px(14.0 * layout_spacing(theme)))
 }
 
 /// A selectable row; selection uses the active theme's semantic role.
@@ -458,6 +466,16 @@ pub fn status_dot(theme: &Theme, status: Status) -> Div {
     div().size(px(7.0)).rounded_full().bg(color)
 }
 
+/// Status dot with the word revealed by the active layout.
+pub fn status_indicator(theme: &Theme, status: Status, label: &'static str) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .child(status_dot(theme, status))
+        .when(theme.ui_style.behavior.status_words, |el| el.child(label))
+}
+
 /// A single selectable segment. The caller owns selection and activation.
 pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div {
     let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area;
@@ -582,7 +600,7 @@ pub fn agent_message_bubble(
 /// Frame an existing input entity while retaining its focus and editing behavior.
 pub fn text_input(theme: &Theme, input: AnyElement) -> Div {
     div()
-        .p(px(8.0))
+        .p(px(8.0 * layout_spacing(theme)))
         .border_1()
         .border_color(theme.border)
         .when_some(theme.ui_style.radius_roles().control, |el, radius| {
@@ -614,7 +632,12 @@ pub fn icon_button(
         .items_center()
         .gap(px(4.0))
         .size(px(theme.ui_style.tokens.control_size))
-        .child(crate::icons::icon(icon).size(px(theme.ui_style.tokens.control_icon_size)));
+        .text_color(theme.text)
+        .child(
+            crate::icons::icon(icon)
+                .size(px(theme.ui_style.tokens.control_icon_size))
+                .text_color(theme.text),
+        );
     let control = icon_key(control, theme, false);
     control.when(labels, |el| el.w_auto().child(label))
 }

@@ -338,7 +338,9 @@ impl Render for ComponentMatrix {
                     14 => c::menu_row(&theme, true, format!("matrix-menu-{column}"))
                         .child("Menu")
                         .into_any_element(),
-                    15 => c::status_dot(&theme, c::Status::Success).into_any_element(),
+                    15 => {
+                        c::status_indicator(&theme, c::Status::Success, "Ready").into_any_element()
+                    }
                     16 => c::display(&theme).child("MODEL").into_any_element(),
                     17 => c::user_message_bubble(
                         &theme,
