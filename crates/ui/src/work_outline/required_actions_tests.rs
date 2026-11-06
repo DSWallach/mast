@@ -975,6 +975,32 @@ fn edit_proposal_shows_a_diff_and_accepts(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn space_proposal_chip_opens_container_proposals(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    snapshot.items.iter_mut().find(|item| item.id == LAUNCH).unwrap().container_template = Some(mast_proto::ContainerTemplate {
+        root: mast_proto::RuleNode { id: "root".into(), ..Default::default() }, ..Default::default()
+    });
+    let mut proposal = m4::proposal("space-template", "s1", Some(UI), CHAT_UI, "Rule");
+    proposal.target.scope = mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate;
+    proposal.target.container_work_item_id = Some(LAUNCH.into());
+    proposal.target.rule_node_id = Some("root".into());
+    snapshot.instruction_proposals = vec![proposal];
+    let (overview, _, vcx) = m4_overview(cx, dir.path(), snapshot, proposal_reply);
+    click(vcx, format!("outline-proposals-{}", row_key::space("s1")));
+    let details = overview.read_with(vcx, |o, _| o.work_item_details.clone().unwrap());
+    details.read_with(vcx, |d, _| assert!(d.proposals_open));
+    assert!(row_bounds(vcx, "work-item-proposal-space-template".into()).is_some());
+    click(vcx, "template-proposal-container-space-template".into());
+    let details = overview.read_with(vcx, |o, _| o.work_item_details.clone().unwrap());
+    details.read_with(vcx, |d, _| {
+        assert_eq!(d.item_id, LAUNCH);
+        assert!(d.proposals_open);
+    });
+    assert!(row_bounds(vcx, "work-item-proposal-space-template".into()).is_some());
+}
+
+#[gpui::test]
 fn legacy_template_proposal_only_enables_a_resolvable_root(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");

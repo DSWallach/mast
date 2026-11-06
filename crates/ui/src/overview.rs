@@ -6456,6 +6456,9 @@ impl Overview {
             DetailsEvent::OpenItem { space_id, item_id } => {
                 this.open_work_item_details(space_id.clone(), item_id.clone(), cx);
             }
+            DetailsEvent::OpenProposals { space_id, item_id } => {
+                this.open_proposals(space_id.clone(), item_id.clone(), cx);
+            }
             DetailsEvent::ReassociateChat {
                 space_id,
                 chat_id,

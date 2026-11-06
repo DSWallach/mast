@@ -979,9 +979,19 @@ impl WorkItemDetails {
                 else if legacy_root { "applies to the template root".to_owned() }
                 else { format!("applies to {count} items") };
             let resolved = rule.is_some();
+            let destination = proposal.target.container_work_item_id.clone()
+                .filter(|container| container != &self.item_id && snapshot.item(container).is_some());
+            let space_id = self.space_id.clone();
             return row.child(div().debug_selector(|| "child-template-proposal".into())
-                .child(div().debug_selector(move || if !resolved { "template-rule-unresolved".into() } else if legacy_root { "template-rule-root".into() } else { "template-rule-resolved".into() })
-                    .child(SharedString::from(format!("For the {container} child template · {applies}")))))
+                .child(div().id(SharedString::from(format!("template-proposal-container-{id}")))
+                    .child(div().debug_selector(move || if !resolved { "template-rule-unresolved".into() } else if legacy_root { "template-rule-root".into() } else { "template-rule-resolved".into() })
+                        .child(SharedString::from(format!("For the {container} child template · {applies}"))))
+                    .when_some(destination, |element, item_id| element
+                        .debug_selector({ let selector = format!("template-proposal-container-{id}"); move || selector.clone() })
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(DetailsEvent::OpenProposals {
+                            space_id: space_id.clone(), item_id: item_id.clone(),
+                        }))))))
                 .child(body)
                 .child(div().flex().gap(px(6.0))
                     .when(rule.is_some(), |buttons| buttons.child(Self::small_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
