@@ -2082,11 +2082,16 @@ impl AgentToolsService {
                 operation_id,
             });
         let reply = self.apply(context, &mutation)?;
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let resolved_target = snapshot.instruction_proposals.iter()
+            .find(|proposal| Some(&proposal.id) == reply.proposal_id.as_ref())
+            .map(|proposal| &proposal.target)
+            .ok_or_else(|| AgentToolError::invalid("The proposed instruction could not be read back"))?;
         Ok(json!({
             "proposalId": reply.proposal_id,
             "action": action.as_str(),
             "instructionId": instruction_id,
-            "target": target,
+            "target": resolved_target,
             "state": "pending",
             "note": "The user reviews the proposal; nothing changes until they accept it.",
         }))

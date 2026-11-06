@@ -392,7 +392,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::PROPOSE_INSTRUCTION,
-            description: "Propose an instruction change for user review. For edit/remove provide instructionId from work_outline_read_current. Template-linked instructions propose changes to their child template. For add, target childTemplate proposes a rule for following children; containerWorkItemId and ruleNodeId default to the template and node followed by your item. Alternatively, ruleNodePath is an array of child rule titles from the template root. Required: idempotencyKey, and text for add/edit.",
+            description: "Propose an instruction change for user review. For edit/remove provide instructionId from work_outline_read_current. Template-linked instructions propose changes to their child template. For add, target childTemplate defaults to the node followed by your item, or the template root for a direct child. If the template or node cannot be resolved, the call fails. Alternatively, ruleNodePath is an array of child rule titles from the template root. Required: idempotencyKey, and text for add/edit.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

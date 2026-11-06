@@ -996,8 +996,12 @@ impl RegistryDoc {
                     if p.space_id.as_ref().is_some_and(|space| *space != item.space_id) {
                         return Err(err(WorkOutlineErrorCode::CrossSpace, "The work item belongs to another Space"));
                     }
-                    let (container, followed_rule, followed) = self.followed_template_rule(&item.space_id, item_id)
-                        .ok_or_else(|| invalid("The item does not follow a child template"))?;
+                    let tree = self.outline_tree(&item.space_id);
+                    let direct_template = tree.parent.get(item_id).and_then(|parent| parent.as_ref())
+                        .and_then(|parent| tree.items.get(parent).and_then(|item| item.container_template.as_ref().map(|template| (parent.clone(), template.root.id.clone(), item_id.to_owned()))));
+                    let (container, followed_rule, followed) = direct_template
+                        .or_else(|| self.followed_template_rule(&item.space_id, item_id))
+                        .ok_or_else(|| invalid("The item does not follow a child template and is not a direct child of a template container"))?;
                     if p.target.container_work_item_id.as_deref().is_some_and(|id| id != container) {
                         return Err(invalid("The item does not follow the requested template"));
                     }
@@ -1015,7 +1019,6 @@ impl RegistryDoc {
                         node.id.clone()
                     } else { p.target.rule_node_id.clone().unwrap_or(followed_rule) };
                     if template.root.find(&rule_node).is_none() { return Err(invalid("Template rule not found")); }
-                    let tree = self.outline_tree(&item.space_id);
                     let root_of = |id: &str| -> Option<String> {
                         let mut current = id.to_owned();
                         loop {
@@ -1029,8 +1032,9 @@ impl RegistryDoc {
                         candidate.template_node_id.as_deref() == Some(rule_node.as_str())
                             && root_of(&candidate.id).as_deref() == Some(child_root.as_str())
                             && self.followed_template_rule(&item.space_id, &candidate.id).is_some_and(|(c, n, f)| c == container && n == rule_node && f == candidate.id)
-                    }).ok_or_else(|| invalid("This child does not follow the requested template rule"))?;
-                    (item.space_id, InstructionProposalTarget {
+                    }).or_else(|| (rule_node == template.root.id && child_root == item_id).then_some(&item))
+                        .ok_or_else(|| invalid("This child does not follow the requested template rule"))?;
+                    (item.space_id.clone(), InstructionProposalTarget {
                         scope: ProposalTargetScope::ChildTemplate,
                         work_item_id: Some(target_item.id.clone()),
                         container_work_item_id: Some(container),
@@ -1225,6 +1229,7 @@ impl RegistryDoc {
         let container = target.container_work_item_id.as_deref().ok_or_else(|| invalid("The proposal has no template container"))?;
         let node_id = target.rule_node_id.as_deref().ok_or_else(|| invalid("The proposal has no template rule"))?;
         let mut template = self.live_item(container)?.container_template.ok_or_else(|| invalid("The child template no longer exists"))?;
+        let root_rule = template.root.id == node_id;
         let node = find_mut(&mut template.root, node_id).ok_or_else(|| invalid("The template rule no longer exists"))?;
         if proposal.action != ProposalAction::Add {
             let rule_id = target.rule_instruction_id.as_deref().ok_or_else(|| invalid("The proposal has no template instruction"))?;
@@ -1235,7 +1240,10 @@ impl RegistryDoc {
         }
         let mut plan = if p.project_only {
             let item_id = target.work_item_id.as_deref().ok_or_else(|| invalid("The proposal has no followed item"))?;
-            if !self.followed_template_rule(&proposal.space_id, item_id).is_some_and(|(c, n, i)| c == container && n == node_id && i == item_id) {
+            let direct_root = proposal.action == ProposalAction::Add && root_rule
+                && self.outline_tree(&proposal.space_id).parent.get(item_id).and_then(|parent| parent.as_deref()) == Some(container)
+                && self.live_item(item_id).is_ok_and(|item| !item.archived());
+            if !direct_root && !self.followed_template_rule(&proposal.space_id, item_id).is_some_and(|(c, n, i)| c == container && n == node_id && i == item_id) {
                 return Err(invalid("The work item no longer follows this template rule"));
             }
             let source = checked_source(Some(&InstructionSource {
