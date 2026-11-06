@@ -1732,40 +1732,24 @@ pub(super) fn pr_link_row(
         );
     if title.is_some() && !repo_ref.is_empty() {
         row = row.child(
-            div()
-                .flex_none()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(repo_ref)),
+            crate::components::shell_parts::reference_label(theme, SharedString::from(repo_ref), theme.text_faint),
         );
     }
     if let Some(status) = pr.status {
         row = row.child(
-            div()
-                .debug_selector(selector("-state"))
-                .flex_none()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(chip::state_color(status.state, theme))
-                .child(chip::state_label(status.state)),
+            crate::components::shell_parts::reference_label(theme, chip::state_label(status.state).into(), chip::state_color(status.state, theme))
+                .debug_selector(selector("-state")),
         );
         if let Some(ci) = status.checks.filter(|ci| chip::ci_glyph(*ci).is_some()) {
             row = row.child(
-                div()
-                    .debug_selector(selector("-checks"))
-                    .flex_none()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(chip::ci_color(ci, theme)),
+                crate::components::shell_parts::reference_status_dot(chip::ci_color(ci, theme))
+                    .debug_selector(selector("-checks")),
             );
         }
         if let Some(label) = chip::review_decision_label(status.review) {
             row = row.child(
-                div()
-                    .debug_selector(selector("-review"))
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_muted)
-                    .child(label),
+                crate::components::shell_parts::reference_label(theme, label.into(), theme.text_muted)
+                    .debug_selector(selector("-review")),
             );
         }
     }
@@ -1798,11 +1782,7 @@ pub(super) fn ticket_link_row(
         .child(div().flex_1().min_w_0().truncate().child(text))
         .when_some(ticket.state.clone(), |el, state| {
             el.child(
-                div()
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(state)),
+                crate::components::shell_parts::reference_label(theme, SharedString::from(state), theme.text_muted),
             )
         })
 }

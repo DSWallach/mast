@@ -1503,6 +1503,21 @@ pub(crate) fn panel_reference_row(theme: &Theme, id: String) -> gpui::Stateful<g
         .hover(|el| el.bg(theme.element_hover))
 }
 
+pub(crate) fn reference_label(theme: &Theme, label: SharedString, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .flex_none()
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(color)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(label)
+}
+
+pub(crate) fn reference_status_dot(color: gpui::Hsla) -> gpui::Div {
+    div().flex_none().size(px(6.0)).rounded_full().bg(color)
+}
+
 pub(crate) fn wake_toggle(
     theme: &Theme,
     selector: String,
