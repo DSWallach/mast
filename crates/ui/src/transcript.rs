@@ -6330,14 +6330,9 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
-                    let mut bubble_theme = theme.clone();
-                    if matches!(conversation, crate::ui_style::ConversationVariant::Area) {
-                        bubble_theme.text = theme.identity_text(identity);
-                        bubble_theme.code_wash = bubble_theme.text;
-                        bubble_theme.code_text = identity;
-                    }
+                    let bubble_theme = crate::components::user_message_theme(&theme, identity);
                     let content = self.render_user_body(&row.id, ix, text, mentions, false, &bubble_theme, window, cx);
-                    let bubble = crate::components::user_message_bubble(
+                    let bubble = crate::components::conversation_user_bubble(
                         &theme, identity, self.content_width, USER_LINE_HEIGHT, pending, content,
                     );
                     column = column.child(div().w_full().flex().justify_end().child(bubble));
@@ -6345,11 +6340,7 @@ impl Transcript {
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
-                let mut theme = theme.clone();
-                if area {
-                    theme.font_sans = "EB Garamond".into();
-                    theme.text = theme.identity_foreground(identity);
-                }
+                let theme = crate::components::agent_message_theme(&theme, identity);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6384,11 +6375,7 @@ impl Transcript {
                 content
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
-                let mut theme = theme.clone();
-                if area {
-                    theme.font_sans = "EB Garamond".into();
-                    theme.text = theme.identity_foreground(identity);
-                }
+                let theme = crate::components::agent_message_theme(&theme, identity);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6677,10 +6664,7 @@ impl Transcript {
             // Keep side gutters as the configurable column shrinks to fit.
             .px(px(48.0))
             .child(
-                div()
-                    .w_full()
-                    .max_w(px(self.content_width))
-                    .min_w_0()
+                crate::components::conversation_column(&theme, self.content_width)
                     .child(inner)
                     .children(strip)
                     .children(trailer),

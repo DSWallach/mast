@@ -5,6 +5,11 @@ use crate::motion;
 use crate::theme::{Theme, hairline, ink};
 use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
+mod conversation_parts;
+pub use conversation_parts::{
+    agent_message_theme, conversation_column, conversation_user_bubble, user_message_theme,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonVariant {
     Primary,
