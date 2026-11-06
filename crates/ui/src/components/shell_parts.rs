@@ -2004,3 +2004,62 @@ mod tests {
         assert!(cx.debug_bounds("chat-status-test").is_some());
     }
 }
+
+pub(crate) fn action_segment(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h_full()
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .text_size(px(11.5))
+        .text_color(theme.text.opacity(0.9))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .hover(|style| style.bg(crate::theme::ink(0.07)))
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+}
+
+pub(crate) fn action_chevron(
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("project-actions-chevron")
+        .h_full()
+        .w(px(23.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_l_1()
+        .border_color(theme.border)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .cursor_pointer()
+        .hover(|style| style.bg(crate::theme::ink(0.07)))
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx)
+        })
+        .child(
+            icon(crate::icons::ALT_ARROW_DOWN)
+                .size(px(11.0))
+                .text_color(theme.text_muted),
+        )
+}
+
+pub(crate) fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
+    div()
+        .mt(px(12.0))
+        .mb(px(5.0))
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(SharedString::from(label.to_string()))
+}
