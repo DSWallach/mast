@@ -78,6 +78,7 @@ mod outside_file_ui;
 #[cfg(test)]
 mod perf_tests;
 mod pr_review_ui;
+mod review_ui;
 mod project_icon;
 mod required_actions_ui;
 mod menu_bar_ui;
@@ -612,6 +613,7 @@ pub enum Route {
     Overview,
     /// The PR page: dashboards plus the chats launched to review PRs.
     PrReviewChats,
+    Review,
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -638,6 +640,7 @@ pub enum RightSurface {
     File(u64),
     Browser(u64),
     Diff(u64),
+    Review,
     Terminal(u64),
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
     /// keys [`Shell::subagent_tabs`].
@@ -1608,7 +1611,7 @@ impl Render for SidebarPane {
             match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
                 // Overview keeps the normal chat sidebar.
-                Route::Chat | Route::Overview | Route::PrReviewChats => {
+                Route::Chat | Route::Overview | Route::PrReviewChats | Route::Review => {
                     shell.render_chat_sidebar(&theme, cx)
                 }
             }
@@ -1674,6 +1677,7 @@ pub struct Shell {
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
     diffs: std::collections::HashMap<u64, Entity<Changes>>,
+    review_hosts: std::collections::HashMap<String, (String, u32, Entity<crate::changes::walkthrough::ReviewHost>)>,
     /// One workspace browser per chat/panel key. Dropping the entity closes
     /// its file watcher and every in-flight workspace request.
     files: std::collections::HashMap<String, Entity<FilesSurface>>,
@@ -2177,6 +2181,7 @@ impl Shell {
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Overview => NavEntry::Overview,
             Route::PrReviewChats => NavEntry::PrReviewChats,
+            Route::Review => NavEntry::Chat(String::new()),
         });
         // Parent notifications carry presentation changes (session status,
         // elapsed labels, menus); sibling animation/caret ticks do not.
@@ -2239,6 +2244,7 @@ impl Shell {
             devices_page: None,
             overview_page: None,
             pr_review_chats_page: None,
+            review_hosts: Default::default(),
             pr_review_ops: Default::default(),
             #[cfg(test)]
             pr_review_script: None,
@@ -2983,7 +2989,7 @@ impl Shell {
             .as_ref()
             .map(|t| t.read(cx).tab_summaries(cx))
             .unwrap_or_default();
-        stored
+        let mut rows: Vec<_> = stored
             .iter()
             .filter_map(|surface| match surface {
                 RightSurface::File(id) => self.file_surfaces.get(id).map(|file| {
@@ -3024,9 +3030,13 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
-                RightSurface::Picker | RightSurface::Item | RightSurface::Team => None,
+                RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => None,
             })
-            .collect()
+            .collect();
+        if self.review_artifact(cx).is_some() {
+            rows.push((RightSurface::Review, "Review".into(), false, None));
+        }
+        rows
     }
 
     fn workspace_path_for_surface(
@@ -3039,6 +3049,7 @@ impl Shell {
             RightSurface::Picker
             | RightSurface::Item
             | RightSurface::Team
+            | RightSurface::Review
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
             | RightSurface::Subagent(_)
@@ -3144,7 +3155,7 @@ impl Shell {
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
             RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Artifact(_) => {}
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team => {}
+            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.sync_explorer_selection(cx);
         cx.notify();
@@ -4078,6 +4089,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if surface == RightSurface::Review {
+            return;
+        }
         let was_active = self.resolved_right_active(cx) == surface;
         let key = self.panel_key(cx);
         let files = match surface {
@@ -4128,7 +4142,7 @@ impl Shell {
                 }
             }
             RightSurface::Artifact(id) => self.close_artifact_tab(id, cx),
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team => {}
+            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.panels.update(&key, |p| {
             if p.right_active == surface {
@@ -4190,7 +4204,7 @@ impl Shell {
             return None;
         }
         match self.resolved_right_active(cx) {
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team => None,
+            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => None,
             surface => Some(surface),
         }
     }
@@ -6458,7 +6472,7 @@ impl Shell {
     /// and control cluster overlay its left end.
     fn render_title_bar(&mut self, viewport_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
-            Route::Chat => self.render_session_title_bar(viewport_height, cx),
+            Route::Chat | Route::Review => self.render_session_title_bar(viewport_height, cx),
             Route::Settings(_) => {
                 let inner = div()
                     .size_full()
@@ -9886,6 +9900,12 @@ impl Shell {
                 .into_any_element();
         }
 
+        if let Route::Review = self.route {
+            let outlet = self.render_review(true, cx);
+            return div().flex_1().min_w_0().h_full().pt(px(Theme::TITLEBAR_HEIGHT))
+                .child(outlet).into_any_element();
+        }
+
         let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let chat_header_metadata = has_selection
@@ -10556,6 +10576,7 @@ impl Shell {
                         .child(div().flex_1().min_h_0().child(changes))
                         .into_any_element()
                 }
+                RightSurface::Review => self.render_review(false, cx),
                 RightSurface::Item => self.render_item_tab(cx),
                 RightSurface::Team => self.render_team_tab(cx),
                 RightSurface::Browser(id) => self
@@ -10930,6 +10951,7 @@ impl Shell {
                         }
                     })
                     .unwrap_or(icons::LIST),
+                RightSurface::Review => icons::DOCUMENT,
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Artifact(id) => self
                     .artifact_tab(id)
@@ -11030,7 +11052,7 @@ impl Shell {
                         this.close_right_surface(surface, window, cx);
                     }),
                 )
-                .when(crate::click_activation_drag_enabled(), |el| {
+                .when(crate::click_activation_drag_enabled() && surface != RightSurface::Review, |el| {
                     el.on_drag(
                         RightTabDrag {
                             panel_key: self.panel_key(cx),
@@ -11063,10 +11085,10 @@ impl Shell {
                             window.prevent_default();
                             cx.stop_propagation();
                         })
-                        .on_click(cx.listener(move |this, _, window, cx| {
+                        .when(surface != RightSurface::Review, |el| el.on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_right_surface(surface, window, cx);
-                        }))
+                        })))
                         .child(
                             div()
                                 .absolute()
@@ -11074,7 +11096,7 @@ impl Shell {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .group_hover(group.clone(), |s| s.opacity(0.0))
+                                .when(surface != RightSurface::Review, |s| s.group_hover(group.clone(), |s| s.opacity(0.0)))
                                 .child(if subagent_running {
                                     loaders::mini_glyph_spinner(
                                         format!("subagent-tab-{ix}"),
@@ -11115,7 +11137,7 @@ impl Shell {
                                 .items_center()
                                 .justify_center()
                                 .opacity(0.0)
-                                .group_hover(group.clone(), |s| s.opacity(1.0))
+                                .when(surface != RightSurface::Review, |s| s.group_hover(group.clone(), |s| s.opacity(1.0)))
                                 .child(
                                     icon(icons::CLOSE)
                                         .size(px(12.0))

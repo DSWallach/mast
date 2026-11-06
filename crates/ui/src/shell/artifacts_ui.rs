@@ -451,6 +451,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_surface_is_chat_scoped_and_shared_with_full_width(cx: &mut gpui::TestAppContext) {
+        let dir = init_ui(cx);
+        let mut review = artifact(&id(1), "Review", ArtifactKind::Review);
+        review.space_id = "s1".into();
+        review.chat_id = Some("c1".into());
+        let content = r#"{"schema":"mast.review/v1","pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},"summary":"Summary","steps":[],"highlights":[],"questions":[],"suggestedComments":[]}"#;
+        let reply: Reply = Arc::new(move |_, _| Ok(content_reply(ArtifactKind::Review, 1, content, ArtifactContentEncoding::Utf8)));
+        let (shell, _, _, vcx) = artifact_shell(cx, dir.path(), vec![review], reply);
+        shell.update(vcx, |shell, cx| {
+            assert!(shell.right_surface_rows(cx).iter().any(|row| row.0 == RightSurface::Review));
+            let pane = shell.review_host(cx).unwrap();
+            shell.route = Route::Review;
+            let full = shell.review_host(cx).unwrap();
+            assert_eq!(pane.entity_id(), full.entity_id());
+            shell.active_chat = "other".into();
+            assert!(!shell.right_surface_rows(cx).iter().any(|row| row.0 == RightSurface::Review));
+            shell.active_chat = "c1".into();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("review-progress").is_some());
+    }
+
+    #[gpui::test]
     fn artifact_links_open_a_tab_by_id_and_register_unknown_paths(cx: &mut gpui::TestAppContext) {
         let dir = init_ui(cx);
         let mut plan = artifact(&id(1), "Plan", ArtifactKind::Markdown);

@@ -400,7 +400,7 @@ fn file_matches_filter(file: &FileDiff, query: &str) -> bool {
 }
 
 impl Changes {
-    fn jump_to_file(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn jump_to_file(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(file) = self
             .parsed
             .as_ref()
@@ -431,6 +431,15 @@ impl Changes {
             });
         }
         cx.notify();
+    }
+
+    pub(super) fn jump_to_hunk(&mut self, file: usize, hunk: usize, cx: &mut Context<Self>) {
+        self.jump_to_file(file, cx);
+        if let Some(row) = self.rows.iter().position(|row| {
+            *row == DiffRow::HunkHeader { file: file as u32, hunk: hunk as u32 }
+        }) {
+            self.list.scroll_to(gpui::ListOffset { item_ix: row, offset_in_item: px(0.0) });
+        }
     }
 
     pub(super) fn render_file_list(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
