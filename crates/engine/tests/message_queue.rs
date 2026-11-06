@@ -1152,6 +1152,31 @@ async fn concurrent_drains_release_one_message() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn append_during_drain_delivers_each_message_once() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host.queue_message(CHAT, "first", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "first turn").await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let host = core.doc_host.clone();
+    let append_barrier = barrier.clone();
+    let append = tokio::spawn(async move {
+        append_barrier.wait().await;
+        host.queue_message(CHAT, "second", Vec::new()).unwrap();
+    });
+    barrier.wait().await;
+    core.doc_host.drain_queue(&handle).await;
+    append.await.unwrap();
+    assert_eq!(queue_texts(&core), vec!["second"]);
+    harness.finish.send(()).unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 2, "second turn").await;
+    assert_eq!(*prompts.lock().unwrap(), vec!["first", "second"]);
+    assert!(queue_texts(&core).is_empty());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// An agent parked on a question still owns the turn. The composer queues on
 /// that state, so the drain has to hold there too — reading `AwaitingInput` as
 /// idle sends the follow-up as a fresh turn and abandons the question.
