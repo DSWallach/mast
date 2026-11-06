@@ -1353,3 +1353,58 @@ pub fn conversation_answer_button(
         .hover(|style| style.bg(color.opacity(0.2)))
         .child(label)
 }
+
+pub fn conversation_tool_patch_header(
+    file: &crate::changes::FileDiff,
+    theme: &Theme,
+    height: f32,
+    text_size: f32,
+) -> AnyElement {
+    div()
+        .h(px(height))
+        .w_full()
+        .min_w_0()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .px(px(8.0))
+        .border_b_1()
+        .border_color(crate::theme::hairline(0.07))
+        .bg(crate::theme::ink(0.025))
+        .font_family(theme.font_sans_fixed.clone())
+        .text_size(px(text_size))
+        .child(
+            crate::file_icons::icon(
+                crate::file_icons::FileIconIdentity::file(&file.path),
+                theme.appearance,
+            )
+            .size(px(14.0))
+            .flex_none(),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_color(theme.text.opacity(0.9))
+                .child(SharedString::from(file.path.clone())),
+        )
+        .when(file.additions > 0, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_color(theme.success)
+                    .child(SharedString::from(format!("+{}", file.additions))),
+            )
+        })
+        .when(file.deletions > 0, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_color(theme.danger)
+                    .child(SharedString::from(format!("−{}", file.deletions))),
+            )
+        })
+        .into_any_element()
+}
