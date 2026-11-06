@@ -287,7 +287,7 @@ fn industrial(dark: bool) -> ThemeVariant {
             "#1d1f1c",
             "#f5f3ed",
             "#bcbdb6",
-            "#777970",
+            "#4a4c46",
             ANSI_DARK,
         )
     } else {

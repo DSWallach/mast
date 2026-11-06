@@ -4091,6 +4091,7 @@ impl Render for OutlineView {
         div()
             .id("work-outline")
             .relative()
+            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
             .debug_selector(|| "work-outline".into())
             .track_focus(&self.focus)
             .when(!editing, |el| el.key_context(KEY_CONTEXT))

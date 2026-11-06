@@ -12682,7 +12682,8 @@ impl Render for Shell {
                 let files_panel = self.render_files_panel(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
-                let border_color = Theme::of(cx).border;
+                let theme = Theme::of(cx).clone();
+                let border_color = theme.border;
                 // No inset cards (user request): the conversation column sits
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
@@ -12704,6 +12705,7 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
+                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.bg))
                     .child(main)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
@@ -12771,6 +12773,7 @@ impl Render for Shell {
                         }
                     })
                     .bg(crate::theme::wash(0.05))
+                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
                     .border_r_1()
                     .border_color(border_color);
                 // The content row spans the FULL window height — the titlebar
@@ -12809,7 +12812,9 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
-                    .child(div().absolute().top_0().left_0().right_0().child(title_bar))
+                    .child(div().absolute().top_0().left_0().right_0()
+                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_b_1().border_color(theme.border))
+                        .child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
                 root.child(sidebar_tone)
