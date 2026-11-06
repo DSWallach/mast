@@ -7,7 +7,7 @@
 //! Overview's side pane, I interrupts, →/← unfold/fold, Esc closes.
 use super::*;
 use crate::components::shell_parts::{interrupted_label, running_button};
-use gpui::{Div, ElementId, ScrollHandle, point};
+use gpui::{ScrollHandle, point};
 
 use crate::build_watch::{self, BuildStamp, Pending, RestartAction, RestartPlan, RestartState};
 use crate::running_chats::{self, Entry, Input, Row, RunState, Section, SectionKind, Snapshot};

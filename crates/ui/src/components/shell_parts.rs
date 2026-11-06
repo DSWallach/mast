@@ -1212,3 +1212,65 @@ pub(crate) fn running_button(
     .child(SharedString::from(label));
     super::segmented_key(button, theme, primary)
 }
+
+/// Persistent copy-identity button beside the titlebar's chat name. The text
+/// label and quiet border make the action discoverable without hover; it is
+/// kept outside the title's overflow clipping above. Like
+/// [`header_icon_button`], it is occluded out of the drag strip and swallows
+/// the click. The label flips to `Copied` with the icon while `copied`.
+pub(crate) fn chat_identity_button(
+    copied: bool,
+    label: &'static str,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let fade_key = "chat-identity-copy".to_string();
+    div()
+        .id("chat-identity-copy")
+        .h(px(22.0))
+        .px(px(6.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .bg(motion::hover_blend(
+            &fade_key,
+            crate::theme::wash(0.05),
+            crate::theme::wash(0.13),
+        ))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(true, |el| super::segmented_key(el, theme, false))
+        .on_hover(motion::hover_listener(fade_key))
+        .occlude()
+        .role(gpui::Role::Button)
+        .aria_label(if copied {
+            "Chat name and IDs copied"
+        } else {
+            "Copy chat name and IDs"
+        })
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx)
+        })
+        .child(
+            icon(if copied {
+                crate::icons::CHECK
+            } else {
+                crate::icons::COPY
+            })
+            .size(px(12.0))
+            .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(10.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(label)),
+        )
+}
