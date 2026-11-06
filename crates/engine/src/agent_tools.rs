@@ -1492,6 +1492,16 @@ impl AgentToolsService {
             Some(id) => self.resolve_work_item_id(context, &id)?,
             None => context.require_item("changing status")?,
         };
+        if context.admin_space.is_none() {
+            let own_item = context.require_item("changing status")?;
+            let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+            if !in_subtree(&snapshot, &own_item, &target) {
+                let allowed = snapshot.items.iter().filter(|item| in_subtree(&snapshot, &own_item, &item.id)).map(|item| format!("{} ({})", item.title, item.id)).collect::<Vec<_>>().join(", ");
+                let target_title = snapshot.item(&target).map(|item| item.title.as_str()).unwrap_or("unknown");
+                let own_title = snapshot.item(&own_item).map(|item| item.title.as_str()).unwrap_or("unknown");
+                return Err(WorkOutlineError::unauthorized(format!("Cannot change {target_title} ({target}); your item is {own_title} ({own_item}); allowed subtree: {allowed}")).into());
+            }
+        }
         let waiting_changed = !args.waiting_until.is_unchanged() || !args.waiting_reason.is_unchanged();
         if status.is_none() && !waiting_changed {
             return Err(AgentToolError::invalid("Provide status or waitingUntil"));
