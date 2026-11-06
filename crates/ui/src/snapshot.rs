@@ -5,7 +5,7 @@ use gpui::{App, AppContext, Entity, HeadlessAppContext, Pixels, Render, Size, Wi
 
 use crate::{
     theme::{Appearance, Theme},
-    ui_style::{self, UiStyleId},
+    ui_style::{self, UiLayout, UiStyleId},
 };
 
 /// Render a fixture into `$CARGO_TARGET_DIR/snapshots/<name>.png`.
@@ -17,6 +17,18 @@ pub fn render_to_png<V: Render + 'static>(
     name: &str,
     size: Size<Pixels>,
     style: UiStyleId,
+    appearance: Appearance,
+    build_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+) -> anyhow::Result<PathBuf> {
+    render_to_png_with_layout(name, size, style, UiLayout::Minimal, appearance, build_view)
+}
+
+/// Render a fixture with an independently selected layout.
+pub fn render_to_png_with_layout<V: Render + 'static>(
+    name: &str,
+    size: Size<Pixels>,
+    style: UiStyleId,
+    layout: UiLayout,
     appearance: Appearance,
     build_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> anyhow::Result<PathBuf> {
@@ -35,7 +47,7 @@ pub fn render_to_png<V: Render + 'static>(
     );
     cx.update(|cx| {
         gpui_base::init(cx);
-        ui_style::init(style, cx);
+        ui_style::init_with_layout(style, layout, cx);
         Theme::install(appearance, cx);
     });
     let window = cx.open_window(size, build_view)?;

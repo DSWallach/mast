@@ -6,49 +6,31 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum UiStyleId {
     #[default]
-    Minimal,
-    Dense,
-    Guided,
+    Default,
     Industrial,
     Area,
 }
 
 impl UiStyleId {
-    pub const ALL: &'static [Self] = &[
-        Self::Minimal,
-        Self::Dense,
-        Self::Guided,
-        Self::Industrial,
-        Self::Area,
-    ];
-
+    pub const ALL: &'static [Self] = &[Self::Default, Self::Industrial, Self::Area];
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Minimal => "Minimal",
-            Self::Dense => "Dense",
-            Self::Guided => "Guided",
+            Self::Default => "Default",
             Self::Industrial => "Industrial",
             Self::Area => "Area",
         }
     }
-
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Minimal => "Current spacing",
-            Self::Dense => "More on screen",
-            Self::Guided => "More labels and guidance",
+            Self::Default => "Standard controls",
             Self::Industrial => "Instrument panel",
             Self::Area => "Character conversation",
         }
     }
-
     pub const fn preview_gap(self) -> f32 {
         match self {
-            Self::Minimal => 4.0,
-            Self::Dense => 2.0,
-            Self::Guided => 6.0,
-            Self::Industrial => 8.0,
-            Self::Area => 8.0,
+            Self::Default => 4.0,
+            Self::Industrial | Self::Area => 8.0,
         }
     }
 }
@@ -56,12 +38,31 @@ impl UiStyleId {
 impl<'de> Deserialize<'de> for UiStyleId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match String::deserialize(deserializer)?.as_str() {
-            "dense" => Self::Dense,
-            "guided" => Self::Guided,
             "industrial" => Self::Industrial,
             "area" => Self::Area,
-            _ => Self::Minimal,
+            _ => Self::Default,
         })
+    }
+}
+
+/// Density and guidance are independent of the visual style.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLayout {
+    #[default]
+    Minimal,
+    Compact,
+    Guided,
+}
+
+impl UiLayout {
+    pub const ALL: &'static [Self] = &[Self::Minimal, Self::Compact, Self::Guided];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Minimal => "Minimal",
+            Self::Compact => "Compact",
+            Self::Guided => "Guided",
+        }
     }
 }
 
@@ -158,6 +159,7 @@ pub struct StyleBehavior {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiStyle {
     pub id: UiStyleId,
+    pub layout: UiLayout,
     pub tokens: StyleTokens,
     pub behavior: StyleBehavior,
     pub surface: SurfaceModel,
@@ -169,7 +171,8 @@ pub struct UiStyle {
 
 impl UiStyle {
     pub const MINIMAL: Self = Self {
-        id: UiStyleId::Minimal,
+        id: UiStyleId::Default,
+        layout: UiLayout::Minimal,
         tokens: StyleTokens {
             type_scale: 1.0,
             sidebar_row_compact_h: 29.0,
@@ -205,7 +208,8 @@ impl UiStyle {
         },
     };
     pub const DENSE: Self = Self {
-        id: UiStyleId::Dense,
+        id: UiStyleId::Default,
+        layout: UiLayout::Compact,
         tokens: StyleTokens {
             type_scale: 0.9375,
             sidebar_row_compact_h: 22.0,
@@ -241,7 +245,8 @@ impl UiStyle {
         },
     };
     pub const GUIDED: Self = Self {
-        id: UiStyleId::Guided,
+        id: UiStyleId::Default,
+        layout: UiLayout::Guided,
         tokens: StyleTokens {
             type_scale: 1.0,
             sidebar_row_compact_h: 29.0,
@@ -278,6 +283,7 @@ impl UiStyle {
     };
     pub const INDUSTRIAL: Self = Self {
         id: UiStyleId::Industrial,
+        layout: UiLayout::Minimal,
         tokens: StyleTokens {
             sidebar_row_compact_h: 32.0,
             control_size: 32.0,
@@ -304,6 +310,7 @@ impl UiStyle {
     };
     pub const AREA: Self = Self {
         id: UiStyleId::Area,
+        layout: UiLayout::Minimal,
         tokens: StyleTokens {
             sidebar_row_compact_h: 36.0,
             control_size: 36.0,
@@ -330,12 +337,29 @@ impl UiStyle {
     };
     pub const fn of(id: UiStyleId) -> Self {
         match id {
-            UiStyleId::Minimal => Self::MINIMAL,
-            UiStyleId::Dense => Self::DENSE,
-            UiStyleId::Guided => Self::GUIDED,
+            UiStyleId::Default => Self::MINIMAL,
             UiStyleId::Industrial => Self::INDUSTRIAL,
             UiStyleId::Area => Self::AREA,
         }
+    }
+
+    /// Combine the look with independently selected density and guidance.
+    pub const fn resolve(id: UiStyleId, layout: UiLayout) -> Self {
+        let mut style = Self::of(id);
+        let layout_style = match layout {
+            UiLayout::Minimal => return style,
+            UiLayout::Compact => Self::DENSE,
+            UiLayout::Guided => Self::GUIDED,
+        };
+        style.layout = layout;
+        style.tokens.type_scale = layout_style.tokens.type_scale;
+        style.tokens.sidebar_row_compact_h = layout_style.tokens.sidebar_row_compact_h;
+        style.tokens.sidebar_row_extra_h = layout_style.tokens.sidebar_row_extra_h;
+        style.tokens.outline_row_delta = layout_style.tokens.outline_row_delta;
+        style.tokens.control_size = layout_style.tokens.control_size;
+        style.tokens.control_icon_size = layout_style.tokens.control_icon_size;
+        style.behavior = layout_style.behavior;
+        style
     }
 }
 
@@ -356,33 +380,64 @@ pub fn reveal_on_hover<T: gpui::Styled + gpui::InteractiveElement>(
     }
 }
 
-struct UiStyleState(UiStyleId);
+struct UiStyleState(UiStyleId, UiLayout);
 impl gpui::Global for UiStyleState {}
 
 pub fn init(id: UiStyleId, cx: &mut gpui::App) {
-    cx.set_global(UiStyleState(id));
+    cx.set_global(UiStyleState(id, UiLayout::Minimal));
 }
 
 /// Change the presentation style without saving device settings.
 pub fn set_style_in_memory(id: UiStyleId, cx: &mut gpui::App) {
-    cx.set_global(UiStyleState(id));
+    let layout = cx
+        .try_global::<UiStyleState>()
+        .map(|state| state.1)
+        .unwrap_or_default();
+    cx.set_global(UiStyleState(id, layout));
     crate::typography::reinstall_theme(cx);
     cx.refresh_windows();
 }
 
+/// Change layout without saving device settings (used by the gallery).
+pub fn set_layout_in_memory(layout: UiLayout, cx: &mut gpui::App) {
+    let id = current(cx).id;
+    cx.set_global(UiStyleState(id, layout));
+    crate::typography::reinstall_theme(cx);
+    cx.refresh_windows();
+}
+
+pub fn init_with_layout(id: UiStyleId, layout: UiLayout, cx: &mut gpui::App) {
+    cx.set_global(UiStyleState(id, layout));
+}
+
 pub fn current(cx: &gpui::App) -> UiStyle {
-    UiStyle::of(
-        cx.try_global::<UiStyleState>()
-            .map(|state| state.0)
-            .unwrap_or_default(),
-    )
+    let (id, layout) = cx
+        .try_global::<UiStyleState>()
+        .map(|state| (state.0, state.1))
+        .unwrap_or_default();
+    UiStyle::resolve(id, layout)
+}
+
+pub fn set_layout(layout: UiLayout, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
+    let style = current(cx);
+    if style.layout == layout {
+        return false;
+    }
+    cx.set_global(UiStyleState(style.id, layout));
+    window.set_rem_size(gpui::px(crate::typography::effective_rem_px(cx)));
+    crate::typography::reinstall_theme(cx);
+    crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+        settings.ui_layout = layout
+    });
+    cx.refresh_windows();
+    true
 }
 
 pub fn set_style(id: UiStyleId, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
     if current(cx).id == id {
         return false;
     }
-    cx.set_global(UiStyleState(id));
+    cx.set_global(UiStyleState(id, current(cx).layout));
     window.set_rem_size(gpui::px(crate::typography::effective_rem_px(cx)));
     crate::typography::reinstall_theme(cx);
     window.set_background_appearance(crate::theme::Theme::of(cx).window_background_appearance());
@@ -448,9 +503,61 @@ pub fn help_card(
 mod tests {
     use super::*;
     #[test]
+    fn each_layout_preserves_each_style_look() {
+        for &id in UiStyleId::ALL {
+            let look = UiStyle::of(id);
+            for &layout in UiLayout::ALL {
+                let resolved = UiStyle::resolve(id, layout);
+                assert_eq!(resolved.id, id);
+                assert_eq!(resolved.layout, layout);
+                assert_eq!(resolved.controls, look.controls);
+                assert_eq!(resolved.conversation, look.conversation);
+                assert_eq!(resolved.tokens.panel_radius, look.tokens.panel_radius);
+                assert_eq!(
+                    resolved.behavior.labels,
+                    match layout {
+                        UiLayout::Minimal => LabelMode::IconOnly,
+                        UiLayout::Compact => LabelMode::Primary,
+                        UiLayout::Guided => LabelMode::All,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_settings_migrate_and_explicit_layout_wins() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = crate::settings::UiSettings::path(directory.path());
+        for (legacy, style, layout) in [
+            ("minimal", UiStyleId::Default, UiLayout::Minimal),
+            ("dense", UiStyleId::Default, UiLayout::Compact),
+            ("guided", UiStyleId::Default, UiLayout::Guided),
+            ("industrial", UiStyleId::Industrial, UiLayout::Minimal),
+            ("area", UiStyleId::Area, UiLayout::Minimal),
+        ] {
+            std::fs::write(&path, format!(r#"{{"uiStyle":"{legacy}"}}"#)).unwrap();
+            let settings = crate::settings::UiSettings::load(directory.path());
+            assert_eq!((settings.ui_style, settings.ui_layout), (style, layout));
+            std::fs::write(
+                &path,
+                format!(r#"{{"uiStyle":"{legacy}","uiLayout":"guided"}}"#),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::settings::UiSettings::load(directory.path()).ui_layout,
+                UiLayout::Guided
+            );
+        }
+    }
+
+    #[test]
     fn conversation_variants_keep_styles_independent() {
         assert_eq!(UiStyle::MINIMAL.conversation, ConversationVariant::Standard);
-        assert_eq!(UiStyle::INDUSTRIAL.conversation, ConversationVariant::Industrial);
+        assert_eq!(
+            UiStyle::INDUSTRIAL.conversation,
+            ConversationVariant::Industrial
+        );
         assert_eq!(UiStyle::AREA.conversation, ConversationVariant::Area);
     }
     #[test]
@@ -479,7 +586,7 @@ mod tests {
         let (_, vcx) = cx.add_window_view(|_, _| Host);
         vcx.update(|_, cx| {
             crate::settings::init(Default::default(), directory.path(), cx);
-            init(UiStyleId::Minimal, cx);
+            init(UiStyleId::Default, cx);
             crate::appearance::init(
                 crate::appearance::AppearanceMode::Light,
                 mast_theme::ThemeSelection {
@@ -502,13 +609,16 @@ mod tests {
                 "github-light"
             );
             set_style(UiStyleId::Area, window, cx);
-            assert_eq!(crate::theme::Theme::of(cx).variant_id.as_ref(), "github-light");
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "github-light"
+            );
             crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
             assert_eq!(
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
                 "github-dark"
             );
-            set_style(UiStyleId::Minimal, window, cx);
+            set_style(UiStyleId::Default, window, cx);
             assert_eq!(
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
                 "github-dark"
@@ -719,33 +829,33 @@ mod tests {
     #[test]
     fn settings_default_unknown_and_dense() {
         use crate::settings::UiSettings;
-        assert_eq!(UiSettings::default().ui_style, UiStyleId::Minimal);
+        assert_eq!(UiSettings::default().ui_style, UiStyleId::Default);
         for json in ["{}", r#"{"uiStyle":"bogus"}"#] {
             assert_eq!(
                 serde_json::from_str::<UiSettings>(json).unwrap().ui_style,
-                UiStyleId::Minimal
+                UiStyleId::Default
             );
         }
         let mut settings = UiSettings::default();
-        settings.ui_style = UiStyleId::Dense;
+        settings.ui_style = UiStyleId::Default;
         assert_eq!(
             serde_json::from_str::<UiSettings>(&serde_json::to_string(&settings).unwrap())
                 .unwrap()
                 .ui_style,
-            UiStyleId::Dense
+            UiStyleId::Default
         );
     }
     #[test]
     fn style_id_defaults_and_round_trips() {
-        assert_eq!(UiStyleId::default(), UiStyleId::Minimal);
+        assert_eq!(UiStyleId::default(), UiStyleId::Default);
         assert_eq!(
             serde_json::from_str::<UiStyleId>("\"unknown\"").unwrap(),
-            UiStyleId::Minimal
+            UiStyleId::Default
         );
         assert_eq!(
-            serde_json::from_str::<UiStyleId>(&serde_json::to_string(&UiStyleId::Dense).unwrap())
+            serde_json::from_str::<UiStyleId>(&serde_json::to_string(&UiStyleId::Default).unwrap())
                 .unwrap(),
-            UiStyleId::Dense
+            UiStyleId::Default
         );
     }
 }

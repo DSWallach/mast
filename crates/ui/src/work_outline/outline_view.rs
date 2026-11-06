@@ -2621,7 +2621,7 @@ impl OutlineView {
             .child("No work items yet \u{2014} group Chats and share instructions under one.")
             .child(
                 button("outline-first-use-create")
-                    .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+                    .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
                         el.h(px(32.0)).bg(theme.solid).text_color(theme.on_solid)
                             .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
                     })
@@ -3142,14 +3142,14 @@ impl OutlineView {
                     .text_size(crate::typography::ui_rems(10.0))
                     .text_color(theme.text_muted)
                     .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+                    .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
                         el.h(px(32.0)).px(px(8.0)).bg(theme.solid).text_color(theme.on_solid)
                             .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
                     })
                     .child(
                         crate::icons::icon(crate::icons::ACTION_PLAY)
                             .size(px(10.0))
-                            .text_color(if theme.ui_style.id == crate::ui_style::UiStyleId::Guided { theme.on_solid } else { theme.text_muted }),
+                            .text_color(if theme.ui_style.layout == crate::ui_style::UiLayout::Guided { theme.on_solid } else { theme.text_muted }),
                     )
                     .child("Start Chat")
                     .hint(
@@ -3646,7 +3646,7 @@ fn item_body(
                     }
                 }),
         )
-        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+        .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
             el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(color).child(label))
         })
         .child(
@@ -3892,7 +3892,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
         .items_center()
         .gap(px(6.0))
         .child(indicator)
-        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+        .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
             el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted).child(status_label))
         })
         .child(

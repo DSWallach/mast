@@ -754,6 +754,7 @@ pub struct UiSettings {
     /// Base size for interface and conversational prose.
     pub ui_font_size: crate::typography::UiFontSize,
     pub ui_style: crate::ui_style::UiStyleId,
+    pub ui_layout: crate::ui_style::UiLayout,
     /// Help cards dismissed on this device.
     pub dismissed_help_cards: Vec<String>,
     /// Terminal family and absolute pixel size. Only fixed-width families
@@ -871,6 +872,7 @@ impl Default for UiSettings {
             ui_font_family: crate::typography::UiFontFamily::default(),
             ui_font_size: crate::typography::UiFontSize::default(),
             ui_style: crate::ui_style::UiStyleId::default(),
+            ui_layout: crate::ui_style::UiLayout::default(),
             dismissed_help_cards: Vec::new(),
             terminal_font_family: crate::typography::UiFontFamily::GeistMono,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
@@ -1970,6 +1972,20 @@ impl UiSettings {
             Ok(text) => {
                 match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
                     if let Some(settings) = value.as_object_mut() {
+                        // Legacy uiStyle selected density and look in one field.
+                        let legacy = settings.get("uiStyle").and_then(serde_json::Value::as_str).map(str::to_owned);
+                        let (style, layout) = match legacy.as_deref() {
+                            Some("dense") => ("default", "compact"),
+                            Some("guided") => ("default", "guided"),
+                            Some("minimal") => ("default", "minimal"),
+                            Some("industrial") => ("industrial", "minimal"),
+                            Some("area") => ("area", "minimal"),
+                            _ => ("default", "minimal"),
+                        };
+                        if matches!(legacy.as_deref(), Some("dense" | "guided" | "minimal")) {
+                            settings.insert("uiStyle".into(), serde_json::json!(style));
+                        }
+                        settings.entry("uiLayout").or_insert(serde_json::json!(layout));
                         let previous_sound = settings
                             .get("soundEnabled")
                             .and_then(serde_json::Value::as_bool)
@@ -2998,7 +3014,8 @@ mod tests {
             git_history_author_display: GitHistoryAuthorDisplay::Name,
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
-            ui_style: crate::ui_style::UiStyleId::Dense,
+            ui_style: crate::ui_style::UiStyleId::Default,
+            ui_layout: crate::ui_style::UiLayout::Compact,
             dismissed_help_cards: vec!["outline".into()],
             theme_selection: mast_theme::ThemeSelection {
                 light: "catppuccin-latte".into(),

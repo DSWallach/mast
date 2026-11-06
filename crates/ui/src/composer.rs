@@ -8100,7 +8100,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
-        let guided = theme.ui_style.id == crate::ui_style::UiStyleId::Guided;
+        let guided = theme.ui_style.layout == crate::ui_style::UiLayout::Guided;
         let (area, key) = match theme.ui_style.conversation {
             crate::ui_style::ConversationVariant::Area => (true, false),
             crate::ui_style::ConversationVariant::Industrial => (false, true),
