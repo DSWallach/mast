@@ -2270,6 +2270,7 @@ impl FilesSurface {
                         } else {
                             "Preview Markdown"
                         },
+                        theme,
                     )
                     .when(showing_markdown, |el| el.bg(crate::theme::wash(0.1)))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -2345,7 +2346,7 @@ impl FilesSurface {
                 )
             })
             .child(
-                toolbar_button("files-reveal-active", "Reveal file in tree")
+                toolbar_button("files-reveal-active", "Reveal file in tree", theme)
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FilesEvent::RevealFile(reveal_path.clone()));
                     }))
@@ -2363,6 +2364,7 @@ impl FilesSurface {
                     } else {
                         "Enable word wrap"
                     },
+                    theme,
                 )
                 .when(self.preview.word_wrap(), |element| {
                     element.bg(crate::theme::wash(0.1))

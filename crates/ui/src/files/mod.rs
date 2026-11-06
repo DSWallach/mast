@@ -42,10 +42,12 @@ use crate::surface_chrome::{
     CONTROL_RADIUS as TOOLBAR_BUTTON_RADIUS, CONTROL_SIZE as TOOLBAR_BUTTON_SIZE, toolbar,
 };
 
-pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+pub(super) fn toolbar_button(id: &'static str, label: &'static str, theme: &crate::theme::Theme) -> gpui::Stateful<gpui::Div> {
+    let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
     div()
         .id(id)
         .size(px(TOOLBAR_BUTTON_SIZE))
+        .when(guided, |element| element.h(px(theme.ui_style.tokens.control_size)).w_auto().px(px(6.0)).gap(px(4.0)).flex_row_reverse().child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label)))
         .flex_none()
         .rounded(px(TOOLBAR_BUTTON_RADIUS))
         .flex()
@@ -1081,6 +1083,7 @@ impl FilesSurface {
                     } else {
                         "Show all files (even hidden)"
                     },
+                    &theme,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
                 .when(include_ignored, |element| {

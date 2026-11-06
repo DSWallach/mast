@@ -4535,6 +4535,8 @@ impl Shell {
         self.settings.open_web_links_in_mast = current.open_web_links_in_mast;
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
+        self.settings.ui_style = current.ui_style;
+        self.settings.dismissed_help_cards = current.dismissed_help_cards.clone();
         self.settings.terminal_font_family = current.terminal_font_family;
         self.settings.terminal_font_size = current.terminal_font_size;
         self.settings.code_font_family = current.code_font_family;

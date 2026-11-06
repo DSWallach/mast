@@ -1343,7 +1343,7 @@ impl MarkdownPreview {
                             if let Some(target) = image.link.clone() {
                                 let link = image_link.clone();
                                 el = el.child(
-                                    super::toolbar_button("markdown-image-link", "Open image link")
+                                    super::toolbar_button("markdown-image-link", "Open image link", theme)
                                         .on_click(move |_, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
