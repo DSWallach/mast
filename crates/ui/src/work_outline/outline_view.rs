@@ -2617,6 +2617,9 @@ impl OutlineView {
             .child("No work items yet \u{2014} group Chats and share instructions under one.")
             .child(
                 button("outline-first-use-create")
+                    .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+                        el.h(px(32.0)).bg(theme.accent).text_color(theme.bg)
+                    })
                     .child("Create work item")
                     .when_some(create_keys, |el, keys| {
                         el.child(crate::popover::kbd_hint(theme, &keys))
