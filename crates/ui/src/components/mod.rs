@@ -559,6 +559,7 @@ pub fn user_message_bubble(
 /// Apply the assistant faceplate for the active conversation treatment.
 pub fn agent_message_bubble(
     theme: &Theme,
+    identity: gpui::Hsla,
     first: bool,
     model: Option<String>,
     content: AnyElement,
@@ -591,6 +592,12 @@ pub fn agent_message_bubble(
                     .bg(theme.industrial_colors().panel)
                     .child(content),
             )
+            .into_any_element()
+    } else if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area {
+        div()
+            .font_family("EB Garamond")
+            .text_color(theme.identity_foreground(identity))
+            .child(content)
             .into_any_element()
     } else {
         content

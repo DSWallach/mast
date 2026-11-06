@@ -352,6 +352,7 @@ impl Render for ComponentMatrix {
                     ),
                     _ => c::agent_message_bubble(
                         &theme,
+                        theme.identity_color(""),
                         true,
                         Some("Model".into()),
                         div().child("Reply").into_any_element(),
