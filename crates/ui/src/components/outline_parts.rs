@@ -741,9 +741,11 @@ pub fn outline_waiting_section(theme: &Theme) -> Div {
         )
 }
 
-/// Footer keeps destructive actions at their natural width.
-pub fn outline_details_footer() -> Div {
-    div().flex().items_start()
+/// Preserve the original Default Minimal footer while sizing Archive in other appearances.
+pub fn outline_details_footer(archived: bool, theme: &Theme) -> Div {
+    let original = theme.ui_style.id == crate::ui_style::UiStyleId::Default
+        && theme.ui_style.layout == crate::ui_style::UiLayout::Minimal;
+    div().when(!archived && !original, |el| el.flex().items_start())
 }
 
 /// Artifact count marker in an outline row.

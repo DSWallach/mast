@@ -1885,12 +1885,12 @@ impl Render for WorkItemDetails {
 
         // Archive / restore.
         let footer = if item.archived_at.is_some() {
-            crate::components::outline_details_footer().child(
+            crate::components::outline_details_footer(true, &theme).child(
                 crate::work_outline::hints::details_button("work-item-restore", "Restore", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.restore(cx))),
             )
         } else {
-            crate::components::outline_details_footer().child(
+            crate::components::outline_details_footer(false, &theme).child(
                 crate::work_outline::hints::details_button("work-item-archive", "Archive…", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.request_archive(cx))),
             )
