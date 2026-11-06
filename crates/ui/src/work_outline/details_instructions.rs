@@ -1097,12 +1097,12 @@ impl WorkItemDetails {
             let label = SharedString::from(format!("{} · {} uses · {}", rule.label, rule.hit_count, last_used));
             section = section.child(div().flex().items_center().gap(px(6.0))
                 .child(div().flex_1().min_w_0().truncate().text_color(theme.text_muted).child(label))
-                .child(Self::small_button(button_id, if rule.enabled { "On" } else { "Off" }, theme)
+                .child(approval_rule_button(button_id, if rule.enabled { "On" } else { "Off" }, theme)
                     .debug_selector(move || selector.to_string())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_approval_rule(updated.clone(), cx);
                     })))
-                .child(Self::small_button(SharedString::from(format!("approval-rule-edit-{}", rule.id)), "Edit", theme)
+                .child(approval_rule_button(SharedString::from(format!("approval-rule-edit-{}", rule.id)), "Edit", theme)
                     .on_click(cx.listener(move |this, _, _, cx| this.edit_approval_rule(edit_rule.clone(), cx)))));
         }
         if let Some(draft) = &self.approval_rule_draft {
@@ -1110,14 +1110,14 @@ impl WorkItemDetails {
                 section = section.child(div().text_color(theme.text_muted).child(label)).child(Self::input_frame(input, theme));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
-            section = section.child(Self::small_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
+            section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
                 if let Some(rule) = &mut this.approval_rule_draft { rule.harness = match rule.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => mast_proto::work_outline::ApprovalRuleHarness::Codex, mast_proto::work_outline::ApprovalRuleHarness::Codex => mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode, mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => mast_proto::work_outline::ApprovalRuleHarness::Any }; }
                 cx.notify();
             })))
-                .child(Self::small_button("approval-rule-save", "Save", theme).on_click(cx.listener(|this, _, _, cx| this.save_approval_rule(cx))))
-                .child(Self::small_button("approval-rule-cancel", "Cancel", theme).on_click(cx.listener(|this, _, _, cx| { this.approval_rule_draft = None; cx.notify(); })));
+                .child(approval_rule_button("approval-rule-save", "Save", theme).on_click(cx.listener(|this, _, _, cx| this.save_approval_rule(cx))))
+                .child(approval_rule_button("approval-rule-cancel", "Cancel", theme).on_click(cx.listener(|this, _, _, cx| { this.approval_rule_draft = None; cx.notify(); })));
         } else {
-            section = section.child(Self::small_button("approval-rule-add", "Add rule", theme).on_click(cx.listener(|this, _, _, cx| {
+            section = section.child(approval_rule_button("approval-rule-add", "Add rule", theme).on_click(cx.listener(|this, _, _, cx| {
                 this.edit_approval_rule(mast_proto::work_outline::ApprovalRule {
                     id: super::super::actions::new_operation_id(), label: String::new(), created_by: "user".into(),
                     harness: mast_proto::work_outline::ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
@@ -1127,8 +1127,8 @@ impl WorkItemDetails {
         }
         section = section.child(div().text_color(theme.text_muted).child("Test as Codex in the Space root"))
             .child(Self::input_frame(&self.approval_test_input, theme))
-            .child(Self::small_button("approval-rule-test", "Test command", theme).on_click(cx.listener(|this, _, _, cx| this.test_approval_command(cx))))
-            .child(Self::small_button("approval-rule-prefill", "Create rule from command…", theme).on_click(cx.listener(|this, _, _, cx| this.prefill_approval_command(cx))));
+            .child(approval_rule_button("approval-rule-test", "Test command", theme).on_click(cx.listener(|this, _, _, cx| this.test_approval_command(cx))))
+            .child(approval_rule_button("approval-rule-prefill", "Create rule from command…", theme).on_click(cx.listener(|this, _, _, cx| this.prefill_approval_command(cx))));
         if let Some(result) = &self.approval_test_result {
             section = section.child(div().debug_selector(|| "approval-rule-test-result".into()).text_color(theme.text_muted).child(SharedString::from(result.clone())));
         }
@@ -1215,4 +1215,19 @@ impl WorkItemDetails {
                 .child(pr_prompts),
         )
     }
+}
+
+/// Approval-rule settings actions use the shared secondary button.
+fn approval_rule_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
+    crate::components::button(
+        id,
+        label,
+        crate::components::ButtonVariant::Secondary,
+        crate::components::ButtonSize::Sm,
+        theme,
+    )
 }
