@@ -116,6 +116,7 @@ pub(super) fn review_chat_for_target<T: 'static>(
     space_id: &str,
     target_key: &str,
     head_sha: Option<&str>,
+    branch_hint: Option<(String, String, String)>,
     cx: &mut Context<T>,
 ) -> gpui::Task<Result<Option<String>, String>> {
     let state = state.read(cx);
@@ -145,13 +146,17 @@ pub(super) fn review_chat_for_target<T: 'static>(
                 companion: None,
                 target_device_id: device,
             });
-            (artifact.chat_id.clone().unwrap(), call)
+            (
+                artifact.chat_id.clone().unwrap(),
+                artifact.device_id.clone(),
+                call,
+            )
         })
         .collect();
     let target_key = target_key.to_owned();
     let head_sha = head_sha.map(str::to_owned);
     cx.spawn(async move |_, _| {
-        for (chat_id, call) in calls {
+        for (chat_id, device_id, call) in calls {
             let reply = call.await.map_err(|error| error.text())?;
             if reply.encoding != mast_proto::ArtifactContentEncoding::Utf8 {
                 return Err("Review content is not UTF-8".into());
@@ -170,20 +175,36 @@ pub(super) fn review_chat_for_target<T: 'static>(
                 };
             let target: mast_proto::ReviewTarget = serde_json::from_value(target)
                 .map_err(|error| format!("Invalid review target: {error}"))?;
-            let target_head = match &target {
-                mast_proto::ReviewTarget::PullRequest { head_sha, .. }
-                | mast_proto::ReviewTarget::Branch { head_sha, .. } => head_sha,
-            };
-            if target.state_key() == target_key
-                && head_sha
-                    .as_ref()
-                    .is_none_or(|head| head.eq_ignore_ascii_case(target_head))
-            {
+            if review_target_matches(
+                &target,
+                &target_key,
+                head_sha.as_deref(),
+                branch_hint.as_ref(),
+                &device_id,
+            ) {
                 return Ok(Some(chat_id));
             }
         }
         Ok(None)
     })
+}
+
+fn review_target_matches(
+    target: &mast_proto::ReviewTarget,
+    key: &str,
+    head: Option<&str>,
+    branch_hint: Option<&(String, String, String)>,
+    device_id: &str,
+) -> bool {
+    let target_head = match target {
+        mast_proto::ReviewTarget::PullRequest { head_sha, .. }
+        | mast_proto::ReviewTarget::Branch { head_sha, .. } => head_sha,
+    };
+    let branch_matches = key.starts_with("ref:") && branch_hint.is_some_and(|(device, path, name)| {
+        device == device_id && matches!(target, mast_proto::ReviewTarget::Branch { checkout_path: Some(checkout), branch: Some(branch), .. } if checkout == path && branch == name)
+    });
+    (target.state_key() == key || branch_matches)
+        && head.is_none_or(|head| head.eq_ignore_ascii_case(target_head))
 }
 
 pub(super) fn send_question<T: 'static>(
@@ -450,6 +471,8 @@ impl Changes {
                     ExplanationPanel::Error(error) => (error.clone(), None),
                 };
                 let mut panel = div()
+                    .id("explanation-answer-panel")
+                    .debug_selector(|| "explanation-answer-panel".into())
                     .w(px(320.0))
                     .p_3()
                     .flex()
@@ -514,6 +537,13 @@ impl Changes {
 
     pub(super) fn explain_selection(&mut self, cx: &mut Context<Self>) {
         self.cancel_explanation();
+        if self.review_link_task.is_some() || self.review_branch_lookup_task.is_some() {
+            self.explanation_panel = Some(ExplanationPanel::Error(
+                "Review target is still loading; try again shortly.".into(),
+            ));
+            cx.notify();
+            return;
+        }
         let Some(selection) = self.explanation_selection.clone() else {
             return;
         };
@@ -524,7 +554,7 @@ impl Changes {
         else {
             return;
         };
-        let lines = self
+        let lines: Vec<&DiffLine> = self
             .explanation_hunk
             .and_then(|(file_index, hunk_index)| {
                 self.parsed
@@ -535,6 +565,35 @@ impl Changes {
                     .get(hunk_index)
             })
             .map(|hunk| hunk.lines.iter().collect())
+            .or_else(|| {
+                self.explanation_unified_rows.map(|(start, end, _)| {
+                    self.rows
+                        .iter()
+                        .skip(start.min(end))
+                        .take(start.max(end) - start.min(end) + 1)
+                        .filter_map(|row| match row {
+                            super::DiffRow::Line {
+                                file: file_index,
+                                hunk,
+                                line,
+                                ..
+                            } => {
+                                let candidate =
+                                    self.parsed.as_ref()?.files.get(*file_index as usize)?;
+                                if candidate.path != selection.path {
+                                    return None;
+                                }
+                                candidate
+                                    .hunks
+                                    .get(*hunk as usize)?
+                                    .lines
+                                    .get(*line as usize)
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+            })
             .unwrap_or_else(|| selection.lines(file));
         if lines.is_empty() {
             return;
@@ -553,16 +612,45 @@ impl Changes {
                     .as_ref()
                     .and_then(|range| range.head_sha.clone())
             });
-        let target = head
-            .clone()
-            .unwrap_or_else(|| self.scope.label().to_owned());
-        let message = selection_question(
-            if selection.side == SourceSide::Old {
-                file.old_path.as_deref().unwrap_or(&selection.path)
-            } else {
-                &selection.path
-            },
+        let target = if let Some(head) = &head {
+            owner
+                .range
+                .as_ref()
+                .map(|range| format!("{} ({head}, base {})", range.label, range.base_ref))
+                .unwrap_or_else(|| head.clone())
+        } else {
+            let mut target = self.scope.label().to_owned();
+            if let Some(branch) = &owner.branch {
+                target.push_str(&format!("; branch {branch}"));
+            }
+            if let Some(base) = &self.base_ref {
+                target.push_str(&format!("; base {base}"));
+            }
+            if let Some(path) = &owner.cwd {
+                target.push_str(&format!("; checkout {path}"));
+            }
+            target
+        };
+        let end_side = self
+            .explanation_unified_rows
+            .map(|(_, _, side)| side)
+            .unwrap_or(selection.side);
+        let display_path = if selection.side != end_side {
+            file.old_path
+                .as_ref()
+                .map(|old| format!("{old} → {}", file.path))
+                .unwrap_or_else(|| file.path.clone())
+        } else if selection.side == SourceSide::Old {
+            file.old_path
+                .clone()
+                .unwrap_or_else(|| selection.path.clone())
+        } else {
+            selection.path.clone()
+        };
+        let message = selection_question_for_sides(
+            &display_path,
             selection.side,
+            end_side,
             selection.anchor,
             selection.extent,
             &lines,
@@ -581,6 +669,15 @@ impl Changes {
                 &space,
                 key,
                 head.as_deref(),
+                owner.range.as_ref().and_then(|range| {
+                    owner.cwd.as_ref().map(|path| {
+                        (
+                            owner.device_id.clone(),
+                            path.clone(),
+                            range.head_branch.clone(),
+                        )
+                    })
+                }),
                 cx,
             )),
             _ => None,
@@ -676,6 +773,7 @@ impl Changes {
     ) {
         self.cancel_explanation();
         self.explanation_hunk = None;
+        self.explanation_unified_rows = None;
         if let Some(selection) = self
             .explanation_selection
             .as_mut()
@@ -691,6 +789,34 @@ impl Changes {
             });
         }
         cx.notify();
+    }
+
+    pub(super) fn select_unified_explanation_line(
+        &mut self,
+        path: &str,
+        side: SourceSide,
+        line: u32,
+        row: usize,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = self.explanation_unified_rows.filter(|_| {
+            extend
+                && self
+                    .explanation_selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.path == path)
+        });
+        if let Some((anchor, _, _)) = existing {
+            self.cancel_explanation();
+            self.explanation_hunk = None;
+            self.explanation_selection.as_mut().unwrap().extent = line;
+            self.explanation_unified_rows = Some((anchor, row, side));
+            cx.notify();
+        } else {
+            self.select_explanation_line(path, side, line, false, cx);
+            self.explanation_unified_rows = Some((row, row, side));
+        }
     }
 
     pub(super) fn explanation_line_selected(
@@ -714,13 +840,41 @@ pub(super) fn selection_question(
     lines: &[&DiffLine],
     target: &str,
 ) -> String {
-    let side = match side {
+    selection_question_for_sides(path, side, side, first, last, lines, target)
+}
+
+fn selection_question_for_sides(
+    path: &str,
+    side: SourceSide,
+    end_side: SourceSide,
+    first: u32,
+    last: u32,
+    lines: &[&DiffLine],
+    target: &str,
+) -> String {
+    let side_name = |side| match side {
         SourceSide::Old => "old",
         SourceSide::New => "new",
     };
-    let (first, last) = (first.min(last), first.max(last));
+    let (side, range) = if side == end_side {
+        (
+            side_name(side).to_owned(),
+            format!("{}–{}", first.min(last), first.max(last)),
+        )
+    } else {
+        (
+            "mixed".to_owned(),
+            format!(
+                "{}:{} → {}:{}",
+                side_name(side),
+                first,
+                side_name(end_side),
+                last
+            ),
+        )
+    };
     let mut question = format!(
-        "Explain briefly (≤5 lines) what this change does and why it might matter for review.\n\nTarget: {target}\nFile: {path}\nSide: {side}\nLines: {first}–{last}\n\nSelected diff:\n"
+        "Explain briefly (≤5 lines) what this change does and why it might matter for review.\n\nTarget: {target}\nFile: {path}\nSide: {side}\nLines: {range}\n\nSelected diff:\n"
     );
     for line in lines {
         let marker = match line.kind {
@@ -759,6 +913,40 @@ mod tests {
     use mast_proto::{ReviewHunk, ReviewRisk};
 
     #[test]
+    fn local_branch_review_requires_matching_checkout_branch_device_and_head() {
+        let target = mast_proto::ReviewTarget::Branch {
+            repo: None,
+            checkout_path: Some("/repo".into()),
+            branch: Some("feature".into()),
+            base_ref: None,
+            base_sha: None,
+            head_sha: "abc".into(),
+        };
+        let hint = ("device".into(), "/repo".into(), "feature".into());
+        assert!(review_target_matches(
+            &target,
+            "ref:device:/repo:refs/heads/feature",
+            Some("abc"),
+            Some(&hint),
+            "device"
+        ));
+        assert!(!review_target_matches(
+            &target,
+            "ref:device:/repo:refs/heads/feature",
+            Some("different"),
+            Some(&hint),
+            "device"
+        ));
+        assert!(!review_target_matches(
+            &target,
+            "ref:device:/repo:refs/heads/feature",
+            Some("abc"),
+            Some(&hint),
+            "other"
+        ));
+    }
+
+    #[test]
     fn explanation_shortcut_is_persisted_and_rebindable() {
         let mut keymap = crate::settings::KeymapConfig::default();
         assert_eq!(keymap.get(crate::settings::ShortcutId::ExplainDiff), "e");
@@ -766,6 +954,44 @@ mod tests {
         let restored: crate::settings::KeymapConfig =
             serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
         assert_eq!(restored.get(crate::settings::ShortcutId::ExplainDiff), "x");
+    }
+
+    #[gpui::test]
+    fn rebound_explanation_shortcut_dispatches_in_diff_context(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            let mut keymap = crate::settings::KeymapConfig::default();
+            keymap.set(crate::settings::ShortcutId::ExplainDiff, "x".into());
+            bind_keys(cx, &keymap);
+        });
+        struct Host {
+            focus: gpui::FocusHandle,
+            invoked: bool,
+        }
+        impl gpui::Render for Host {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .key_context("ChangesDiff")
+                    .track_focus(&self.focus)
+                    .on_action(cx.listener(|this, _: &ExplainDiff, _, cx| {
+                        this.invoked = true;
+                        cx.notify();
+                    }))
+            }
+        }
+        let (view, vcx) = cx.add_window_view(|_, cx| Host {
+            focus: cx.focus_handle(),
+            invoked: false,
+        });
+        vcx.update(|window, cx| {
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            window.draw(cx).clear();
+        });
+        vcx.simulate_keystrokes("e");
+        assert!(!view.read_with(vcx, |view, _| view.invoked));
+        vcx.simulate_keystrokes("x");
+        assert!(view.read_with(vcx, |view, _| view.invoked));
     }
 
     #[gpui::test]
@@ -792,7 +1018,14 @@ mod tests {
         }
         let (view, vcx) = cx.add_window_view(|_, _| TestView);
         let task = view.update(vcx, |_, cx| {
-            review_chat_for_target(state.clone(), "space", "pr:org/repo#42", Some("abc"), cx)
+            review_chat_for_target(
+                state.clone(),
+                "space",
+                "pr:org/repo#42",
+                Some("abc"),
+                None,
+                cx,
+            )
         });
         vcx.run_until_parked();
         assert_eq!(
@@ -800,10 +1033,50 @@ mod tests {
             Some("review-chat")
         );
         let task = view.update(vcx, |_, cx| {
-            review_chat_for_target(state, "space", "pr:org/repo#42", Some("different"), cx)
+            review_chat_for_target(
+                state,
+                "space",
+                "pr:org/repo#42",
+                Some("different"),
+                None,
+                cx,
+            )
         });
         vcx.run_until_parked();
         assert_eq!(task.now_or_never().unwrap().unwrap(), None);
+    }
+
+    #[gpui::test]
+    fn explanation_reply_renders_in_anchored_panel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+        });
+        struct Host {
+            changes: gpui::Entity<Changes>,
+        }
+        impl gpui::Render for Host {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = crate::theme::Theme::of(cx).clone();
+                let panel = self
+                    .changes
+                    .update(cx, |changes, cx| changes.render_explanation(&theme, cx));
+                div().size_full().relative().child(panel)
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            let changes = cx.new(|cx| Changes::new(state, cx));
+            changes.update(cx, |changes, _| {
+                changes.explanation_panel = Some(ExplanationPanel::Answer {
+                    chat_id: "chat".into(),
+                    text: "A short explanation".into(),
+                })
+            });
+            Host { changes }
+        });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("explanation-answer-panel").is_some());
     }
 
     #[gpui::test]

@@ -2009,6 +2009,7 @@ pub struct Changes {
     seen_hunks: std::collections::HashSet<String>,
     explanation_selection: Option<explanation::DiffSelection>,
     explanation_hunk: Option<(usize, usize)>,
+    explanation_unified_rows: Option<(usize, usize, SourceSide)>,
     explanation_panel: Option<explanation::ExplanationPanel>,
     explanation_task: Option<Task<()>>,
     explanation_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -2254,6 +2255,7 @@ impl Changes {
             seen_hunks: std::collections::HashSet::new(),
             explanation_selection: None,
             explanation_hunk: None,
+            explanation_unified_rows: None,
             explanation_panel: None,
             explanation_task: None,
             explanation_cancelled: None,
@@ -2422,6 +2424,7 @@ impl Changes {
         self.diffs.clear();
         self.parsed = None;
         self.explanation_selection = None;
+        self.explanation_unified_rows = None;
         self.cancel_explanation();
         self.rows.clear();
         self.row_ranges.clear();
@@ -2884,6 +2887,7 @@ impl Changes {
         if self.scope != scope {
             self.scope = scope;
             self.explanation_selection = None;
+            self.explanation_unified_rows = None;
             self.cancel_explanation();
             self.reset_horizontal_scroll();
             if scope == DiffScope::History {
@@ -3139,6 +3143,11 @@ impl Changes {
     /// `splice` shifts the logical scroll anchor by the count delta, so
     /// content below the fold stays put.
     fn replace_file_body(&mut self, file_ix: usize, new_body: Vec<DiffRow>) {
+        if self.explanation_selection.take().is_some() {
+            self.explanation_unified_rows = None;
+            self.explanation_hunk = None;
+            self.cancel_explanation();
+        }
         self.seen_candidates.clear();
         let Some(range) = self.row_ranges.get(file_ix).and_then(Clone::clone) else {
             return;
@@ -3484,6 +3493,11 @@ impl Changes {
 
     fn reflatten(&mut self, cx: &mut Context<Self>) {
         self.seen_candidates.clear();
+        if self.explanation_selection.take().is_some() {
+            self.explanation_unified_rows = None;
+            self.explanation_hunk = None;
+            self.cancel_explanation();
+        }
         let Some(parsed) = &self.parsed else {
             cx.notify();
             return;
@@ -4412,8 +4426,8 @@ impl Changes {
                 let move_path = path.clone();
                 let leave_path = path.clone();
                 let select_path = path.clone();
-                let selected = self.explanation_line_selected(&path, source_side, line_no);
-                let selection_end = self.explanation_selection.as_ref().is_some_and(|s| s.path == path && s.side == source_side && s.extent == line_no);
+                let selected = self.explanation_unified_rows.map_or_else(|| self.explanation_line_selected(&path, source_side, line_no), |(start, end, _)| self.explanation_selection.as_ref().is_some_and(|s| s.path == path) && (start.min(end)..=start.max(end)).contains(&ix));
+                let selection_end = self.explanation_unified_rows.map_or_else(|| self.explanation_selection.as_ref().is_some_and(|s| s.path == path && s.side == source_side && s.extent == line_no), |(_, end, _)| end == ix && self.explanation_selection.as_ref().is_some_and(|s| s.path == path));
                 div()
                     .id(("diff-line", ix))
                     .w_full()
@@ -4423,7 +4437,7 @@ impl Changes {
                     .when(selection_end, |el| el.child(self.render_explanation(&theme, cx)))
                     .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                         window.focus(&this.diff_focus, cx);
-                        this.select_explanation_line(&select_path, source_side, line_no, event.modifiers.shift, cx);
+                        this.select_unified_explanation_line(&select_path, source_side, line_no, ix, event.modifiers.shift, cx);
                     }))
                     .when(hovered, |el| {
                         el.child(positioned_adder(
@@ -4432,8 +4446,8 @@ impl Changes {
                         ))
                     })
                     .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                        if event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == move_path && s.side == source_side) {
-                            this.select_explanation_line(&move_path, source_side, line_no, true, cx);
+                        if event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == move_path) {
+                            this.select_unified_explanation_line(&move_path, source_side, line_no, ix, true, cx);
                         }
                         this.set_hover(&move_path, Some((side, line_no)), cx);
                     }))
@@ -8156,6 +8170,52 @@ index 1111111..2222222 160000
             let mut changes = Changes::new(state, cx);
             changes.owner = Some(ChangesTarget { chat_id: "owner".into(), device_id: "local".into(), cwd: None, checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false, range: None });
             let files = parse_patch("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n");
+            let (rows, _) = flatten_rows(&files, &[], None, DiffMode::Unified, |_| false);
+            changes.rows = rows;
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes
+        });
+        view.update(vcx, |changes, cx| {
+            let old = changes.rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 0, line: 0, .. })).unwrap();
+            let new = changes.rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 0, line: 1, .. })).unwrap();
+            changes.select_unified_explanation_line("a.rs", SourceSide::Old, 1, old, false, cx);
+            changes.select_unified_explanation_line("a.rs", SourceSide::New, 1, new, true, cx);
+            changes.explain_selection(cx);
+        });
+        vcx.run_until_parked();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, mast_rpc::methods::QUEUE_MESSAGE);
+        assert_eq!(calls[0].1["chatId"], "owner");
+        let text = calls[0].1["text"].as_str().unwrap();
+        assert!(text.contains("File: a.rs\nSide: mixed\nLines: old:1 → new:1"));
+        assert!(text.ends_with("-old\n+new\n"));
+    }
+
+    #[gpui::test]
+    fn explaining_selected_lines_prefers_matching_review_chat(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (view, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.chats = vec![serde_json::from_value(serde_json::json!({"id":"owner", "deviceId":"local", "spaceId":"space", "archived":false, "createdAt":"2026-07-19T12:00:00Z"})).unwrap()];
+                let artifact = serde_json::from_value(serde_json::json!({"id":"review", "spaceId":"space", "deviceId":"local", "chatId":"review-chat", "kind":"review"})).unwrap();
+                state.set_test_artifacts(mast_proto::ArtifactsSnapshot { space_id: "space".into(), revision: 1, artifacts: vec![artifact] });
+                state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(Arc::new(move |method, params| {
+                    recorded.lock().unwrap().push((method.to_owned(), params));
+                    if method == mast_rpc::methods::ARTIFACT_CONTENT { Ok(serde_json::json!({"artifactId":"review", "content":"{\"target\":{\"kind\":\"pr\",\"repo\":\"o/r\",\"number\":1,\"headSha\":\"head\",\"baseSha\":\"base\"}}"})) }
+                    else { Ok(serde_json::json!({"id":"message"})) }
+                })));
+                state
+            });
+            let mut changes = Changes::new(state, cx);
+            changes.owner = Some(ChangesTarget { chat_id: "owner".into(), device_id: "local".into(), cwd: None, checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false, range: None });
+            changes.review_target = Some("pr:o/r#1".into());
+            let files = parse_patch("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n");
             let horizontal = files.iter().map(FileHorizontalState::new).collect();
             changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
             changes
@@ -8166,12 +8226,8 @@ index 1111111..2222222 160000
         });
         vcx.run_until_parked();
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, mast_rpc::methods::QUEUE_MESSAGE);
-        assert_eq!(calls[0].1["chatId"], "owner");
-        let text = calls[0].1["text"].as_str().unwrap();
-        assert!(text.contains("File: a.rs\nSide: new\nLines: 1–1"));
-        assert!(text.ends_with("+new\n"));
+        let send = calls.iter().find(|(method, _)| method == mast_rpc::methods::QUEUE_MESSAGE).unwrap();
+        assert_eq!(send.1["chatId"], "review-chat");
     }
 
     fn diff(checkout: &str, device: &str, cwd: &str, patch: &str) -> CheckoutDiff {

@@ -628,6 +628,10 @@ impl Changes {
     }
 
     pub(super) fn step_diff(&mut self, forward: bool, files_only: bool, cx: &mut Context<Self>) {
+        self.explanation_selection = None;
+        self.explanation_unified_rows = None;
+        self.explanation_hunk = None;
+        self.cancel_explanation();
         let Some(parsed) = self.parsed.as_ref() else {
             return;
         };
