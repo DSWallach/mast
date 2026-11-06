@@ -1168,6 +1168,8 @@ The candidate index is not a substitute for that audit.
 
 ### Shell mechanical candidate ledger (untriaged)
 
+Untriaged; no per-style rendering difference observed for the remaining visible candidates in preview `target-clean/ui-preview/20261106-181557-290/chat.png`. The sheet does not cover every candidate or open the Item/Team panels.
+
 Locations refer to shell branch `d311aee00`. This index includes tests and already migrated code, and can miss inline elements without these patterns. It is a navigation aid, not a completed manual audit. Interaction includes click, mouse-down and key-down sites; Label covers explicit text sizes; Radius covers explicit rounded shapes; ID covers element IDs.
 
 **Stays literal, in baseline:** event handlers and element IDs preserve control
