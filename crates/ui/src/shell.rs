@@ -7563,32 +7563,13 @@ impl Shell {
         } else {
             text.opacity(0.8)
         };
-        div()
-            .id(SharedString::from(row_id.clone()))
-            .group("sidebar-session-row")
-            .debug_selector({
-                let row_id = row_id.clone();
-                move || row_id.clone()
-            })
-            .h(px(sidebar_row_height(
+        crate::components::shell_parts::sidebar_row_frame(theme, row_id.clone(), sidebar_row_height(
                 compact,
                 show_label,
                 branch.is_some(),
                 change_request.is_some(),
                 theme.ui_style.tokens,
-            )))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(if search_query.is_some() {
-                popover::PALETTE_ITEM_RADIUS
-            } else {
-                8.0
-            })))
-            .px(px(Theme::SPACE_SM))
-            .py(px(6.0))
-            .text_color(motion::hover_blend(&fade_key, rest_text, text))
-            .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
+            ), search_query.is_some(), &fade_key, rest_text, text, rest_bg, hover_bg)
             // No selection ring (user request) — the wash alone marks the
             // active row.
             // Row hover drives BOTH the wash blend and the corner's

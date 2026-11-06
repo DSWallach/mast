@@ -958,6 +958,39 @@ pub(crate) fn sidebar_row_colors(
     (text, selected_wash, dot)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sidebar_row_frame(
+    theme: &Theme,
+    row_id: String,
+    height: f32,
+    searching: bool,
+    fade_key: &str,
+    rest_text: gpui::Hsla,
+    hover_text: gpui::Hsla,
+    rest_bg: gpui::Hsla,
+    hover_bg: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(row_id.clone()))
+        .group("sidebar-session-row")
+        .debug_selector(move || row_id.clone())
+        .h(px(height))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(
+            if searching {
+                crate::popover::PALETTE_ITEM_RADIUS
+            } else {
+                8.0
+            },
+        )))
+        .px(px(Theme::SPACE_SM))
+        .py(px(6.0))
+        .text_color(motion::hover_blend(fade_key, rest_text, hover_text))
+        .bg(motion::hover_blend(fade_key, rest_bg, hover_bg))
+}
+
 pub(crate) fn sidebar_grille(theme: &Theme) -> Option<gpui::Div> {
     super::is_industrial(theme).then(|| {
         div()
