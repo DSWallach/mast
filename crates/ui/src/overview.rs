@@ -3268,13 +3268,8 @@ impl Overview {
             .take(visible_count)
             .map(|sub| {
                 let color = sub.status.color(theme.appearance);
-                let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-                    crate::status_style::indicator_for_theme(if sub.status == SubagentStatus::Running { crate::status_style::Status::Working } else { crate::status_style::Status::Done }, &theme).into_any_element()
-                } else if sub.status == SubagentStatus::Running {
-                    crate::loaders::mini_mono_spinner(format!("overview-subagent-status-{chat_id}-{}", sub.agent_id), 1.5, color, cx.entity_id(), cx).into_any_element()
-                } else {
-                    crate::status_style::indicator_for_theme(crate::status_style::Status::Done, &theme).into_any_element()
-                };
+                let status = if sub.status == SubagentStatus::Running { crate::status_style::Status::Working } else { crate::status_style::Status::Done };
+                let indicator = crate::components::outline_chat_indicator(status, format!("overview-subagent-status-{chat_id}-{}", sub.agent_id), color, theme, cx.entity_id(), cx);
                 let name = sub.display_name();
                 let peeking = self
                     .subagent_peek
@@ -5519,13 +5514,7 @@ impl Overview {
             .unwrap_or_else(|| format_time_ago(row.chat.created_at, now))
             .into();
         let dot = crate::status_style::status_style(row.status.into(), theme.appearance).color;
-        let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-            crate::status_style::indicator_for_theme(row.status.into(), &theme).into_any_element()
-        } else if row.status == ChatIndicator::Working {
-            crate::loaders::mini_mono_spinner(format!("overview-status-{chat_id}"), 1.5, dot, cx.entity_id(), cx).into_any_element()
-        } else {
-            crate::status_style::indicator_for_theme(row.status.into(), &theme).into_any_element()
-        };
+        let indicator = crate::components::outline_chat_indicator(row.status.into(), format!("overview-status-{chat_id}"), dot, theme, cx.entity_id(), cx);
         let (icon, label) = status_style(row.status);
         let unread = is_unread_done(
             &self.acknowledged_done,

@@ -64,6 +64,56 @@ pub fn outline_section_header(
         })
 }
 
+/// Animated chat marker using the supplied theme rather than global appearance state.
+pub fn outline_chat_indicator(
+    status: crate::status_style::Status,
+    key: impl Into<SharedString>,
+    working_color: gpui::Hsla,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+        crate::status_style::indicator_for_theme(status, theme).into_any_element()
+    } else if status == crate::status_style::Status::Working {
+        crate::loaders::mini_mono_spinner(key, 1.5, working_color, view, cx).into_any_element()
+    } else {
+        crate::status_style::indicator_for_theme(status, theme).into_any_element()
+    }
+}
+
+/// Work-item glyph that follows the status-indicator variant.
+pub fn outline_item_indicator(
+    glyph: &'static str,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+        div()
+            .size(px(8.0))
+            .rounded_full()
+            .bg(color)
+            .into_any_element()
+    } else {
+        div()
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(color)
+            .child(glyph)
+            .into_any_element()
+    }
+}
+
+/// Status word shown when the layout requests it.
+pub fn outline_status_word(label: &'static str, color: gpui::Hsla, theme: &Theme) -> Option<Div> {
+    theme.ui_style.behavior.status_words.then(|| {
+        div()
+            .flex_none()
+            .text_size(crate::typography::ui_rems(10.0))
+            .text_color(color)
+            .child(label)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

@@ -3632,7 +3632,7 @@ fn item_body(
                 .w(px(12.0))
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(color)
-                .child(glyph)
+                .child(crate::components::outline_item_indicator(glyph, color, theme))
                 .map(|el| match open_details {
                     Some((press, open)) => el
                         .cursor_pointer()
@@ -3646,9 +3646,7 @@ fn item_body(
                     }
                 }),
         )
-        .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(color).child(label))
-        })
+        .children(crate::components::outline_status_word(label, color, theme))
         .child(
             div()
                 .flex_1()
@@ -3809,7 +3807,7 @@ fn compact_chat_segment(
 ) -> AnyElement {
     let chat = &row.chat;
     let status = crate::status_style::Status::from(chat.status);
-    let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-compact-status-{key}"), cx.entity_id(), cx);
+    let indicator = crate::components::outline_chat_indicator(status, format!("outline-compact-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, cx.entity_id(), cx);
     let tip: SharedString = format!("Chat: {}", chat.title).into();
     div()
         .flex_none()
@@ -3877,7 +3875,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
             .into_any_element();
     }
     let status = crate::status_style::Status::from(chat.status);
-    let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-chat-status-{key}"), cx.entity_id(), cx);
+    let indicator = crate::components::outline_chat_indicator(status, format!("outline-chat-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, cx.entity_id(), cx);
     let status_label = match chat.status {
         mast_proto::ChatIndicator::Working => "Working",
         mast_proto::ChatIndicator::AwaitingInput => "Needs you",
@@ -3892,9 +3890,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
         .items_center()
         .gap(px(6.0))
         .child(indicator)
-        .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted).child(status_label))
-        })
+        .children(crate::components::outline_status_word(status_label, theme.text_muted, theme))
         .child(
             div()
                 .flex_1()
