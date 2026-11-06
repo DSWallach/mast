@@ -2619,6 +2619,7 @@ impl OutlineView {
                 button("outline-first-use-create")
                     .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
                         el.h(px(32.0)).bg(theme.solid).text_color(theme.on_solid)
+                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
                     })
                     .child("Create work item")
                     .when_some(create_keys, |el, keys| {
