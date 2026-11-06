@@ -34,18 +34,6 @@ const MAX_REF_ROWS: usize = 300;
 
 const FOOTER_CHIP_RADIUS: f32 = 6.0;
 
-/// Both sides of the composer handoff share one leading-aligned workspace
-/// cluster. Available width belongs after the pair, never between its labels.
-fn workspace_footer_row() -> gpui::Div {
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-}
-
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::observe_gate::ObserveGate;
@@ -1399,39 +1387,9 @@ impl Pickers {
     /// The Ask / Auto chip beside the model chip. Auto wears the warning
     /// accent — it's the "the agent won't ask" state.
     fn render_approval_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let id = "picker-approval-mode";
         let mode = ApprovalMode::from_auto_approve(self.effective_auto_approve(cx));
-        let (icon_path, text, icon_color, bg) = match mode {
-            ApprovalMode::Ask => (
-                crate::icons::KEY_MINIMALISTIC,
-                motion::hover_blend(id, theme.text_muted.opacity(0.7), theme.text.opacity(0.8)),
-                theme.text_muted.opacity(0.7),
-                motion::hover_blend(id, gpui::transparent_black(), theme.element_hover),
-            ),
-            ApprovalMode::Auto => (
-                crate::icons::DANGER_TRIANGLE,
-                motion::hover_blend(id, theme.warning.opacity(0.85), theme.warning),
-                theme.warning.opacity(0.85),
-                motion::hover_blend(id, theme.warning.opacity(0.10), theme.warning.opacity(0.18)),
-            ),
-        };
         let tooltip = SharedString::from(mode.tooltip());
-        div()
-            .id(id)
-            .h(px(20.0))
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .rounded(px(FOOTER_CHIP_RADIUS))
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(text)
-            .bg(bg)
-            .on_hover(motion::hover_listener(id))
-            .cursor_pointer()
+        crate::components::conversation_picker_approval(theme, mode.auto_approve(), mode.label())
             .tooltip(move |_, cx| cx.new(|_| WorkspaceChipTooltip(tooltip.clone())).into())
             .on_click(cx.listener(|this, _, _, cx| this.toggle_auto_approve(cx)))
             .when(self.launcher.is_some(), |chip| {
@@ -1445,13 +1403,6 @@ impl Pickers {
                         }
                     }))
             })
-            .child(
-                crate::icons::icon(icon_path)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(icon_color),
-            )
-            .child(SharedString::from(mode.label()))
             .into_any_element()
     }
 
@@ -3805,39 +3756,7 @@ impl Pickers {
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
-        div()
-            .id(id)
-            .h(px(32.0))
-            .max_w(px(248.0))
-            // Shrinkable under row pressure — four footer chips share one
-            // line; without min_w_0 they overflowed and painted overlapped.
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            // zeron composer/styles.tsx `pill`: `transition-colors` — the wash
-            // and text brighten fade over 150ms.
-            .text_color(motion::hover_blend(
-                id,
-                if set {
-                    theme.text.opacity(0.9)
-                } else {
-                    theme.text_muted
-                },
-                theme.text,
-            ))
-            .bg(if open {
-                theme.element_hover
-            } else {
-                motion::hover_blend(id, gpui::transparent_black(), theme.element_hover)
-            })
-            .on_hover(motion::hover_listener(id))
-            .cursor_pointer()
+        crate::components::conversation_picker_trigger(theme, id, open, set)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, _, _| {
@@ -3900,30 +3819,7 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let open = self.open_kind() == Some(kind);
-        div()
-            .id(id)
-            .h(px(20.0))
-            .max_w(px(280.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .rounded(px(FOOTER_CHIP_RADIUS))
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                id,
-                theme.text_muted.opacity(0.7),
-                theme.text.opacity(0.8),
-            ))
-            .bg(if open {
-                theme.element_hover
-            } else {
-                motion::hover_blend(id, gpui::transparent_black(), theme.element_hover)
-            })
-            .on_hover(motion::hover_listener(id))
-            .cursor_pointer()
+        crate::components::conversation_picker_footer_chip(theme, id, open)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, _, _| {
@@ -3944,33 +3840,6 @@ impl Pickers {
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.5)),
             )
-    }
-
-    /// A read-only footer label (locked sessions — t3code's
-    /// `resolveLockedWorkspaceLabel` span).
-    fn footer_label(icon_path: &'static str, label: SharedString, theme: &Theme) -> gpui::Div {
-        div()
-            .h(px(20.0))
-            // Four of these share one row now (device, project, checkout,
-            // ref): cap each early and let them SHRINK (`min_w_0`) — without
-            // it the clusters overflowed into each other and the labels
-            // painted overlapped (user report).
-            .max_w(px(160.0))
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(theme.text_muted.opacity(0.6))
-            .child(
-                crate::icons::icon(icon_path)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted.opacity(0.6)),
-            )
-            .child(div().min_w_0().truncate().child(label))
     }
 
     /// New-session destination controls. Machine and project form the
@@ -4126,7 +3995,7 @@ impl Pickers {
         );
         let workspace_chip = self.render_workspace_chip(&theme, cx);
         Some(
-            workspace_footer_row()
+            crate::components::conversation_picker_footer_row()
                 .child(attach_overlay_below(
                     checkout_chip,
                     &mut overlay,
@@ -4185,7 +4054,7 @@ impl Pickers {
         let chat_id = chat_id.to_owned();
         let current = selected.repo_id.clone();
         Some(
-            Self::footer_label(
+            crate::components::conversation_picker_footer_label(
                 crate::icons::GIT_BRANCH,
                 SharedString::from(selected.label()),
                 theme,
@@ -4240,7 +4109,7 @@ impl Pickers {
             // the row to CONTENT, and the left cluster's flex_1 (basis 0)
             // collapsed to zero width — both clusters painted from the same
             // origin, chips overlapping (user report).
-            workspace_footer_row().px(px(10.0))
+            crate::components::conversation_picker_footer_row().px(px(10.0))
         };
 
         if let Some(chat) = &session {
@@ -4278,7 +4147,7 @@ impl Pickers {
                 .flex_row()
                 .items_center()
                 .min_w_0()
-                .child(Self::footer_label(
+                .child(crate::components::conversation_picker_footer_label(
                     icon_path,
                     SharedString::from(label),
                     &theme,
@@ -4289,7 +4158,7 @@ impl Pickers {
             // pane's selector through AppState).
             let branch_label = match self.execution_branch_indicator(&chat.id, &theme, cx) {
                 Some(indicator) => indicator,
-                None => Self::footer_label(
+                None => crate::components::conversation_picker_footer_label(
                     crate::icons::GIT_BRANCH,
                     chat.branch
                         .clone()
@@ -6850,7 +6719,7 @@ mod tests {
                     .flex_none()
                 };
                 div().w(px(self.width)).child(
-                    workspace_footer_row()
+                    crate::components::conversation_picker_footer_row()
                         .px(px(10.0))
                         .child(chip(120.0))
                         .child(chip(90.0))

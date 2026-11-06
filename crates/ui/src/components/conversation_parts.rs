@@ -4,6 +4,185 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_picker_footer_row() -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+}
+
+pub fn conversation_picker_trigger(
+    theme: &Theme,
+    id: &'static str,
+    open: bool,
+    set: bool,
+) -> gpui::Stateful<Div> {
+    let chip = div()
+        .id(id)
+        .h(px(32.0))
+        .max_w(px(248.0))
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(10.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(crate::motion::hover_blend(
+            id,
+            if set {
+                theme.text.opacity(0.9)
+            } else {
+                theme.text_muted
+            },
+            theme.text,
+        ))
+        .bg(if open {
+            theme.element_hover
+        } else {
+            crate::motion::hover_blend(id, gpui::transparent_black(), theme.element_hover)
+        })
+        .on_hover(crate::motion::hover_listener(id))
+        .cursor_pointer()
+        .when(
+            theme.ui_style.layout == crate::ui_style::UiLayout::Guided,
+            |el| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .text_color(theme.text_muted)
+                        .child("Model"),
+                )
+            },
+        );
+    super::segmented_key(chip, theme, open)
+}
+
+pub fn conversation_picker_footer_chip(
+    theme: &Theme,
+    id: &'static str,
+    open: bool,
+) -> gpui::Stateful<Div> {
+    let chip = div()
+        .id(id)
+        .h(px(20.0))
+        .max_w(px(280.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(8.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(crate::motion::hover_blend(
+            id,
+            theme.text_muted.opacity(0.7),
+            theme.text.opacity(0.8),
+        ))
+        .bg(if open {
+            theme.element_hover
+        } else {
+            crate::motion::hover_blend(id, gpui::transparent_black(), theme.element_hover)
+        })
+        .on_hover(crate::motion::hover_listener(id))
+        .cursor_pointer();
+    super::segmented_key(chip, theme, open)
+}
+
+pub fn conversation_picker_approval(
+    theme: &Theme,
+    auto: bool,
+    label: &'static str,
+) -> gpui::Stateful<Div> {
+    let id = "picker-approval-mode";
+    let (icon, text, icon_color, bg) = if auto {
+        (
+            crate::icons::DANGER_TRIANGLE,
+            crate::motion::hover_blend(id, theme.warning.opacity(0.85), theme.warning),
+            theme.warning.opacity(0.85),
+            crate::motion::hover_blend(
+                id,
+                theme.warning.opacity(0.10),
+                theme.warning.opacity(0.18),
+            ),
+        )
+    } else {
+        (
+            crate::icons::KEY_MINIMALISTIC,
+            crate::motion::hover_blend(id, theme.text_muted.opacity(0.7), theme.text.opacity(0.8)),
+            theme.text_muted.opacity(0.7),
+            crate::motion::hover_blend(id, gpui::transparent_black(), theme.element_hover),
+        )
+    };
+    let chip = div()
+        .id(id)
+        .h(px(20.0))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(8.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(text)
+        .bg(bg)
+        .on_hover(crate::motion::hover_listener(id))
+        .cursor_pointer()
+        .child(
+            crate::icons::icon(icon)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(icon_color),
+        )
+        .child(
+            if theme.ui_style.layout == crate::ui_style::UiLayout::Guided {
+                format!("Approval: {label}")
+            } else {
+                label.to_string()
+            },
+        );
+    super::segmented_key(chip, theme, auto)
+}
+
+pub fn conversation_picker_footer_label(
+    icon: &'static str,
+    label: SharedString,
+    theme: &Theme,
+) -> Div {
+    div()
+        .h(px(20.0))
+        .max_w(px(160.0))
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted.opacity(0.6))
+        .child(
+            crate::icons::icon(icon)
+                .size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.6)),
+        )
+        .child(div().min_w_0().truncate().child(label))
+}
+
 pub fn conversation_message_expander(
     theme: &Theme,
     row_id: &str,
