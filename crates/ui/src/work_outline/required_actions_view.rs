@@ -2024,8 +2024,7 @@ impl RequiredActionsList {
             let selector = format!("approval-card-{id}");
             let prefill_selector = format!("approval-prefill-{id}");
             let save_selector = format!("approval-save-{id}");
-            let mut card = div().debug_selector(move || selector.clone()).flex().flex_col().gap(px(4.0))
-                .px(px(6.0)).py(px(4.0)).border_1().border_color(theme.border)
+            let mut card = crate::components::outline_approval_card(selector, theme)
                 .child(div().text_color(theme.text).child("Approve command"))
                 .child(div().text_color(theme.text_muted).child(SharedString::from(question.question.clone())))
                 .child(Self::button(SharedString::from(format!("approval-open-{id}")), "Open chat", true, theme)
@@ -2216,18 +2215,7 @@ fn group_heading(group: NeedsGroup, count: usize, theme: &Theme) -> gpui::Div {
         NeedsGroup::ReadyToMerge => theme.success,
         NeedsGroup::Fyi => theme.text_muted,
     };
-    div()
-        .debug_selector(move || format!("required-actions-group-{}", group.label()))
-        .px(px(6.0))
-        .pt(px(6.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .text_size(crate::typography::ui_rems(10.5))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(color)
-        .child(group.label())
-        .child(SharedString::from(format!("\u{b7} {count}")))
+    crate::components::outline_needs_heading(group.label(), count, color, theme)
 }
 
 impl Render for RequiredActionsList {
