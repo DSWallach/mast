@@ -67,6 +67,12 @@ pub struct StyleTokens {
     pub panel_radius: Option<f32>,
     pub chip_radius: Option<f32>,
     pub rule_width: Option<f32>,
+    /// Optional grid and type roles; absent values preserve existing metrics.
+    pub grid: Option<f32>,
+    pub label_size: Option<f32>,
+    pub secondary_size: Option<f32>,
+    pub body_size: Option<f32>,
+    pub title_size: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +168,11 @@ impl UiStyle {
             panel_radius: None,
             chip_radius: None,
             rule_width: None,
+            grid: None,
+            label_size: None,
+            secondary_size: None,
+            body_size: None,
+            title_size: None,
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
@@ -193,6 +204,11 @@ impl UiStyle {
             panel_radius: None,
             chip_radius: None,
             rule_width: None,
+            grid: None,
+            label_size: None,
+            secondary_size: None,
+            body_size: None,
+            title_size: None,
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
@@ -224,6 +240,11 @@ impl UiStyle {
             panel_radius: None,
             chip_radius: None,
             rule_width: None,
+            grid: None,
+            label_size: None,
+            secondary_size: None,
+            body_size: None,
+            title_size: None,
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
@@ -251,6 +272,11 @@ impl UiStyle {
             panel_radius: Some(0.0),
             chip_radius: Some(4.0),
             rule_width: Some(1.0),
+            grid: Some(8.0),
+            label_size: Some(10.0),
+            secondary_size: Some(12.0),
+            body_size: Some(13.0),
+            title_size: Some(16.0),
             ..Self::MINIMAL.tokens
         },
         surface: SurfaceModel::Opaque,
@@ -447,6 +473,16 @@ mod tests {
         assert_eq!(style.surface, SurfaceModel::Opaque);
         assert_eq!(
             (
+                style.tokens.grid,
+                style.tokens.label_size,
+                style.tokens.secondary_size,
+                style.tokens.body_size,
+                style.tokens.title_size
+            ),
+            (Some(8.0), Some(10.0), Some(12.0), Some(13.0), Some(16.0))
+        );
+        assert_eq!(
+            (
                 style.tokens.control_radius,
                 style.tokens.panel_radius,
                 style.tokens.chip_radius,
@@ -530,6 +566,16 @@ mod tests {
     #[test]
     fn minimal_preserves_existing_metrics() {
         let t = UiStyle::MINIMAL.tokens;
+        assert_eq!(
+            (
+                t.grid,
+                t.label_size,
+                t.secondary_size,
+                t.body_size,
+                t.title_size
+            ),
+            (None, None, None, None, None)
+        );
         assert_eq!(
             (
                 t.control_radius,

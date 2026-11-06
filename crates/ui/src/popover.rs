@@ -843,8 +843,8 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(MENU_ITEM_RADIUS)))
-        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.py(px(8.0)))
-        .text_size(crate::typography::ui_rems(13.0))
+        .when_some(theme.ui_style.tokens.grid, |el, grid| el.py(px(grid)))
+        .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(13.0)))
         .cursor_pointer();
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         row.bg(if active { theme.element_active } else { theme.surface })

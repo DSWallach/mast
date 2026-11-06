@@ -2082,7 +2082,7 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
             "sidebar-disclosure-label".into(),
             false,
             div()
-                .text_size(crate::typography::ui_rems(if key { 10.0 } else { 12.0 }))
+                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.label_size.unwrap_or(12.0)))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(if key { theme.text_muted } else { theme.text_muted.opacity(0.5) })
                 .child(label),

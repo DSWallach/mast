@@ -6337,7 +6337,7 @@ impl Transcript {
                                 .px(px(16.0))
                                 .py(px(10.0))
                                 .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
-                                .text_size(crate::typography::ui_rems(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { 13.0 } else { 14.0 }))
+                                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(14.0)))
                                 .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
