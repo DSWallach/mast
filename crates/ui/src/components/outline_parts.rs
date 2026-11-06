@@ -1436,6 +1436,82 @@ pub fn outline_execution_repository(
         )
 }
 
+/// Checkbox or radio mark for execution settings.
+pub fn outline_checkbox(checked: bool, round: bool, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .size(px(12.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(if round {
+            6.0
+        } else {
+            theme.ui_style.tokens.control_radius.unwrap_or(3.0)
+        }))
+        .border_1()
+        .border_color(theme.border_strong)
+        .when(checked && round, |el| {
+            el.child(div().size(px(6.0)).rounded_full().bg(theme.accent))
+        })
+        .when(checked && !round, |el| {
+            el.child(
+                crate::icons::icon(crate::icons::CHECK)
+                    .size(px(9.0))
+                    .text_color(theme.text),
+            )
+        })
+}
+pub fn outline_muted_line(text: impl Into<SharedString>, theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(text.into())
+}
+
+/// Repository binding editor card.
+pub fn outline_binding_card(index: usize, theme: &Theme) -> Div {
+    let scale = super::layout_spacing(theme);
+    div()
+        .debug_selector(move || format!("work-item-execution-binding-{index}"))
+        .flex()
+        .flex_col()
+        .gap(px(3.0 * scale))
+        .p(px(6.0 * scale))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border)
+}
+
+/// Checkout choice in a binding editor.
+pub fn outline_binding_choice(
+    index: usize,
+    choice: usize,
+    label: String,
+    active: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = format!("work-item-execution-worktree-{index}-{choice}");
+    let button = div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .px(px(5.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(if active { theme.accent } else { theme.border })
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if active { theme.text } else { theme.text_muted })
+        .hover(|el| el.bg(theme.element_hover));
+    crate::surface_chrome::segmented_key(button, theme, active)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(SharedString::from(label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

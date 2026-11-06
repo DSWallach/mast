@@ -550,35 +550,6 @@ impl WorkItemDetails {
     // Rendering
     // ----------------------------------------------------------------------
 
-    fn checkbox(checked: bool, round: bool, theme: &Theme) -> gpui::Div {
-        div()
-            .flex_none()
-            .size(px(12.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(if round { 6.0 } else { 3.0 }))
-            .border_1()
-            .border_color(theme.border_strong)
-            .when(checked && round, |el| {
-                el.child(div().size(px(6.0)).rounded_full().bg(theme.accent))
-            })
-            .when(checked && !round, |el| {
-                el.child(
-                    crate::icons::icon(crate::icons::CHECK)
-                        .size(px(9.0))
-                        .text_color(theme.text),
-                )
-            })
-    }
-
-    fn muted_line(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
-        div()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .child(text.into())
-    }
-
     fn render_validation(&self, theme: &Theme, cx: &gpui::App) -> Option<AnyElement> {
         let block = div()
             .debug_selector(|| "work-item-execution-validation".into())
@@ -590,7 +561,7 @@ impl WorkItemDetails {
             .bg(theme.element_hover.opacity(0.4));
         let element = match &self.execution_validation {
             ValidationState::Idle => return None,
-            ValidationState::Running => block.child(Self::muted_line("Validating\u{2026}", theme)),
+            ValidationState::Running => block.child(crate::components::outline_muted_line("Validating\u{2026}", theme)),
             ValidationState::Failed(message) => block.child(
                 div()
                     .text_size(crate::typography::ui_rems(11.0))
@@ -646,7 +617,7 @@ impl WorkItemDetails {
                 );
                 if let Some(validated) = reply.validated.as_ref() {
                     block = block.children(validated.repositories.iter().map(|repo| {
-                        Self::muted_line(
+                        crate::components::outline_muted_line(
                             format!(
                                 "{} \u{b7} {} \u{b7} {}",
                                 exec::path_name(&repo.repo_path),
@@ -891,15 +862,7 @@ impl WorkItemDetails {
                 .any(|(choice, _)| choice.as_ref().map(|(c, _)| c) == Some(*id))
         });
         let ref_input = self.execution_ref_inputs.get(ix).cloned();
-        div()
-            .debug_selector(move || format!("work-item-execution-binding-{ix}"))
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .p(px(6.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
+        crate::components::outline_binding_card(ix, theme)
             .child(
                 div()
                     .flex()
@@ -944,7 +907,7 @@ impl WorkItemDetails {
                             .gap(px(4.0))
                             .cursor_pointer()
                             .hover(|el| el.text_color(theme.text))
-                            .child(Self::checkbox(binding.member, false, theme))
+                            .child(crate::components::outline_checkbox(binding.member, false, theme))
                             .child("Member")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_execution_binding(cx, |d| d.toggle_member(ix))
@@ -959,7 +922,7 @@ impl WorkItemDetails {
                             .gap(px(4.0))
                             .cursor_pointer()
                             .hover(|el| el.text_color(theme.text))
-                            .child(Self::checkbox(binding.primary, true, theme))
+                            .child(crate::components::outline_checkbox(binding.primary, true, theme))
                             .child("Primary")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_execution_binding(cx, |d| d.set_primary(ix))
@@ -972,7 +935,7 @@ impl WorkItemDetails {
                     .flex_wrap()
                     .items_center()
                     .gap(px(4.0))
-                    .child(Self::muted_line("Checkout:", theme))
+                    .child(crate::components::outline_muted_line("Checkout:", theme))
                     .children(
                         choices
                             .into_iter()
@@ -980,22 +943,7 @@ impl WorkItemDetails {
                             .map(|(cix, (choice, label))| {
                                 let active =
                                     choice.as_ref().map(|(id, _)| id.clone()) == selected_worktree;
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "work-item-execution-worktree-{ix}-{cix}"
-                                    )))
-                                    .debug_selector(move || {
-                                        format!("work-item-execution-worktree-{ix}-{cix}")
-                                    })
-                                    .px(px(5.0))
-                                    .rounded(px(3.0))
-                                    .border_1()
-                                    .border_color(if active { theme.accent } else { theme.border })
-                                    .cursor_pointer()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(if active { theme.text } else { theme.text_muted })
-                                    .hover(|el| el.bg(theme.element_hover))
-                                    .child(SharedString::from(label))
+                                crate::components::outline_binding_choice(ix, cix, label, active, theme)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let choice = choice.clone();
                                         this.edit_execution_binding(cx, |d| {
@@ -1020,7 +968,7 @@ impl WorkItemDetails {
                         )
                     })
                     .when(draft.describing, |el| {
-                        el.child(Self::muted_line("Loading worktrees\u{2026}", theme))
+                        el.child(crate::components::outline_muted_line("Loading worktrees\u{2026}", theme))
                     }),
             )
             .when_some(draft.describe_error.clone(), |el, error| {
@@ -1055,7 +1003,7 @@ impl WorkItemDetails {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(Self::muted_line("Execution root", theme))
+            .child(crate::components::outline_muted_line("Execution root", theme))
             .child(
                 div()
                     .flex()
@@ -1079,7 +1027,7 @@ impl WorkItemDetails {
                         })),
                     ),
             )
-            .child(Self::muted_line("Repositories", theme))
+            .child(crate::components::outline_muted_line("Repositories", theme))
             .children(bindings)
             .child(
                 div().child(
@@ -1198,7 +1146,7 @@ impl WorkItemDetails {
         } else if let Some(resolved) = self.resolved_execution() {
             section = section.child(self.render_execution_view(snapshot, &resolved, theme, cx));
         } else {
-            section = section.child(Self::muted_line(
+            section = section.child(crate::components::outline_muted_line(
                 "Execution configuration needs the Space to be available",
                 theme,
             ));
