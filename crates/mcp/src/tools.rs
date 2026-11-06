@@ -564,6 +564,11 @@ fn friction_catalog() -> Vec<ToolDef> {
                 "since":{"type":"integer"}, "limit":{"type":"integer","minimum":1,"maximum":500}
             }}),
         },
+        ToolDef {
+            name: agent_tool_names::DISMISS_FRICTION,
+            description: "Dismiss a Space friction report with a reason, for orchestrator and admin chats.",
+            input_schema: json!({"type":"object", "properties": {"id":{"type":"string"}, "reason":{"type":"string","maxLength":1000}}, "required":["id","reason"]}),
+        },
     ]
 }
 
@@ -574,6 +579,7 @@ fn is_engine_agent_tool(name: &str) -> bool {
         || DIFF_TARGET_TOOLS.contains(&name)
         || name == agent_tool_names::REPORT_FRICTION
         || name == agent_tool_names::LIST_FRICTION
+        || name == agent_tool_names::DISMISS_FRICTION
         || name == agent_tool_names::HAND_OFF_ORCHESTRATOR
 }
 
@@ -4013,7 +4019,7 @@ mod tests {
         let world = Arc::new(World::default());
         let anonymous = tools(world.clone(), None);
         let agent = tools(world.clone(), Some(BETA_TOKEN));
-        for name in [agent_tool_names::REPORT_FRICTION, agent_tool_names::LIST_FRICTION] {
+        for name in [agent_tool_names::REPORT_FRICTION, agent_tool_names::LIST_FRICTION, agent_tool_names::DISMISS_FRICTION] {
             assert!(!anonymous.has(name));
             assert!(agent.has(name));
             agent.call(name, json!({})).await.unwrap();

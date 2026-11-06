@@ -1099,6 +1099,7 @@ impl AgentToolsService {
             tools::BIND_CHAT_WORKTREE => self.bind_chat_worktree(context, arguments),
             tools::REPORT_FRICTION => self.report_friction(context, arguments),
             tools::LIST_FRICTION => self.list_friction(context, arguments),
+            tools::DISMISS_FRICTION => self.dismiss_friction(context, arguments),
             other => Err(AgentToolError::refused(
                 AgentToolErrorCode::Unsupported,
                 format!("unknown agent tool: {other}"),
@@ -1122,7 +1123,10 @@ impl AgentToolsService {
 
     fn resolve_work_item_id(&self, context: &CallContext, id: &str) -> Result<String, AgentToolError> {
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-        resolve_id(id, snapshot.items.iter().map(|item| item.id.as_str()), "work item")
+        match resolve_id(id, snapshot.items.iter().map(|item| item.id.as_str()), "work item") {
+            Err(AgentToolError::Refused { ref message, .. }) if message.contains("not found") => Ok(id.trim().to_owned()),
+            result => result,
+        }
     }
 
     fn resolve_request_id(&self, context: &CallContext, id: &str) -> Result<String, AgentToolError> {
@@ -1134,7 +1138,7 @@ impl AgentToolsService {
                 || self.workspace.chat(&request.chat_id).ok().flatten().is_some_and(|chat| chat.parent_chat_id.as_deref() == Some(context.grant.chat_id.as_str()))
                 || root.as_deref().is_some_and(|root| in_agent_scope(&snapshot, root, &request.work_item_id))
         }).collect();
-        match resolve_id(id, requests.iter().map(|request| request.id.as_str()), "request") {
+        match resolve_id(id, snapshot.user_action_requests.iter().map(|request| request.id.as_str()), "request") {
             Ok(id) => Ok(id),
             Err(AgentToolError::Refused { ref message, .. }) if message.contains("not found") => {
                 let open = requests.iter().filter(|request| request.is_open()).map(|request| request.id.as_str()).collect::<Vec<_>>().join(", ");
@@ -1218,7 +1222,30 @@ impl AgentToolsService {
         });
         reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
         reports.truncate(args.limit.unwrap_or(100).min(500));
+        let reports: Vec<Value> = reports.into_iter().map(|report| {
+            let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
+            let mut value = json!(report);
+            if let Some(reason) = reason { value["dismissalReason"] = reason; }
+            value
+        }).collect();
         Ok(json!({ "reports": reports }))
+    }
+
+    fn dismiss_friction(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        let id = arguments.get("id").and_then(Value::as_str).unwrap_or("").trim();
+        let reason = arguments.get("reason").and_then(Value::as_str).unwrap_or("").trim();
+        if id.is_empty() || reason.is_empty() || reason.chars().count() > 1000 {
+            return Err(AgentToolError::invalid("id and reason (at most 1000 characters) are required"));
+        }
+        let orchestrator = self.workspace.read_chats().map_err(|error| AgentToolError::invalid(error.to_string()))?.iter().any(|chat| chat.space_id.as_deref() == Some(&context.grant.space_id) && chat.parent_chat_id.as_deref() == Some(&context.grant.chat_id));
+        if context.admin_space.as_deref() != Some(&context.grant.space_id) && !orchestrator {
+            return Err(WorkOutlineError::unauthorized("Only orchestrator or admin chats may dismiss friction").into());
+        }
+        let reports = self.workspace.friction_reports(&context.grant.space_id);
+        let id = resolve_id(id, reports.iter().map(|report| report.id.as_str()), "friction report")?;
+        let report = reports.iter().find(|report| report.id == id).expect("resolved report");
+        let report = self.workspace.dismiss_friction(&context.grant.space_id, &report.fingerprint, reason).map_err(|error| AgentToolError::invalid(error.to_string()))?;
+        Ok(json!({"report": report, "dismissalReason": reason}))
     }
 
     /// `bind_chat_worktree`: record a worktree as the calling Chat's diff
