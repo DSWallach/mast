@@ -2925,6 +2925,67 @@ pub fn outline_description(text: String, has_text: bool, theme: &Theme) -> State
         .child(SharedString::from(text))
 }
 
+/// Primary text of a Required Action.
+pub fn outline_required_text(
+    selector: String,
+    text: String,
+    open: bool,
+    expanded: bool,
+    theme: &Theme,
+) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .flex_1()
+        .min_w_0()
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if open { theme.text } else { theme.text_muted })
+        .when(open && !expanded, |el| el.line_clamp(2))
+        .child(SharedString::from(text))
+}
+pub fn outline_required_lifecycle(selector: String, label: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .px(px(5.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(label))
+}
+pub fn outline_required_fact(
+    selector: String,
+    text: String,
+    emphasized: bool,
+    theme: &Theme,
+) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .pl(px(12.0))
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .when(emphasized, |el| {
+            el.text_color(theme.text)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+        })
+        .child(SharedString::from(text))
+}
+pub fn outline_required_info(selector: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .pl(px(12.0))
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

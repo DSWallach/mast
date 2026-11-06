@@ -1790,42 +1790,21 @@ impl RequiredActionsList {
                             .text_color(if open { attention } else { theme.text_faint })),
                     )
                     .child(
-                        div()
-                            .debug_selector({ let selector = format!("required-actions-text-{id}"); move || selector.clone() })
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(if open { theme.text } else { theme.text_muted })
-                            // Two lines until Details expands the row.
-                            .when(open && !info_open, |el| el.line_clamp(2))
-                            .child(SharedString::from(row.text.clone())),
+                        crate::components::outline_required_text(format!("required-actions-text-{id}"), row.text.clone(), open, info_open, theme),
                     )
                     .when_some(lifecycle, |el, lifecycle| el.child(
-                        div().debug_selector({ let selector = format!("required-actions-lifecycle-{id}-{lifecycle}"); move || selector.clone() })
-                            .px(px(5.0)).rounded(px(4.0)).border_1().border_color(theme.border)
-                            .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
-                            .child(lifecycle)
+                        crate::components::outline_required_lifecycle(format!("required-actions-lifecycle-{id}-{lifecycle}"), lifecycle.to_string(), theme)
                     )),
             )
             .child(div().pl(px(12.0)).child(meta))
             .children(row.facts.iter().filter(|fact| row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests"))).chain(row.facts.iter().filter(|fact| row.kind != mast_proto::work_outline_user_actions::UserActionKind::Handoff || !(fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")))).map(|fact| {
-                div().debug_selector({ let selector = format!("required-actions-fact-{id}-{}", fact.label); move || selector.clone() }).pl(px(12.0)).text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .when(row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")), |el| el.text_color(theme.text).font_weight(gpui::FontWeight::SEMIBOLD))
-                    .child(SharedString::from(format!("{}: {}", fact.label, fact.value)))
+                crate::components::outline_required_fact(format!("required-actions-fact-{id}-{}", fact.label), format!("{}: {}", fact.label, fact.value), row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")), theme)
             }))
             .when_some(request_links, |el, links| el.child(links))
             .when_some(artifact_links, |el, links| el.child(links))
             .when(info_open, |el| {
                 el.child(
-                    div()
-                        .debug_selector({
-                            let selector = format!("required-actions-info-{id}");
-                            move || selector.clone()
-                        })
-                        .pl(px(12.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
+                    crate::components::outline_required_info(format!("required-actions-info-{id}"), theme)
                         .children(detail),
                 )
             })
