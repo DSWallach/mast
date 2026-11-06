@@ -2972,7 +2972,11 @@ fn render_code_block_source_with_actions(
 /// asked for color; these are the diff pane's hues, now shared by both).
 pub fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
     let color = theme.syntax.color(kind);
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area { theme.identity_foreground(color) } else { color }
+    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+        (0..=100).map(|step| crate::theme::flatten(color.opacity(1.0 - step as f32 / 100.0), theme.text))
+            .find(|candidate| crate::theme::contrast_ratio(*candidate, theme.bg) >= 7.0)
+            .unwrap_or(theme.text)
+    } else { color }
 }
 
 /// Build the exact-cover `TextRun` list for one code line from its tokens.
@@ -3033,7 +3037,7 @@ mod tests {
         theme.bg = theme.solid;
         theme.text = theme.identity_text(theme.bg);
         for kind in [HighlightKind::Comment, HighlightKind::Keyword, HighlightKind::String, HighlightKind::Function] {
-            assert!(crate::theme::contrast_ratio(token_color(kind, &theme), theme.bg) >= 4.5);
+            assert!(crate::theme::contrast_ratio(token_color(kind, &theme), theme.bg) >= 7.0);
         }
     }
 

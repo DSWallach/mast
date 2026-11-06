@@ -819,6 +819,7 @@ impl Theme {
     pub fn identity_text(&self, fill: Hsla) -> Hsla {
         [self.text, self.solid, self.on_solid, self.on_accent]
             .into_iter()
+            .map(|candidate| flatten(candidate, fill))
             .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
             .unwrap_or(self.text)
     }
@@ -1966,6 +1967,14 @@ mod tests {
                 assert!(contrast_ratio(theme.identity_foreground(fill), theme.bg) >= 4.5, "{id} {key}");
             }
         }
+    }
+
+    #[test]
+    fn inverse_panel_text_is_opaque_and_contrasts_in_industrial_light() {
+        let theme = Theme::for_selection(Appearance::Light, "industrial-light", AccentSelection::ThemeDefault, SurfacePreference::Opaque);
+        let foreground = theme.identity_text(theme.solid);
+        assert_eq!(foreground.a, 1.0);
+        assert!(contrast_ratio(foreground, theme.solid) >= 4.5);
     }
 
     #[test]
