@@ -166,6 +166,7 @@ mod tests {
             .with_ui_style(crate::ui_style::UiStyle::INDUSTRIAL);
         assert_eq!(dot_color(Status::Working, &theme), theme.accent);
         assert_eq!(dot_color(Status::Idle, &theme), theme.text_muted);
+        assert_eq!(dot_color(Status::Done, &theme), theme.success);
     }
 
     #[test]
