@@ -1289,6 +1289,28 @@ pub(crate) fn panel_link(
         .hover(|el| el.bg(theme.element_hover))
 }
 
+pub(crate) fn panel_reference_row(theme: &Theme, id: String) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(4.0))
+        .rounded(px(3.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_industrial(theme), |el| {
+            el.border_1().border_color(theme.industrial_colors().rule)
+        })
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text)
+        .hover(|el| el.bg(theme.element_hover))
+}
+
 pub(crate) fn wake_toggle(
     theme: &Theme,
     selector: String,

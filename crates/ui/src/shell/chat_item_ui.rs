@@ -1711,20 +1711,7 @@ pub(super) fn pr_link_row(
         }
     }
     let tip: SharedString = tip.join("\n").into();
-    let mut row = div()
-        .id(SharedString::from(id.clone()))
-        .debug_selector(selector(""))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(11.5))
-        .text_color(theme.text)
-        .hover(|el| el.bg(theme.element_hover))
+    let mut row = crate::components::shell_parts::panel_reference_row(theme, id.clone())
         .tooltip(move |_, cx| {
             cx.new(|_| crate::work_outline::chips::TextTooltip(tip.clone()))
                 .into()
@@ -1791,27 +1778,13 @@ pub(super) fn ticket_link_row(
     ticket: &crate::chat_metadata::HeaderTicket,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let selector = id.clone();
     let tip: SharedString = match &ticket.title {
         Some(title) => format!("{} {title}", ticket.identifier),
         None => ticket.identifier.clone(),
     }
     .into();
     let text = tip.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(11.5))
-        .text_color(theme.text)
-        .hover(|el| el.bg(theme.element_hover))
+    crate::components::shell_parts::panel_reference_row(theme, id)
         .tooltip(move |_, cx| {
             cx.new(|_| crate::work_outline::chips::TextTooltip(tip.clone()))
                 .into()
