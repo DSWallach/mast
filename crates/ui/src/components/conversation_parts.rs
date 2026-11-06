@@ -4,6 +4,44 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_skill_chip(theme: &Theme, index: usize) -> gpui::Stateful<Div> {
+    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    div()
+        .id(("composer-skill-chip", index))
+        .flex_none()
+        .h(px(crate::badges::BADGE_HEIGHT))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .pl(px(8.0))
+        .pr(px(4.0))
+        .rounded(px(if area { 12.0 } else { 8.0 }))
+        .bg(crate::theme::ink(0.06))
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+}
+
+pub fn conversation_skill_remove(theme: &Theme, index: usize) -> gpui::Stateful<Div> {
+    div()
+        .id(("composer-skill-remove", index))
+        .role(gpui::Role::Button)
+        .aria_label("Remove skill")
+        .size(px(16.0))
+        .rounded(px(4.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(crate::theme::ink(0.08)))
+        .child(
+            crate::icons::icon(crate::icons::CLOSE)
+                .size(px(10.0))
+                .text_color(theme.text_muted),
+        )
+}
+
 pub fn conversation_send_hint(
     theme: &Theme,
     enabled: bool,

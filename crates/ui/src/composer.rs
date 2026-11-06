@@ -4953,21 +4953,7 @@ impl Composer {
             let remove = name.clone();
             let label: SharedString = format!("/{name}").into();
             row = row.child(
-                div()
-                    .id(("composer-skill-chip", ix))
-                    .flex_none()
-                    .h(px(crate::badges::BADGE_HEIGHT))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .pl(px(8.0))
-                    .pr(px(4.0))
-                    .rounded(px(8.0))
-                    .bg(crate::theme::ink(0.06))
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
+                crate::components::conversation_skill_chip(theme, ix)
                     .tooltip(|_, cx| {
                         cx.new(|_| {
                             crate::workspace_chip::WorkspaceChipTooltip(
@@ -4987,27 +4973,12 @@ impl Composer {
                     )
                     .child(label)
                     .child(
-                        div()
-                            .id(("composer-skill-remove", ix))
-                            .role(gpui::Role::Button)
-                            .aria_label("Remove skill")
-                            .size(px(16.0))
-                            .rounded(px(4.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.08)))
+                        crate::components::conversation_skill_remove(theme, ix)
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.remove_skill(&remove, cx);
-                            }))
-                            .child(
-                                crate::icons::icon(crate::icons::CLOSE)
-                                    .size(px(10.0))
-                                    .text_color(theme.text_muted),
-                            ),
+                            })),
                     ),
             );
         }
