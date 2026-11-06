@@ -4,6 +4,50 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_tool_stat_row(
+    theme: &Theme,
+    path: &str,
+    additions: u64,
+    deletions: u64,
+    height: f32,
+) -> Div {
+    div()
+        .h(px(height))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            crate::file_icons::icon(
+                crate::file_icons::FileIconIdentity::file(path),
+                theme.appearance,
+            )
+            .size(px(14.0))
+            .flex_none(),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_color(theme.text_faint)
+                .child(SharedString::from(path.to_owned())),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme.success)
+                .child(SharedString::from(format!("+{additions}"))),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme.danger)
+                .child(SharedString::from(format!("−{deletions}"))),
+        )
+}
+
 pub fn conversation_subagent_chip_frame(
     id: SharedString,
     rail: bool,

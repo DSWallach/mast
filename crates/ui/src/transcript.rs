@@ -7822,41 +7822,7 @@ fn detail_body(
             .font_family(theme.font_mono.clone())
             .text_size(px(TOOL_TEXT_SIZE))
             .children(stats.iter().map(|stat| {
-                div()
-                    .h(px(OUTPUT_LINE_HEIGHT))
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        crate::file_icons::icon(
-                            crate::file_icons::FileIconIdentity::file(&stat.path),
-                            theme.appearance,
-                        )
-                        .size(px(14.0))
-                        .flex_none(),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(stat.path.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.success)
-                            .child(SharedString::from(format!("+{}", stat.additions))),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.danger)
-                            .child(SharedString::from(format!("−{}", stat.deletions))),
-                    )
+                crate::components::conversation_tool_stat_row(theme, &stat.path, stat.additions, stat.deletions, OUTPUT_LINE_HEIGHT)
             }))
             .into_any_element(),
         ToolDetail::Output {

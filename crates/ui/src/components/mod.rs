@@ -23,7 +23,7 @@ pub use conversation_parts::{
     conversation_skill_remove, conversation_subagent_chip_frame, conversation_thought_line, conversation_tool_chip_frame,
     conversation_tool_detail_frame, conversation_tool_group_header, conversation_tool_more_lines,
     conversation_tool_output_line,
-    conversation_tool_header, conversation_tool_icon_tile,
+    conversation_tool_header, conversation_tool_icon_tile, conversation_tool_stat_row,
     conversation_tool_panel, conversation_tool_theme, conversation_user_bubble,
     conversation_wizard_surface, user_message_theme,
 };
