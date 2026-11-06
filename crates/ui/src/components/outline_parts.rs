@@ -900,6 +900,65 @@ pub fn outline_move_flash(selector: String, theme: &Theme) -> Div {
         .bg(theme.accent_wash)
 }
 
+/// Metadata row beneath a required action.
+pub fn outline_action_metadata(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+        .min_w_0()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+}
+
+/// A linked target on a required action.
+pub fn outline_request_link(id: SharedString, label: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    let scale = super::layout_spacing(theme);
+    let button = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .px(px(6.0 * scale))
+        .py(px(scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_color(theme.accent)
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover));
+    crate::surface_chrome::segmented_key(button, theme, false)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(SharedString::from(label))
+}
+
+/// Artifact link on a required action.
+pub fn outline_artifact_link(id: SharedString, label: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .max_w(px(220.0))
+        .flex()
+        .items_center()
+        .gap(px(3.0 * super::layout_spacing(theme)))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .hover(|el| el.bg(theme.element_hover))
+        .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(10.0)))
+        .child(div().min_w_0().truncate().child(SharedString::from(label)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

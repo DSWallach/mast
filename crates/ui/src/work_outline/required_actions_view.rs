@@ -1243,13 +1243,7 @@ impl RequiredActionsList {
         };
         let path_space = row.space_id.clone();
         let path_item = row.work_item_id.clone();
-        let mut meta = div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .min_w_0()
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_muted)
+        let mut meta = crate::components::outline_action_metadata(theme)
             .child(
                 div()
                     .id(SharedString::from(format!("required-actions-path-{id}")))
@@ -1904,19 +1898,7 @@ impl RequiredActionsList {
                 let label = link.label.clone();
                 let target = link.target.clone();
                 let chat_id = row.chat_id.clone();
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_color(theme.accent)
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(SharedString::from(label))
+                crate::components::outline_request_link(SharedString::from(selector), label, theme)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         if let RequestLinkTarget::Chat { id } = &target {
@@ -1991,22 +1973,7 @@ impl RequiredActionsList {
             } else {
                 link.label.clone()
             };
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .max_w(px(220.0))
-                .flex()
-                .items_center()
-                .gap(px(3.0))
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.accent)
-                .hover(|el| el.bg(theme.element_hover))
-                .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(10.0)))
-                .child(div().min_w_0().truncate().child(SharedString::from(label)))
+            crate::components::outline_artifact_link(SharedString::from(selector), label, theme)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if let Some(shell) = &this.shell {
