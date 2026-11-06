@@ -2570,6 +2570,65 @@ pub fn outline_exception_row(
         .child(outline_execution_line(summary, 10.5, theme.text_faint, theme).truncate())
 }
 
+/// Repository binding heading.
+pub fn outline_binding_heading(name: String, path: String, theme: &Theme) -> Div {
+    outline_detail_row(theme)
+        .child(
+            outline_execution_line(name, 12.0, theme.text, theme)
+                .flex_none()
+                .font_weight(gpui::FontWeight::SEMIBOLD),
+        )
+        .child(
+            outline_execution_line(path, 10.5, theme.text_faint, theme)
+                .flex_1()
+                .min_w_0()
+                .truncate(),
+        )
+}
+pub fn outline_binding_toggle_group(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .gap(px(12.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+}
+pub fn outline_binding_toggle(
+    index: usize,
+    primary: bool,
+    checked: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let (id, label) = if primary {
+        ("work-item-execution-primary", "Primary")
+    } else {
+        ("work-item-execution-member", "Member")
+    };
+    div()
+        .id((id, index))
+        .debug_selector(move || format!("{id}-{index}"))
+        .flex()
+        .items_center()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+        .cursor_pointer()
+        .hover(|el| el.text_color(theme.text))
+        .child(outline_checkbox(checked, primary, theme))
+        .child(label)
+}
+pub fn outline_binding_pinned(label: String, theme: &Theme) -> Div {
+    div()
+        .px(px(5.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.accent)
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .child(SharedString::from(label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

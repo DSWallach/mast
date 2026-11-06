@@ -778,27 +778,7 @@ impl WorkItemDetails {
         let ref_input = self.execution_ref_inputs.get(ix).cloned();
         crate::components::outline_binding_card(ix, theme)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(SharedString::from(exec::path_name(&binding.repo_path))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(binding.repo_path.clone())),
-                    )
+                crate::components::outline_binding_heading(exec::path_name(&binding.repo_path), binding.repo_path.clone(), theme)
                     .child(
                         crate::work_outline::hints::details_button(("work-item-execution-remove", ix), "Remove", theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -807,37 +787,15 @@ impl WorkItemDetails {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(12.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
+                crate::components::outline_binding_toggle_group(theme)
                     .child(
-                        div()
-                            .id(("work-item-execution-member", ix))
-                            .debug_selector(move || format!("work-item-execution-member-{ix}"))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .cursor_pointer()
-                            .hover(|el| el.text_color(theme.text))
-                            .child(crate::components::outline_checkbox(binding.member, false, theme))
-                            .child("Member")
+                        crate::components::outline_binding_toggle(ix, false, binding.member, theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_execution_binding(cx, |d| d.toggle_member(ix))
                             })),
                     )
                     .child(
-                        div()
-                            .id(("work-item-execution-primary", ix))
-                            .debug_selector(move || format!("work-item-execution-primary-{ix}"))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .cursor_pointer()
-                            .hover(|el| el.text_color(theme.text))
-                            .child(crate::components::outline_checkbox(binding.primary, true, theme))
-                            .child("Primary")
+                        crate::components::outline_binding_toggle(ix, true, binding.primary, theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_execution_binding(cx, |d| d.set_primary(ix))
                             })),
@@ -868,17 +826,7 @@ impl WorkItemDetails {
                     )
                     .when_some(pinned_unlisted.cloned(), |el, _| {
                         el.child(
-                            div()
-                                .px(px(5.0))
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(theme.accent)
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(theme.text)
-                                .child(SharedString::from(format!(
-                                    "{} (pinned)",
-                                    exec::path_name(binding.checkout_path())
-                                ))),
+                            crate::components::outline_binding_pinned(format!("{} (pinned)", exec::path_name(binding.checkout_path())), theme),
                         )
                     })
                     .when(draft.describing, |el| {
@@ -887,10 +835,7 @@ impl WorkItemDetails {
             )
             .when_some(draft.describe_error.clone(), |el, error| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(error)),
+                    crate::components::outline_execution_line(error, 10.5, theme.warning, theme),
                 )
             })
             .when_some(ref_input, |el, input| {
