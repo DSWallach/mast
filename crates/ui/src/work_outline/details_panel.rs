@@ -1289,15 +1289,7 @@ impl Render for WorkItemDetails {
             return shell_frame
                 .child(div().flex().justify_end().p(px(8.0)).child(close))
                 .child(
-                    div()
-                        .px(px(16.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child(if self.snapshot.is_some() {
-                            "This work item no longer exists."
-                        } else {
-                            "Loading…"
-                        }),
+                    crate::components::outline_detail_text(if self.snapshot.is_some() { "This work item no longer exists." } else { "Loading…" }.into(), 12.0, theme.text_muted, &theme).px(px(16.0)),
                 );
         };
         let snapshot = self.snapshot.clone().expect("item implies snapshot");
@@ -1360,16 +1352,7 @@ impl Render for WorkItemDetails {
             .px(px(14.0))
             .pt(px(10.0))
             .child(
-                div()
-                    .debug_selector(|| "work-item-breadcrumbs".into())
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .overflow_hidden()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
+                crate::components::outline_breadcrumbs(&theme)
                     .children(crumbs),
             )
             .children(crate::components::outline_panel_marks(&theme))
@@ -1410,14 +1393,7 @@ impl Render for WorkItemDetails {
                 let (glyph, label, color) =
                     chips::status_style(WorkItemEffectiveStatus::UserActionRequired, &theme);
                 let count = item.rollup.unresolved_user_action_count;
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(color)
-                    .child(SharedString::from(if count > 1 {
-                        format!("{glyph} {label} ({count})")
-                    } else {
-                        format!("{glyph} {label}")
-                    }))
+                crate::components::outline_details_attention(glyph, label, color, count, &theme)
             });
         let branch_review = self.shell.upgrade().and_then(|shell| {
             let shell = shell.read(cx);
@@ -1514,18 +1490,7 @@ impl Render for WorkItemDetails {
             } else {
                 let text = item.description.clone().filter(|d| !d.trim().is_empty());
                 description = description.child(
-                    div()
-                        .id("work-item-description")
-                        .cursor_text()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(if text.is_some() {
-                            theme.text
-                        } else {
-                            theme.text_faint
-                        })
-                        .child(SharedString::from(
-                            text.unwrap_or_else(|| "No description".into()),
-                        ))
+                    crate::components::outline_description(text.clone().unwrap_or_else(|| "No description".into()), text.is_some(), &theme)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.begin_description_edit(window, cx)
                         })),
@@ -1607,10 +1572,7 @@ impl Render for WorkItemDetails {
                 .pl(px(8.0))
                 .when(candidates.is_empty(), |el| {
                     el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_faint)
-                            .child("No unassociated chats in this Space"),
+                        crate::components::outline_detail_text("No unassociated chats in this Space".into(), 11.0, theme.text_faint, &theme),
                     )
                 })
                 .children(candidates.into_iter().enumerate().map(|(ix, (id, title))| {
@@ -1832,11 +1794,8 @@ impl Render for WorkItemDetails {
                 .children(linear_hint)
                 .when_some(error, |el, error| {
                     el.child(
-                        div()
-                            .debug_selector(|| "work-item-details-error".into())
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.warning)
-                            .child(SharedString::from(error)),
+                        crate::components::outline_detail_text(error, 11.0, theme.warning, &theme)
+                            .debug_selector(|| "work-item-details-error".into()),
                     )
                 })
                 .child(footer),

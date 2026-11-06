@@ -2856,6 +2856,75 @@ pub fn outline_space_title(theme: &Theme) -> Div {
         .font_weight(gpui::FontWeight::SEMIBOLD)
 }
 
+/// Breadcrumb container in an item-details header.
+pub fn outline_breadcrumbs(theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "work-item-breadcrumbs".into())
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+        .overflow_hidden()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+}
+
+/// Effective user-action status beside the item status control.
+pub fn outline_details_attention(
+    glyph: &'static str,
+    label: &'static str,
+    color: gpui::Hsla,
+    count: u32,
+    theme: &Theme,
+) -> Div {
+    let suffix = if count > 1 {
+        format!("{label} ({count})")
+    } else {
+        label.to_owned()
+    };
+    div()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(color)
+        .when(
+            theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot,
+            |el| {
+                el.flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(crate::status_style::indicator_for_theme(
+                        crate::status_style::Status::Waiting,
+                        theme,
+                    ))
+                    .child(SharedString::from(suffix.clone()))
+            },
+        )
+        .when(
+            theme.ui_style.status_indicator != crate::ui_style::StatusIndicator::Dot,
+            |el| el.child(SharedString::from(format!("{glyph} {suffix}"))),
+        )
+}
+
+/// Editable item description.
+pub fn outline_description(text: String, has_text: bool, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("work-item-description")
+        .cursor_text()
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if has_text {
+            theme.text
+        } else {
+            theme.text_faint
+        })
+        .child(SharedString::from(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
