@@ -1,7 +1,37 @@
 //! Context carried by questions about a diff or a walkthrough step.
 
-use super::{DiffLine, LineKind, SourceSide};
+use super::{DiffLine, FileDiff, LineKind, SourceSide};
 use mast_proto::ReviewStep;
+
+/// A selection belongs to one file and one side, even in a split diff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DiffSelection {
+    pub path: String,
+    pub side: SourceSide,
+    pub anchor: u32,
+    pub extent: u32,
+}
+
+impl DiffSelection {
+    pub fn lines<'a>(&self, file: &'a FileDiff) -> Vec<&'a DiffLine> {
+        if file.path != self.path {
+            return Vec::new();
+        }
+        let first = self.anchor.min(self.extent);
+        let last = self.anchor.max(self.extent);
+        file.hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| {
+                let number = match self.side {
+                    SourceSide::Old => line.old_no,
+                    SourceSide::New => line.new_no,
+                };
+                number.is_some_and(|number| (first..=last).contains(&number))
+            })
+            .collect()
+    }
+}
 
 /// Format the selected lines as a normal chat message, preserving patch markers.
 pub(super) fn selection_question(
@@ -9,7 +39,7 @@ pub(super) fn selection_question(
     side: SourceSide,
     first: u32,
     last: u32,
-    lines: &[DiffLine],
+    lines: &[&DiffLine],
     target: &str,
 ) -> String {
     let side = match side {
@@ -57,6 +87,31 @@ mod tests {
     use mast_proto::{ReviewHunk, ReviewRisk};
 
     #[test]
+    fn selection_respects_file_side_and_reverse_ranges() {
+        let files = super::super::parse_patch(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-old\n+new\n shared\n",
+        );
+        let mut selection = DiffSelection {
+            path: "a.rs".into(),
+            side: SourceSide::Old,
+            anchor: 2,
+            extent: 1,
+        };
+        let lines = selection.lines(&files[0]);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old", "shared"]
+        );
+        selection.side = SourceSide::New;
+        assert_eq!(selection.lines(&files[0])[0].text, "new");
+        selection.path = "other.rs".into();
+        assert!(selection.lines(&files[0]).is_empty());
+    }
+
+    #[test]
     fn selection_message_preserves_side_range_and_patch() {
         let lines = vec![
             DiffLine {
@@ -72,7 +127,14 @@ mod tests {
                 text: "after".into(),
             },
         ];
-        let message = selection_question("src/lib.rs", SourceSide::Old, 8, 4, &lines, "abc..def");
+        let message = selection_question(
+            "src/lib.rs",
+            SourceSide::Old,
+            8,
+            4,
+            &lines.iter().collect::<Vec<_>>(),
+            "abc..def",
+        );
         assert!(message.contains("Target: abc..def\nFile: src/lib.rs\nSide: old\nLines: 4–8"));
         assert!(message.ends_with("-before\n+after\n"));
     }
