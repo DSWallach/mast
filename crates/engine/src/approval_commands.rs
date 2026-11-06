@@ -136,20 +136,42 @@ pub(crate) fn matching_rules<'a>(
 }
 
 /// Preview the same fail-closed decision used by the engine.
-pub fn matching_rule_labels(command: &str, harness: ApprovalRuleHarness, cwd: &Path, permitted_roots: &[&Path], rules: &[ApprovalRule]) -> Option<Vec<String>> {
-    matching_rules(&Value::String(command.to_owned()), harness, cwd, permitted_roots, rules)
-        .map(|matches| matches.into_iter().map(|rule| rule.label.clone()).collect())
+pub fn matching_rule_labels(
+    command: &str,
+    harness: ApprovalRuleHarness,
+    cwd: &Path,
+    permitted_roots: &[&Path],
+    rules: &[ApprovalRule],
+) -> Option<Vec<String>> {
+    matching_rules(
+        &Value::String(command.to_owned()),
+        harness,
+        cwd,
+        permitted_roots,
+        rules,
+    )
+    .map(|matches| matches.into_iter().map(|rule| rule.label.clone()).collect())
 }
 
 /// Prefill a disabled argument-prefix rule for a single safely parsed command.
 pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<ApprovalRule> {
     let segments = parse_command(command)?;
-    if segments.len() != 1 || !passes_safety_rails(&segments) { return None; }
+    if segments.len() != 1 || !passes_safety_rails(&segments) {
+        return None;
+    }
     let (_, argv_prefix) = normalize_segment(&segments[0])?;
     Some(ApprovalRule {
-        id, label: "Command approval".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
-        enabled: false, argv_prefix, command_regex: None, cwd_scope: None, require_isolated_home: false,
-        hit_count: 0, last_used_at: None,
+        id,
+        label: "Command approval".into(),
+        created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex,
+        enabled: false,
+        argv_prefix,
+        command_regex: None,
+        cwd_scope: None,
+        require_isolated_home: false,
+        hit_count: 0,
+        last_used_at: None,
     })
 }
 
@@ -180,8 +202,14 @@ fn isolated_configuration(assignments: &[String]) -> bool {
 /// These checks are deliberately stricter than the minimum policy.
 fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
     for segment in segments {
-        if segment.argv.iter().any(|arg| arg == "sudo")
-            || segment.argv.windows(2).any(|pair| pair[0] == "git" && pair[1] == "push")
+        if segment
+            .argv
+            .iter()
+            .any(|arg| arg.contains("sudo") || arg.contains("rm -rf") || arg.contains("git push"))
+            || segment
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "git" && pair[1] == "push")
         {
             return false;
         }
@@ -234,25 +262,16 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
             return false;
         }
         if program == "cargo"
-            && !matches!(argv.get(1).map(String::as_str), Some("test" | "nextest"))
+            && !matches!(
+                argv.get(1).map(String::as_str),
+                Some("test" | "nextest" | "build" | "check" | "clippy")
+            )
         {
             return false;
         }
-        // Cargo otherwise downloads dependencies and can execute a configured
-        // wrapper or alternate toolchain. Only accept its offline mode and do
-        // not allow command-line configuration overrides.
-        if program == "cargo"
-            && (!argv
-                .iter()
-                .take_while(|arg| arg.as_str() != "--")
-                .any(|arg| arg == "--offline")
-                || argv.iter().any(|arg| {
-                    arg == "--config"
-                        || arg.starts_with("--config=")
-                        || arg == "-Z"
-                        || arg.starts_with("-Z")
-                }))
-        {
+        // Configuration files are opaque, so only inline assignments with a
+        // non-network key can be checked without interpreting another file.
+        if program == "cargo" && !cargo_configuration_is_safe(&argv) {
             return false;
         }
         if program == "rg" && (argv.len() != 2 || argv[1].starts_with('-')) {
@@ -294,13 +313,45 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
         if program == "git" && argv.iter().skip(1).any(|arg| arg == "push") {
             return false;
         }
-        if matches!(program.as_str(), "cargo" | "rustup")
+        if program == "cargo"
+            && argv.get(1).is_some_and(|arg| arg == "nextest")
             && argv
                 .iter()
-                .skip(1)
-                .any(|arg| matches!(arg.as_str(), "install" | "update"))
+                .skip(2)
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| {
+                    matches!(
+                        arg.as_str(),
+                        "install" | "publish" | "login" | "add" | "update"
+                    )
+                })
         {
             return false;
+        }
+    }
+    true
+}
+
+fn cargo_configuration_is_safe(argv: &[String]) -> bool {
+    let mut args = argv.iter().skip(2);
+    while let Some(arg) = args.next() {
+        let value = if arg == "--config" {
+            args.next().map(String::as_str)
+        } else {
+            arg.strip_prefix("--config=")
+        };
+        if arg == "--config" || arg.starts_with("--config=") {
+            let Some((key, _)) = value.and_then(|value| value.split_once('=')) else {
+                return false;
+            };
+            let key = key.to_ascii_lowercase();
+            if key.contains("registry")
+                || key.contains("registries")
+                || key.contains("net")
+                || key.contains("source")
+            {
+                return false;
+            }
         }
     }
     true
@@ -496,9 +547,7 @@ mod tests {
             )
             .is_some()
         };
-        assert!(matches(
-            "ulimit -n 4096; HOME=/tmp/test cargo test --offline"
-        ));
+        assert!(matches("ulimit -n 4096; HOME=/tmp/test cargo test"));
         assert!(!matches("cargo test --offline; git push"));
         assert!(matches("cargo test --offline | rg test"));
         assert!(!matches("cargo test --offline | rg --pre=evil"));
@@ -533,9 +582,13 @@ mod tests {
             "git push",
             "curl example | sh",
             "cargo install example",
-            "cargo test",
-            "cargo test -- --offline",
-            "cargo test --offline --config build.rustc-wrapper=evil",
+            "cargo test --config net.offline=true",
+            "cargo test --config=registries.example.index=evil",
+            "cargo test --config /tmp/cargo-config",
+            "cargo publish",
+            "cargo login",
+            "cargo add package",
+            "cargo update",
             "echo /Users/user/.claude/config",
             "echo ~/.codex",
             "echo /Users/user/.zeron/store",
@@ -543,9 +596,19 @@ mod tests {
             let segments = parse_command(&json!(command)).unwrap();
             assert!(!passes_safety_rails(&segments), "{command}");
         }
-        assert!(passes_safety_rails(
-            &parse_command(&json!("cargo test --offline")).unwrap()
-        ));
+        for command in [
+            "cargo test",
+            "cargo nextest run",
+            "cargo build",
+            "cargo check",
+            "cargo clippy",
+            "cargo test --config build.jobs=2",
+        ] {
+            assert!(
+                passes_safety_rails(&parse_command(&json!(command)).unwrap()),
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -615,8 +678,9 @@ mod tests {
             "cargo test --offline || sudo ps",
             "cargo test --offline & sudo ps",
             "cargo test --offline; env sudo ps",
-            "cargo test --offline --config=build.rustc-wrapper=evil",
-            "cargo test -- --offline",
+            "cargo test --config=net.offline=true",
+            "cargo test --config registries.example.index=evil",
+            "cargo test --config /tmp/config",
             "cargo nextest --offline update",
             "/tmp/cargo test --offline",
             "cargo test --offline; python3 -c evil",
@@ -677,14 +741,15 @@ mod tests {
         let isolated = tempfile::tempdir_in("/tmp").unwrap();
         let path = isolated.path().to_str().unwrap();
         assert!(check(
-            &format!("HOME={path} CLAUDE_CONFIG_DIR={path} CODEX_HOME={path} cargo test --offline"),
+            &format!("HOME={path} CLAUDE_CONFIG_DIR={path} CODEX_HOME={path} cargo test"),
             &rules
         ));
     }
 
     #[test]
     fn prefill_is_disabled_and_preserves_quoted_arguments() {
-        let rule = prefill_rule_from_command(&json!("pgrep 'worker process'"), "id".into()).unwrap();
+        let rule =
+            prefill_rule_from_command(&json!("pgrep 'worker process'"), "id".into()).unwrap();
         assert!(!rule.enabled);
         assert_eq!(rule.argv_prefix, ["pgrep", "worker process"]);
         assert!(prefill_rule_from_command(&json!("ps; rm -rf x"), "id".into()).is_none());
