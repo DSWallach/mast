@@ -1955,6 +1955,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn area_identity_defaults_to_blue_and_preserves_text_contrast() {
+        for (appearance, id) in [(Appearance::Light, "area-light"), (Appearance::Dark, "area-dark")] {
+            let theme = Theme::for_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque);
+            assert_eq!(theme.identity_color(""), flatten(theme.terminal.ansi[4], theme.bg));
+            assert_eq!(theme.identity_color("harness:ClaudeCode"), theme.identity_color(""));
+            for key in ["harness:ClaudeCode", "harness:Codex", "chat-a", "chat-b", "chat-c"] {
+                let fill = theme.identity_color(key);
+                assert!(contrast_ratio(theme.identity_text(fill), fill) >= 4.5, "{id} {key}");
+                assert!(contrast_ratio(theme.identity_foreground(fill), theme.bg) >= 4.5, "{id} {key}");
+            }
+        }
+    }
+
+    #[test]
     fn industrial_colors_derive_from_active_theme() {
         for (appearance, id) in [(Appearance::Light, "industrial-light"), (Appearance::Dark, "github-dark")] {
             let theme = Theme::for_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque);
