@@ -1329,7 +1329,7 @@ pub(crate) fn held_wake_badge(
     border: gpui::Hsla,
     text: gpui::Hsla,
 ) -> gpui::Div {
-    div()
+    let badge = div()
         .debug_selector(move || selector.clone())
         .flex_none()
         .h(px(18.0))
@@ -1342,7 +1342,8 @@ pub(crate) fn held_wake_badge(
         .border_color(border)
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(text)
-        .child(SharedString::from(label))
+        .child(SharedString::from(label));
+    super::segmented_key(badge, theme, false)
 }
 
 pub(crate) fn held_wake_reason(theme: &Theme, selector: String, reason: &str) -> gpui::Div {
