@@ -4,6 +4,24 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_error_chip(theme: &Theme, message: SharedString) -> AnyElement {
+    div()
+        .py(px(4.0))
+        .w_full()
+        .child(
+            crate::notice::notice_chip(
+                theme,
+                false,
+                "Error",
+                message,
+                crate::notice::NoticeChipIcon::Tile,
+            )
+            .overflow_hidden()
+            .w_full(),
+        )
+        .into_any_element()
+}
+
 pub fn conversation_add_harness_key(theme: &Theme) -> gpui::Stateful<Div> {
     div()
         .id("area-add-harness")

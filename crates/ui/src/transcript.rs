@@ -48,7 +48,6 @@ use crate::markdown::parser::{
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _};
-use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
@@ -6513,7 +6512,7 @@ impl Transcript {
                             .and_then(|chat| chat.config.as_ref())
                             .is_some_and(|config| crate::managed_accounts::supports_accounts(config.harness))
                 });
-                div().child(error_chip(message.clone(), &theme))
+                div().child(crate::components::conversation_error_chip(&theme, message.clone()))
                     .when_some(action, |el, chat_id| el.child(
                         div().id(SharedString::from(format!("{}-sign-in-again", row.id)))
                             .debug_selector({ let selector = format!("{}-sign-in-again", row.id); move || selector.clone() })
@@ -7702,25 +7701,6 @@ fn visualization_card(
                         ),
                     })
                 }),
-        )
-        .into_any_element()
-}
-
-/// The transcript ErrorChip — the shared [`notice_chip`] in its tile
-/// treatment (a port of zeron chat-view.tsx `ErrorChip`, restacked for long
-/// payloads: header row with the red-washed tile and the medium "Error"
-/// label, then the human message below). Unlike the web port, the message
-/// WRAPS instead of truncating: startup-crash errors carry the agent's exit
-/// status and stderr, and a one-line ellipsis was exactly what made
-/// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
-    div()
-        .py(px(4.0))
-        .w_full()
-        .child(
-            notice_chip(theme, false, "Error", message, Tile)
-                .overflow_hidden()
-                .w_full(),
         )
         .into_any_element()
 }
