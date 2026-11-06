@@ -274,6 +274,31 @@ fn image_comparison_detects_visible_changes() -> anyhow::Result<()> {
     Ok(())
 }
 
+struct HardwareFixture;
+impl Render for HardwareFixture {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div().size_full().p(px(24.0)).bg(theme.surface).flex().flex_col().gap(px(16.0))
+            .child(div().text_color(theme.text).child("CONTROLS"))
+            .child(div().flex().gap(px(12.0))
+                .child(mast_ui::popover::btn_primary(theme, "Signal"))
+                .child(mast_ui::popover::btn_ghost(theme, "Cancel", "matrix-cancel")))
+            .child(div().flex().gap(px(12.0))
+                .child(mast_ui::settings::widgets::toggle_switch(theme, true))
+                .child(mast_ui::settings::widgets::toggle_switch(theme, false)))
+    }
+}
+
+struct MatrixOutline<V: Render + 'static> {
+    outline: gpui::Entity<V>,
+}
+
+impl<V: Render + 'static> Render for MatrixOutline<V> {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div().size_full().bg(Theme::of(cx).surface).child(self.outline.clone())
+    }
+}
+
 #[test]
 #[ignore = "requires macOS Metal and access to macOS services"]
 fn render_style_theme_matrix() -> anyhow::Result<()> {
@@ -354,6 +379,10 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
                     })
                 },
         )?;
+        mast_ui::snapshot::render_to_png(&format!("matrix-hardware-{name}"), size(px(640.), px(300.)), style, appearance, move |_, cx| {
+            Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
+            cx.new(|_| HardwareFixture)
+        })?;
         let data_dir = directory.path().to_path_buf();
         mast_ui::snapshot::render_to_png(&format!("matrix-details-{name}"), size(px(1100.), px(800.)), style, appearance, move |_, cx| {
             let settings = mast_ui::settings::UiSettings::default();
@@ -362,7 +391,8 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
             mast_ui::composer::init(cx, settings.composer_send_behavior);
             mast_ui::terminal::panel::init(cx);
             Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
-            mast_ui::snapshot::outline_fixture(data_dir, cx)
+            let outline = mast_ui::snapshot::outline_fixture(data_dir, cx);
+            cx.new(|_| MatrixOutline { outline })
         })?;
         mast_ui::snapshot::render_to_png(&format!("matrix-walkthrough-{name}"), size(px(640.), px(800.)), style, appearance, move |_, cx| {
             Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);

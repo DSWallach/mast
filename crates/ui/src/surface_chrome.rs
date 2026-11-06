@@ -18,10 +18,10 @@ pub(crate) fn key_ledge(theme: &Theme) -> gpui::Hsla {
 
 pub(crate) fn segmented_key<T: gpui::Styled + gpui::ParentElement>(element: T, theme: &Theme, active: bool) -> T {
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-        element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        element.rounded_full()
             .bg(if active { theme.industrial_colors().pressed } else { theme.industrial_colors().key })
             .border_1().border_color(theme.industrial_colors().rule).relative()
-            .child(div().absolute().left_0().right_0().bottom_0().h(px(2.0)).bg(key_ledge(theme)))
+            .child(div().absolute().left(px(5.0)).right(px(5.0)).bottom_0().h(px(2.0)).bg(key_ledge(theme)))
     } else {
         element
     }
