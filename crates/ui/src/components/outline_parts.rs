@@ -2686,6 +2686,53 @@ pub fn outline_friction_details(selector: String, theme: &Theme) -> Div {
         .text_color(theme.text_muted)
 }
 
+/// Destination picker row for PR synchronization.
+pub fn outline_pr_destination(
+    id: String,
+    label: String,
+    checked: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .h(px(22.0 * super::layout_spacing(theme)))
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if checked {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .child(
+            div()
+                .flex_none()
+                .w(px(10.0))
+                .text_color(theme.accent)
+                .child(if checked { "✓" } else { "" }),
+        )
+        .child(div().min_w_0().truncate().child(SharedString::from(label)))
+}
+pub fn outline_pr_destination_picker(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("space-pr-sync-picker")
+        .debug_selector(|| "space-pr-sync-picker".into())
+        .max_h(px(220.0))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .pl(px(8.0 * super::layout_spacing(theme)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

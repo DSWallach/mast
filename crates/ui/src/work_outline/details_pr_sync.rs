@@ -239,50 +239,16 @@ impl WorkItemDetails {
                 let id = item.id.clone();
                 let checked = current.as_deref() == Some(id.as_str());
                 let selector = format!("space-pr-sync-pick-{id}");
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(if checked {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(10.0))
-                            .text_color(theme.accent)
-                            .child(if checked { "\u{2713}" } else { "" }),
-                    )
-                    .child(div().min_w_0().truncate().child(SharedString::from(label)))
+                crate::components::outline_pr_destination(selector, label, checked, theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_pr_review_destination(Some(id.clone()), cx)
                     }))
             })
             .collect::<Vec<_>>();
-        div()
-            .id("space-pr-sync-picker")
-            .debug_selector(|| "space-pr-sync-picker".into())
-            .max_h(px(220.0))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .pl(px(8.0))
+        crate::components::outline_pr_destination_picker(theme)
             .when(rows.is_empty(), |el| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child("No work items in this Space yet"),
+                    crate::components::outline_execution_line("No work items in this Space yet".into(), 11.0, theme.text_faint, theme),
                 )
             })
             .children(rows)
