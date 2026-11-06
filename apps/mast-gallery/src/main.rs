@@ -8,6 +8,8 @@ struct Gallery {
     transcript: gpui::Entity<mast_ui::transcript::Transcript>,
     composer: gpui::Entity<mast_ui::composer::Composer>,
     chat: bool,
+    toggled: bool,
+    menu_open: bool,
 }
 
 const STYLES: [ui_style::UiStyleId; 3] = [
@@ -143,7 +145,63 @@ impl Render for Gallery {
                             .child(self.composer.clone())
                     })
                     .when(!self.chat, |el| {
-                        el.child("Input")
+                        el.child("Buttons and toggles")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .child(mast_ui::popover::btn_primary(theme, "Primary"))
+                                    .child(mast_ui::popover::btn_ghost(
+                                        theme,
+                                        "Secondary",
+                                        "gallery-secondary",
+                                    ))
+                                    .child(mast_ui::popover::btn_danger(theme, "Delete"))
+                                    .child(
+                                        div()
+                                            .id("toggle")
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggled = !this.toggled;
+                                                cx.notify();
+                                            }))
+                                            .child(mast_ui::settings::widgets::toggle_switch(
+                                                theme,
+                                                self.toggled,
+                                            )),
+                                    )
+                                    .child(mast_ui::settings::widgets::badge(theme, "Draft"))
+                                    .child(mast_ui::settings::widgets::badge_active(
+                                        theme, "Active",
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id("menu-toggle")
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.menu_open = !this.menu_open;
+                                        cx.notify();
+                                    }))
+                                    .child("Menu ▾"),
+                            )
+                            .when(self.menu_open, |el| {
+                                el.child(
+                                    mast_ui::popover::popover_card(theme)
+                                        .w(px(200.))
+                                        .child(mast_ui::popover::menu_heading(theme, "Actions"))
+                                        .child(
+                                            mast_ui::popover::menu_row(
+                                                theme,
+                                                false,
+                                                "gallery-menu",
+                                            )
+                                            .child("Open"),
+                                        ),
+                                )
+                            })
+                            .child("Input")
                             .child(
                                 div()
                                     .w(px(360.))
@@ -182,6 +240,8 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
         }),
         composer: cx.new(|cx| mast_ui::composer::Composer::new(state.clone(), cx)),
         chat: false,
+        toggled: false,
+        menu_open: false,
     }
 }
 
@@ -233,41 +293,38 @@ fn main() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn stories_render_in_each_style_and_appearance() {
-        gpui_platform::headless().run(|cx| {
-            let dir = tempfile::tempdir().unwrap();
-            init(cx, dir.path());
-            let window = cx
-                .open_window(Default::default(), |window, cx| {
-                    cx.new(|cx| {
-                        let focus = cx.focus_handle();
-                        window.focus(&focus, cx);
-                        gallery(focus, cx)
-                    })
-                })
-                .unwrap();
-            let gallery = window.entity(cx).unwrap();
-            for style in STYLES {
-                for mode in [
-                    appearance::AppearanceMode::Light,
-                    appearance::AppearanceMode::Dark,
-                ] {
-                    switch_appearance(mode, cx);
-                    for chat in [false, true] {
-                        gallery.update(cx, |gallery, cx| {
+    #[gpui::test]
+    fn stories_render_in_each_style_and_appearance(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| init(cx, dir.path()));
+        let window = cx.add_window(|window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            gallery(focus, cx)
+        });
+        for style in STYLES {
+            for mode in [
+                appearance::AppearanceMode::Light,
+                appearance::AppearanceMode::Dark,
+            ] {
+                cx.update(|cx| switch_appearance(mode, cx));
+                for chat in [false, true] {
+                    window
+                        .update(cx, |gallery, _, cx| {
                             gallery.chat = chat;
+                            gallery.menu_open = !chat;
+                            gallery.toggled = true;
                             cx.notify();
-                        });
-                        cx.update_window(window.into(), |_, window, cx| {
-                            switch_style(style, window, cx);
-                            window.refresh();
-                            let _ = window.draw(cx);
                         })
                         .unwrap();
-                    }
+                    cx.update_window(window.into(), |_, window, cx| {
+                        switch_style(style, window, cx);
+                        window.refresh();
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
                 }
             }
-        });
+        }
     }
 }

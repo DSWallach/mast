@@ -5162,6 +5162,7 @@ dependencies = [
  "gpui",
  "gpui-base",
  "gpui_platform",
+ "mast-doc",
  "mast-ui",
  "tempfile",
 ]

@@ -7,7 +7,7 @@ is removed when the process exits.
 
 Choose a style in the toolbar or press 1–3; press L or D for light or dark.
 Choose Controls or Chat in the left rail. The controls story currently contains
-the actual composer input and message badge. The chat story mounts the real
+Mast button, toggle, badge and menu primitives, the composer input, and a message badge. The chat story mounts the real
 transcript and composer on an in-memory app state with fixture messages.
 
 The style list currently reflects the three styles on the integration branch;
