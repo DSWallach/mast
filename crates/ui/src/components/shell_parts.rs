@@ -429,6 +429,78 @@ pub(crate) fn area_sidebar_chat_row(
     )
 }
 
+pub(crate) fn awaiting_input_label(theme: &Theme) -> &'static str {
+    if theme.ui_style.layout == crate::ui_style::UiLayout::Guided {
+        "Needs you"
+    } else {
+        "Input"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sidebar_status_glyph(
+    theme: &Theme,
+    status: crate::status_style::Status,
+    working: bool,
+    completed: bool,
+    key: String,
+    color: gpui::Hsla,
+    view: gpui::EntityId,
+    cx: &mut App,
+) -> AnyElement {
+    if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+        crate::status_style::indicator_for_theme(
+            if working {
+                crate::status_style::Status::Working
+            } else {
+                crate::status_style::Status::Idle
+            },
+            theme,
+        )
+        .into_any_element()
+    } else if working {
+        crate::loaders::mini_mono_spinner(key, 2.0, color, view, cx).into_any_element()
+    } else if completed {
+        icon(crate::icons::CHECK)
+            .size(px(11.0))
+            .text_color(color)
+            .into_any_element()
+    } else {
+        crate::status_style::indicator_for_theme(status, theme).into_any_element()
+    }
+}
+
+pub(crate) fn compact_sidebar_status(
+    theme: &Theme,
+    id: String,
+    selector: String,
+    label: &'static str,
+    color: gpui::Hsla,
+    glyph: AnyElement,
+) -> AnyElement {
+    let guided = theme.ui_style.layout == crate::ui_style::UiLayout::Guided;
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .size(px(13.0))
+        .when(guided, |el| el.w_auto().gap(px(4.0)))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .aria_label(label)
+        .child(glyph)
+        .when(guided, |el| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(color)
+                    .child(label),
+            )
+        })
+        .into_any_element()
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(

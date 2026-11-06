@@ -7354,7 +7354,7 @@ impl Shell {
         } else {
             match status {
                 mast_proto::ChatIndicator::Working => Some("Working"),
-                mast_proto::ChatIndicator::AwaitingInput => Some(if theme.ui_style.layout == crate::ui_style::UiLayout::Guided { "Needs you" } else { "Input" }),
+                mast_proto::ChatIndicator::AwaitingInput => Some(crate::components::shell_parts::awaiting_input_label(theme)),
                 mast_proto::ChatIndicator::Errored => Some("Failed"),
                 mast_proto::ChatIndicator::Completed => Some("Done"),
                 mast_proto::ChatIndicator::Idle => None,
@@ -7364,44 +7364,9 @@ impl Shell {
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let glyph = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-                crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
-            } else if working {
-                loaders::mini_mono_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    status_color,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else if status == mast_proto::ChatIndicator::Completed && !queued && !undelivered {
-                icon(icons::CHECK)
-                    .size(px(11.0))
-                    .text_color(status_color)
-                    .into_any_element()
-            } else {
-                crate::status_style::indicator_for_theme(
-                    if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                    &theme,
-                ).into_any_element()
-            };
-            div()
-                .id(SharedString::from(format!("{row_id}-status")))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("chat-status-{id}")
-                })
-                .size(px(13.0))
-                .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| el.w_auto().gap(px(4.0)))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
-                .child(glyph)
-                .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| el.child(div().text_size(crate::typography::ui_rems(10.0)).text_color(status_color).child(status_label.unwrap_or("Idle"))))
-                .into_any_element()
+            let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+            let glyph = crate::components::shell_parts::sidebar_status_glyph(theme, resolved_status, working, status == mast_proto::ChatIndicator::Completed && !queued && !undelivered, format!("{row_id}-working"), status_color, self.sidebar_pane.entity_id(), cx);
+            crate::components::shell_parts::compact_sidebar_status(theme, format!("{row_id}-status"), format!("chat-status-{id}"), status_label.unwrap_or("Idle"), status_color, glyph)
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
@@ -7485,29 +7450,8 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-                        crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
-                    } else if status == mast_proto::ChatIndicator::Completed {
-                        icon(icons::CHECK)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(status_color)
-                            .into_any_element()
-                    } else if working {
-                        loaders::mini_mono_spinner(
-                            format!("{row_id}-working"),
-                            2.0,
-                            status_color,
-                            self.sidebar_pane.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        crate::status_style::indicator_for_theme(
-                            if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                            &theme,
-                        ).into_any_element()
-                    };
+                    let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+                    let glyph = crate::components::shell_parts::sidebar_status_glyph(theme, resolved_status, working, status == mast_proto::ChatIndicator::Completed, format!("{row_id}-working"), status_color, self.sidebar_pane.entity_id(), cx);
                     div()
                         .flex()
                         .flex_row()
