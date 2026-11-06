@@ -7063,25 +7063,15 @@ impl Transcript {
         let toggle_id = row_id.clone();
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
-        let header = div()
-            .id(SharedString::from(format!("{row_id}-hdr")))
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .pr(px(4.0))
-            .h(px(TOOL_GROUP_HEADER_HEIGHT))
-            .cursor_pointer()
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        let header = crate::components::conversation_tool_group_header(
+            theme, SharedString::from(format!("{row_id}-hdr")), TOOL_GROUP_HEADER_HEIGHT,
+            TOOL_LABEL_SIZE, TOOL_LABEL_LINE_HEIGHT,
+        )
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
             // chips (destructive tint, zeron tool-chip.tsx) and in the
             // summary's "· N failed" count.
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open);
@@ -7803,7 +7793,7 @@ fn detail_body(
     scroll_id: SharedString,
     theme: &Theme,
 ) -> AnyElement {
-    let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
+    let body = crate::components::conversation_tool_detail_frame();
     match detail {
         // No comment layer: an inline tool diff is a record of what the
         // agent already did, not a review surface.
@@ -7886,16 +7876,10 @@ fn detail_body(
                 .font_family(theme.font_mono.clone())
                 .text_size(px(TOOL_TEXT_SIZE))
                 .children(lines.iter().map(|line| {
-                    div()
-                        .h(px(OUTPUT_LINE_HEIGHT))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .text_color(theme.text_faint)
-                        .child(line.clone())
+                    crate::components::conversation_tool_output_line(theme, OUTPUT_LINE_HEIGHT, line.clone())
                 }))
                 .when(*truncated_by > 0, |block| {
-                    block.child(more_lines_row(*truncated_by, theme))
+                    block.child(crate::components::conversation_tool_more_lines(theme, *truncated_by, OUTPUT_LINE_HEIGHT, TOOL_TEXT_SIZE))
                 });
             let mut viewport = body.id(scroll_id).overflow_x_scroll().child(content);
             // Vertical transcript scrolling must continue through the local
@@ -7910,12 +7894,7 @@ fn detail_body(
             .py(px(6.0))
             .text_size(px(TOOL_TEXT_SIZE))
             .children(lines.iter().map(|line| {
-                let row = div()
-                    .h(px(OUTPUT_LINE_HEIGHT))
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center();
+                let row = crate::components::conversation_thought_line(OUTPUT_LINE_HEIGHT);
                 let Some((text, runs)) = thought_line_text(line, theme) else {
                     return row; // blank separator row
                 };
@@ -7928,21 +7907,10 @@ fn detail_body(
                 )
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
+                block.child(crate::components::conversation_tool_more_lines(theme, *truncated_by, OUTPUT_LINE_HEIGHT, TOOL_TEXT_SIZE))
             })
             .into_any_element(),
     }
-}
-
-/// The counted-tail row under a truncated Output/Thought detail.
-fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
-    div()
-        .h(px(OUTPUT_LINE_HEIGHT))
-        .flex()
-        .items_center()
-        .text_size(px(TOOL_TEXT_SIZE))
-        .text_color(theme.text_faint)
-        .child(SharedString::from(format!("… {truncated_by} more lines")))
 }
 
 /// Shape one flattened thought line into gpui text runs — the detail-body

@@ -4,6 +4,63 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_tool_detail_frame() -> Div {
+    div().w_full().min_w_0().flex().flex_col().overflow_hidden()
+}
+
+pub fn conversation_tool_output_line(theme: &Theme, height: f32, text: SharedString) -> Div {
+    div()
+        .h(px(height))
+        .flex_none()
+        .flex()
+        .items_center()
+        .text_color(theme.text_faint)
+        .child(text)
+}
+
+pub fn conversation_thought_line(height: f32) -> Div {
+    div().h(px(height)).w_full().min_w_0().flex().items_center()
+}
+
+pub fn conversation_tool_more_lines(
+    theme: &Theme,
+    count: usize,
+    height: f32,
+    text_size: f32,
+) -> Div {
+    div()
+        .h(px(height))
+        .flex()
+        .items_center()
+        .text_size(px(text_size))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("… {count} more lines")))
+}
+
+pub fn conversation_tool_group_header(
+    theme: &Theme,
+    id: SharedString,
+    height: f32,
+    text_size: f32,
+    line_height: f32,
+) -> gpui::Stateful<Div> {
+    let hover_text = theme.text;
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .pr(px(4.0))
+        .h(px(height))
+        .cursor_pointer()
+        .text_size(px(text_size))
+        .line_height(px(line_height))
+        .text_color(theme.text_muted)
+        .hover(move |s| s.text_color(hover_text))
+}
+
 pub fn conversation_tool_chip_frame(
     rail: bool,
     row_height: f32,

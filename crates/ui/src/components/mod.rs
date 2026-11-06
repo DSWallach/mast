@@ -18,7 +18,10 @@ pub use conversation_parts::{
     conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
     conversation_model_picker, conversation_panel_radius, conversation_question_chip,
     conversation_reveal, conversation_send_hint, conversation_send_key, conversation_skill_chip,
-    conversation_skill_remove, conversation_tool_chip_frame, conversation_tool_header, conversation_tool_icon_tile,
+    conversation_skill_remove, conversation_thought_line, conversation_tool_chip_frame,
+    conversation_tool_detail_frame, conversation_tool_group_header, conversation_tool_more_lines,
+    conversation_tool_output_line,
+    conversation_tool_header, conversation_tool_icon_tile,
     conversation_tool_panel, conversation_tool_theme, conversation_user_bubble,
     conversation_wizard_surface, user_message_theme,
 };
