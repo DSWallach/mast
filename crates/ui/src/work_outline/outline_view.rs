@@ -3137,10 +3137,14 @@ impl OutlineView {
                     .text_size(crate::typography::ui_rems(10.0))
                     .text_color(theme.text_muted)
                     .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+                    .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+                        el.h(px(32.0)).px(px(8.0)).bg(theme.solid).text_color(theme.on_solid)
+                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
+                    })
                     .child(
                         crate::icons::icon(crate::icons::ACTION_PLAY)
                             .size(px(10.0))
-                            .text_color(theme.text_muted),
+                            .text_color(if theme.ui_style.id == crate::ui_style::UiStyleId::Guided { theme.on_solid } else { theme.text_muted }),
                     )
                     .child("Start Chat")
                     .hint(
