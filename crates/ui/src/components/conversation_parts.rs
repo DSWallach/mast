@@ -490,6 +490,13 @@ pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder
             theme.input_glass_bg()
         })
         .when(
+            theme.ui_style.conversation == ConversationVariant::Industrial,
+            |el| {
+                el.bg(theme.input_bg)
+                    .border_color(theme.industrial_colors().rule)
+            },
+        )
+        .when(
             !area
                 && !theme.is_frost()
                 && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
