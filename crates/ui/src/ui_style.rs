@@ -10,10 +10,17 @@ pub enum UiStyleId {
     Dense,
     Guided,
     Industrial,
+    Area,
 }
 
 impl UiStyleId {
-    pub const ALL: &'static [Self] = &[Self::Minimal, Self::Dense, Self::Guided, Self::Industrial];
+    pub const ALL: &'static [Self] = &[
+        Self::Minimal,
+        Self::Dense,
+        Self::Guided,
+        Self::Industrial,
+        Self::Area,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -21,6 +28,7 @@ impl UiStyleId {
             Self::Dense => "Dense",
             Self::Guided => "Guided",
             Self::Industrial => "Industrial",
+            Self::Area => "Area",
         }
     }
 
@@ -30,6 +38,7 @@ impl UiStyleId {
             Self::Dense => "More on screen",
             Self::Guided => "More labels and guidance",
             Self::Industrial => "Instrument panel",
+            Self::Area => "Character conversation",
         }
     }
 
@@ -39,6 +48,7 @@ impl UiStyleId {
             Self::Dense => 2.0,
             Self::Guided => 6.0,
             Self::Industrial => 8.0,
+            Self::Area => 8.0,
         }
     }
 }
@@ -49,6 +59,7 @@ impl<'de> Deserialize<'de> for UiStyleId {
             "dense" => Self::Dense,
             "guided" => Self::Guided,
             "industrial" => Self::Industrial,
+            "area" => Self::Area,
             _ => Self::Minimal,
         })
     }
@@ -87,6 +98,14 @@ pub enum ControlVariant {
     Minimal,
     Key,
     FlatOutline,
+}
+
+/// Conversation and composer presentation, independent of theme colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationVariant {
+    Standard,
+    Industrial,
+    Area,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +162,7 @@ pub struct UiStyle {
     pub behavior: StyleBehavior,
     pub surface: SurfaceModel,
     pub controls: ControlVariant,
+    pub conversation: ConversationVariant,
     pub status_indicator: StatusIndicator,
     pub font_preference: FontPreference,
 }
@@ -169,6 +189,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
@@ -204,6 +225,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
@@ -239,6 +261,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
@@ -271,10 +294,37 @@ impl UiStyle {
         },
         surface: SurfaceModel::Opaque,
         controls: ControlVariant::Key,
+        conversation: ConversationVariant::Industrial,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
         behavior: StyleBehavior {
             motion: Motion::Instant,
+            ..Self::MINIMAL.behavior
+        },
+    };
+    pub const AREA: Self = Self {
+        id: UiStyleId::Area,
+        tokens: StyleTokens {
+            sidebar_row_compact_h: 36.0,
+            control_size: 36.0,
+            control_radius: Some(12.0),
+            panel_radius: Some(14.0),
+            chip_radius: Some(12.0),
+            rule_width: None,
+            grid: Some(8.0),
+            label_size: Some(10.0),
+            secondary_size: Some(12.0),
+            body_size: Some(13.0),
+            title_size: Some(20.0),
+            ..Self::MINIMAL.tokens
+        },
+        surface: SurfaceModel::Opaque,
+        controls: ControlVariant::Minimal,
+        conversation: ConversationVariant::Area,
+        status_indicator: StatusIndicator::Dot,
+        font_preference: FontPreference::Geist,
+        behavior: StyleBehavior {
+            motion: Motion::Soft,
             ..Self::MINIMAL.behavior
         },
     };
@@ -284,6 +334,7 @@ impl UiStyle {
             UiStyleId::Dense => Self::DENSE,
             UiStyleId::Guided => Self::GUIDED,
             UiStyleId::Industrial => Self::INDUSTRIAL,
+            UiStyleId::Area => Self::AREA,
         }
     }
 }
@@ -397,6 +448,12 @@ pub fn help_card(
 mod tests {
     use super::*;
     #[test]
+    fn conversation_variants_keep_styles_independent() {
+        assert_eq!(UiStyle::MINIMAL.conversation, ConversationVariant::Standard);
+        assert_eq!(UiStyle::INDUSTRIAL.conversation, ConversationVariant::Industrial);
+        assert_eq!(UiStyle::AREA.conversation, ConversationVariant::Area);
+    }
+    #[test]
     fn registry_has_unique_labels_and_round_trips() {
         let mut labels = std::collections::HashSet::new();
         for &id in UiStyleId::ALL {
@@ -444,6 +501,8 @@ mod tests {
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
                 "github-light"
             );
+            set_style(UiStyleId::Area, window, cx);
+            assert_eq!(crate::theme::Theme::of(cx).variant_id.as_ref(), "github-light");
             crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
             assert_eq!(
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
@@ -456,6 +515,17 @@ mod tests {
             );
             assert_eq!(crate::appearance::themes(cx).light, "github-light");
         });
+    }
+
+    #[test]
+    fn area_uses_soft_character_geometry() {
+        let style = UiStyle::AREA;
+        assert_eq!(style.tokens.control_radius, Some(12.0));
+        assert_eq!(style.tokens.panel_radius, Some(14.0));
+        assert_eq!(style.tokens.rule_width, None);
+        assert_eq!(style.status_indicator, StatusIndicator::Dot);
+        assert_eq!(style.font_preference, FontPreference::Geist);
+        assert_eq!(UiStyle::MINIMAL.tokens.control_radius, None);
     }
 
     #[test]

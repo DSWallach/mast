@@ -505,6 +505,13 @@ pub struct ThemeVariant {
 }
 
 impl ThemeVariant {
+    /// Character colours derive from the theme's terminal palette, keeping
+    /// identity independent of the selected presentation style.
+    pub fn identity_palette(&self) -> [Color; 6] {
+        let ansi = self.terminal.ansi;
+        [ansi[4], ansi[3], ansi[5], ansi[2], ansi[1], ansi[6]]
+    }
+
     pub fn accent_for(&self, selection: AccentSelection) -> AccentRoles {
         match selection {
             AccentSelection::ThemeDefault => self.accent,
@@ -824,7 +831,7 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 20);
+        assert_eq!(registry.families.len(), 21);
         assert!(registry.variant("mast-light").is_some());
         assert!(registry.variant("mast-dark").is_some());
         // Saved selections from before the rename still resolve.
@@ -859,6 +866,19 @@ mod tests {
     }
 
     #[test]
+    fn area_identity_palette_is_theme_owned() {
+        let registry = ThemeRegistry::builtin();
+        for id in ["area-light", "area-dark"] {
+            let variant = registry.variant(id).unwrap();
+            let palette = variant.identity_palette();
+            assert_eq!(palette[0], "#3F69CC".parse().unwrap());
+            assert_eq!(palette[1], "#DFBE1B".parse().unwrap());
+            assert_eq!(palette[3], "#38D059".parse().unwrap());
+            assert_eq!(palette[4], "#FE4B25".parse().unwrap());
+        }
+    }
+
+    #[test]
     fn visual_fixture_matrix_covers_every_variant_and_scene() {
         let registry = ThemeRegistry::builtin();
         let variants = registry
@@ -866,8 +886,8 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 32);
-        assert_eq!(variants * VisualFixture::ALL.len(), 320);
+        assert_eq!(variants, 34);
+        assert_eq!(variants * VisualFixture::ALL.len(), 340);
     }
 }
 

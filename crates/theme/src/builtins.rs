@@ -13,6 +13,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     REGISTRY.get_or_init(|| ThemeRegistry {
         families: vec![
             family("mast", "Mast", vec![zeron_light(), zeron_dark()]),
+            family("area", "Area", vec![area(false), area(true)]),
             family(
                 "industrial",
                 "Industrial",
@@ -273,6 +274,77 @@ fn zeron_dark() -> ThemeVariant {
             "MIT",
         ),
     })
+}
+
+fn area(dark: bool) -> ThemeVariant {
+    let (id, name, appearance, background, shell, text, muted, ansi) = if dark {
+        (
+            "area-dark",
+            "Area Dark",
+            Appearance::Dark,
+            "#182632",
+            "#263847",
+            "#F3F6FB",
+            "#B5B5B5",
+            ANSI_DARK,
+        )
+    } else {
+        (
+            "area-light",
+            "Area Light",
+            Appearance::Light,
+            "#FFFFFF",
+            "#F3F6FB",
+            "#183028",
+            "#183028",
+            ANSI_LIGHT,
+        )
+    };
+    let mut result = variant(Seeds {
+        id,
+        family_id: "area",
+        name,
+        appearance,
+        treatment: SurfaceTreatment::Opaque,
+        background,
+        shell,
+        raised: shell,
+        card: background,
+        text,
+        muted,
+        faint: muted,
+        accent: "#3F69CC",
+        danger: "#FE4B25",
+        warning: text,
+        success: text,
+        terminal_background: background,
+        ansi,
+        syntax: [
+            muted, text, text, text, text, text, text, text, muted, text, text, text,
+        ],
+        source: source(
+            id,
+            "native",
+            "https://github.com/Pluto8195/mast",
+            "area-palette",
+            "MIT",
+        ),
+    });
+    // Purple and cyan are reference-inspired additions to the Cofactr palette.
+    for (index, color) in [
+        (4, "#3F69CC"),
+        (1, "#FE4B25"),
+        (5, "#8B7CF6"),
+        (3, "#DFBE1B"),
+        (2, "#38D059"),
+        (6, "#619C82"),
+    ] {
+        result.terminal.ansi[index] = c(color);
+    }
+    result.source.asset_hash.clear();
+    let encoded = serde_json::to_vec(&result).expect("built-in theme serializes");
+    result.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
+    result
 }
 
 fn industrial(dark: bool) -> ThemeVariant {

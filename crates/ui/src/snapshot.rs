@@ -60,6 +60,11 @@ pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)
 }
 
+/// Construct an artifact pane with local, in-memory fixture content.
+pub fn artifact_fixture(window: &mut Window, cx: &mut App) -> Entity<impl Render + use<>> {
+    crate::artifacts::tab::snapshot_fixture(window, cx)
+}
+
 struct OutlineFixture {
     outline: Entity<crate::work_outline::outline_view::OutlineView>,
     details: Entity<crate::work_outline::details_panel::WorkItemDetails>,

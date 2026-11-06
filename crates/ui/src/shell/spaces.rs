@@ -2064,11 +2064,11 @@ fn promote_local_device_group<T>(
 
 /// Shared quiet rule for sidebar groups and palette sections.
 pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
-    div().h(px(theme.ui_style.tokens.rule_width.unwrap_or(1.0))).bg(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { theme.border.opacity(0.6) })
+    div().h(px(if theme.ui_style.id == crate::ui_style::UiStyleId::Area { 0.0 } else { theme.ui_style.tokens.rule_width.unwrap_or(1.0) })).bg(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { theme.border.opacity(0.6) })
 }
 
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
-    let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
+    let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key || theme.ui_style.id == crate::ui_style::UiStyleId::Area;
     let label = if key { SharedString::from(popover::tracked_upper(&label)) } else { label };
     div()
         .flex()

@@ -311,6 +311,10 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
         ("industrial-dark", UiStyleId::Industrial, Appearance::Dark, "industrial-dark"),
         ("industrial-github-dark", UiStyleId::Industrial, Appearance::Dark, "github-dark"),
         ("minimal-industrial-light", UiStyleId::Minimal, Appearance::Light, "industrial-light"),
+        ("area-default", UiStyleId::Area, Appearance::Light, "mast-light"),
+        ("area-light", UiStyleId::Area, Appearance::Light, "area-light"),
+        ("area-dark", UiStyleId::Area, Appearance::Dark, "area-dark"),
+        ("area-industrial-light", UiStyleId::Area, Appearance::Light, "industrial-light"),
     ] {
         let data_dir = directory.path().to_path_buf();
         mast_ui::snapshot::render_to_png(&format!("matrix-chat-{name}"), size(px(1100.), px(800.)), style, appearance,
@@ -356,7 +360,7 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
                     state.update(cx, |state, cx| {
                     state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
                         {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
-                        {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I will inspect the layout and report the changes."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
+                        {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I will inspect the layout and report the changes.\n\n```rust\nfn main() { println!(\"ready\"); }\n```"},{"id":"tool","kind":"tool","call":{"kind":"exec","command":"cargo test"},"resolved":true,"output":"Tests passed"}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
                     ])).unwrap() }, cx).unwrap();
                 });
                     let boot = mast_ui::EngineBootConfig {
@@ -393,6 +397,16 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
             Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
             let outline = mast_ui::snapshot::outline_fixture(data_dir, cx);
             cx.new(|_| MatrixOutline { outline })
+        })?;
+        mast_ui::snapshot::render_to_png(&format!("matrix-walkthrough-{name}"), size(px(640.), px(800.)), style, appearance, move |_, cx| {
+            Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
+            mast_ui::snapshot::walkthrough_fixture(cx)
+        })?;
+        let data_dir = directory.path().to_path_buf();
+        mast_ui::snapshot::render_to_png(&format!("matrix-artifact-{name}"), size(px(900.), px(700.)), style, appearance, move |window, cx| {
+            mast_ui::settings::init(mast_ui::settings::UiSettings::default(), data_dir, cx);
+            Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
+            mast_ui::snapshot::artifact_fixture(window, cx)
         })?;
     }
     Ok(())

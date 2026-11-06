@@ -1674,6 +1674,7 @@ struct InputLayoutKey {
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
+    identity_text: Option<gpui::Hsla>,
     /// Key context for the binding map ("Composer", or "PaletteSearch" for
     /// palette filters whose navigation keys must bubble).
     key_context: &'static str,
@@ -1781,6 +1782,7 @@ impl ComposerInput {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            identity_text: None,
             key_context,
             accessibility_role: Role::MultilineTextInput,
             focus_handle: cx.focus_handle(),
@@ -3870,7 +3872,9 @@ impl Render for ComposerInput {
         } else {
             theme
         };
-        let text_color = if self.content.is_empty() {
+        let text_color = if let Some(color) = self.identity_text {
+            color
+        } else if self.content.is_empty() {
             theme.text_faint
         } else {
             theme.text
@@ -8097,7 +8101,11 @@ impl Composer {
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
         let guided = theme.ui_style.id == crate::ui_style::UiStyleId::Guided;
-        let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
+        let (area, key) = match theme.ui_style.conversation {
+            crate::ui_style::ConversationVariant::Area => (true, false),
+            crate::ui_style::ConversationVariant::Industrial => (false, true),
+            crate::ui_style::ConversationVariant::Standard => (false, false),
+        };
         // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
@@ -8105,10 +8113,12 @@ impl Composer {
                 .id("composer-stop")
                 .size(px(28.0))
                 .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
+                .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
                 .flex_none()
                 .rounded_full()
                 .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                 .bg(theme.text)
+                .when(area, |el| el.bg(theme.text_muted))
                 .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                 .flex()
                 .items_center()
@@ -8116,8 +8126,9 @@ impl Composer {
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(if key { theme.on_accent } else { theme.bg }))
+                .child(div().size(px(11.0)).rounded(px(3.0)).bg(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }))
                 .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
+                .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child("Stop")))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -8127,10 +8138,12 @@ impl Composer {
                     .id("composer-send")
                     .size(px(28.0))
                     .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
+                    .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
                     .flex_none()
                     .rounded_full()
                     .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                     .bg(theme.text)
+                    .when(area, |el| el.bg(theme.text_muted))
                     .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                     .flex()
                     .items_center()
@@ -8144,9 +8157,10 @@ impl Composer {
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
-                            .text_color(if key { theme.on_accent } else { theme.bg }),
+                            .text_color(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }),
                     )
                     .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
+                    .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child(if mode == SendButtonMode::Queue { "QUEUE" } else { "SEND" })))
                     .into_any_element()
             }
         }
@@ -8183,6 +8197,10 @@ impl Render for Composer {
         }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
+        let area = matches!(theme.ui_style.conversation, crate::ui_style::ConversationVariant::Area);
+        let identity_key = self.pickers.read(cx).effective_harness(cx).map(|harness| format!("harness:{harness:?}")).unwrap_or_default();
+        let identity = theme.identity_color(&identity_key);
+        let identity_text = area.then(|| theme.identity_text(identity));
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
@@ -8197,11 +8215,15 @@ impl Render for Composer {
         // Shape the current draft before sizing the pill. Waiting for the child
         // layout leaves the parent using the previous edit's height.
         self.input.update(cx, |input, cx| {
+            if input.identity_text != identity_text {
+                input.identity_text = identity_text;
+                input.needs_measure = true;
+            }
             if input.needs_measure && input.last_width > 0.0 {
                 let mut style = window.text_style();
                 style.font_family = theme.font_sans.clone();
                 style.font_size = crate::typography::ui_rems(INPUT_TEXT_SIZE).into();
-                style.color = if input.content.is_empty() {
+                style.color = if let Some(color) = identity_text { color } else if input.content.is_empty() {
                     theme.text_faint
                 } else {
                     theme.text
@@ -8716,6 +8738,7 @@ impl Render for Composer {
             .border_color(pill_border)
             .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
             .when(!theme.is_frost(), |el| el.bg(theme.input_glass_bg()))
+            .when(area, |el| el.bg(identity).border_color(identity))
             .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
@@ -8769,15 +8792,15 @@ impl Render for Composer {
             - morph_cluster_inset(expanded, layout_morph_t))
         .max(0.0);
         let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
-        let model_offset = (model_side - compact_target) * model_travel + model_drift;
+        let model_offset = if area { 0.0 } else { (model_side - compact_target) * model_travel + model_drift };
         let measured_model_bounds = self.model_bounds.clone();
         let model_picker = div()
             .min_w_0()
             .max_w(px(surface_width * 0.45))
             .relative()
             .left(px(model_offset))
-            .opacity(model_opacity)
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+            .opacity(if area { 1.0 } else { model_opacity })
+            .when(theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial, |el| el.child(
                 div().absolute().top(px(-8.0)).left(px(4.0)).right(px(4.0)).flex().justify_between().text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL").child("MODE")
             ))
             .child(self.pickers.clone())
@@ -8789,7 +8812,50 @@ impl Render for Composer {
                 .absolute()
                 .inset_0(),
             );
-        let body = if expanded {
+        // Area exposes the existing harness/model/account picker as a raised
+        // character tab, keeping the same accessible control and menu.
+        let (model_picker, area_picker) = if area {
+            (None, Some(model_picker))
+        } else {
+            (Some(model_picker), None)
+        };
+        let area_tabs = area.then(|| {
+            let selected = self.pickers.read(cx).effective_harness(cx);
+            let harnesses = self.pickers.read(cx).area_harnesses(cx);
+            let tabs = harnesses.into_iter().map(|harness| {
+                let (path, _) = crate::pickers::harness_brand_icon(harness);
+                let selected = selected == Some(harness);
+                let tab_identity = theme.identity_color(&format!("harness:{harness:?}"));
+                div().id(SharedString::from(format!("area-harness-{harness:?}")))
+                    .size(px(28.0)).rounded_t(px(14.0)).flex().items_center().justify_center()
+                    .bg(tab_identity)
+                    .text_color(theme.identity_text(tab_identity))
+                    .when(!selected, |el| el.opacity(0.75))
+                    .cursor_pointer().child(crate::icons::icon(path).size(px(16.0)).text_color(theme.identity_text(tab_identity)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
+                        pickers.pick_harness(harness, cx);
+                        pickers.open_model_menu(window, cx);
+                    })))
+            }).collect::<Vec<_>>();
+            div().absolute().left(px(16.0)).right(px(16.0)).top(px(-28.0)).h(px(28.0)).flex().items_end()
+                .children(tabs).child(div().flex_1())
+                .child(div().id("area-add-harness").size(px(28.0)).rounded_full().flex().items_center().justify_center()
+                    .text_color(theme.text_muted).cursor_pointer().child("+")
+                    .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx)))))
+        });
+        let body = match theme.ui_style.conversation {
+        crate::ui_style::ConversationVariant::Area => {
+            div().flex().flex_col()
+                .child(pill.h(px(pill_height)).overflow_hidden().flex().flex_col()
+                    .children(comments_chip).children(skill_chips).children(appshot_strip).children(strip)
+                    .child(div().flex_1().min_h_0().overflow_hidden().px(px(16.0)).pt(px(text_pt)).child(self.render_input_with_completion())))
+                .child(div().h(px(40.0)).w_full().relative().flex().items_center().justify_center()
+                    .child(div().absolute().left_0().top(px(6.0)).flex().items_center().gap(px(2.0))
+                        .text_color(theme.text_muted).child(attach).child("Attach"))
+                    .child(send_button)
+                    .child(div().absolute().right_0().top(px(4.0)).max_w(px(surface_width * 0.35)).children(area_picker)))
+        },
+        crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Industrial => if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
             // stationary bottom — constant screen-y through the morph, with
@@ -8844,7 +8910,7 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(attach)
-                                .child(model_picker),
+                                .children(model_picker),
                         )
                         .children(send_hint)
                         .child(send_button),
@@ -8903,7 +8969,7 @@ impl Render for Composer {
                                 .max_w(px(surface_width * 0.45))
                                 .relative()
                                 .top(px(-cluster_dy))
-                                .child(model_picker),
+                                .children(model_picker),
                         )
                         .child(
                             div()
@@ -8917,7 +8983,7 @@ impl Render for Composer {
                                 .child(send_button),
                         ),
                 )
-        };
+        }};
         let new_thread_target_selectors = (new_thread_chrome_opacity > 0.0).then(|| {
             self.pickers.update(cx, |pickers, cx| {
                 pickers.render_new_thread_target_selectors(cx)
@@ -8947,6 +9013,7 @@ impl Render for Composer {
             .id("composer-surface")
             .debug_selector(|| "composer-surface".into())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
+            .children(area_tabs)
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background

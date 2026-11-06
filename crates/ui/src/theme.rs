@@ -799,6 +799,38 @@ impl TerminalColors {
 }
 
 impl Theme {
+    /// Stable character colour derived solely from the active theme palette.
+    pub fn identity_color(&self, chat_id: &str) -> Hsla {
+        let hash = chat_id.bytes().fold(14695981039346656037_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
+        });
+        let indices = [4, 3, 5, 2, 1, 6];
+        let colors: Vec<_> = indices.into_iter().map(|index| flatten(self.terminal.ansi[index], self.bg))
+            .filter(|color| {
+                let distance = (color.h - self.danger.h).abs();
+                color.s < 0.15 || self.danger.s < 0.15 || distance.min(1.0 - distance) > 0.08
+            }).collect();
+        if colors.is_empty() { return self.accent; }
+        let index = if chat_id.is_empty() || chat_id == "harness:ClaudeCode" { 0 } else if chat_id == "harness:Codex" { 1 % colors.len() } else { (hash as usize).wrapping_add(1) % colors.len() };
+        colors[index]
+    }
+
+    /// Select a theme text role with the strongest contrast on an identity fill.
+    pub fn identity_text(&self, fill: Hsla) -> Hsla {
+        [self.text, self.solid, self.on_solid, self.on_accent]
+            .into_iter()
+            .map(|candidate| flatten(candidate, fill))
+            .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
+            .unwrap_or(self.text)
+    }
+
+    /// Preserve the identity hue while making prose readable on the main surface.
+    pub fn identity_foreground(&self, fill: Hsla) -> Hsla {
+        (0..=100)
+            .map(|step| flatten(fill.opacity(1.0 - step as f32 / 100.0), self.text))
+            .find(|color| contrast_ratio(*color, self.bg) >= 4.5)
+            .unwrap_or(self.text)
+    }
     // ---- numbers drive layout (px) ----
     /// Frost translucency over the blurred window background (macOS vibrancy
     /// or Windows Acrylic). Linux stays opaque because compositor blur is not
@@ -1922,6 +1954,28 @@ pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn area_identity_defaults_to_blue_and_preserves_text_contrast() {
+        for (appearance, id) in [(Appearance::Light, "area-light"), (Appearance::Dark, "area-dark")] {
+            let theme = Theme::for_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque);
+            assert_eq!(theme.identity_color(""), flatten(theme.terminal.ansi[4], theme.bg));
+            assert_eq!(theme.identity_color("harness:ClaudeCode"), theme.identity_color(""));
+            for key in ["harness:ClaudeCode", "harness:Codex", "chat-a", "chat-b", "chat-c"] {
+                let fill = theme.identity_color(key);
+                assert!(contrast_ratio(theme.identity_text(fill), fill) >= 4.5, "{id} {key}");
+                assert!(contrast_ratio(theme.identity_foreground(fill), theme.bg) >= 4.5, "{id} {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_panel_text_is_opaque_and_contrasts_in_industrial_light() {
+        let theme = Theme::for_selection(Appearance::Light, "industrial-light", AccentSelection::ThemeDefault, SurfacePreference::Opaque);
+        let foreground = theme.identity_text(theme.solid);
+        assert_eq!(foreground.a, 1.0);
+        assert!(contrast_ratio(foreground, theme.solid) >= 4.5);
+    }
 
     #[test]
     fn industrial_colors_derive_from_active_theme() {

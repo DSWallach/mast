@@ -6208,6 +6208,9 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
+        let conversation = theme.ui_style.conversation;
+        let area = matches!(conversation, crate::ui_style::ConversationVariant::Area);
+        let identity = theme.identity_color(self.chat_id.as_deref().unwrap_or(""));
         let workspace_root = {
             let state = self.state.read(cx);
             self.chat_id
@@ -6327,26 +6330,39 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
+                    let mut bubble_theme = theme.clone();
+                    if matches!(conversation, crate::ui_style::ConversationVariant::Area) {
+                        bubble_theme.text = theme.identity_text(identity);
+                        bubble_theme.code_wash = bubble_theme.text;
+                        bubble_theme.code_text = identity;
+                    }
                     let bubble = div()
                         .min_w_0().max_w(px(self.content_width * 0.8))
                         .bg(crate::theme::user_bubble_bg())
                         .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(Theme::BUBBLE_RADIUS)))
                         .px(px(16.0)).py(px(10.0))
-                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
+                        .when(matches!(conversation, crate::ui_style::ConversationVariant::Industrial), |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
+                        .when(matches!(conversation, crate::ui_style::ConversationVariant::Area), |el| el.bg(identity).max_w_full().w_full())
                         .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(14.0)))
-                        .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT)).text_color(theme.text)
+                        .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT)).text_color(bubble_theme.text)
                         .when(pending, |el| el.opacity(0.65))
-                        .child(self.render_user_body(&row.id, ix, text, mentions, false, &theme, window, cx));
-                    let bubble = if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-                        div().min_w_0().max_w(px(self.content_width * 0.8)).flex().flex_col().items_end().gap(px(4.0))
+                        .child(self.render_user_body(&row.id, ix, text, mentions, false, &bubble_theme, window, cx));
+                    let bubble = match conversation {
+                        crate::ui_style::ConversationVariant::Industrial => div().min_w_0().max_w(px(self.content_width * 0.8)).flex().flex_col().items_end().gap(px(4.0))
                             .child(div().text_size(crate::typography::ui_rems(9.0)).text_color(theme.text_muted).child("YOU"))
-                            .child(bubble).into_any_element()
-                    } else { bubble.into_any_element() };
+                            .child(bubble).into_any_element(),
+                        crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Area => bubble.into_any_element(),
+                    };
                     column = column.child(div().w_full().flex().justify_end().child(bubble));
                 }
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
+                let mut theme = theme.clone();
+                if area {
+                    theme.font_sans = "EB Garamond".into();
+                    theme.text = theme.identity_foreground(identity);
+                }
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6366,7 +6382,7 @@ impl Transcript {
                     question: None,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                render::render_block(
+                let content = render::render_block(
                     &top.block,
                     *block_ix,
                     *block_ix,
@@ -6377,9 +6393,15 @@ impl Transcript {
                         .get(block_ix)
                         .and_then(|o| o.as_deref())
                         .map(|document| document.lines.as_slice()),
-                )
+                );
+                area_assistant_marker(content, area && *block_ix == 0, identity)
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
+                let mut theme = theme.clone();
+                if area {
+                    theme.font_sans = "EB Garamond".into();
+                    theme.text = theme.identity_foreground(identity);
+                }
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6464,13 +6486,34 @@ impl Transcript {
                 if veil.is_some_and(|v| v.borrow().is_fading()) {
                     motion::pulse_lease(cx.entity_id(), cx);
                 }
-                el
+                area_assistant_marker(el, area && *block_ix == 0, identity)
             }
             RowKind::ToolGroup {
                 tools,
                 auto_open,
                 summary,
-            } => self.render_tool_group(&row.id, tools, summary, *auto_open, &theme, cx),
+            } => {
+                if area {
+                    let mut panel_theme = theme.clone();
+                    let panel = if theme.appearance.is_dark() { theme.surface_raised } else { theme.solid };
+                    let foreground = theme.identity_text(panel);
+                    panel_theme.bg = panel;
+                    panel_theme.surface = panel;
+                    panel_theme.surface_raised = panel;
+                    panel_theme.text = foreground;
+                    panel_theme.text_muted = foreground.opacity(0.8);
+                    panel_theme.text_faint = foreground.opacity(0.7);
+                    let body = self.render_tool_group(&row.id, tools, summary, *auto_open, &panel_theme, cx);
+                    div().rounded(px(14.0)).bg(panel).px(px(16.0)).py(px(12.0))
+                        .child(div().w_full().flex().justify_center().items_center().gap(px(6.0))
+                            .text_color(panel_theme.identity_foreground(identity)).font_family("EB Garamond")
+                            .text_size(crate::typography::ui_rems(16.0))
+                            .child(div().size(px(10.0)).rounded_full().bg(identity)).child("Tools"))
+                        .child(body).into_any_element()
+                } else {
+                    self.render_tool_group(&row.id, tools, summary, *auto_open, &theme, cx)
+                }
+            },
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
@@ -6527,7 +6570,7 @@ impl Transcript {
         };
 
         let is_first_entry_row = ix == 0 || self.rows.get(ix - 1).is_some_and(|previous| previous.entry_id != row.entry_id);
-        let inner = if theme.ui_style.controls == crate::ui_style::ControlVariant::Key
+        let inner = if matches!(conversation, crate::ui_style::ConversationVariant::Industrial)
             && matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
             let model = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).and_then(|config| config.model.clone());
             div().flex().flex_col().gap(px(4.0))
@@ -7461,6 +7504,14 @@ impl Transcript {
 /// run when there are none), with the same selection machinery as rendered
 /// markdown — the element registers into the frame's document-ordered
 /// registry, so drags select, span into adjacent rows, and Cmd+C copies.
+fn area_assistant_marker(content: AnyElement, show: bool, identity: gpui::Hsla) -> AnyElement {
+    if !show { return content; }
+    div().relative().min_w_0()
+        .child(div().absolute().left(px(-18.0)).top(px(4.0)).size(px(10.0)).rounded_full().bg(identity))
+        .child(content)
+        .into_any_element()
+}
+
 fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,

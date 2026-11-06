@@ -2454,6 +2454,15 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
+    let mut panel_theme = theme.clone();
+    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+        let panel = if theme.appearance.is_dark() { theme.surface_raised } else { theme.solid };
+        panel_theme.bg = panel;
+        panel_theme.text = theme.identity_text(panel);
+        panel_theme.text_muted = panel_theme.text;
+        panel_theme.text_faint = panel_theme.text;
+    }
+    let theme = &panel_theme;
     if is_mermaid(language)
         && let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref())
     {
@@ -2573,6 +2582,7 @@ fn code_copy_button(
                 .text_color(theme.text_muted),
             )
             .when(copied, |el| el.child(SharedString::from("Copied")))
+            .when(!copied && theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.child("Copy"))
             .into_any_element()
     })
 }
@@ -2584,6 +2594,12 @@ fn code_block_header(
 ) -> Option<gpui::Div> {
     if language.is_none() && actions.is_empty() {
         return None;
+    }
+    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+        return Some(div().h(crate::typography::ui_rems(CODE_HEADER_HEIGHT + 8.0)).relative().flex().items_center().justify_center()
+            .child(div().font_family("EB Garamond").text_size(px(16.0)).text_color(theme.text)
+                .child(SharedString::from(language.map_or_else(|| "Code".to_string(), |lang| format!("Code · {lang}")))))
+            .child(div().absolute().right(px(8.0)).top(px(4.0)).flex().items_center().gap(px(4.0)).children(actions)));
     }
     Some(
         div()
@@ -2635,6 +2651,7 @@ fn code_block_frame(
         .bg(crate::theme::ink(0.035))
         .border_1()
         .border_color(theme.border)
+        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded(px(14.0)).bg(theme.bg).border_color(theme.bg).p(px(4.0)))
         .overflow_hidden()
         .relative()
         .children(code_block_header(language, actions, theme))
@@ -2954,7 +2971,12 @@ fn render_code_block_source_with_actions(
 /// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
 /// asked for color; these are the diff pane's hues, now shared by both).
 pub fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
-    theme.syntax.color(kind)
+    let color = theme.syntax.color(kind);
+    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+        (0..=100).map(|step| crate::theme::flatten(color.opacity(1.0 - step as f32 / 100.0), theme.text))
+            .find(|candidate| crate::theme::contrast_ratio(*candidate, theme.bg) >= 7.0)
+            .unwrap_or(theme.text)
+    } else { color }
 }
 
 /// Build the exact-cover `TextRun` list for one code line from its tokens.
@@ -3007,6 +3029,19 @@ mod tests {
     use super::*;
     use crate::markdown::parser::{InlineStyle, parse_full};
     use gpui::TestAppContext;
+
+    #[test]
+    fn area_code_tokens_remain_readable_on_inverse_panel() {
+        for id in ["area-light", "industrial-light"] {
+        let mut theme = Theme::for_selection(crate::theme::Appearance::Light, id, Default::default(), mast_theme::SurfacePreference::Opaque)
+            .with_ui_style(crate::ui_style::UiStyle::AREA);
+        theme.bg = theme.solid;
+        theme.text = theme.identity_text(theme.bg);
+        for kind in [HighlightKind::Comment, HighlightKind::Keyword, HighlightKind::String, HighlightKind::Function] {
+            assert!(crate::theme::contrast_ratio(token_color(kind, &theme), theme.bg) >= 7.0);
+        }
+        }
+    }
 
     struct CodeSelectionHarness;
 

@@ -47,6 +47,25 @@ use crate::state::AppState;
 use crate::theme::Theme;
 use crate::{icons, surface_chrome};
 
+fn adjacent_revisions(ids: impl Iterator<Item = u32>, shown: u32) -> (Option<u32>, Option<u32>) {
+    ids.fold((None, None), |(previous, next), id| {
+        (if id < shown { Some(previous.map_or(id, |p: u32| p.max(id))) } else { previous },
+         if id > shown { Some(next.map_or(id, |n: u32| n.min(id))) } else { next })
+    })
+}
+
+#[cfg(test)]
+mod area_revision_tests {
+    use super::adjacent_revisions;
+
+    #[test]
+    fn navigation_uses_nearest_available_revision_regardless_of_order() {
+        assert_eq!(adjacent_revisions([9, 2, 6, 4].into_iter(), 6), (Some(4), Some(9)));
+        assert_eq!(adjacent_revisions([9, 2, 6, 4].into_iter(), 2), (None, Some(4)));
+        assert_eq!(adjacent_revisions([9, 2, 6, 4].into_iter(), 9), (Some(6), None));
+    }
+}
+
 /// What the tab asks its owner (the Shell) to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArtifactTabEvent {
@@ -1040,6 +1059,7 @@ impl ArtifactTab {
                         .size(px(surface_chrome::ICON_SIZE))
                         .text_color(theme.text_muted),
                 )
+                .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded_full().border_1().border_color(theme.border_strong))
         };
         let shown = self
             .content
@@ -1053,6 +1073,7 @@ impl ArtifactTab {
         } else {
             format!("r{shown}").into()
         };
+        let (previous_revision, next_revision) = adjacent_revisions(artifact.revisions.iter().map(|revision| revision.id), shown);
         let picker_button = |id: &'static str, label: SharedString, open: bool| {
             div()
                 .id(id)
@@ -1074,6 +1095,16 @@ impl ArtifactTab {
         };
         let pinned = artifact.pinned_as_plan;
         surface_chrome::toolbar(theme)
+            .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |toolbar| {
+                toolbar.child(div().flex().items_center().rounded(px(12.0)).border_1().border_color(theme.border_strong).overflow_hidden()
+                    .children([(previous_revision, icons::ALT_ARROW_LEFT, "artifact-previous-revision", "Previous revision"), (next_revision, icons::ALT_ARROW_RIGHT, "artifact-next-revision", "Next revision")].into_iter().map(|(revision, icon, id, label)| {
+                        div().id(id).debug_selector(move || id.into()).aria_label(label).size(px(26.0)).flex().items_center().justify_center()
+                            .when(revision.is_some() && id == "artifact-previous-revision", |el| el.bg(theme.accent))
+                            .when(revision.is_none(), |el| el.opacity(0.35))
+                            .when_some(revision, |el, revision| el.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| this.load(Some(revision), window, cx))))
+                            .child(icons::icon(icon).size(px(12.0)).text_color(if revision.is_some() && id == "artifact-previous-revision" { theme.identity_text(theme.accent) } else { theme.text_muted }))
+                    })))
+            })
             .child(
                 picker_button(
                     "artifact-revision-picker",
@@ -1162,6 +1193,25 @@ impl ArtifactTab {
                 })),
             )
             .into_any_element()
+    }
+
+    fn render_area_footer(&self, artifact: &ArtifactView, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if theme.ui_style.id != crate::ui_style::UiStyleId::Area { return None; }
+        let revision = self.shown.unwrap_or(artifact.current_revision);
+        let author = artifact.revisions.iter().find(|entry| entry.id == revision).map(|entry| {
+            entry.by.chat_id.as_ref().and_then(|id| self.state.read(cx).chats.iter().find(|chat| &chat.id == id).and_then(|chat| chat.title.clone()))
+                .unwrap_or_else(|| match entry.by.kind { mast_proto::WorkOutlineActorKind::User => "User".into(), mast_proto::WorkOutlineActorKind::Agent => "Agent".into(), mast_proto::WorkOutlineActorKind::System => "System".into() })
+        });
+        let standalone = self.standalone_path(cx).is_some();
+        let local = self.is_local(artifact, cx);
+        Some(div().w_full().h(px(40.0)).px(px(12.0)).flex().items_center().gap(px(8.0)).text_color(theme.text_muted)
+            .text_size(crate::typography::ui_rems(11.0))
+            .child(div().flex_1().min_w_0().truncate().child(SharedString::from(author.map_or_else(|| "Artifact".into(), |author| format!("Written by {author}")))))
+            .when(local, |el| el.child(div().id("area-artifact-reveal").debug_selector(|| "area-artifact-reveal".into()).px(px(10.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border_strong).cursor_pointer().child("Reveal")
+                .on_click(cx.listener(|this, _, _, cx| this.reveal(cx)))))
+            .when(standalone, |el| el.child(div().id("area-artifact-open").debug_selector(|| "area-artifact-open".into()).px(px(10.0)).py(px(5.0)).rounded_full().bg(theme.accent).text_color(theme.identity_text(theme.accent)).cursor_pointer().child("Open")
+                .on_click(cx.listener(|this, _, _, cx| this.open_standalone(cx)))))
+            .into_any_element())
     }
 
     fn render_picker(
@@ -1635,6 +1685,7 @@ impl gpui::Render for ArtifactTab {
         let find_bar = self.render_find_bar(&theme, cx);
         let body = self.with_section_index(body, &theme, window, cx);
         let body = self.with_comments_panel(body, &artifact, &theme, cx);
+        let area_footer = self.render_area_footer(&artifact, &theme, cx);
         self.with_find_keys(root, cx)
             .on_action(cx.listener(|this, _: &super::zoom::ZoomIn, _, cx| {
                 if !this.zoom_step(1, cx) {
@@ -1659,7 +1710,33 @@ impl gpui::Render for ArtifactTab {
             .children(notice)
             .children(find_bar)
             .child(div().flex_1().min_h_0().relative().child(body))
+            .children(area_footer)
     }
+}
+
+#[cfg(feature = "snapshot")]
+pub(crate) fn snapshot_fixture(window: &mut Window, cx: &mut App) -> Entity<impl gpui::Render + use<>> {
+    let id = "00000000000000000000000000000001".to_owned();
+    let artifact = ArtifactView {
+        id: id.clone(), space_id: "fixture-space".into(), device_id: "fixture-device".into(),
+        title: "Workspace review".into(), kind: ArtifactKind::HtmlPage,
+        stored_path: "/fixture/review.html".into(), current_revision: 2,
+        revisions: vec![mast_proto::ArtifactRevision { id: 2, by: mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::Agent, ..Default::default() }, ..Default::default() }, mast_proto::ArtifactRevision { id: 1, ..Default::default() }],
+        ..Default::default()
+    };
+    let state = cx.new(|_| {
+        let mut state = AppState::new();
+        state.local_device_id = Some("fixture-device".into());
+        state.set_test_artifacts(mast_proto::ArtifactsSnapshot { space_id: "fixture-space".into(), revision: 1, artifacts: vec![artifact] });
+        state
+    });
+    cx.new(|cx| {
+        let mut tab = ArtifactTab::new(state, None, id, BrowserWebHost::factory(), window, cx);
+        tab._load = None;
+        tab.loading = false;
+        tab.body = Some(ArtifactBody::Text("Review the workspace\n\nAll checks passed.".into()));
+        tab
+    })
 }
 
 /// The platform's offscreen renderer (none in tests, which inject a fake).
