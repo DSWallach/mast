@@ -315,6 +315,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                     "waitingReason": { "type": ["string", "null"], "description": "Short reason, or null to clear." },
                     "idempotencyKey": optional_idempotency_key_schema()
                 },
+                "required": [],
                 "anyOf": [{"required": ["status"]}, {"required": ["waitingUntil", "idempotencyKey"]}, {"required": ["waitingReason", "idempotencyKey"]}]
             }),
         },
