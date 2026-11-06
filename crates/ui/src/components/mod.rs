@@ -430,3 +430,107 @@ pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div
         .child(label.into());
     segmented_key(item, theme, selected)
 }
+
+/// Render the existing user-message shell; the caller supplies formatted content.
+pub fn user_message_bubble(
+    theme: &Theme,
+    identity: gpui::Hsla,
+    width: f32,
+    line_height: f32,
+    pending: bool,
+    content: AnyElement,
+) -> AnyElement {
+    use crate::ui_style::ConversationVariant;
+    let variant = theme.ui_style.conversation;
+    let area = variant == ConversationVariant::Area;
+    let text = if area {
+        theme.identity_text(identity)
+    } else {
+        theme.text
+    };
+    let bubble = div()
+        .min_w_0()
+        .max_w(px(width * 0.8))
+        .bg(crate::theme::user_bubble_bg())
+        .rounded(px(theme
+            .ui_style
+            .radius_roles()
+            .bubble
+            .unwrap_or(Theme::BUBBLE_RADIUS)))
+        .px(px(16.0))
+        .py(px(10.0))
+        .when(variant == ConversationVariant::Industrial, |el| {
+            el.bg(theme.surface)
+                .py(px(8.0))
+                .border_1()
+                .border_color(theme.border)
+        })
+        .when(area, |el| el.bg(identity).max_w_full().w_full())
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().body.unwrap_or(14.0),
+        ))
+        .line_height(crate::typography::ui_rems(line_height))
+        .text_color(text)
+        .when(pending, |el| el.opacity(0.65))
+        .child(content);
+    if variant == ConversationVariant::Industrial {
+        div()
+            .min_w_0()
+            .max_w(px(width * 0.8))
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(9.0))
+                    .text_color(theme.text_muted)
+                    .child("YOU"),
+            )
+            .child(bubble)
+            .into_any_element()
+    } else {
+        bubble.into_any_element()
+    }
+}
+
+/// Apply the assistant faceplate for the active conversation treatment.
+pub fn agent_message_bubble(
+    theme: &Theme,
+    first: bool,
+    model: Option<String>,
+    content: AnyElement,
+) -> AnyElement {
+    if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .when(first, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(9.0))
+                                .text_color(theme.text_muted)
+                                .child("AGENT"),
+                        )
+                        .when_some(model, |el, model| el.child(display(theme).child(model))),
+                )
+            })
+            .child(
+                div()
+                    .p(px(10.0))
+                    .border_1()
+                    .border_color(theme.industrial_colors().rule)
+                    .bg(theme.industrial_colors().panel)
+                    .child(content),
+            )
+            .into_any_element()
+    } else {
+        content
+    }
+}
