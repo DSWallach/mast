@@ -47,6 +47,25 @@ use crate::state::AppState;
 use crate::theme::Theme;
 use crate::{icons, surface_chrome};
 
+fn adjacent_revisions(ids: impl Iterator<Item = u32>, shown: u32) -> (Option<u32>, Option<u32>) {
+    ids.fold((None, None), |(previous, next), id| {
+        (if id < shown { Some(previous.map_or(id, |p: u32| p.max(id))) } else { previous },
+         if id > shown { Some(next.map_or(id, |n: u32| n.min(id))) } else { next })
+    })
+}
+
+#[cfg(test)]
+mod area_revision_tests {
+    use super::adjacent_revisions;
+
+    #[test]
+    fn navigation_uses_nearest_available_revision_regardless_of_order() {
+        assert_eq!(adjacent_revisions([9, 2, 6, 4].into_iter(), 6), (Some(4), Some(9)));
+        assert_eq!(adjacent_revisions([9, 2, 6, 4].into_iter(), 2), (None, Some(4)));
+        assert_eq!(adjacent_revisions([9, 2, 6, 4].into_iter(), 9), (Some(6), None));
+    }
+}
+
 /// What the tab asks its owner (the Shell) to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArtifactTabEvent {
@@ -1053,6 +1072,7 @@ impl ArtifactTab {
         } else {
             format!("r{shown}").into()
         };
+        let (previous_revision, next_revision) = adjacent_revisions(artifact.revisions.iter().map(|revision| revision.id), shown);
         let picker_button = |id: &'static str, label: SharedString, open: bool| {
             div()
                 .id(id)
@@ -1074,6 +1094,15 @@ impl ArtifactTab {
         };
         let pinned = artifact.pinned_as_plan;
         surface_chrome::toolbar(theme)
+            .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |toolbar| {
+                toolbar.child(div().flex().items_center().rounded(px(12.0)).border_1().border_color(theme.border_strong).overflow_hidden()
+                    .children([(previous_revision, icons::ALT_ARROW_LEFT, "artifact-previous-revision", "Previous revision"), (next_revision, icons::ALT_ARROW_RIGHT, "artifact-next-revision", "Next revision")].into_iter().map(|(revision, icon, id, label)| {
+                        div().id(id).debug_selector(move || id.into()).aria_label(label).size(px(26.0)).flex().items_center().justify_center()
+                            .when(revision.is_none(), |el| el.opacity(0.35))
+                            .when_some(revision, |el, revision| el.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| this.load(Some(revision), window, cx))))
+                            .child(icons::icon(icon).size(px(12.0)).text_color(theme.text_muted))
+                    })))
+            })
             .child(
                 picker_button(
                     "artifact-revision-picker",
