@@ -114,6 +114,70 @@ pub fn outline_status_word(label: &'static str, color: gpui::Hsla, theme: &Theme
     })
 }
 
+/// First-use outline action; callers add labels, shortcuts, and handlers.
+pub fn outline_first_use_button(id: &'static str, primary: bool, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .when(
+            primary && theme.ui_style.layout == crate::ui_style::UiLayout::Guided,
+            |el| {
+                el.h(px(32.0))
+                    .bg(theme.solid)
+                    .text_color(theme.on_solid)
+                    .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
+            },
+        )
+}
+
+/// Start-chat action for an outline row.
+pub fn outline_start_chat_button(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    let guided = theme.ui_style.layout == crate::ui_style::UiLayout::Guided;
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(4.0))
+        .rounded(px(3.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(theme.text_muted)
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .when(guided, |el| {
+            el.h(px(32.0))
+                .px(px(8.0))
+                .bg(theme.solid)
+                .text_color(theme.on_solid)
+                .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
+        })
+        .child(
+            crate::icons::icon(crate::icons::ACTION_PLAY)
+                .size(px(10.0))
+                .text_color(if guided {
+                    theme.on_solid
+                } else {
+                    theme.text_muted
+                }),
+        )
+        .child("Start Chat")
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

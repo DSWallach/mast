@@ -2590,23 +2590,6 @@ impl OutlineView {
             &keymap,
             HintKey::Command(super::command::WorkOutlineCommand::CreateWorkItem),
         );
-        let button = |id: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .px(px(7.0))
-                .py(px(2.0))
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .text_color(theme.text_muted)
-                .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-        };
         div()
             .debug_selector(|| "outline-first-use".into())
             .flex_none()
@@ -2620,11 +2603,7 @@ impl OutlineView {
             .text_color(theme.text_muted)
             .child("No work items yet \u{2014} group Chats and share instructions under one.")
             .child(
-                button("outline-first-use-create")
-                    .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-                        el.h(px(32.0)).bg(theme.solid).text_color(theme.on_solid)
-                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
-                    })
+                crate::components::outline_first_use_button("outline-first-use-create", true, theme)
                     .child("Create work item")
                     .when_some(create_keys, |el, keys| {
                         el.child(crate::popover::kbd_hint(theme, &keys))
@@ -2636,7 +2615,7 @@ impl OutlineView {
                     })),
             )
             .child(
-                button("outline-first-use-learn-more")
+                crate::components::outline_first_use_button("outline-first-use-learn-more", false, theme)
                     .child("Learn more")
                     .hint(
                         "Outline keys and commands",
@@ -3126,32 +3105,7 @@ impl OutlineView {
             .map(|item| {
                 let space_id = item.space_id.clone();
                 let item_id = item.item_id.clone();
-                div()
-                    .id(SharedString::from(format!("outline-start-chat-{key}")))
-                    .debug_selector({
-                        let selector = format!("outline-start-chat-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px(px(4.0))
-                    .rounded(px(3.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-                        el.h(px(32.0)).px(px(8.0)).bg(theme.solid).text_color(theme.on_solid)
-                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
-                    })
-                    .child(
-                        crate::icons::icon(crate::icons::ACTION_PLAY)
-                            .size(px(10.0))
-                            .text_color(if theme.ui_style.layout == crate::ui_style::UiLayout::Guided { theme.on_solid } else { theme.text_muted }),
-                    )
-                    .child("Start Chat")
+                crate::components::outline_start_chat_button(SharedString::from(format!("outline-start-chat-{key}")), theme)
                     .hint(
                         "Start a Chat in this work item",
                         HintKey::Outline(OutlineNavKey::StartChat),
