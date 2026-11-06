@@ -1051,6 +1051,25 @@ unknown ids instead of denying.
   drastic"). The next look is **Area** (area.tech case studies); ask Mikey for reference screenshots. Release run 58:
   UI 2555/0, but Codex approval harness tests and engine message_queue tests flake only in the full cross-crate run
   (pass alone). Fix in progress: item ffa6f957, branch `fix-release-flakes`.
+- **2026-11-06 evening (release 60, installed):** Style and theme are INDEPENDENT (Mikey's model). A style
+  changes element design only (shapes, control variants, structure, type, status shape), and the theme supplies
+  the colours, so any combination works. `style-theme-decouple`: no forced theme on style switch; Industrial
+  Light/Dark ship as ordinary themes; theme-derived hardware roles. Bold Industrial phase 2: round/pressed keys,
+  attached ledges, green confirm (theme success role), dark mono readouts (model/context), MODEL/MODE and YOU/AGENT
+  faceplate labels, grille texture, chassis bezel, notched toggles. `looks-area`: the Area style from the
+  area.tech OpenAI case-study interface (rounded, identity hue per agent with a calm-first palette that avoids
+  danger, filled user pills, serif agent replies (EB Garamond, OFL), harness icon tabs on a filled composer, SEND
+  key, dark rounded code/tool panels, artifact nav/footer) + Area Light/Dark themes; notes in
+  docs/internal/styles/area.md. `ui-preview`: `scripts/ui-preview.sh [--themes …] [--screens …]` renders
+  screens × styles × themes into labelled contact sheets (docs/internal/ui-preview.md). UI workers must look at
+  and attach a sheet before handoff; Codex needs one approval to run it outside the sandbox, and the coordinator
+  can run it directly. `tool-error-friction`: id prefixes for requests and items, full ids in worker banners,
+  scope diagnostics, facts/links truncate with warnings, and a `dismiss_friction` tool. After this install, dismiss
+  friction 8e01dbe19385db7a364f1e5b84c6d31a, 4a607d99fdef1ef4c28d2dfc90a303b9, e24a833369cf43dff6c1f9b978d9db79 and
+  a865ed1a524c1577bbc1a0974a625125 (already fixed). `fix-release-flakes`: SessionDoc serializes queue mutations; a
+  real append-versus-drain race rejected queued messages. Gallery: T cycles themes. Release 60: UI 2563/0, plus one
+  engine test updated for truncate-not-refuse. Running: `approval-rules` (58571810): per-Space auto-approve
+  patterns for worker command approvals; suggestions off by default; 39 adversarial cases must ask.
 - Release runs 50–55 passed (last: nextest 2405/2405, UI 2542/0). Run 54 failed two load-sensitive tests
   (`message_queue::queued_text_waits_for_a_steerable_turn_even_with_legacy_policy`,
   `executable::tests::stderr_versions_are_read_and_build_metadata_does_not_break_ties`) while worker builds ran
