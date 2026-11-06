@@ -2733,6 +2733,30 @@ pub fn outline_pr_destination_picker(theme: &Theme) -> Stateful<Div> {
         .pl(px(8.0 * super::layout_spacing(theme)))
 }
 
+/// Enable-Linear suggestion in item details.
+pub fn outline_linear_hint(theme: &Theme) -> Div {
+    let scale = super::layout_spacing(theme);
+    div()
+        .debug_selector(|| "work-item-linear-hint".into())
+        .flex()
+        .items_center()
+        .gap(px(6.0 * scale))
+        .px(px(8.0 * scale))
+        .py(px(6.0 * scale))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .child(
+            outline_execution_line(
+                "Linear link saved as a plain link. Enable Linear for this Space?".into(),
+                11.5,
+                theme.text_muted,
+                theme,
+            )
+            .flex_1(),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
