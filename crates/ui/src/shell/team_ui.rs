@@ -96,7 +96,7 @@ impl Shell {
                 .h(px(24.0))
                 .flex_none()
                 .px(px(8.0))
-                .rounded(px(6.0))
+                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
                 .flex()
                 .items_center()
                 .gap(px(5.0))
@@ -109,6 +109,8 @@ impl Shell {
                 })
                 .when(active, |el| el.bg(crate::theme::wash(0.10)))
                 .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
+                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
+                .children(crate::surface_chrome::active_key_dot(&theme, active))
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.set_right_active(RightSurface::Team, cx);
@@ -123,7 +125,7 @@ impl Shell {
                     el.child(
                         div()
                             .debug_selector(|| "right-surface-team-dot".into())
-                            .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance)),
+                            .child(crate::status_style::indicator_for_theme(crate::status_style::Status::Waiting, &theme)),
                     )
                 })
                 .into_any_element(),
@@ -321,10 +323,12 @@ impl Shell {
             .map(|at| mast_proto::view::format_time_ago(at, now))
             .unwrap_or_default();
         let status = crate::status_style::status_style(worker.state.into(), theme.appearance);
-        let indicator = if worker.state == WorkerState::Working {
+        let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+            crate::status_style::indicator_for_theme(worker.state.into(), &theme).into_any_element()
+        } else if worker.state == WorkerState::Working {
             crate::loaders::mini_mono_spinner(format!("{prefix}-status-{id}"), 1.5, status.color, cx.entity_id(), cx).into_any_element()
         } else {
-            crate::status_style::indicator(worker.state.into(), theme.appearance).into_any_element()
+            crate::status_style::indicator_for_theme(worker.state.into(), &theme).into_any_element()
         };
         let open_id = id.clone();
         let menu_id = id.clone();

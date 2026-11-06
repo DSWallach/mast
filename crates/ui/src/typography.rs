@@ -614,17 +614,8 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
 pub(crate) fn reinstall_theme(cx: &mut App) {
     crate::theme::bump_style_generation();
     let appearance = crate::theme::current_appearance();
-    let themes = crate::appearance::themes(cx);
-    crate::theme::Theme::install_selection(
-        appearance,
-        themes.variant_id(match appearance {
-            crate::theme::Appearance::Dark => mast_theme::Appearance::Dark,
-            crate::theme::Appearance::Light => mast_theme::Appearance::Light,
-        }),
-        crate::appearance::accent(cx),
-        crate::appearance::surface(cx),
-        cx,
-    );
+    let (variant_id, accent, surface) = crate::appearance::effective_selection(cx, appearance);
+    crate::theme::Theme::install_selection(appearance, &variant_id, accent, surface, cx);
     cx.refresh_windows();
 }
 

@@ -117,7 +117,7 @@ pub(crate) fn choice_menu_body<V: 'static>(
     let mut body = div().flex().flex_col().gap(px(1.0));
     for (ix, row) in rows.iter().enumerate() {
         if row.separator_before && ix > 0 {
-            body = body.child(super::menu_separator());
+            body = body.child(super::menu_separator(&theme));
         }
         if let Some(heading) = &row.heading {
             body = body.child(super::menu_heading(&popup, heading.as_ref()));

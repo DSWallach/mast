@@ -308,6 +308,8 @@ impl ChatTypeView {
                 } else {
                     gpui::transparent_black()
                 })
+                .when(true, |el| crate::surface_chrome::segmented_key(el, theme, selected))
+                .children(crate::surface_chrome::active_key_dot(theme, selected))
                 .text_size(crate::typography::ui_rems(12.0))
                 .font_weight(if selected {
                     gpui::FontWeight::SEMIBOLD

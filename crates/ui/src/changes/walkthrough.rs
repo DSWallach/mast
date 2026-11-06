@@ -2,6 +2,7 @@
 use super::{Changes, DiffRow, FileDiff, review_state::hunk_identity};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
+use std::{cell::Cell, rc::Rc};
 
 use gpui::{
     App, Context, Entity, FocusHandle, KeyBinding, Render, Subscription, Task, Window, actions,
@@ -354,6 +355,7 @@ pub(crate) struct Walkthrough {
     target_selected: bool,
     selected: usize,
     note_expanded: bool,
+    note_height: Rc<Cell<f32>>,
     tour: bool,
     stale_head: Option<String>,
     focus: FocusHandle,
@@ -556,6 +558,7 @@ impl Walkthrough {
             target_selected: false,
             selected: 0,
             note_expanded: false,
+            note_height: Rc::new(Cell::new(0.0)),
             tour: true,
             stale_head: None,
             focus: cx.focus_handle(),
@@ -581,6 +584,7 @@ impl Walkthrough {
         if self.selected != index {
             self.cancel_step_question();
             self.note_expanded = false;
+            self.note_height.set(0.0);
         }
         self.selected = index;
         let coverage = self.coverage().clone();
@@ -681,7 +685,7 @@ impl Walkthrough {
 }
 
 impl Render for Walkthrough {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let controls = self
             .changes
@@ -714,6 +718,8 @@ impl Render for Walkthrough {
             };
         }
         let coverage = self.coverage().clone();
+        let selected_reviewed = coverage.complete.get(self.selected).copied().unwrap_or(false)
+            && coverage.steps.get(self.selected).is_some_and(|hunks| !hunks.is_empty() && hunks.iter().all(|hunk| self.viewed.contains(&hunk.identity)));
         let progress = format!(
             "{} / {} reviewed",
             coverage.reviewed_count(&self.viewed),
@@ -738,6 +744,15 @@ impl Render for Walkthrough {
                     .items_center()
                     .gap_1()
                     .cursor_pointer()
+                    .when(
+                        theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+                        |row| {
+                            row.px(px(8.0))
+                                .py(px(8.0))
+                                .border_b_1()
+                                .border_color(theme.border)
+                        },
+                    )
                     .when(selected, |row| row.bg(theme.element_active))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         window.focus(&this.focus, cx);
@@ -813,6 +828,34 @@ impl Render for Walkthrough {
             );
         }
         let note = self.review.steps.get(self.selected).map(|step| {
+            let industrial = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
+            let note_content = if industrial {
+                let what = gpui::StyledText::new(step.what.clone());
+                let why = gpui::StyledText::new(format!("Why: {}", step.why));
+                let risk = gpui::StyledText::new(step.risk_note.clone());
+                let layouts = [what.layout().clone(), why.layout().clone(), risk.layout().clone()];
+                let measured = self.note_height.clone();
+                let owner = cx.entity_id();
+                div().relative()
+                    .child(gpui::canvas(|_, _, _| (), move |_, _, _, cx| {
+                        let height = layouts.iter().map(|layout| {
+                            let lines: usize = layout.line_layouts().iter().map(|line| line.wrap_boundaries.len() + 1).sum();
+                            lines.max(1) as f32 * f32::from(layout.line_height())
+                        }).sum::<f32>() + 8.0;
+                        if (measured.get() - height).abs() > 0.5 { measured.set(height); cx.notify(owner); }
+                    }).absolute().inset_0())
+                    .flex().flex_col().gap_1()
+                    .child(what)
+                    .child(div().text_color(theme.text_muted).child(why))
+                    .child(div().text_color(theme.text_muted).child(risk))
+                    .into_any_element()
+            } else {
+                div().flex().flex_col().gap_1().child(step.what.clone())
+                    .child(div().text_color(theme.text_muted).child(format!("Why: {}", step.why)))
+                    .child(div().text_color(theme.text_muted).child(step.risk_note.clone()))
+                    .into_any_element()
+            };
+            let clamped_height = f32::from(crate::typography::ui_rems(64.0).to_pixels(window.rem_size()));
             div()
                 .id("review-note")
                 .debug_selector(|| "review-note".into())
@@ -859,7 +902,7 @@ impl Render for Walkthrough {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(13.0)))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(step.title.clone()),
                         )
@@ -867,7 +910,7 @@ impl Render for Walkthrough {
                             div()
                                 .id("review-risk")
                                 .px_2()
-                                .rounded_md()
+                                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
                                 .bg(theme.surface_raised)
                                 .text_color(theme.text_muted)
                                 .child(format!("{:?}", step.risk)),
@@ -883,30 +926,21 @@ impl Render for Walkthrough {
                         .when(!self.note_expanded, |el| {
                             el.max_h(crate::typography::ui_rems(64.0)).overflow_hidden()
                         })
-                        .child(step.what.clone())
-                        .child(
-                            div()
-                                .text_color(theme.text_muted)
-                                .child(format!("Why: {}", step.why)),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.text_muted)
-                                .child(step.risk_note.clone()),
-                        ),
+                        .child(note_content),
                 )
-                .child(
+                .when(!industrial || self.note_expanded || self.note_height.get() > clamped_height + 0.5, |el| el.child(
                     div()
                         .id("review-note-more")
                         .debug_selector(|| "review-note-more".into())
                         .cursor_pointer()
                         .text_color(theme.text_muted)
+                        .when(industrial, |el| el.px(px(8.0)).py(px(4.0)).bg(theme.surface_raised).rounded(px(4.0)).border_1().border_color(theme.border))
                         .child(if self.note_expanded { "Less" } else { "More" })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.note_expanded = !this.note_expanded;
                             cx.notify();
                         })),
-                )
+                ))
                 .child(
                     div()
                         .flex()
@@ -915,7 +949,7 @@ impl Render for Walkthrough {
                         .children(step.tags.iter().map(|tag| {
                             div()
                                 .px_2()
-                                .rounded_md()
+                                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
                                 .bg(theme.surface_raised)
                                 .text_color(theme.text_muted)
                                 .child(tag.clone())
@@ -992,13 +1026,22 @@ impl Render for Walkthrough {
                         .gap_2()
                         .child(label);
                     if waiting {
-                        reply = reply.child(crate::loaders::gradient_spinner(
-                            "step-question-spinner",
-                            &theme,
-                            2.0,
-                            cx.entity_id(),
-                            cx,
-                        ));
+                        reply = if theme.ui_style.status_indicator
+                            == crate::ui_style::StatusIndicator::Dot
+                        {
+                            reply.child(crate::status_style::indicator_for_theme(
+                                crate::status_style::Status::Working,
+                                &theme,
+                            ))
+                        } else {
+                            reply.child(crate::loaders::gradient_spinner(
+                                "step-question-spinner",
+                                &theme,
+                                2.0,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                        };
                     }
                     if let Some(chat_id) = chat_id {
                         reply = reply.child(
@@ -1031,6 +1074,10 @@ impl Render for Walkthrough {
                     div()
                         .id("review-mark-step")
                         .cursor_pointer()
+                        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.self_start().flex().items_center().gap(px(8.0)).px(px(16.0)).py(px(8.0)))
+                        .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, selected_reviewed))
+                        .when(!selected_reviewed && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(theme.accent).text_color(theme.on_accent))
+                        .children(crate::surface_chrome::active_key_dot(&theme, selected_reviewed))
                         .child("Mark reviewed")
                         .on_click(cx.listener(|this, _, _, cx| this.mark_step(cx))),
                 )
@@ -1127,11 +1174,24 @@ impl Render for Walkthrough {
                     .items_center()
                     .gap_2()
                     .text_color(theme.text_muted)
+                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
                     .child(progress)
                     .child(
                         div()
                             .id("review-mode")
                             .cursor_pointer()
+                            .when(
+                                theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+                                |el| {
+                                    el.px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .bg(theme.surface_raised)
+                                        .border_1()
+                                        .border_b_2()
+                                        .border_color(theme.border)
+                                },
+                            )
                             .child(if self.tour { "Free diff" } else { "Tour" })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 window.focus(&this.focus, cx);
@@ -1155,6 +1215,15 @@ impl Render for Walkthrough {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
+                                .when(
+                                    theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+                                    |el| {
+                                        el.bg(theme.surface)
+                                            .p(px(8.0))
+                                            .border_r_1()
+                                            .border_color(theme.border)
+                                    },
+                                )
                                 .child(steps)
                                 .child(uncovered),
                         )
@@ -1177,6 +1246,16 @@ impl Render for Walkthrough {
                                         .max_w(px(280.))
                                         .min_h_0()
                                         .overflow_y_scroll()
+                                        .when(
+                                            theme.ui_style.surface
+                                                == crate::ui_style::SurfaceModel::Opaque,
+                                            |el| {
+                                                el.bg(theme.surface)
+                                                    .p(px(8.0))
+                                                    .border_l_1()
+                                                    .border_color(theme.border)
+                                            },
+                                        )
                                         .children(note),
                                 )
                             }),
@@ -1348,6 +1427,67 @@ mod tests {
     }
 
     #[gpui::test]
+    fn industrial_walkthrough_renders_light_and_dark(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::for_selection(crate::theme::Appearance::Light, "industrial-light", Default::default(), mast_theme::SurfacePreference::Opaque).with_ui_style(crate::ui_style::UiStyle::INDUSTRIAL));
+        });
+        let (mut review, files) = fixture();
+        review.steps[0].what = "Short".into();
+        review.steps[0].why.clear();
+        review.steps[0].risk_note.clear();
+        let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
+            review: review.into(),
+            files: Arc::new(files),
+            coverage: None,
+            viewed: BTreeSet::new(),
+            seen: HashSet::new(),
+            target_selected: true,
+            selected: 0,
+            note_expanded: false,
+            note_height: Rc::new(Cell::new(0.0)),
+            tour: true,
+            stale_head: None,
+            focus: cx.focus_handle(),
+            changes: None,
+            _changes_observer: None,
+            step_input: None,
+            _step_input_events: None,
+            step_panel: None,
+            step_task: None,
+            step_cancelled: None,
+        });
+        for (appearance, id) in [
+            (crate::theme::Appearance::Light, "industrial-light"),
+            (crate::theme::Appearance::Dark, "industrial-dark"),
+        ] {
+            vcx.update(|window, cx| {
+                cx.set_global(
+                    Theme::for_selection(
+                        appearance,
+                        id,
+                        Default::default(),
+                        mast_theme::SurfacePreference::Opaque,
+                    )
+                    .with_ui_style(crate::ui_style::UiStyle::INDUSTRIAL),
+                );
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            assert!(vcx.debug_bounds("review-progress").is_some());
+            assert!(vcx.debug_bounds("review-note").is_some());
+        }
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("review-note-more").is_none());
+        view.update(vcx, |view, cx| { view.review.steps[0].what = "Long note ".repeat(80); cx.notify(); });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("review-note-more").is_some());
+    }
+
+    #[gpui::test]
     fn walkthrough_renders_step_note_and_coverage(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -1364,6 +1504,7 @@ mod tests {
             target_selected: true,
             selected: 0,
             note_expanded: false,
+            note_height: Rc::new(Cell::new(0.0)),
             tour: true,
             stale_head: None,
             focus: cx.focus_handle(),
@@ -1485,6 +1626,7 @@ mod tests {
             target_selected: true,
             selected: 0,
             note_expanded: false,
+            note_height: Rc::new(Cell::new(0.0)),
             tour: true,
             stale_head: None,
             focus: cx.focus_handle(),

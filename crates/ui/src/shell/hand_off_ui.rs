@@ -139,7 +139,7 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
     popover::dialog_card(theme)
         .debug_selector(|| "hand-off-dialog".into())
         .child(popover::dialog_title(theme, "Hand off to new chat"))
-        .child(div().mt(px(12.0)).child(popover::dialog_field(dialog.input.clone().into_any_element())))
+        .child(div().mt(px(12.0)).child(popover::dialog_field(&theme, dialog.input.clone().into_any_element())))
         .child(div().mt(px(12.0)).child(SharedString::from("Workers")))
         .child(div().id("hand-off-workers").max_h(px(180.0)).overflow_y_scroll().text_color(theme.text_muted).child(workers))
         .child(div().id("hand-off-archive").mt(px(12.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {

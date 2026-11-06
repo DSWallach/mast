@@ -648,7 +648,7 @@ impl Shell {
             );
         for (ix, row) in rows.into_iter().enumerate() {
             if row.separator_before {
-                card = card.child(popover::menu_separator());
+                card = card.child(popover::menu_separator(&theme));
             }
             card = card.child(menu_row(ix, row, page, &theme, cx));
         }

@@ -270,7 +270,7 @@ impl Shell {
             .debug_selector(|| "chat-header-title".into())
             .min_w_0()
             .truncate()
-            .text_size(crate::typography::ui_rems(15.0))
+            .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(15.0)))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.text)
             .child(SharedString::from(facts.title.clone()));
@@ -292,6 +292,7 @@ impl Shell {
                 .border_b_1()
                 .border_color(theme.border.opacity(0.7))
                 .bg(theme.surface.opacity(0.94))
+                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_color(theme.border).px(px(16.0)))
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     this.chat_item_header_hover(*hovered, cx)
                 }))
@@ -416,7 +417,7 @@ impl Shell {
                 .flex()
                 .items_center()
                 .gap(px(3.0))
-                .rounded(px(5.0))
+                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
                 .border_1()
                 .border_color(color)
                 .cursor_pointer()
@@ -496,6 +497,7 @@ impl Shell {
                 .border_1()
                 .border_color(border)
                 .bg(theme.element_hover.opacity(0.55))
+                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface_raised))
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(text)
                 .when(clickable, |chip| {
@@ -613,10 +615,11 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .rounded(px(5.0))
+                    .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.element_hover.opacity(0.55))
+                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface_raised))
                     .cursor_pointer()
                     .hover(|el| el.bg(theme.element_hover))
                     .text_size(crate::typography::ui_rems(11.0))
@@ -653,11 +656,11 @@ impl Shell {
             .max_w_full()
             .mt(px(4.0))
             .p(px(10.0))
-            .rounded(px(8.0))
+            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
             .border_1()
             .border_color(theme.border_strong)
             .bg(theme.surface_raised)
-            .shadow_md()
+            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_md())
             .occlude()
             .flex()
             .flex_col()
@@ -701,7 +704,7 @@ impl Shell {
             .h(px(24.0))
             .flex_none()
             .px(px(8.0))
-            .rounded(px(6.0))
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
             .flex()
             .items_center()
             .gap(px(5.0))
@@ -714,6 +717,8 @@ impl Shell {
             })
             .when(active, |el| el.bg(crate::theme::wash(0.10)))
             .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
+            .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
+            .children(crate::surface_chrome::active_key_dot(&theme, active))
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
                 this.set_right_active(RightSurface::Item, cx);
@@ -728,7 +733,7 @@ impl Shell {
                 el.child(
                     div()
                         .debug_selector(|| "right-surface-item-dot".into())
-                        .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance)),
+                        .child(crate::status_style::indicator_for_theme(crate::status_style::Status::Waiting, &theme)),
                 )
             })
             .into_any_element()

@@ -1208,14 +1208,24 @@ impl WorkItemDetails {
         open: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
+        let (label, count) = if theme.ui_style.tokens.label_size.is_some() {
+            match label.rsplit_once(" (") {
+                Some((title, suffix)) if suffix.ends_with(')') && suffix[..suffix.len() - 1].chars().all(|c| c.is_ascii_digit()) =>
+                    (crate::popover::tracked_upper(title), Some(format!("({suffix}"))),
+                _ => (crate::popover::tracked_upper(&label), None),
+            }
+        } else {
+            (label, None)
+        };
         div()
             .id(id)
             .flex()
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .text_size(crate::typography::ui_rems(11.0))
+            .text_size(crate::typography::ui_rems(theme.ui_style.tokens.label_size.unwrap_or(11.0)))
             .font_weight(gpui::FontWeight::SEMIBOLD)
+            .when(theme.ui_style.tokens.label_size.is_some(), |el| el.font_family(theme.font_sans.clone()))
             .text_color(theme.text_muted)
             .hover(|el| el.text_color(theme.text))
             .child(
@@ -1228,6 +1238,7 @@ impl WorkItemDetails {
                 .text_color(theme.text_muted),
             )
             .child(SharedString::from(label))
+            .when_some(count, |el, count| el.child(div().font_family(theme.font_mono.clone()).child(SharedString::from(count))))
     }
 
     /// A compact details button. Its hover tooltip (label + live binding)
@@ -1245,6 +1256,7 @@ impl WorkItemDetails {
             .rounded(px(4.0))
             .border_1()
             .border_color(theme.border)
+            .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
             .cursor_pointer()
             .text_size(crate::typography::ui_rems(10.5))
             .text_color(theme.text_muted)
@@ -1308,10 +1320,10 @@ impl WorkItemDetails {
             .min_h(px(24.0))
             .px(px(6.0))
             .py(px(3.0))
-            .rounded(px(4.0))
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
             .border_1()
-            .border_color(theme.accent)
-            .bg(theme.surface)
+            .border_color(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { theme.border } else { theme.accent })
+            .bg(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { theme.input_bg } else { theme.surface })
             .child(input.clone())
     }
 }
@@ -1498,7 +1510,7 @@ impl Render for WorkItemDetails {
                 .id("work-item-title")
                 .debug_selector(|| "work-item-title".into())
                 .cursor_text()
-                .text_size(crate::typography::ui_rems(15.0))
+                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(15.0)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(SharedString::from(item.title.clone()))
@@ -1529,6 +1541,9 @@ impl Render for WorkItemDetails {
                     el.bg(theme.element_active).text_color(theme.text)
                 })
                 .when(!active, |el| el.text_color(theme.text_muted))
+                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.flex().items_center().gap(px(8.0)))
+                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
+                .children(crate::surface_chrome::active_key_dot(&theme, active))
                 .hover(|el| el.text_color(theme.text))
                 .child(chips::base_status_label(status))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_status(status, cx)))
@@ -1567,6 +1582,7 @@ impl Render for WorkItemDetails {
                     .p(px(2.0))
                     .rounded(px(6.0))
                     .bg(theme.element_hover.opacity(0.5))
+                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
                     .children(status_pills),
             )
             .when_some(attention, |el, attention| el.child(attention))
@@ -1801,6 +1817,7 @@ impl Render for WorkItemDetails {
                             .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_muted)
+                            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
                             .child(SharedString::from(format!(
                                 "Chats ({})",
                                 item.chat_ids.len()
@@ -1999,7 +2016,7 @@ impl Render for WorkItemDetails {
                     .on_click(cx.listener(|this, _, _, cx| this.restore(cx))),
             )
         } else {
-            div().child(
+            div().when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.flex().items_start()).child(
                 Self::small_button("work-item-archive", "Archive…", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.request_archive(cx))),
             )
@@ -2017,9 +2034,9 @@ impl Render for WorkItemDetails {
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .gap(px(12.0))
-                .px(px(14.0))
-                .py(px(10.0))
+                .gap(px(theme.ui_style.tokens.grid.unwrap_or(12.0)))
+                .px(px(if theme.ui_style.tokens.grid.is_some() { 16.0 } else { 14.0 }))
+                .py(px(theme.ui_style.tokens.grid.unwrap_or(10.0)))
                 .child(title)
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))

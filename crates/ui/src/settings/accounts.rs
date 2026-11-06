@@ -1318,7 +1318,7 @@ impl AccountsPage {
                     ))
                     .child(
                         div().mt(px(12.0)).child(
-                            popover::dialog_field(self.code_input.clone().into_any_element())
+                            popover::dialog_field(&theme, self.code_input.clone().into_any_element())
                                 .font_family(theme.font_mono.clone())
                                 .text_size(crate::typography::ui_rems(13.0)),
                         ),

@@ -9,6 +9,38 @@ pub enum UiStyleId {
     Minimal,
     Dense,
     Guided,
+    Industrial,
+}
+
+impl UiStyleId {
+    pub const ALL: &'static [Self] = &[Self::Minimal, Self::Dense, Self::Guided, Self::Industrial];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Minimal => "Minimal",
+            Self::Dense => "Dense",
+            Self::Guided => "Guided",
+            Self::Industrial => "Industrial",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Minimal => "Current spacing",
+            Self::Dense => "More on screen",
+            Self::Guided => "More labels and guidance",
+            Self::Industrial => "Instrument panel",
+        }
+    }
+
+    pub const fn preview_gap(self) -> f32 {
+        match self {
+            Self::Minimal => 4.0,
+            Self::Dense => 2.0,
+            Self::Guided => 6.0,
+            Self::Industrial => 8.0,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for UiStyleId {
@@ -16,6 +48,7 @@ impl<'de> Deserialize<'de> for UiStyleId {
         Ok(match String::deserialize(deserializer)?.as_str() {
             "dense" => Self::Dense,
             "guided" => Self::Guided,
+            "industrial" => Self::Industrial,
             _ => Self::Minimal,
         })
     }
@@ -29,6 +62,49 @@ pub struct StyleTokens {
     pub outline_row_delta: f32,
     pub control_size: f32,
     pub control_icon_size: f32,
+    /// `None` preserves the primitive's existing geometry.
+    pub control_radius: Option<f32>,
+    pub panel_radius: Option<f32>,
+    pub chip_radius: Option<f32>,
+    pub rule_width: Option<f32>,
+    /// Optional grid and type roles; absent values preserve existing metrics.
+    pub grid: Option<f32>,
+    pub label_size: Option<f32>,
+    pub secondary_size: Option<f32>,
+    pub body_size: Option<f32>,
+    pub title_size: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceModel {
+    ThemeDefault,
+    Opaque,
+    Glass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlVariant {
+    Minimal,
+    Key,
+    FlatOutline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusIndicator {
+    Minimal,
+    Dot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontPreference {
+    UserDefault,
+    Geist,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairedTheme {
+    pub light: &'static str,
+    pub dark: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +147,11 @@ pub struct UiStyle {
     pub id: UiStyleId,
     pub tokens: StyleTokens,
     pub behavior: StyleBehavior,
+    pub surface: SurfaceModel,
+    pub controls: ControlVariant,
+    pub status_indicator: StatusIndicator,
+    pub font_preference: FontPreference,
+    pub paired_theme: Option<PairedTheme>,
 }
 
 impl UiStyle {
@@ -83,7 +164,21 @@ impl UiStyle {
             outline_row_delta: 0.0,
             control_size: 28.0,
             control_icon_size: 16.0,
+            control_radius: None,
+            panel_radius: None,
+            chip_radius: None,
+            rule_width: None,
+            grid: None,
+            label_size: None,
+            secondary_size: None,
+            body_size: None,
+            title_size: None,
         },
+        surface: SurfaceModel::ThemeDefault,
+        controls: ControlVariant::Minimal,
+        status_indicator: StatusIndicator::Minimal,
+        font_preference: FontPreference::UserDefault,
+        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
             reveal: Reveal::Hover,
@@ -105,7 +200,21 @@ impl UiStyle {
             outline_row_delta: -4.0,
             control_size: 24.0,
             control_icon_size: 14.0,
+            control_radius: None,
+            panel_radius: None,
+            chip_radius: None,
+            rule_width: None,
+            grid: None,
+            label_size: None,
+            secondary_size: None,
+            body_size: None,
+            title_size: None,
         },
+        surface: SurfaceModel::ThemeDefault,
+        controls: ControlVariant::Minimal,
+        status_indicator: StatusIndicator::Minimal,
+        font_preference: FontPreference::UserDefault,
+        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::Primary,
             reveal: Reveal::Always,
@@ -127,7 +236,21 @@ impl UiStyle {
             outline_row_delta: 6.0,
             control_size: 32.0,
             control_icon_size: 16.0,
+            control_radius: None,
+            panel_radius: None,
+            chip_radius: None,
+            rule_width: None,
+            grid: None,
+            label_size: None,
+            secondary_size: None,
+            body_size: None,
+            title_size: None,
         },
+        surface: SurfaceModel::ThemeDefault,
+        controls: ControlVariant::Minimal,
+        status_indicator: StatusIndicator::Minimal,
+        font_preference: FontPreference::UserDefault,
+        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::All,
             reveal: Reveal::Always,
@@ -140,11 +263,41 @@ impl UiStyle {
             walkthrough_rail: false,
         },
     };
+    pub const INDUSTRIAL: Self = Self {
+        id: UiStyleId::Industrial,
+        tokens: StyleTokens {
+            sidebar_row_compact_h: 32.0,
+            control_size: 32.0,
+            control_radius: Some(4.0),
+            panel_radius: Some(0.0),
+            chip_radius: Some(4.0),
+            rule_width: Some(1.0),
+            grid: Some(8.0),
+            label_size: Some(10.0),
+            secondary_size: Some(12.0),
+            body_size: Some(13.0),
+            title_size: Some(16.0),
+            ..Self::MINIMAL.tokens
+        },
+        surface: SurfaceModel::Opaque,
+        controls: ControlVariant::Key,
+        status_indicator: StatusIndicator::Dot,
+        font_preference: FontPreference::Geist,
+        paired_theme: Some(PairedTheme {
+            light: "industrial-light",
+            dark: "industrial-dark",
+        }),
+        behavior: StyleBehavior {
+            motion: Motion::Instant,
+            ..Self::MINIMAL.behavior
+        },
+    };
     pub const fn of(id: UiStyleId) -> Self {
         match id {
             UiStyleId::Minimal => Self::MINIMAL,
             UiStyleId::Dense => Self::DENSE,
             UiStyleId::Guided => Self::GUIDED,
+            UiStyleId::Industrial => Self::INDUSTRIAL,
         }
     }
 }
@@ -195,6 +348,8 @@ pub fn set_style(id: UiStyleId, window: &mut gpui::Window, cx: &mut gpui::App) -
     cx.set_global(UiStyleState(id));
     window.set_rem_size(gpui::px(crate::typography::effective_rem_px(cx)));
     crate::typography::reinstall_theme(cx);
+    window.set_background_appearance(crate::theme::Theme::of(cx).window_background_appearance());
+    crate::appearance::reapply_window_background(cx);
     crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
         settings.ui_style = id
     });
@@ -231,7 +386,7 @@ pub fn help_card(
             .child(
                 div()
                     .id(gpui::SharedString::from(format!("dismiss-help-{id}")))
-                .debug_selector(move || format!("dismiss-help-{id}"))
+                    .debug_selector(move || format!("dismiss-help-{id}"))
                     .flex_none()
                     .cursor_pointer()
                     .child("Dismiss")
@@ -255,9 +410,150 @@ pub fn help_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registry_has_unique_labels_and_round_trips() {
+        let mut labels = std::collections::HashSet::new();
+        for &id in UiStyleId::ALL {
+            assert!(!id.label().is_empty());
+            assert!(labels.insert(id.label()));
+            assert_eq!(
+                serde_json::from_str::<UiStyleId>(&serde_json::to_string(&id).unwrap()).unwrap(),
+                id
+            );
+            assert_eq!(UiStyle::of(id).id, id);
+        }
+    }
+    #[gpui::test]
+    fn industrial_switch_restores_saved_themes(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, Render, Window, div};
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+                div()
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (_, vcx) = cx.add_window_view(|_, _| Host);
+        vcx.update(|_, cx| {
+            crate::settings::init(Default::default(), directory.path(), cx);
+            init(UiStyleId::Minimal, cx);
+            crate::appearance::init(
+                crate::appearance::AppearanceMode::Light,
+                mast_theme::ThemeSelection {
+                    light: "github-light".into(),
+                    dark: "github-dark".into(),
+                },
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        vcx.update(|window, cx| {
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "github-light"
+            );
+            set_style(UiStyleId::Industrial, window, cx);
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "industrial-light"
+            );
+            crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "industrial-dark"
+            );
+            set_style(UiStyleId::Minimal, window, cx);
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "github-dark"
+            );
+            assert_eq!(crate::appearance::themes(cx).light, "github-light");
+        });
+    }
+
+    #[test]
+    fn industrial_uses_key_controls_and_opaque_surfaces() {
+        let style = UiStyle::INDUSTRIAL;
+        assert_eq!(style.controls, ControlVariant::Key);
+        assert_eq!(style.status_indicator, StatusIndicator::Dot);
+        assert_eq!(style.surface, SurfaceModel::Opaque);
+        assert_eq!(
+            (
+                style.tokens.grid,
+                style.tokens.label_size,
+                style.tokens.secondary_size,
+                style.tokens.body_size,
+                style.tokens.title_size
+            ),
+            (Some(8.0), Some(10.0), Some(12.0), Some(13.0), Some(16.0))
+        );
+        assert_eq!(
+            (
+                style.tokens.control_radius,
+                style.tokens.panel_radius,
+                style.tokens.chip_radius,
+                style.tokens.rule_width
+            ),
+            (Some(4.0), Some(0.0), Some(4.0), Some(1.0))
+        );
+        assert_eq!(
+            serde_json::from_str::<UiStyleId>("\"industrial\"").unwrap(),
+            UiStyleId::Industrial
+        );
+    }
+
+    #[gpui::test]
+    fn industrial_shared_controls_render_in_both_appearances(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, Render, Window, div, prelude::*};
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+                div().children(
+                    [
+                        crate::theme::Appearance::Light,
+                        crate::theme::Appearance::Dark,
+                    ]
+                    .map(|appearance| {
+                        let id = if appearance.is_dark() {
+                            "industrial-dark"
+                        } else {
+                            "industrial-light"
+                        };
+                        let theme = crate::theme::Theme::for_selection(
+                            appearance,
+                            id,
+                            Default::default(),
+                            mast_theme::SurfacePreference::Opaque,
+                        )
+                        .with_ui_style(UiStyle::INDUSTRIAL);
+                        div()
+                            .child(
+                                crate::settings::widgets::section_card(&theme)
+                                    .child(crate::settings::widgets::badge(&theme, "Idle"))
+                                    .child(crate::settings::widgets::toggle_switch(&theme, true))
+                                    .child(crate::settings::widgets::toggle_switch(&theme, false))
+                                    .child(
+                                        crate::settings::widgets::ghost_action(&theme)
+                                            .child("Action"),
+                                    ),
+                            )
+                            .child(crate::popover::popover_card(&theme).child("Menu"))
+                            .child(crate::popover::dialog_card(&theme)
+                                .child(crate::popover::dialog_title(&theme, "Title"))
+                                .child(crate::popover::dialog_field(&theme, div().child("Input").into_any_element()))
+                                .child(crate::popover::btn_primary(&theme, "Apply"))
+                                .child(crate::popover::btn_ghost(&theme, "Cancel", "industrial-test-cancel")))
+                    }),
+                )
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| Host);
+        vcx.update(|window, cx| window.draw(cx).clear());
+    }
     #[gpui::test]
     fn help_card_dismissal_persists(cx: &mut gpui::TestAppContext) {
-        use gpui::{div, prelude::*, Context, Render, Window};
+        use gpui::{Context, Render, Window, div, prelude::*};
         struct Host;
         impl Render for Host {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
@@ -274,11 +570,41 @@ mod tests {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("dismiss-help-test-card").is_none());
-        assert_eq!(crate::settings::UiSettings::load(directory.path()).dismissed_help_cards, ["test-card"]);
+        assert_eq!(
+            crate::settings::UiSettings::load(directory.path()).dismissed_help_cards,
+            ["test-card"]
+        );
     }
     #[test]
     fn minimal_preserves_existing_metrics() {
         let t = UiStyle::MINIMAL.tokens;
+        assert_eq!(
+            (
+                t.grid,
+                t.label_size,
+                t.secondary_size,
+                t.body_size,
+                t.title_size
+            ),
+            (None, None, None, None, None)
+        );
+        assert_eq!(
+            (
+                t.control_radius,
+                t.panel_radius,
+                t.chip_radius,
+                t.rule_width
+            ),
+            (None, None, None, None)
+        );
+        assert_eq!(UiStyle::MINIMAL.surface, SurfaceModel::ThemeDefault);
+        assert_eq!(UiStyle::MINIMAL.controls, ControlVariant::Minimal);
+        assert_eq!(UiStyle::MINIMAL.status_indicator, StatusIndicator::Minimal);
+        assert_eq!(
+            UiStyle::MINIMAL.font_preference,
+            FontPreference::UserDefault
+        );
+        assert_eq!(UiStyle::MINIMAL.paired_theme, None);
         assert_eq!(
             (
                 t.type_scale,

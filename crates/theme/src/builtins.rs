@@ -14,6 +14,11 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
         families: vec![
             family("mast", "Mast", vec![zeron_light(), zeron_dark()]),
             family(
+                "industrial",
+                "Industrial",
+                vec![industrial(false), industrial(true)],
+            ),
+            family(
                 "vscode-default",
                 "VS Code Default",
                 vec![vscode_light(), vscode_dark()],
@@ -268,6 +273,77 @@ fn zeron_dark() -> ThemeVariant {
             "MIT",
         ),
     })
+}
+
+fn industrial(dark: bool) -> ThemeVariant {
+    let (id, name, appearance, background, shell, key, active, text, muted, rule, ansi) = if dark {
+        (
+            "industrial-dark",
+            "Industrial Dark",
+            Appearance::Dark,
+            "#242622",
+            "#30322e",
+            "#3a3c37",
+            "#1d1f1c",
+            "#f5f3ed",
+            "#bcbdb6",
+            "#4a4c46",
+            ANSI_DARK,
+        )
+    } else {
+        (
+            "industrial-light",
+            "Industrial Light",
+            Appearance::Light,
+            "#f5f3ed",
+            "#e6e4dd",
+            "#efeee8",
+            "#d3d2cb",
+            "#272a27",
+            "#666862",
+            "#aaa9a2",
+            ANSI_LIGHT,
+        )
+    };
+    let mut result = variant(Seeds {
+        id,
+        family_id: "industrial",
+        name,
+        appearance,
+        treatment: SurfaceTreatment::Opaque,
+        background,
+        shell,
+        raised: key,
+        card: shell,
+        text,
+        muted,
+        faint: muted,
+        accent: "#fe4b25",
+        danger: text,
+        warning: muted,
+        success: muted,
+        terminal_background: background,
+        ansi,
+        syntax: [
+            muted, text, text, text, text, text, text, text, muted, text, text, text,
+        ],
+        source: source(
+            id,
+            "native",
+            "https://github.com/Pluto8195/mast",
+            "industrial-prototype",
+            "MIT",
+        ),
+    });
+    result.colors.border = c(rule);
+    result.colors.border_strong = c(rule);
+    result.colors.input = c(key);
+    result.colors.hover = c(key);
+    result.colors.active = c(active);
+    result.source.asset_hash.clear();
+    let encoded = serde_json::to_vec(&result).expect("built-in theme serializes");
+    result.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
+    result
 }
 
 fn zeron_light() -> ThemeVariant {

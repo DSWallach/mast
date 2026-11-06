@@ -2293,7 +2293,7 @@ impl AppearancePage {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        popover::dialog_field(input.into_any_element())
+                        popover::dialog_field(&theme, input.into_any_element())
                             .flex_1()
                             .min_w_0()
                             .h(px(36.0))
@@ -2994,65 +2994,50 @@ impl Render for AppearancePage {
             })
             .collect::<Vec<_>>();
 
-        let style_cards = [
-            (
-                crate::ui_style::UiStyleId::Minimal,
-                "Minimal",
-                "Current spacing",
-                4.0,
-            ),
-            (
-                crate::ui_style::UiStyleId::Dense,
-                "Dense",
-                "More on screen",
-                2.0,
-            ),
-            (
-                crate::ui_style::UiStyleId::Guided,
-                "Guided",
-                "More labels and guidance",
-                6.0,
-            ),
-        ]
-        .into_iter()
-        .map(|(id, label, description, gap)| {
-            let preview = div()
-                .size_full()
-                .rounded(px(widgets::OPTION_CARD_RADIUS))
-                .bg(theme.surface)
-                .p(px(16.0))
-                .flex()
-                .flex_col()
-                .gap(px(gap))
-                .children((0..4).map(|_| {
-                    div()
-                        .h(px(12.0))
-                        .w_full()
-                        .rounded(px(3.0))
-                        .bg(theme.surface_raised)
-                }))
-                .child(
-                    div()
-                        .mt(px(8.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(description),
+        let style_cards = crate::ui_style::UiStyleId::ALL
+            .iter()
+            .copied()
+            .map(|id| {
+                let label = id.label();
+                let description = id.description();
+                let gap = id.preview_gap();
+                let preview = div()
+                    .size_full()
+                    .rounded(px(widgets::OPTION_CARD_RADIUS))
+                    .bg(theme.surface)
+                    .p(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(gap))
+                    .children((0..4).map(|_| {
+                        div()
+                            .h(px(12.0))
+                            .w_full()
+                            .rounded(px(3.0))
+                            .bg(theme.surface_raised)
+                    }))
+                    .child(
+                        div()
+                            .mt(px(8.0))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(description),
+                    )
+                    .into_any_element();
+                widgets::option_card(
+                    &theme,
+                    icons::MONITOR,
+                    label,
+                    ui_settings.ui_style == id,
+                    preview,
                 )
-                .into_any_element();
-            widgets::option_card(
-                &theme,
-                icons::MONITOR,
-                label,
-                ui_settings.ui_style == id,
-                preview,
-            )
-            .id(SharedString::from(format!("style-{label}")))
-            .on_click(cx.listener(move |_, _, window, cx| {
-                crate::ui_style::set_style(id, window, cx);
-                cx.notify();
-            }))
-        })
-        .collect::<Vec<_>>();
+                .id(SharedString::from(format!("style-{label}")))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    crate::ui_style::set_style(id, window, cx);
+                    cx.notify();
+                }))
+            })
+            .collect::<Vec<_>>();
 
         let mut theme_rows = Vec::new();
         for (index, appearance_kind) in [Appearance::Light, Appearance::Dark]
@@ -3568,11 +3553,11 @@ mod tests {
         let registry = ThemeRegistry::builtin();
         assert_eq!(
             registry.variants_for(mast_theme::Appearance::Light).count(),
-            10
+            11
         );
         assert_eq!(
             registry.variants_for(mast_theme::Appearance::Dark).count(),
-            20
+            21
         );
     }
 

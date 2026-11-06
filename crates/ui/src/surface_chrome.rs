@@ -11,15 +11,37 @@ pub(crate) const ICON_SIZE: f32 = 14.0;
 pub(crate) const CONTROL_GAP: f32 = 4.0;
 pub(crate) const EDGE_INSET: f32 = 8.0;
 
+/// Apply the active look's segmented-key treatment while preserving legacy tabs.
+pub(crate) fn key_ledge(theme: &Theme) -> gpui::Hsla {
+    gpui::rgb(if theme.appearance.is_dark() { 0x1a1b18 } else { 0xaaa9a2 }).into()
+}
+
+pub(crate) fn segmented_key<T: gpui::Styled + gpui::ParentElement>(element: T, theme: &Theme, active: bool) -> T {
+    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+        element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+            .bg(if active { theme.element_active } else { theme.surface_raised })
+            .border_1().border_color(theme.border).relative()
+            .child(div().absolute().left_0().right_0().bottom_0().h(px(2.0)).bg(key_ledge(theme)))
+    } else {
+        element
+    }
+}
+
+pub(crate) fn active_key_dot(theme: &Theme, active: bool) -> Option<Div> {
+    (active && theme.ui_style.controls == crate::ui_style::ControlVariant::Key)
+        .then(|| div().size(px(6.0)).rounded_full().bg(theme.accent))
+}
+
 /// Shared field treatment for the file search and browser address controls.
-pub(crate) fn input() -> Div {
+pub(crate) fn input(theme: &Theme) -> Div {
     div()
         .h(px(CONTROL_SIZE))
         .min_w_0()
         .flex_1()
         .px(px(8.0))
-        .rounded(px(CONTROL_RADIUS))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(CONTROL_RADIUS)))
         .bg(crate::theme::ink(0.035))
+        .when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_1().border_color(theme.border))
         .flex()
         .items_center()
         .gap(px(6.0))

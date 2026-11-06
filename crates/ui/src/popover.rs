@@ -325,8 +325,16 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
     div()
         .border_1()
         .border_color(theme.border)
-        .rounded(px(CARD_RADIUS))
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .panel_radius
+            .unwrap_or(CARD_RADIUS)))
+        .when(
+            !theme.is_frost()
+                && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
+            |el| el.shadow_lg(),
+        )
         .bg(surface_bg(theme))
         .p(px(CARD_INSET))
         .gap(px(MENU_GAP))
@@ -834,10 +842,20 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .gap(px(10.0))
         .px(px(8.0))
         .py(px(6.0))
-        .rounded(px(MENU_ITEM_RADIUS))
-        .text_size(crate::typography::ui_rems(13.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(MENU_ITEM_RADIUS)))
+        .when_some(theme.ui_style.tokens.grid, |el, grid| el.py(px(grid)))
+        .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(13.0)))
         .cursor_pointer();
-    if active {
+    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+        let fade_key = fade_key.into();
+        let mut row = row.bg(if active { theme.element_active } else { motion::hover_blend(&fade_key, theme.surface, theme.element_hover) })
+            .text_color(theme.text)
+            .children(crate::surface_chrome::active_key_dot(theme, active));
+        if !active {
+            row.interactivity().on_hover(motion::hover_listener(fade_key));
+        }
+        row
+    } else if active {
         row.bg(crate::theme::card_selected_bg())
             .text_color(theme.text)
     } else {
@@ -913,14 +931,15 @@ pub fn tracked_upper(label: &str) -> String {
 
 /// Hairline divider between menu sections (zeron `MenuSeparator`:
 /// `mx-1 my-1 h-px bg-white/[0.07]`).
-pub fn menu_separator() -> gpui::Div {
+pub fn menu_separator(theme: &Theme) -> gpui::Div {
     // Full-bleed: negative margins cancel the card's inset so the hairline
     // runs border to border (user request).
     div()
-        .h(px(1.0))
+        .h(px(theme.ui_style.tokens.rule_width.unwrap_or(1.0)))
         .mx(px(-CARD_INSET))
         .my(px(MENU_GAP))
         .bg(hairline(0.07))
+        .when(theme.ui_style.tokens.rule_width.is_some(), |el| el.bg(theme.border))
 }
 
 /// The recessed band tone for a palette/picker header or footer strip — a
@@ -1080,13 +1099,14 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
 /// `searchInput`: `w-full rounded-lg bg-white/[0.04] px-2.5 py-1.5
 /// text-[13px]` + `mb-1`, borderless — full width inside the card's own
 /// p-1, only a 4px bottom margin).
-pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
+pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
     div()
         .mb(px(4.0))
         .px(px(10.0))
         .py(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .bg(ink(0.04))
+        .when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_1().border_color(theme.border))
         .text_size(crate::typography::ui_rems(13.0))
         .child(input)
 }
@@ -1115,12 +1135,12 @@ pub fn menu_section() -> gpui::Div {
 pub fn dialog_card(theme: &Theme) -> gpui::Div {
     div()
         .w(px(360.0))
-        .p(px(20.0))
-        .rounded(px(16.0))
+        .p(px(if theme.ui_style.tokens.grid.is_some() { 24.0 } else { 20.0 }))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(16.0)))
         .bg(surface_bg(theme))
         .border_1()
-        .border_color(hairline(0.10))
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .border_color(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { hairline(0.10) })
+        .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg())
         .flex()
         .flex_col()
         .text_color(theme.text)
@@ -1129,7 +1149,7 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
 /// Dialog title: `text-[15px] font-semibold tracking-tight`.
 pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
     div()
-        .text_size(crate::typography::ui_rems(15.0))
+        .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(15.0)))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text)
         .child(SharedString::from(title.to_string()))
@@ -1138,7 +1158,7 @@ pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
 /// Dialog body copy: `text-[13px] leading-relaxed text-muted-foreground`.
 pub fn dialog_body(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
     div()
-        .text_size(crate::typography::ui_rems(13.0))
+        .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(13.0)))
         .line_height(px(19.0))
         .text_color(theme.text_muted)
         .child(copy.into())
@@ -1146,15 +1166,16 @@ pub fn dialog_body(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
 
 /// Dialog text-field frame: `rounded-lg border border-white/[0.08]
 /// bg-white/[0.04] px-3 py-2 text-[14px]`.
-pub fn dialog_field(input: AnyElement) -> gpui::Div {
+pub fn dialog_field(theme: &Theme, input: AnyElement) -> gpui::Div {
     div()
         .w_full()
         .px(px(12.0))
         .py(px(8.0))
-        .rounded(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .border_1()
         .border_color(hairline(0.08))
         .bg(ink(0.04))
+        .when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_color(theme.border))
         .text_size(crate::typography::ui_rems(14.0))
         .child(input)
 }
@@ -1167,7 +1188,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
     let mut btn = div()
         .px(px(12.0))
         .py(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
         .bg(motion::hover_blend(
@@ -1175,6 +1196,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
             crate::theme::wash(0.0),
             ink(0.06),
         ))
+        .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
         .cursor_pointer()
         .child(SharedString::from(label.to_string()));
     btn.interactivity()
@@ -1187,11 +1209,12 @@ pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
     div()
         .px(px(12.0))
         .py(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .bg(theme.text)
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(theme.accent).border_1().border_color(theme.border).relative().child(div().absolute().left_0().right_0().bottom_0().h(px(2.0)).bg(crate::surface_chrome::key_ledge(theme))))
         .text_size(crate::typography::ui_rems(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.on_solid)
+        .text_color(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { theme.on_accent } else { theme.on_solid })
         .cursor_pointer()
         .hover(|s| s.opacity(0.9))
         .child(SharedString::from(label.to_string()))
@@ -1202,7 +1225,7 @@ pub fn btn_danger(theme: &Theme, label: &str) -> gpui::Div {
     div()
         .px(px(12.0))
         .py(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .bg(theme.danger_strong)
         .text_size(crate::typography::ui_rems(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)

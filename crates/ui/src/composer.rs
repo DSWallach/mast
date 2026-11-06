@@ -7978,11 +7978,11 @@ impl Composer {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             }))
-            .rounded(px(COMPOSER_RADIUS))
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(COMPOSER_RADIUS)))
             .border_1()
             .border_color(theme.border)
             .bg(theme.input_glass_bg())
-            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg())
             .flex()
             .flex_col()
             .child(
@@ -8097,6 +8097,7 @@ impl Composer {
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
         let guided = theme.ui_style.id == crate::ui_style::UiStyleId::Guided;
+        let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
         // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
@@ -8106,7 +8107,9 @@ impl Composer {
                 .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
                 .flex_none()
                 .rounded_full()
+                .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                 .bg(theme.text)
+                .when(key, |el| el.bg(theme.accent).border_b_2().border_color(theme.border))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -8126,7 +8129,9 @@ impl Composer {
                     .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
                     .flex_none()
                     .rounded_full()
+                    .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                     .bg(theme.text)
+                    .when(key, |el| el.bg(theme.accent).border_b_2().border_color(theme.border))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -8597,7 +8602,7 @@ impl Render for Composer {
                 morph_t
             };
         let text_pt = morph_text_pad(layout_morph_t);
-        let surface_radius = COMPOSER_RADIUS - 4.0 * dock_amount;
+        let surface_radius = theme.ui_style.tokens.panel_radius.unwrap_or(COMPOSER_RADIUS - 4.0 * dock_amount);
         let route_to_single_line =
             self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
@@ -8709,9 +8714,8 @@ impl Render for Composer {
             .border_1()
             .border_color(pill_border)
             .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
-            .when(!theme.is_frost(), |el| {
-                el.bg(theme.input_glass_bg()).shadow_lg()
-            });
+            .when(!theme.is_frost(), |el| el.bg(theme.input_glass_bg()))
+            .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
@@ -8937,6 +8941,7 @@ impl Render for Composer {
         let pill_surface = div()
             .relative()
             .id("composer-surface")
+            .debug_selector(|| "composer-surface".into())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
             .child({
                 let measured = self.surface_bounds.clone();

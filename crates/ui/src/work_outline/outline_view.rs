@@ -2522,7 +2522,11 @@ impl OutlineView {
     // ----------------------------------------------------------------------
 
     fn row_height(compact: bool, tokens: crate::ui_style::StyleTokens) -> f32 {
-        (if compact { 24.0 } else { 28.0 }) + tokens.outline_row_delta
+        if let Some(grid) = tokens.grid {
+            grid * if compact { 4.0 } else { 5.0 }
+        } else {
+            (if compact { 24.0 } else { 28.0 }) + tokens.outline_row_delta
+        }
     }
 
     fn render_rows(
@@ -3208,11 +3212,11 @@ impl OutlineView {
             .w_full()
             .flex()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(theme.ui_style.tokens.grid.unwrap_or(4.0)))
             .pl(px(Self::indent(row.depth)))
             .pr(px(8.0))
-            .rounded(px(4.0))
-            .text_size(crate::typography::ui_rems(12.5))
+            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+            .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(12.5)))
             .border_1()
             .border_color(gpui::transparent_black())
             .when(highlighted, |el| el.border_color(theme.accent.opacity(0.6)))
@@ -3558,6 +3562,7 @@ fn status_totals_element(
         .gap(px(3.0))
         .text_size(crate::typography::ui_rems(10.0))
         .text_color(theme.text_faint)
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
         .when_some(totals.active_label(), |el, label| {
             el.child(SharedString::from(label))
         })
@@ -4087,6 +4092,7 @@ impl Render for OutlineView {
         div()
             .id("work-outline")
             .relative()
+            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
             .debug_selector(|| "work-outline".into())
             .track_focus(&self.focus)
             .when(!editing, |el| el.key_context(KEY_CONTEXT))
@@ -4259,6 +4265,9 @@ mod tests {
         let tokens = crate::ui_style::UiStyle::MINIMAL.tokens;
         assert_eq!(OutlineView::row_height(true, tokens), 24.0);
         assert_eq!(OutlineView::row_height(false, tokens), 28.0);
+        let tokens = crate::ui_style::UiStyle::INDUSTRIAL.tokens;
+        assert_eq!(OutlineView::row_height(true, tokens), 32.0);
+        assert_eq!(OutlineView::row_height(false, tokens), 40.0);
     }
 
     #[test]

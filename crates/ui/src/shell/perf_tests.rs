@@ -54,6 +54,45 @@ fn chat_row(index: usize) -> mast_proto::Chat {
     }
 }
 
+#[gpui::test]
+fn industrial_chat_shell_renders_light_and_dark(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        crate::ui_style::init(crate::ui_style::UiStyleId::Industrial, cx);
+        crate::appearance::init(crate::appearance::AppearanceMode::Light, Default::default(), Default::default(), Default::default(), cx);
+        crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+        crate::composer::init(cx, Default::default());
+        crate::terminal::panel::init(cx);
+        crate::app_menus::init(cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = vec![chat_row(0)];
+        state.chats_synced = true;
+        state.selected_chat = Some("c0".into());
+        state.no_project = true;
+        state.data_dir = Some(dir.path().to_path_buf());
+    });
+    let boot = EngineBootConfig { data_dir: dir.path().to_path_buf(), ipc_port: 0, edge_url: "http://127.0.0.1:1".into(), edge_token: None, org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock };
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let mut shell = Shell::new(state.clone(), boot, cx);
+        shell.route = Route::Chat;
+        shell.active_chat = "c0".into();
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell
+    });
+    for mode in [crate::appearance::AppearanceMode::Light, crate::appearance::AppearanceMode::Dark] {
+        vcx.update(|window, cx| {
+            crate::appearance::set_mode(mode, cx);
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(vcx.debug_bounds("composer-surface").is_some());
+    }
+}
+
 fn totals(counters: &[Counter]) -> Vec<(&'static str, u64)> {
     counters.iter().map(|(n, c)| (*n, c.get())).collect()
 }

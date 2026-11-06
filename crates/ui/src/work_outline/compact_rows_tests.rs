@@ -3,8 +3,8 @@
 // fixtures.
 use super::*;
 
-use crate::work_outline::outline_view::context_menu::MenuAction;
 use crate::work_outline::outline_view::OutlineView;
+use crate::work_outline::outline_view::context_menu::MenuAction;
 
 type Events = std::sync::Arc<std::sync::Mutex<Vec<OutlineEvent>>>;
 
@@ -77,10 +77,38 @@ fn shown(vcx: &mut gpui::VisualTestContext, key: &str) -> bool {
 }
 
 #[gpui::test]
+fn industrial_outline_renders_in_both_appearances(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, _outline, _calls, _events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
+    vcx.update(|window, cx| {
+        crate::appearance::init(
+            crate::appearance::AppearanceMode::Light,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+        crate::ui_style::set_style(crate::ui_style::UiStyleId::Industrial, window, cx);
+        crate::appearance::set_mode(crate::appearance::AppearanceMode::Light, cx);
+        window.draw(cx).clear();
+        crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
+        window.draw(cx).clear();
+    });
+    assert!(shown(vcx, &item_key(UI)));
+}
+
+#[gpui::test]
 fn a_single_chat_item_renders_one_row_with_the_chat_state(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, _outline, _calls, _events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, _outline, _calls, _events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     // w-ui and w-api-auth each fold their only Chat.
     for (item, chat) in [(UI, CHAT_UI), (API_AUTH, CHAT_AUTH)] {
         assert!(shown(vcx, &item_key(item)), "{item} row");
@@ -103,13 +131,20 @@ fn a_single_chat_item_renders_one_row_with_the_chat_state(cx: &mut gpui::TestApp
 #[gpui::test]
 fn changing_compact_single_chat_rebuilds_the_outline(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (overview, _outline, _calls, _events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (overview, _outline, _calls, _events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     assert!(!shown(vcx, &row_key::chat(CHAT_UI)));
-    overview.update(vcx, |overview, cx| overview.set_compact_single_chat(false, cx));
+    overview.update(vcx, |overview, cx| {
+        overview.set_compact_single_chat(false, cx)
+    });
     draw(vcx);
     assert!(shown(vcx, &row_key::chat(CHAT_UI)));
-    overview.update(vcx, |overview, cx| overview.set_compact_single_chat(true, cx));
+    overview.update(vcx, |overview, cx| {
+        overview.set_compact_single_chat(true, cx)
+    });
     draw(vcx);
     assert!(!shown(vcx, &row_key::chat(CHAT_UI)));
 }
@@ -119,8 +154,11 @@ fn enter_and_double_click_open_the_chat_and_the_menu_reaches_the_item(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, outline, _calls, events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, outline, _calls, events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     select_key(&outline, vcx, &item_key(UI));
     press_keys(vcx, "enter");
     assert!(
@@ -154,7 +192,9 @@ fn enter_and_double_click_open_the_chat_and_the_menu_reaches_the_item(
     );
 
     // The item's actions live in the context menu.
-    let menu = outline.read_with(vcx, |o, cx| o.context_menu(&item_key(UI), cx)).unwrap();
+    let menu = outline
+        .read_with(vcx, |o, cx| o.context_menu(&item_key(UI), cx))
+        .unwrap();
     let ids: Vec<_> = menu.entries.iter().map(|entry| entry.id).collect();
     for id in [
         "open-chat",
@@ -168,18 +208,35 @@ fn enter_and_double_click_open_the_chat_and_the_menu_reaches_the_item(
     ] {
         assert!(ids.contains(&id), "{id} in {ids:?}");
     }
-    let action = |id: &str| menu.entries.iter().find(|e| e.id == id).unwrap().action.clone();
+    let action = |id: &str| {
+        menu.entries
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap()
+            .action
+            .clone()
+    };
     assert_eq!(
         action("open-details"),
         MenuAction::Outline(crate::shell::work_outline_ui::OutlineNavKey::OpenDetails)
     );
-    assert_eq!(action("archive-chat"), MenuAction::ArchiveChat(CHAT_UI.into()));
+    assert_eq!(
+        action("archive-chat"),
+        MenuAction::ArchiveChat(CHAT_UI.into())
+    );
     assert_eq!(action("archive"), MenuAction::Archive);
     // Expanded items keep the plain item menu.
-    let plain = outline.read_with(vcx, |o, cx| o.context_menu(&item_key(API), cx)).unwrap();
+    let plain = outline
+        .read_with(vcx, |o, cx| o.context_menu(&item_key(API), cx))
+        .unwrap();
     assert!(plain.entries.iter().all(|e| e.id != "open-chat"));
     assert_eq!(
-        plain.entries.iter().find(|e| e.id == "open-details").unwrap().action,
+        plain
+            .entries
+            .iter()
+            .find(|e| e.id == "open-details")
+            .unwrap()
+            .action,
         MenuAction::Outline(crate::shell::work_outline_ui::OutlineNavKey::OpenDetails)
     );
 }
@@ -187,8 +244,11 @@ fn enter_and_double_click_open_the_chat_and_the_menu_reaches_the_item(
 #[gpui::test]
 fn item_actions_still_act_on_the_item(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, outline, _calls, events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, outline, _calls, events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     select_key(&outline, vcx, &item_key(UI));
     vcx.dispatch_action(crate::work_outline::outline_view::StartChatSelected);
     vcx.run_until_parked();
@@ -212,8 +272,11 @@ fn item_actions_still_act_on_the_item(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn keyboard_navigation_treats_the_compact_row_as_one_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, outline, _calls, _events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, outline, _calls, _events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     select_key(&outline, vcx, &item_key(API_AUTH));
     press_keys(vcx, "down");
     // The next row is w-api's Chat, not a Chat row under w-api-auth.
@@ -231,7 +294,8 @@ fn keyboard_navigation_treats_the_compact_row_as_one_row(cx: &mut gpui::TestAppC
 fn selection_survives_expanding_and_compacting(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let fixture = crate::work_outline::store::fixture_snapshot("s1");
-    let (overview, outline, _calls, _events, vcx) = compact_overview(cx, dir.path(), fixture.clone());
+    let (overview, outline, _calls, _events, vcx) =
+        compact_overview(cx, dir.path(), fixture.clone());
     select_key(&outline, vcx, &item_key(UI));
 
     // The item gets a second chat: it expands, the item stays selected.
@@ -258,8 +322,11 @@ fn selection_survives_expanding_and_compacting(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn dragging_a_compact_row_moves_the_item(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, outline, calls, _events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, outline, calls, _events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     let start = row_bounds(vcx, format!("outline-row-{}", item_key(UI)))
         .unwrap()
         .center();
@@ -311,7 +378,10 @@ fn streaming_with_compact_rows_does_no_extra_outline_work(cx: &mut gpui::TestApp
     }
     let after = overview.read_with(vcx, |o, _| o.perf);
     assert_eq!(after.observer_calls - before.observer_calls, 50);
-    assert_eq!(after.observer_notifies, before.observer_notifies, "{after:?}");
+    assert_eq!(
+        after.observer_notifies, before.observer_notifies,
+        "{after:?}"
+    );
     assert_eq!(after.rows_rebuilds, before.rows_rebuilds, "{after:?}");
     assert_eq!(after.fetch_checks, before.fetch_checks, "{after:?}");
 
@@ -349,8 +419,11 @@ fn details_events(events: &Events) -> Vec<String> {
 #[gpui::test]
 fn cmd_i_opens_details_on_compact_and_normal_rows(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, outline, calls, events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, outline, calls, events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     // Compact row: details, not the Chat; selection stays put.
     select_key(&outline, vcx, &item_key(UI));
     press_keys(vcx, "cmd-i");
@@ -376,8 +449,11 @@ fn cmd_i_opens_details_on_compact_and_normal_rows(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn cmd_i_in_a_text_field_does_nothing_outline_related(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, outline, calls, events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, outline, calls, events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     select_key(&outline, vcx, &item_key(UI));
     press_keys(vcx, "f2");
     assert!(outline.read_with(vcx, |o, _| o.is_editing()));
@@ -392,7 +468,12 @@ fn cmd_i_in_a_text_field_does_nothing_outline_related(cx: &mut gpui::TestAppCont
 fn waiting_item_shows_a_row_chip(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = crate::work_outline::store::fixture_snapshot("s1");
-    snapshot.items.iter_mut().find(|item| item.id == UI).unwrap().waiting_until = Some(chrono::Utc::now().timestamp_millis() + 86_400_000);
+    snapshot
+        .items
+        .iter_mut()
+        .find(|item| item.id == UI)
+        .unwrap()
+        .waiting_until = Some(chrono::Utc::now().timestamp_millis() + 86_400_000);
     let (_overview, _outline, _calls, _events, vcx) = compact_overview(cx, dir.path(), snapshot);
     assert!(row_bounds(vcx, "work-item-waiting-chip".into()).is_some());
 }
@@ -402,12 +483,14 @@ fn status_glyph_click_opens_details_and_the_row_still_opens_the_chat(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let (_overview, outline, calls, events, vcx) =
-        compact_overview(cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"));
+    let (_overview, outline, calls, events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
     select_key(&outline, vcx, &item_key(API_AUTH));
     events.lock().unwrap().clear();
-    let glyph = row_bounds(vcx, format!("outline-status-{}", item_key(UI)))
-        .expect("status glyph");
+    let glyph = row_bounds(vcx, format!("outline-status-{}", item_key(UI))).expect("status glyph");
     vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
     assert_eq!(details_events(&events), [UI]);

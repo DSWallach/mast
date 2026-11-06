@@ -744,7 +744,7 @@ impl Shell {
         }
         if !snapshot.importable_actions.is_empty() {
             card = card
-                .child(popover::menu_separator())
+                .child(popover::menu_separator(&theme))
                 .child(popover::menu_heading(&theme, "Import from project file"));
             for draft in snapshot.importable_actions.clone() {
                 let import = draft.clone();
@@ -774,7 +774,7 @@ impl Shell {
                     .child(SharedString::from(issue)),
             );
         }
-        card.child(popover::menu_separator())
+        card.child(popover::menu_separator(&theme))
             .child(
                 popover::menu_row(&theme, false, "project-actions-add-row")
                     .id("project-actions-add-row")
@@ -858,10 +858,10 @@ impl Shell {
             }))
             .child(popover::dialog_title(&theme, title))
             .child(action_field_label(&theme, "Name"))
-            .child(popover::dialog_field(name.into_any_element()))
+            .child(popover::dialog_field(&theme, name.into_any_element()))
             .child(action_field_label(&theme, "Command"))
             .child(
-                popover::dialog_field(
+                popover::dialog_field(&theme,
                     div()
                         .h(px(88.0))
                         .overflow_hidden()
@@ -1095,14 +1095,14 @@ mod project_actions_scroll_tests {
                 );
             }
             menu = menu
-                .child(popover::menu_separator())
+                .child(popover::menu_separator(&theme))
                 .child(popover::menu_heading(theme, "Import from project file"))
                 .child(
                     popover::menu_row(theme, false, "import")
                         .id("import")
                         .child("Import action"),
                 )
-                .child(popover::menu_separator())
+                .child(popover::menu_separator(&theme))
                 .child(
                     popover::menu_row(theme, false, "add")
                         .id("add")

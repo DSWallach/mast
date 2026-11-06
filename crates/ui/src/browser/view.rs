@@ -438,7 +438,7 @@ impl Render for BrowserSurface {
         .when(has_page, |el| {
             el.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
         });
-        let address = surface_chrome::input()
+        let address = surface_chrome::input(&theme)
             .id("browser-address")
             .when(self.validation.is_some(), |el| {
                 el.border_1().border_color(theme.danger)

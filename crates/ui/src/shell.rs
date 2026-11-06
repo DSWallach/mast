@@ -7095,7 +7095,8 @@ impl Shell {
         out
     }
 
-    fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx);
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
@@ -7114,6 +7115,7 @@ impl Shell {
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
+            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_r_1().border_color(theme.border))
             .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
             .into_any_element()
     }
@@ -7342,7 +7344,9 @@ impl Shell {
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let glyph = if working {
+            let glyph = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+                crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
+            } else if working {
                 loaders::mini_mono_spinner(
                     format!("{row_id}-working"),
                     2.0,
@@ -7357,9 +7361,9 @@ impl Shell {
                     .text_color(status_color)
                     .into_any_element()
             } else {
-                crate::status_style::indicator(
+                crate::status_style::indicator_for_theme(
                     if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                    theme.appearance,
+                    &theme,
                 ).into_any_element()
             };
             div()
@@ -7461,7 +7465,9 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == mast_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+                        crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
+                    } else if status == mast_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -7477,9 +7483,9 @@ impl Shell {
                         )
                         .into_any_element()
                     } else {
-                        crate::status_style::indicator(
+                        crate::status_style::indicator_for_theme(
                             if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                            theme.appearance,
+                            &theme,
                         ).into_any_element()
                     };
                     div()
@@ -7500,6 +7506,8 @@ impl Shell {
                 None => div()
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
+                    .when(theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot, |el| el.flex().items_center().gap(px(8.0)).child(crate::status_style::indicator_for_theme(crate::status_style::Status::Idle, &theme)))
+                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
                     .child(time_ago.clone())
                     .into_any_element(),
             }
@@ -7552,7 +7560,7 @@ impl Shell {
         };
         let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
-        let selected_wash = crate::theme::glass_selected_bg();
+        let selected_wash = if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque { theme.element_active } else { crate::theme::glass_selected_bg() };
         let subline = if search_query.is_some() {
             theme.text_muted
         } else {
@@ -7597,11 +7605,11 @@ impl Shell {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .rounded(px(if search_query.is_some() {
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(if search_query.is_some() {
                 popover::PALETTE_ITEM_RADIUS
             } else {
                 8.0
-            }))
+            })))
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
@@ -7787,6 +7795,7 @@ impl Shell {
                                 .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(subline)
+                                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
                                 .child(compact_jump_label.unwrap_or(time_ago)),
                         )
                     }),
@@ -8764,7 +8773,7 @@ impl Shell {
                                 .into_any_element()
                         }
                     };
-                    menu.child(row).child(popover::menu_separator())
+                    menu.child(row).child(popover::menu_separator(&theme))
                 })
                 .child(
                     popover::menu_row(theme, false, "user-menu-settings")
@@ -9541,7 +9550,7 @@ impl Shell {
                                     .text_color(theme.text_muted),
                             ),
                     )
-                    .child(popover::menu_separator())
+                    .child(popover::menu_separator(&theme))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                             .id("chat-menu-delete")
@@ -9592,7 +9601,7 @@ impl Shell {
                             )
                             .child(SharedString::from("Back")),
                     )
-                    .child(popover::menu_separator())
+                    .child(popover::menu_separator(&theme))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-copy-zeron-{chat_id}"))
                             .id("chat-copy-zeron")
@@ -9672,7 +9681,7 @@ impl Shell {
                 .child(
                     div()
                         .mt(px(12.0))
-                        .child(popover::dialog_field(input.into_any_element())),
+                        .child(popover::dialog_field(&theme, input.into_any_element())),
                 )
                 .child(
                     div()
@@ -11045,7 +11054,7 @@ impl Shell {
                 .flex_none()
                 .pl(px(4.0))
                 .pr(px(8.0))
-                .rounded(px(6.0))
+                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -11077,6 +11086,8 @@ impl Shell {
                 .when(!is_active, |el| {
                     el.hover(|s| s.bg(crate::theme::wash(0.06)))
                 })
+                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, is_active))
+                .children(crate::surface_chrome::active_key_dot(&theme, is_active))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.set_right_active(surface, cx);
@@ -11880,7 +11891,7 @@ fn window_control_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
         .cursor_pointer()
         // zeron window-controls.tsx: `transition-colors` — the wash fades.
         .bg(motion::hover_blend(
@@ -11888,6 +11899,7 @@ fn window_control_button(
             theme.glass_hover().opacity(0.0),
             theme.glass_hover(),
         ))
+        .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
@@ -12067,7 +12079,8 @@ fn header_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
         .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft, |el| {
@@ -12672,7 +12685,8 @@ impl Render for Shell {
                 let files_panel = self.render_files_panel(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
-                let border_color = Theme::of(cx).border;
+                let theme = Theme::of(cx).clone();
+                let border_color = theme.border;
                 // No inset cards (user request): the conversation column sits
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
@@ -12694,6 +12708,7 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
+                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.bg))
                     .child(main)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
@@ -12761,6 +12776,7 @@ impl Render for Shell {
                         }
                     })
                     .bg(crate::theme::wash(0.05))
+                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
                     .border_r_1()
                     .border_color(border_color);
                 // The content row spans the FULL window height — the titlebar
@@ -12799,7 +12815,9 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
-                    .child(div().absolute().top_0().left_0().right_0().child(title_bar))
+                    .child(div().absolute().top_0().left_0().right_0()
+                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_b_1().border_color(theme.border))
+                        .child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
                 root.child(sidebar_tone)

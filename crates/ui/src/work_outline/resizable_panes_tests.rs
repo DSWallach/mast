@@ -67,6 +67,21 @@ fn details_overview<'a>(
     (overview, vcx)
 }
 
+#[gpui::test]
+fn industrial_details_render_in_both_appearances(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, vcx) = details_overview(cx, dir.path());
+    vcx.update(|window, cx| {
+        crate::appearance::init(crate::appearance::AppearanceMode::Light, Default::default(), Default::default(), Default::default(), cx);
+        crate::ui_style::set_style(crate::ui_style::UiStyleId::Industrial, window, cx);
+        window.draw(cx).clear();
+        crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
+        window.draw(cx).clear();
+    });
+    assert!(vcx.debug_bounds("work-item-details").is_some());
+    assert!(vcx.debug_bounds("work-item-title").is_some());
+}
+
 #[test]
 fn limits_are_320_to_sixty_percent_and_keep_the_body_minimum() {
     assert_eq!(details_max_width(Some(1400.0)), 840.0);

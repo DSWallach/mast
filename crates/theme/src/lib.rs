@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 19);
+        assert_eq!(registry.families.len(), 20);
         assert!(registry.variant("mast-light").is_some());
         assert!(registry.variant("mast-dark").is_some());
         // Saved selections from before the rename still resolve.
@@ -847,6 +847,17 @@ mod tests {
     }
 
     #[test]
+    fn industrial_uses_one_signal_color() {
+        let signal: Color = "#fe4b25".parse().unwrap();
+        for id in ["industrial-light", "industrial-dark"] {
+            let variant = ThemeRegistry::builtin().variant(id).unwrap();
+            assert_eq!(variant.accent.activity, signal);
+            assert_ne!(variant.colors.danger, signal);
+            assert!(variant.syntax.values().all(|color| *color != signal));
+        }
+    }
+
+    #[test]
     fn visual_fixture_matrix_covers_every_variant_and_scene() {
         let registry = ThemeRegistry::builtin();
         let variants = registry
@@ -854,8 +865,8 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 30);
-        assert_eq!(variants * VisualFixture::ALL.len(), 300);
+        assert_eq!(variants, 32);
+        assert_eq!(variants * VisualFixture::ALL.len(), 320);
     }
 }
 

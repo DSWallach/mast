@@ -2064,10 +2064,12 @@ fn promote_local_device_group<T>(
 
 /// Shared quiet rule for sidebar groups and palette sections.
 pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
-    div().h(px(1.0)).bg(theme.border.opacity(0.6))
+    div().h(px(theme.ui_style.tokens.rule_width.unwrap_or(1.0))).bg(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { theme.border.opacity(0.6) })
 }
 
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
+    let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
+    let label = if key { SharedString::from(popover::tracked_upper(&label)) } else { label };
     div()
         .flex()
         .flex_row()
@@ -2080,9 +2082,9 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
             "sidebar-disclosure-label".into(),
             false,
             div()
-                .text_size(crate::typography::ui_rems(12.0))
+                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.label_size.unwrap_or(12.0)))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted.opacity(0.5))
+                .text_color(if key { theme.text_muted } else { theme.text_muted.opacity(0.5) })
                 .child(label),
         ))
         .child(div().flex_1())
@@ -2189,7 +2191,7 @@ pub(super) struct RenameSpaceDialog {
 
 /// Dot color for a chat's display status (tab dots + Sessions rows).
 pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
-    crate::status_style::status_style(status.into(), theme.appearance).color
+    crate::status_style::dot_color(status.into(), theme)
 }
 
 // Handle-based rail host for the spaces dropdown: its list is a plain
@@ -3434,7 +3436,7 @@ impl Shell {
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
             if group == 2 {
-                groups.push(popover::menu_separator().into_any_element());
+                groups.push(popover::menu_separator(&theme).into_any_element());
             }
             let open = submenu == Some(group);
             let entity = cx.entity().downgrade();
@@ -3608,7 +3610,7 @@ impl Shell {
                     .into_any_element(),
             );
         }
-        groups.push(popover::menu_separator().into_any_element());
+        groups.push(popover::menu_separator(&theme).into_any_element());
         groups.push(
             div()
                 .id("sidebar-view-compact-hover")
@@ -3655,7 +3657,7 @@ impl Shell {
                 )
                 .into_any_element(),
         );
-        groups.push(popover::menu_separator().into_any_element());
+        groups.push(popover::menu_separator(&theme).into_any_element());
         groups.push(
             div()
                 .id("sidebar-create-section-hover")
@@ -6548,7 +6550,7 @@ impl Shell {
                         .child(SharedString::from("Rename…")),
                 )
                 .children(account_rows)
-                .child(popover::menu_separator())
+                .child(popover::menu_separator(&theme))
                 .child(
                     popover::menu_row(&theme, false, format!("space-menu-delete-{space_id}"))
                         .id("space-menu-delete")
@@ -6591,7 +6593,7 @@ impl Shell {
                 .child(
                     div()
                         .mt(px(12.0))
-                        .child(popover::dialog_field(input.into_any_element())),
+                        .child(popover::dialog_field(&theme, input.into_any_element())),
                 )
                 .child(
                     div()

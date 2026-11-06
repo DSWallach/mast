@@ -786,7 +786,7 @@ impl ArtifactTab {
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
-                    surface_chrome::input()
+                    surface_chrome::input(&theme)
                         .child(
                             icons::icon(icons::MAGNIFER)
                                 .size(px(12.0))

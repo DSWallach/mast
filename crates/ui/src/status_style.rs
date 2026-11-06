@@ -112,6 +112,22 @@ pub(crate) fn indicator(status: Status, appearance: Appearance) -> Div {
         .child(style.glyph)
 }
 
+pub(crate) fn indicator_for_theme(status: Status, theme: &crate::theme::Theme) -> Div {
+    if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+        div().flex_none().size(px(8.0)).rounded_full().bg(dot_color(status, theme))
+    } else {
+        indicator(status, theme.appearance)
+    }
+}
+
+pub(crate) fn dot_color(status: Status, theme: &crate::theme::Theme) -> gpui::Hsla {
+    if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+        if status == Status::Working { theme.accent } else { theme.text_muted }
+    } else {
+        status_style(status, theme.appearance).color
+    }
+}
+
 /// Animate working markers with the shared, throttled activity loader.
 pub(crate) fn animated_indicator(
     status: Status,
@@ -120,6 +136,11 @@ pub(crate) fn animated_indicator(
     view: EntityId,
     cx: &mut App,
 ) -> AnyElement {
+    if let Some(theme) = cx.try_global::<crate::theme::Theme>()
+        && theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot
+    {
+        return indicator_for_theme(status, theme).into_any_element();
+    }
     if status == Status::Working {
         crate::loaders::mini_mono_spinner(
             key,
@@ -138,6 +159,14 @@ pub(crate) fn animated_indicator(
 mod tests {
     use super::*;
     use crate::theme::{AccentColor, Theme};
+
+    #[test]
+    fn industrial_dot_uses_signal_for_working_and_neutral_for_idle() {
+        let theme = Theme::for_selection(Appearance::Light, "industrial-light", Default::default(), mast_theme::SurfacePreference::Opaque)
+            .with_ui_style(crate::ui_style::UiStyle::INDUSTRIAL);
+        assert_eq!(dot_color(Status::Working, &theme), theme.accent);
+        assert_eq!(dot_color(Status::Idle, &theme), theme.text_muted);
+    }
 
     #[test]
     fn view_models_share_status_mapping() {

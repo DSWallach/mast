@@ -87,7 +87,7 @@ pub(crate) fn attention_indicator(
             .text_size(crate::typography::ui_rems(9.5))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(color)
-            .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance))
+            .child(crate::status_style::indicator_for_theme(crate::status_style::Status::Waiting, &theme))
             .when(count > 1, |el| {
                 el.child(SharedString::from(count.to_string()))
             })
