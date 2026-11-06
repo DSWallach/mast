@@ -1575,6 +1575,67 @@ pub fn outline_template_review_status(status: SharedString, theme: &Theme) -> Di
         .child(status)
 }
 
+/// Selectable blueprint in the conversion flow.
+pub fn outline_conversion_choice(
+    index: usize,
+    selector: String,
+    label: String,
+    selected: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    let button = div()
+        .id(("convert-template", index))
+        .debug_selector(move || selector.clone())
+        .px(px(6.0 * scale))
+        .py(px(scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(if selected { theme.accent } else { theme.border })
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if selected {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .hover(|el| el.bg(theme.element_hover));
+    crate::surface_chrome::segmented_key(button, theme, selected)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(SharedString::from(label))
+}
+
+/// Child placement control in the conversion flow.
+pub fn outline_conversion_child(index: usize, label: String, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(("convert-child", index))
+        .debug_selector(move || format!("convert-child-{index}"))
+        .cursor_pointer()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .hover(|el| el.text_color(theme.text_muted))
+        .child(SharedString::from(label))
+}
+
+/// Conversion preview lines.
+pub fn outline_conversion_preview(lines: Vec<String>, theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "convert-preview".into())
+        .flex()
+        .flex_col()
+        .gap(px(super::layout_spacing(theme)))
+        .children(
+            lines
+                .into_iter()
+                .map(|line| outline_execution_line(format!("• {line}"), 10.5, theme.text, theme)),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
