@@ -1,9 +1,86 @@
 //! Context carried by questions about a diff or a walkthrough step.
 
 use super::{Changes, DiffLine, FileDiff, LineKind, SourceSide};
-use gpui::Context;
+use gpui::{AppContext as _, Context};
 use mast_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use mast_proto::ReviewStep;
+
+/// The message identity is retained for transcript correlation, including
+/// when the host parks it in the busy chat's queue.
+pub(super) struct SentQuestion {
+    pub message_id: String,
+    pub queued: bool,
+}
+
+pub(super) fn send_question<T: 'static>(
+    state: gpui::Entity<crate::state::AppState>,
+    chat_id: String,
+    message: String,
+    cx: &mut Context<T>,
+) -> gpui::Task<Result<SentQuestion, String>> {
+    let (busy, supported, actions) = {
+        let state = state.read(cx);
+        let busy = matches!(
+            state.indicator_for(&chat_id, chrono::Utc::now()),
+            crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+        );
+        let capability = mast_proto::capabilities::MESSAGE_QUEUE_V1;
+        let supported = state.engine().is_none_or(|engine| {
+            engine.engine_info().supports(capability)
+                && state.chat_host_supports(&chat_id, capability)
+        });
+        (busy, supported, state.work_outline_actions())
+    };
+    if busy && !supported {
+        return gpui::Task::ready(Err(
+            "Update the chat's engine to queue messages during a response.".into(),
+        ));
+    }
+    let executor = cx.background_executor().clone();
+    cx.background_spawn(async move {
+        if busy {
+            let message_id = actions
+                .queue_message(&chat_id, &message)
+                .await
+                .map_err(|error| error.message)?;
+            return Ok(SentQuestion {
+                message_id,
+                queued: true,
+            });
+        }
+        let params = mast_proto::ContinueChatForWorkItemParams {
+            chat_id,
+            prompt: mast_proto::WorkItemPrompt {
+                text: message,
+                attachments: Vec::new(),
+            },
+            operation_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let mut reply = actions
+            .continue_chat_for_work_item(params.clone())
+            .await
+            .map_err(|error| error.message)?;
+        for _ in 0..6 {
+            if reply.state != mast_proto::WorkItemLaunchState::Queued {
+                break;
+            }
+            executor.timer(std::time::Duration::from_millis(500)).await;
+            reply = actions
+                .continue_chat_for_work_item(params.clone())
+                .await
+                .map_err(|error| error.message)?;
+        }
+        if reply.state == mast_proto::WorkItemLaunchState::Rejected {
+            return Err(reply
+                .detail
+                .unwrap_or_else(|| "Message was rejected".into()));
+        }
+        Ok(SentQuestion {
+            message_id: reply.message_id,
+            queued: reply.state == mast_proto::WorkItemLaunchState::Queued,
+        })
+    })
+}
 
 /// Find the response belonging to a sent message, never to an earlier turn.
 /// The caller supplies the chat's turn state because individual assistant
