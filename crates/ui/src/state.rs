@@ -2688,7 +2688,7 @@ impl AppState {
     }
 
     /// Tests: put a loaded Work Outline snapshot in the store.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "snapshot"))]
     pub(crate) fn set_work_outline_for_test(&mut self, snapshot: mast_proto::WorkOutlineSnapshot) {
         let space_id = snapshot.space_id.clone();
         self.work_outlines.set(
