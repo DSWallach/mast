@@ -95,11 +95,7 @@ pub fn outline_item_indicator(
             .bg(color)
             .into_any_element()
     } else {
-        div()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(color)
-            .child(glyph)
-            .into_any_element()
+        SharedString::from(glyph).into_any_element()
     }
 }
 
@@ -491,16 +487,17 @@ pub fn outline_details_title(title: String, theme: &Theme) -> Stateful<Div> {
 
 /// Item section heading with a count.
 pub fn outline_list_heading(label: String, theme: &Theme) -> Div {
+    let industrial = super::is_industrial(theme);
+    let (label, count) = section_label(label, industrial);
     div()
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text_muted)
-        .when(super::is_industrial(theme), |el| {
-            el.font_family(theme.font_mono.clone())
-        })
+        .when(industrial, |el| el.font_family(theme.font_mono.clone()))
         .child(SharedString::from(label))
+        .when_some(count, |el, count| el.child(SharedString::from(count)))
 }
 
 /// Decorative Industrial panel marks.

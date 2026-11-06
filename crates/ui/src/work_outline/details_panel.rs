@@ -1617,7 +1617,7 @@ impl Render for WorkItemDetails {
                     let item_id = child.id.clone();
                     crate::components::outline_details_list_row(("work-item-child", ix), 22.0, &theme)
                         .cursor_pointer()
-                        .child(div().w(px(12.0)).child(crate::components::outline_item_indicator(glyph, color, &theme)))
+                        .child(div().w(px(12.0)).text_color(color).child(crate::components::outline_item_indicator(glyph, color, &theme)))
                         .child(crate::components::outline_child_title(child.title, &theme))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(DetailsEvent::OpenItem {
