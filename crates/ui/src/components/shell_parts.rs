@@ -1027,6 +1027,28 @@ pub(crate) fn panel_chip(
         .child(SharedString::from(label))
 }
 
+pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .px(px(6.0))
+        .py(px(5.0))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .when(super::is_industrial(theme), |el| {
+            el.rounded(px(0.0))
+                .border_color(theme.industrial_colors().rule)
+                .bg(theme.industrial_colors().panel)
+        })
+}
+
 pub(crate) fn spaces_filter(theme: &Theme, open: bool) -> gpui::Stateful<gpui::Div> {
     let frame = div()
         .id("spaces-filter")

@@ -298,19 +298,7 @@ impl Shell {
                     .map(|failure| (format!("{} tool calls failed", failure.count), theme.danger))
             }
         });
-        let mut row = div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .px(px(6.0))
-            .py(px(5.0))
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+        let mut row = crate::components::shell_parts::worker_row(theme, selector)
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
                     .find(|chat| chat.id == menu_id).and_then(|chat| chat.cwd.as_deref()));
