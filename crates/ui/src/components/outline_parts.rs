@@ -669,6 +669,29 @@ pub fn outline_required_action_row(id: SharedString, theme: &Theme) -> Stateful<
         })
 }
 
+/// Template editor node header.
+pub fn outline_template_header(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+}
+
+/// Template editor node and its nested descendants.
+pub fn outline_template_node(depth: usize, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0 * super::layout_spacing(theme)))
+        .when(depth > 0, |el| {
+            el.ml(px(10.0))
+                .pl(px(6.0))
+                .border_l_1()
+                .border_color(theme.border)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

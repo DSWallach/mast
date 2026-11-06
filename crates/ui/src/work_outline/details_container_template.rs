@@ -656,7 +656,7 @@ impl WorkItemDetails {
     ) -> AnyElement {
         let key = node.key as usize;
         let node_key = node.key;
-        let mut head = div().flex().flex_wrap().items_center().gap(px(4.0));
+        let mut head = crate::components::outline_template_header(theme);
         head = if is_root {
             head.child(
                 div()
@@ -728,16 +728,7 @@ impl WorkItemDetails {
                     ),
                 );
         }
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .when(depth > 0, |el| {
-                el.ml(px(10.0))
-                    .pl(px(6.0))
-                    .border_l_1()
-                    .border_color(theme.border)
-            })
+        let mut body = crate::components::outline_template_node(depth, theme)
             .child(head);
         for instruction in &node.instructions {
             let instruction_key = instruction.key;
