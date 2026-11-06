@@ -4638,7 +4638,24 @@ impl Render for Overview {
                     // Leftmost of the header's action cluster — the overview's
                     // one clearly-primary button (see `render_new_chat_button`).
                     .child(new_chat_button)
-
+                    .child(
+                        div()
+                            .id("overview-pull-requests")
+                            .debug_selector(|| "overview-pull-requests".into())
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .hover(|el| el.text_color(theme.text))
+                            .child("Pull requests")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if let Some(shell) = this.shell.upgrade() {
+                                    shell.update(cx, |shell, cx| shell.open_pr_review_chats_focused(window, cx));
+                                }
+                            })),
+                    ),
             );
 
         let pill = |id: &'static str, label: String, active: bool| {
