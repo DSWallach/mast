@@ -1509,7 +1509,6 @@ impl OrchestratorWakes {
                 } else {
                     continue;
                 };
-                let id8 = request.id.chars().take(8).collect::<String>();
                 let mut line = format!("{} — {text}", label(&state, &request.chat_id));
                 if let Some(pr) = state
                     .chats
@@ -1519,7 +1518,7 @@ impl OrchestratorWakes {
                     line.push_str(&format!(" (PR {pr})"));
                 }
                 if kind == WakeEventKind::ActionRaised {
-                    line.push_str(&format!(" [request {id8}]"));
+                    line.push_str(&format!(" [request {}]", request.id));
                 }
                 for orch in parents_of(&state, &request.chat_id) {
                     if kind == WakeEventKind::ActionResolved
