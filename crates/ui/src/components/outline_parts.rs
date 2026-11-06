@@ -2172,6 +2172,40 @@ pub fn outline_required_body(theme: &Theme) -> Stateful<Div> {
         .pb(px(10.0 * super::layout_spacing(theme)))
 }
 
+/// Inline reply input on a required-action card.
+pub fn outline_reply_input(
+    input: gpui::Entity<crate::composer::ComposerInput>,
+    theme: &Theme,
+) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border)
+        .child(input)
+}
+
+/// Note input for resolving a required action.
+pub fn outline_resolve_input(
+    input: gpui::Entity<crate::composer::ComposerInput>,
+    theme: &Theme,
+) -> Div {
+    div()
+        .debug_selector(|| "required-actions-note".into())
+        .w_full()
+        .min_h(px(24.0))
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.accent)
+        .bg(theme.surface)
+        .child(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

@@ -1523,15 +1523,7 @@ impl RequiredActionsList {
                     .gap(px(4.0))
                     .pl(px(12.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(6.0))
-                            .py(px(3.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .child(input),
+                        crate::components::outline_reply_input(input, theme),
                     )
                     .child(
                         Self::button(
@@ -1552,10 +1544,7 @@ impl RequiredActionsList {
             None
         };
         let resolve_form = resolving.then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
+            crate::components::outline_detail_section(theme)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         this.cancel_resolve(cx);
@@ -1563,22 +1552,10 @@ impl RequiredActionsList {
                     }
                 }))
                 .child(
-                    div()
-                        .debug_selector(|| "required-actions-note".into())
-                        .w_full()
-                        .min_h(px(24.0))
-                        .px(px(6.0))
-                        .py(px(3.0))
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(theme.accent)
-                        .bg(theme.surface)
-                        .child(self.note_input.clone()),
+                    crate::components::outline_resolve_input(self.note_input.clone(), theme),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
+                    crate::components::outline_action_row(theme)
                         .when(self.decision.is_some(), |el| {
                             el.child(
                                 Self::button(
