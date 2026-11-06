@@ -1085,8 +1085,8 @@ pub mod agent_tools {
         },
         ToolUsage {
             tool: tools::SET_STATUS,
-            required: &[p("status", "active or completed")],
-            optional: &[p("workItemId", "defaults to your chat's item"), KEY_DERIVED],
+            required: &[],
+            optional: &[p("status", "active or completed"), p("waitingUntil", "Unix milliseconds or null; requires idempotencyKey"), p("waitingReason", "short reason or null"), p("workItemId", "defaults to your chat's item"), KEY_DERIVED],
             example: r#"{"status": "completed"}"#,
         },
         ToolUsage {

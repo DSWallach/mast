@@ -305,15 +305,17 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::SET_STATUS,
-            description: "Mark your chat's item (default) or one of its descendants active or completed. Completing an item with open user action requests fails; they are never resolved for you. Required: status. Optional: workItemId (default your chat's item), idempotencyKey (derived when omitted).",
+            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item with open requests fails. Defaults to your chat's item; descendants are also allowed.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "workItemId": { "type": "string", "description": "Defaults to your chat's item." },
                     "status": { "type": "string", "enum": ["active", "completed"] },
+                    "waitingUntil": { "type": ["integer", "null"], "description": "Unix milliseconds, or null to clear." },
+                    "waitingReason": { "type": ["string", "null"], "description": "Short reason, or null to clear." },
                     "idempotencyKey": optional_idempotency_key_schema()
                 },
-                "required": ["status"]
+                "anyOf": [{"required": ["status"]}, {"required": ["waitingUntil", "idempotencyKey"]}, {"required": ["waitingReason", "idempotencyKey"]}]
             }),
         },
         ToolDef {

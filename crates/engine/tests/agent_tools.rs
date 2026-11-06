@@ -529,6 +529,16 @@ async fn each_tool_is_allowed_or_denied_per_the_agent_policy() {
     assert!(err.contains("agent-tools/invalid"), "{err}");
 
     // Status: active/completed inside the subtree only.
+    tool(&rig, &token, "work_outline_set_status", json!({
+        "waitingUntil": 1800000000000_i64, "waitingReason": "Observe", "idempotencyKey": "wait-1"
+    })).await.unwrap();
+    assert_eq!(snapshot(&rig).item(&root_a).unwrap().waiting_until, Some(1800000000000));
+    assert_eq!(snapshot(&rig).item(&root_a).unwrap().waiting_reason.as_deref(), Some("Observe"));
+    assert!(tool(&rig, &token, "work_outline_set_status", json!({"waitingUntil": null})).await.is_err());
+    tool(&rig, &token, "work_outline_set_status", json!({
+        "waitingUntil": null, "waitingReason": null, "idempotencyKey": "wait-clear"
+    })).await.unwrap();
+    assert_eq!(snapshot(&rig).item(&root_a).unwrap().waiting_until, None);
     tool(
         &rig,
         &token,

@@ -469,7 +469,12 @@ struct SetStatusArgs {
     /// Default: the Chat's own item.
     #[serde(default)]
     work_item_id: Option<String>,
-    status: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    waiting_until: mast_proto::FieldPatch<i64>,
+    #[serde(default)]
+    waiting_reason: mast_proto::FieldPatch<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1430,10 +1435,11 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: SetStatusArgs = parse_args(arguments)?;
-        let status = match args.status.trim() {
-            "active" => WorkItemStatus::Active,
-            "completed" => WorkItemStatus::Completed,
-            other => {
+        let status = match args.status.as_deref().map(str::trim) {
+            Some("active") => Some(WorkItemStatus::Active),
+            Some("completed") => Some(WorkItemStatus::Completed),
+            None => None,
+            Some(other) => {
                 return Err(AgentToolError::invalid(format!(
                     "status must be active or completed, not {other:?}"
                 )));
@@ -1443,7 +1449,11 @@ impl AgentToolsService {
             Some(id) => id,
             None => context.require_item("changing status")?,
         };
-        let operation_id = context.operation_id_or_derived(arguments, || {
+        let waiting_changed = !args.waiting_until.is_unchanged() || !args.waiting_reason.is_unchanged();
+        if status.is_none() && !waiting_changed {
+            return Err(AgentToolError::invalid("Provide status or waitingUntil"));
+        }
+        let operation_id = if waiting_changed { context.operation_id(arguments)? } else { context.operation_id_or_derived(arguments, || {
             let updated = context.row_stamp(
                 mast_doc::work_outline::KIND_WORK_ITEMS,
                 &target,
@@ -1451,15 +1461,17 @@ impl AgentToolsService {
             );
             Ok(agent_tools::derived_idempotency_key(
                 tools::SET_STATUS,
-                &[&target, args.status.trim(), &updated],
+                &[&target, args.status.as_deref().unwrap_or_default().trim(), &updated],
             ))
-        })?;
+        })? };
         // `resolveOpenRequests` stays false: completing an item with open
         // requests fails (`openUserActionRequests`), never auto-resolves.
         let mutation = WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
             work_item_id: target.clone(),
             changes: WorkItemChanges {
-                status: Some(status),
+                status,
+                waiting_until: args.waiting_until,
+                waiting_reason: args.waiting_reason,
                 ..WorkItemChanges::default()
             },
             operation_id,
