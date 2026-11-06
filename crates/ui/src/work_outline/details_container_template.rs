@@ -514,13 +514,8 @@ impl WorkItemDetails {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let state = section_state(snapshot, item);
-        let mut header = div().flex().flex_wrap().items_center().gap(px(6.0)).child(
-            div()
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .child("Child template"),
-        );
+        let mut header = crate::components::outline_detail_row(theme).flex_wrap()
+            .child(crate::components::outline_list_heading("Child template".into(), theme));
         let editing = self.container_template.editor.is_some();
         if !editing {
             header = header.child(
@@ -547,7 +542,7 @@ impl WorkItemDetails {
                 );
             }
         }
-        let mut section = div().flex().flex_col().gap(px(4.0)).child(header);
+        let mut section = crate::components::outline_detail_section(theme).child(header);
         let proposals = super::super::required_actions::proposals_for(snapshot, Some(&item.id))
             .filter(|proposal| proposal.target.scope == mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate
                 && proposal.target.container_work_item_id.as_deref() == Some(item.id.as_str())
@@ -565,38 +560,23 @@ impl WorkItemDetails {
             );
             if self.template_proposals_open {
                 section = section.child(
-                    div().debug_selector(|| "work-item-template-proposals-inline".into())
-                        .flex().flex_col().gap(px(4.0))
+                    crate::components::outline_section("work-item-template-proposals-inline", theme)
                         .children(self.render_pending_proposal_groups(proposals, snapshot, theme, cx)),
                 );
             }
         }
         if state.has_rules && !editing {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-container-template-summary".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format!(
-                        "Applies to {} direct children \u{b7} {} follow",
-                        state.children, state.following
-                    ))),
+                crate::components::outline_secondary_text(format!("Applies to {} direct children · {} follow", state.children, state.following), theme)
+                    .debug_selector(|| "work-item-container-template-summary".into()),
             );
         }
         if state.doesnt_follow {
             let id = item.id.clone();
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .debug_selector(|| "work-item-template-doesnt-follow".into())
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted)
-                            .child("Doesn\u{2019}t follow the child template"),
-                    )
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_secondary_text("Doesn’t follow the child template".into(), theme)
+                        .debug_selector(|| "work-item-template-doesnt-follow".into()))
                     .child(
                         crate::work_outline::hints::details_button(
                             "work-item-template-apply",
@@ -614,14 +594,11 @@ impl WorkItemDetails {
             section = section.child(self.render_template_node(&editor.root, true, 0, theme, cx));
             if let Some(error) = &self.container_template.error {
                 section = section.child(
-                    div()
-                        .debug_selector(|| "work-item-container-template-error".into())
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(error.clone())),
+                    crate::components::outline_execution_line(error.clone(), 10.5, theme.warning, theme)
+                        .debug_selector(|| "work-item-container-template-error".into()),
                 );
             }
-            let mut buttons = div().flex().gap(px(6.0)).child(
+            let mut buttons = crate::components::outline_action_row(theme).child(
                 crate::work_outline::hints::details_button("work-item-container-template-save", "Save", theme)
                     .debug_selector(|| "work-item-container-template-save".into())
                     .on_click(cx.listener(|this, _, _, cx| this.save_container_template(cx))),
