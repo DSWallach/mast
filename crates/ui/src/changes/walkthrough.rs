@@ -720,6 +720,20 @@ impl Render for Walkthrough {
             .when_some(controls, |view, controls| {
                 view.child(crate::surface_chrome::toolbar(&theme).child(controls))
             })
+            .when(theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline, |view| {
+                let keymap = crate::settings::current(cx).keymap;
+                view.child(div().flex().gap(px(6.0)).children([
+                    (crate::settings::ShortcutId::ReviewPreviousStep, "Previous"),
+                    (crate::settings::ShortcutId::ReviewNextStep, "Next"),
+                    (crate::settings::ShortcutId::ReviewMarkReviewed, "Reviewed"),
+                ].into_iter().filter_map(|(id, label)| {
+                    crate::work_outline::hints::shortcut_combo(&keymap, id).map(|combo| {
+                        div().flex().items_center().gap(px(3.0))
+                            .child(crate::work_outline::hints::kbd_chip(&theme, &combo))
+                            .child(label)
+                    })
+                })))
+            })
             .child(
                 div()
                     .id("review-progress")

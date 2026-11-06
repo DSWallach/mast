@@ -465,6 +465,13 @@ fn linear_group(mac: bool) -> ShortcutGroup {
     }
 }
 
+/// Render a platform-formatted shortcut as an inline key hint.
+pub(crate) fn kbd_chip(theme: &Theme, combo: &str) -> gpui::Div {
+    div().px(px(5.0)).py(px(2.0)).rounded(px(4.0))
+        .bg(theme.surface_raised).text_color(theme.text_muted)
+        .text_size(crate::typography::ui_rems(10.0)).child(key_label(combo))
+}
+
 /// The shortcut reference's footer: where Outline keys work, how to reach a
 /// row's context menu (right-click, Control-click on macOS, or the
 /// keyboard), and where to rebind.

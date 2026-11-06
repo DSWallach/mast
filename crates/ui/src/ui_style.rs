@@ -149,6 +149,21 @@ impl UiStyle {
     }
 }
 
+/// Keep hover-only actions visible in styles that request persistent controls.
+pub fn reveal_on_hover<T: gpui::Styled + gpui::InteractiveElement>(
+    element: T,
+    group: impl Into<gpui::SharedString>,
+    style: UiStyle,
+    visible: bool,
+) -> T {
+    use gpui::Styled as _;
+    if style.behavior.reveal == Reveal::Always {
+        element.opacity(1.0)
+    } else {
+        element.opacity(if visible { 1.0 } else { 0.0 }).group_hover(group, |s| s.opacity(1.0))
+    }
+}
+
 struct UiStyleState(UiStyleId);
 impl gpui::Global for UiStyleState {}
 

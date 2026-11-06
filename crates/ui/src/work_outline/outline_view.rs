@@ -4224,6 +4224,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn minimal_outline_row_heights_match_existing_values() {
+        let tokens = crate::ui_style::UiStyle::MINIMAL.tokens;
+        assert_eq!(OutlineView::row_height(true, tokens), 24.0);
+        assert_eq!(OutlineView::row_height(false, tokens), 28.0);
+    }
+
+    #[test]
     fn create_slot_follows_the_anchor() {
         let m = flatten(
             &[ready("s1", "Repo", fixture_snapshot("s1"))],

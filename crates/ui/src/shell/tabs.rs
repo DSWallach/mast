@@ -393,6 +393,8 @@ impl Shell {
                         .child(header_icon_button(
                             "expand-changes",
                             right_pane_expand_icon(self.right_pane_expanded),
+                            "Expand",
+                            widths.surface_reveal >= 220.0,
                             &theme,
                             cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
                         )),
@@ -424,6 +426,8 @@ impl Shell {
                                 header_icon_button(
                                     "toggle-files-panel",
                                     icons::FILE_TREE,
+                                    "Files",
+                                    widths.files_controls >= 180.0,
                                     &theme,
                                     cx.listener(|this, _, window, cx| {
                                         this.toggle_files_panel(window, cx)
@@ -442,6 +446,8 @@ impl Shell {
                             .child(header_icon_button(
                                 "toggle-changes",
                                 icons::SIDEBAR_MINIMALISTIC,
+                                "Changes",
+                                widths.files_controls >= 180.0,
                                 &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                             )),
@@ -511,6 +517,8 @@ impl Shell {
                         header_icon_button(
                             "rename-chat-titlebar",
                             icons::PEN,
+                            "Rename",
+                            available_titlebar_width >= 360.0,
                             &theme,
                             cx.listener(move |this, _, _, cx| {
                                 this.open_rename_chat(chat_id.clone(), cx)

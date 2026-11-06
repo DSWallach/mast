@@ -5394,8 +5394,7 @@ impl Composer {
                             .justify_center()
                             .cursor_pointer()
                             .shadow_sm()
-                            .opacity(0.0)
-                            .group_hover(group, |s| s.opacity(1.0))
+                            .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 // The button overhangs the thumbnail, whose
                                 // hitbox is right underneath — don't let the
@@ -5594,8 +5593,7 @@ impl Composer {
                     .justify_center()
                     .cursor_pointer()
                     .shadow_sm()
-                    .opacity(0.0)
-                    .group_hover(group, |style| style.opacity(1.0))
+                    .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
                     .tooltip(move |_, cx| {
                         cx.new(|_| AppshotActionTooltip(remove_label.clone()))
                             .into()
@@ -6445,8 +6443,7 @@ impl Composer {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .opacity(if selected { 1.0 } else { 0.0 })
-            .group_hover(row_group, |s| s.opacity(1.0))
+            .when(true, |el| crate::ui_style::reveal_on_hover(el, row_group, theme.ui_style, selected))
             .hover(|s| s.bg(crate::theme::ink(0.08)))
             .tooltip(|_, cx| {
                 cx.new(|_| {
@@ -8741,6 +8738,13 @@ impl Render for Composer {
             .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
                 f32::from(bounds.size.width)
             });
+        let send_hint = (theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline
+            && mode != SendButtonMode::Stop && surface_width >= 480.0)
+            .then(|| crate::work_outline::hints::kbd_chip(&theme, match crate::settings::current(cx).composer_send_behavior {
+                crate::settings::ComposerSendBehavior::Enter => "enter",
+                crate::settings::ComposerSendBehavior::ModEnter => "mod-enter",
+            }));
+        let has_send_hint = send_hint.is_some();
         let model_travel = (surface_width
             - PILL_BORDER_V
             - 12.0
@@ -8829,6 +8833,7 @@ impl Render for Composer {
                                 .child(attach)
                                 .child(model_picker),
                         )
+                        .children(send_hint)
                         .child(send_button),
                 )
         } else {
@@ -8894,6 +8899,8 @@ impl Render for Composer {
                                 .pr(px(morph_cluster_inset(false, layout_morph_t)))
                                 .relative()
                                 .top(px(-cluster_dy))
+                                .when(has_send_hint, |el| el.flex().items_center().gap(px(4.0)))
+                                .children(send_hint)
                                 .child(send_button),
                         ),
                 )

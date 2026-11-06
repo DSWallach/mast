@@ -11872,7 +11872,7 @@ fn window_control_button(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
-        .child(icon(icon_path).size(px(theme.ui_style.tokens.control_icon_size)).text_color(muted))
+        .child(icon(icon_path).size(px(16.0)).text_color(muted))
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
@@ -12016,14 +12016,18 @@ fn nav_history_button(
 fn header_icon_button(
     id: &'static str,
     icon_path: &'static str,
+    label: &'static str,
+    labels_fit: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let muted = theme.text_muted;
+    let show_label = labels_fit && theme.ui_style.behavior.labels != crate::ui_style::LabelMode::IconOnly;
     let fade_key = format!("header-icon-{id}");
     div()
         .id(id)
         .size(px(theme.ui_style.tokens.control_size))
+        .when(show_label, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
         .flex_none()
         .flex()
         .items_center()
@@ -12047,7 +12051,8 @@ fn header_icon_button(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
-        .child(icon(icon_path).size(px(16.0)).text_color(muted))
+        .child(icon(icon_path).size(px(theme.ui_style.tokens.control_icon_size)).text_color(muted))
+        .when(show_label, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(muted).child(label)))
 }
 
 impl Render for Shell {

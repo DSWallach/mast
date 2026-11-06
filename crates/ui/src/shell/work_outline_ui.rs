@@ -603,7 +603,11 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                     div()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
-                        .child(crate::work_outline::hints::shortcuts_footer(&keymap)),
+                        .child(crate::work_outline::hints::shortcuts_footer(&keymap))
+                        .when(theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline, |el| {
+                            el.children(crate::work_outline::hints::shortcut_combo(&keymap, crate::settings::ShortcutId::ShowOutlineShortcuts)
+                                .map(|combo| crate::work_outline::hints::kbd_chip(theme, &combo)))
+                        }),
                 )
                 .child(
                     popover::btn_ghost(theme, "Close", "work-outline-shortcuts-close")

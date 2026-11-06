@@ -2716,8 +2716,7 @@ impl FilesSurface {
                         .child(
                             div()
                                 .size(px(comments::COMMENT_ADDER_SIZE))
-                                .opacity(0.0)
-                                .group_hover(group, |style| style.opacity(1.0))
+                                .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
                                 .rounded(px(4.0))
                                 .bg(theme.solid)
                                 .flex()
@@ -2832,8 +2831,7 @@ impl FilesSurface {
                             .justify_center()
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .opacity(0.0)
-                            .group_hover(group, |style| style.opacity(1.0))
+                            .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_editor_comment(&id, cx)
                             }))

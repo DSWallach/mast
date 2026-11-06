@@ -118,8 +118,7 @@ pub(crate) fn render_comment_card<T: 'static>(
                                 .justify_center()
                                 .rounded(px(4.0))
                                 .cursor_pointer()
-                                .opacity(0.0)
-                                .group_hover(group, |s| s.opacity(1.0))
+                                .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
                                 .on_click(cx.listener(move |this, _, _, cx| remove(this, &id, cx)))
                                 .child(
                                     crate::icons::icon(crate::icons::CLOSE_CIRCLE)
@@ -163,8 +162,7 @@ pub(crate) fn render_comment_edit<T: 'static>(
         .cursor_pointer()
         .role(gpui::Role::Button)
         .aria_label("Edit comment")
-        .opacity(0.0)
-        .group_hover(group, |style| style.opacity(1.0))
+        .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
