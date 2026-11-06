@@ -1528,6 +1528,8 @@ mod tests {
         let (shell, cx) = test_shell(cx, dir.path());
         seed(&shell, cx, fixture::snapshot("s1"), ok_ids);
         shell.update(cx, |shell, cx| shell.open_overview(cx));
+        let overview = shell.read_with(cx, |shell, _| shell.overview_page.clone().unwrap());
+        overview.update(cx, |overview, cx| overview.set_mode_for_test(crate::overview::OverviewMode::List, cx));
         draw(cx);
         assert!(
             cx.debug_bounds("overview-row-instruction-drift-chat-auth")

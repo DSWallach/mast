@@ -1314,24 +1314,18 @@ fn pr_action_badge(action: PrAction) -> (&'static str, gpui::Hsla) {
 
 /// The main column's rendering mode.
 ///
-/// Persisted as at most one `viewMode:` flag in `UI_FLAGS_FILE`: no flag =
-/// List, [`VIEW_OUTLINE_FLAG`] = Outline, any other `viewMode:` value = List.
-/// The legacy [`LEGACY_VIEW_CANVAS_FLAG`] (the removed Canvas view) also reads
-/// as Outline, alone or alongside the outline flag.
+/// Existing view-mode preferences load as Outline. List remains only for
+/// legacy rendering and tests while its implementation is retired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum OverviewMode {
-    #[default]
     List,
+    #[default]
     Outline,
 }
 
 impl OverviewMode {
-    fn from_flags(flags: &BTreeSet<String>) -> Self {
-        if flags.contains(VIEW_OUTLINE_FLAG) || flags.contains(LEGACY_VIEW_CANVAS_FLAG) {
-            Self::Outline
-        } else {
-            Self::List
-        }
+    fn from_flags(_flags: &BTreeSet<String>) -> Self {
+        Self::Outline
     }
 
     /// The flag written for this mode (`None` = List, written as absence).
@@ -1508,7 +1502,7 @@ pub struct Overview {
     /// animation + the trigger-press note that keeps a trigger click from
     /// close-then-reopening).
     repo_filter: popover::Popup<()>,
-    legend_open: bool,
+    filter_menu: popover::Popup<()>,
     /// Rows before any filter (archived-inclusion aside) — lets the empty
     /// state tell "no chats at all" from "everything filtered out".
     unfiltered_count: usize,
@@ -1822,7 +1816,7 @@ impl Overview {
             body_focus: cx.focus_handle(),
             list_selected: None,
             list_order: Vec::new(),
-            view_mode: OverviewMode::List,
+            view_mode: OverviewMode::Outline,
             expanded: HashSet::new(),
             link_status: HashMap::new(),
             link_status_pending: HashSet::new(),
@@ -1841,7 +1835,7 @@ impl Overview {
             view_prefs_touched: false,
             repo_filter_needs_validation: false,
             repo_filter: popover::Popup::default(),
-            legend_open: false,
+            filter_menu: popover::Popup::default(),
             unfiltered_count: 0,
             refresh_ticks: 0,
             _refresh_task: refresh_task,
@@ -2116,6 +2110,9 @@ impl Overview {
             self.show_archived = prefs.show_archived;
             self.active_groups = prefs.groups;
             self.rows_dirty = true;
+            if !flags.contains(VIEW_OUTLINE_FLAG) {
+                self.view_prefs_changed(cx);
+            }
         }
     }
 
@@ -4594,22 +4591,6 @@ impl Render for Overview {
             self.sync_outline(cx);
         }
 
-        let toggle = |mode: OverviewMode, label: String, current: OverviewMode| {
-            let active = mode == current;
-            div()
-                .id(SharedString::from(format!("overview-mode-{mode:?}")))
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .child(SharedString::from(label))
-        };
-
         let new_chat_button = self.render_new_chat_button(&theme, cx);
 
         let title_row = div()
@@ -4660,110 +4641,28 @@ impl Render for Overview {
                     .child(new_chat_button)
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .p(px(2.0))
-                            .rounded(px(6.0))
-                            .bg(theme.element_hover.opacity(0.5))
-                            .child(
-                                toggle(OverviewMode::List, "List".into(), self.view_mode)
-                                    .hint("List view", HintKey::None)
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.set_mode(OverviewMode::List, cx);
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                toggle(OverviewMode::Outline, "Outline".into(), self.view_mode)
-                                    .hint(
-                                        "Outline: work items and their Chats",
-                                        HintKey::Command(WorkOutlineCommand::OpenOutline),
-                                    )
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, window, cx| {
-                                            this.set_mode(OverviewMode::Outline, cx);
-                                            let handle = gpui::Focusable::focus_handle(
-                                                this.outline.read(cx),
-                                                cx,
-                                            );
-                                            window.focus(&handle, cx);
-                                        }),
-                                    ),
-                            ),
+                            .id("overview-pull-requests")
+                            .debug_selector(|| "overview-pull-requests".into())
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .hover(|el| el.text_color(theme.text))
+                            .child("Pull requests")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if let Some(shell) = this.shell.upgrade() {
+                                    shell.update(cx, |shell, cx| {
+                                        shell.open_pr_review_chats_focused(window, cx)
+                                    });
+                                }
+                            })),
                     ),
             );
 
-        let pill = |id: &'static str, label: String, active: bool| {
-            div()
-                .id(id)
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .hover(|el| el.text_color(theme.text))
-                .child(SharedString::from(label))
-        };
-
-        // "Hide stale" / "Show archived" — the reference's own default-off
-        // toggles (`hideStale`/`showArchived`).
-        let filters = div()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .p(px(2.0))
-            .rounded(px(6.0))
-            .bg(theme.element_hover.opacity(0.5))
-            .child(
-                pill("overview-hide-stale", "Hide stale".into(), self.hide_stale)
-                    .hint("Hide stale chats and completed work items", HintKey::None)
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.hide_stale = !this.hide_stale;
-                            this.view_prefs_changed(cx);
-                            this.rows_dirty = true;
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .child(
-                pill(
-                    "overview-show-archived",
-                    "Show archived".into(),
-                    self.show_archived,
-                )
-                .hint("Show archived chats and work items, dimmed", HintKey::None)
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.show_archived = !this.show_archived;
-                        this.view_prefs_changed(cx);
-                        this.rows_dirty = true;
-                        cx.notify();
-                    }),
-                ),
-            );
-
+        let filters = self.render_filter_menu(&theme, cx);
         let repo_filter = self.render_repo_filter(&theme, cx);
-        let key_toggle = pill("overview-legend-toggle", "Key".into(), self.legend_open)
-            .hint("Explain the colors and marks", HintKey::None)
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.legend_open = !this.legend_open;
-                    cx.notify();
-                }),
-            );
-
         let outline_mode = self.view_mode == OverviewMode::Outline;
         let work_item_filter = (!outline_mode).then(|| self.render_work_item_filter(&theme, cx));
         let mut toolbar = div()
@@ -4773,8 +4672,7 @@ impl Render for Overview {
             .gap(px(6.0))
             .child(filters)
             .child(repo_filter)
-            .when_some(work_item_filter, |el, filter| el.child(filter))
-            .child(key_toggle);
+            .when_some(work_item_filter, |el, filter| el.child(filter));
         if outline_mode {
             toolbar = toolbar.children(self.render_outline_toolbar(&theme, cx));
         } else {
@@ -4842,8 +4740,6 @@ impl Render for Overview {
             .child(title_row)
             .child(toolbar);
 
-        let legend = self.legend_open.then(|| self.render_legend(&theme));
-
         let body = match self.view_mode {
             OverviewMode::List => {
                 let body = self.render_list_body(&rows, &theme, cx);
@@ -4862,7 +4758,6 @@ impl Render for Overview {
             .flex()
             .flex_col()
             .child(header)
-            .when_some(legend, |el, legend| el.child(legend))
             .child(body);
 
         // One right-side panel. Work Item Details, while open, renders in the
@@ -5187,124 +5082,90 @@ impl Overview {
         cx.notify();
     }
 
-    /// The "Key" legend (web `renderLegend`, `session_canvas.html:997-1038`)
-    /// — inline panel under the toolbar, adapted to what this overview
-    /// actually shows (no context-% sizing, no Cursor sessions, no Open in
-    /// Terminal). The web animates it open via `max-height`; this just
-    /// appears (no layout-height tween primitive worth the cost here).
-    fn render_legend(&self, theme: &Theme) -> gpui::AnyElement {
-        let swatch_row = |color: gpui::Hsla, text: String| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_muted)
-                .child(div().flex_none().size(px(8.0)).rounded_full().bg(color))
-                .child(SharedString::from(text))
-                .into_any_element()
-        };
-        let group = |title: &'static str, rows: Vec<gpui::AnyElement>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .min_w(px(130.0))
-                .child(
-                    div()
-                        .pb(px(2.0))
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(SharedString::from(title.to_uppercase())),
-                )
-                .children(rows)
-        };
-        let statuses = [
-            ChatIndicator::AwaitingInput,
-            ChatIndicator::Working,
-            ChatIndicator::Completed,
-            ChatIndicator::Errored,
-            ChatIndicator::Idle,
-        ];
-        let mut status_rows: Vec<gpui::AnyElement> = statuses
-            .iter()
-            .map(|&status| {
-                let (icon, label) = status_style(status);
-                swatch_row(crate::status_style::status_style(status.into(), theme.appearance).color, format!("{icon} {label}"))
-            })
-            .collect();
-        status_rows.push(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_muted)
-                .child(
-                    div()
-                        .flex_none()
-                        .relative()
-                        .w(px(14.0))
-                        .h(px(8.0))
-                        .rounded(px(2.0))
-                        .overflow_hidden()
-                        .bg(theme.surface_raised)
-                        .child(unread_done_ribbon(0.5)),
-                )
-                .child(SharedString::from(
-                    "white left-edge ribbon: done, not looked at yet",
-                ))
-                .into_any_element(),
-        );
-        let notes = [
-            "White left-edge ribbon = the chat finished and you haven't looked yet. Expanding the row or opening its chat clears it; the next completion re-adds the ribbon.",
-            "Dimmed row = stale: no activity for 7 days and not working / waiting on you. \"Hide stale\" filters them out.",
-            "Badge row = linked Linear ticket and/or GitHub PR; a PR badge shows its most urgent action (CI failing, merge conflict, changes requested, needs reviewer, ready to merge).",
-            "Links come from the branch (inferred), PRs created or mentioned in the chat, or you: \"Add PR / ticket…\" in the expanded detail (or the sidebar chat menu) takes a GitHub PR URL or a ticket id like ENG-1234. Add as many PRs as the chat needs. Hover a PR/ticket for its source; a pin marks manual links, and ✕ in the detail unlinks one stored link.",
-            "\"Group by\" toggles combine — the first becomes the top-level headers, each further one nests beneath it. Turn all off for the flat list.",
-            "Click a row = expand for branch/worktree, PR (reviewers, checks, review decision), ticket, last message, archive.",
-            "\"View full chat →\" = live chat side panel: read and reply without leaving the overview (the chat becomes the selected one). \"Open full chat →\" there jumps to the chat itself.",
-            "Small rows under a chat = its subagents (ring: running, check: done). Rows show three plus a remainder count; hover the row to reveal the full stack. Hover a row for its full name; click one to peek at its transcript in a read-only side panel (a subagent can't be continued). ✕ or Escape closes it.",
-            "Archive hides a chat from the default view (same as the sidebar's archive). \"Show archived\" brings archived chats back, dimmed.",
-            "\"Repos\" hides whole repos everywhere (list, grouping, search). Search matches title, branch, last message, folder, ticket id and PR title.",
-        ];
-        div()
-            .flex_none()
-            .mx(px(16.0))
-            .mb(px(10.0))
-            .p(px(12.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .flex()
-            .flex_wrap()
-            .gap(px(24.0))
-            .child(group("Status", status_rows))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(280.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .pb(px(2.0))
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(SharedString::from("READING A ROW")),
-                    )
-                    .children(notes.iter().map(|note| {
-                        div()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(*note))
-                    })),
+    fn render_filter_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let trigger = div()
+            .id("overview-filter-menu")
+            .debug_selector(|| "overview-filter-menu".into())
+            .relative()
+            .px(px(8.0))
+            .py(px(3.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .text_color(theme.text_muted)
+            .bg(theme.element_hover.opacity(0.5))
+            .child("⋯")
+            .hint("Overview filters", HintKey::None)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.filter_menu.note_trigger_press()),
             )
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.filter_menu.take_press_was_open() {
+                    this.close_filter_menu(cx);
+                } else {
+                    this.filter_menu.open(());
+                    cx.notify();
+                }
+            }));
+        if self.filter_menu.get().is_none() {
+            return trigger.into_any_element();
+        }
+        let popup = theme.for_popup();
+        let row = |id: &'static str, label: &'static str, checked: bool| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(popup.text)
+                .hover(|el| el.bg(popup.element_hover))
+                .child(format!("{}  {}", if checked { "✓" } else { "　" }, label))
+        };
+        let card = popover::popover_card(&popup)
+            .w(px(180.0))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_filter_menu(cx)))
+            .child(
+                row("overview-hide-stale", "Hide stale", self.hide_stale).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.hide_stale = !this.hide_stale;
+                        this.view_prefs_changed(cx);
+                        this.rows_dirty = true;
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                row(
+                    "overview-show-archived",
+                    "Show archived",
+                    self.show_archived,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_archived = !this.show_archived;
+                    this.view_prefs_changed(cx);
+                    this.rows_dirty = true;
+                    cx.notify();
+                })),
+            );
+        trigger
+            .child(popover::anchored_menu_below(
+                "overview-filter-menu-popup",
+                card.into_any_element(),
+                self.filter_menu.closing_since(),
+            ))
             .into_any_element()
+    }
+
+    fn close_filter_menu(&mut self, cx: &mut Context<Self>) {
+        if self.filter_menu.begin_close() {
+            popover::reap_popup(cx, |this: &mut Self| &mut this.filter_menu);
+        }
+        cx.notify();
     }
 
     /// Web `#empty-message`, adapted: distinguishes "no chats at all" from
@@ -6035,7 +5896,7 @@ impl Overview {
             div()
                 .id("outline-shortcuts")
                 .debug_selector(|| "outline-shortcuts".into())
-                .aria_label("Shortcuts")
+                .aria_label("Keyboard shortcuts")
                 .flex()
                 .items_center()
                 .px(px(6.0))
@@ -6046,8 +5907,9 @@ impl Overview {
                 .text_color(theme.text_muted)
                 .hover(|el| el.text_color(theme.text))
                 .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
+                .child("?")
                 .hint(
-                    "Shortcuts",
+                    "Keyboard shortcuts",
                     HintKey::Outline(crate::shell::work_outline_ui::OutlineNavKey::ShowShortcuts),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -7814,7 +7676,7 @@ mod logic_tests {
                 ..Default::default()
             },
         );
-        assert_eq!(flags, BTreeSet::from(["groupBy:ticket".to_string()]));
+        assert_eq!(flags, BTreeSet::from(["groupBy:ticket".to_string(), VIEW_OUTLINE_FLAG.to_string()]));
     }
 
     /// A saved `groupBy` written while Category and Origin grouping existed
@@ -7850,7 +7712,7 @@ mod logic_tests {
             prefs.groups,
             vec![GroupDimension::Repo, GroupDimension::Ticket]
         );
-        assert_eq!(prefs.mode, OverviewMode::List);
+        assert_eq!(prefs.mode, OverviewMode::Outline);
         // Every dimension's key round-trips.
         for dim in [GroupDimension::Repo, GroupDimension::Ticket] {
             assert_eq!(
@@ -7867,7 +7729,7 @@ mod logic_tests {
     fn overview_mode_loads_a_saved_canvas_view_as_outline_and_writes_exactly_one() {
         let flags =
             |keys: &[&str]| -> BTreeSet<String> { keys.iter().map(|k| k.to_string()).collect() };
-        assert_eq!(OverviewMode::from_flags(&flags(&[])), OverviewMode::List);
+        assert_eq!(OverviewMode::from_flags(&flags(&[])), OverviewMode::Outline);
         // The removed Canvas view: alone, or next to the outline flag.
         assert_eq!(
             OverviewMode::from_flags(&flags(&["viewMode:canvas"])),
@@ -7881,10 +7743,10 @@ mod logic_tests {
             OverviewMode::from_flags(&flags(&["viewMode:outline"])),
             OverviewMode::Outline
         );
-        // Unknown / stale values read as List, never fail.
+        // Unknown / stale values read as Outline, never fail.
         assert_eq!(
             OverviewMode::from_flags(&flags(&["viewMode:myPrs", "viewMode:board"])),
-            OverviewMode::List
+            OverviewMode::Outline
         );
         // The writer purges every `viewMode:` entry and writes one.
         for mode in [OverviewMode::List, OverviewMode::Outline] {
@@ -7913,7 +7775,7 @@ mod logic_tests {
                 "{mode:?}: {set:?}"
             );
             assert!(!set.contains(LEGACY_VIEW_CANVAS_FLAG));
-            assert_eq!(view_prefs_from_flags(&set).mode, mode);
+            assert_eq!(view_prefs_from_flags(&set).mode, OverviewMode::Outline);
             assert!(set.contains("prSidebarOpen"), "unrelated flags survive");
         }
         // Re-saving a loaded Canvas view writes only the outline flag.
@@ -8041,6 +7903,34 @@ mod logic_tests {
         });
         vcx.run_until_parked();
         (overview, vcx)
+    }
+
+    #[gpui::test]
+    fn filter_menu_toggles_and_persists_both_options(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_repos(cx, dir.path(), &["alpha"]);
+        let (overview, vcx) = overview_over(cx, &state);
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("overview-mode-List").is_none());
+        assert!(vcx.debug_bounds("overview-hide-stale").is_none());
+        let trigger = vcx.debug_bounds("overview-filter-menu").unwrap().center();
+        vcx.simulate_click(trigger, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        for selector in ["overview-hide-stale", "overview-show-archived"] {
+            let item = vcx.debug_bounds(selector).unwrap().center();
+            vcx.simulate_click(item, gpui::Modifiers::default());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear());
+        }
+        overview.read_with(vcx, |overview, _| {
+            assert!(overview.hide_stale && overview.show_archived);
+        });
+        let (restored, vcx) = overview_over(cx, &state);
+        restored.read_with(vcx, |overview, _| {
+            assert!(overview.hide_stale && overview.show_archived);
+            assert_eq!(overview.view_mode, OverviewMode::Outline);
+        });
     }
 
     #[gpui::test]
@@ -8923,6 +8813,7 @@ mod logic_tests {
                 cx,
             );
             overview.active_groups = vec![GroupDimension::Repo];
+            overview.view_mode = OverviewMode::List;
             overview
         });
         let draw = |vcx: &mut gpui::VisualTestContext| {
@@ -9212,7 +9103,7 @@ mod logic_tests {
     fn outline_mode_survives_a_fresh_overview(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (first, state, vcx) = outline_overview(cx, dir.path());
-        first.update(vcx, |o, cx| o.set_mode(OverviewMode::Outline, cx));
+        first.update(vcx, |o, cx| o.view_prefs_changed(cx));
         let flags =
             overview_positions::load_string_set(dir.path(), overview_positions::UI_FLAGS_FILE);
         assert!(flags.contains(VIEW_OUTLINE_FLAG));
@@ -9589,7 +9480,7 @@ mod logic_tests {
     fn commands_without_a_selection_open_the_outline_with_a_notice(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, _state, vcx) = outline_overview(cx, dir.path());
-        assert_eq!(overview.read_with(vcx, |o, _| o.mode()), OverviewMode::List);
+        assert_eq!(overview.read_with(vcx, |o, _| o.mode()), OverviewMode::Outline);
         vcx.update(|window, cx| {
             overview.update(cx, |o, cx| {
                 o.run_work_outline_command(WorkOutlineCommand::RenameWorkItem, window, cx)
@@ -9734,6 +9625,7 @@ mod logic_tests {
     fn list_rows_show_the_work_item_path_and_attention(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, _state, vcx) = outline_overview(cx, dir.path());
+        overview.update(vcx, |o, cx| o.set_mode_for_test(OverviewMode::List, cx));
         draw(vcx);
         let rows = overview.update(vcx, |o, cx| o.rows(cx));
         let auth = rows.iter().find(|r| r.chat.id == CHAT_AUTH).unwrap();
@@ -9790,6 +9682,7 @@ mod logic_tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, _state, vcx) = outline_overview(cx, dir.path());
+        overview.update(vcx, |o, cx| o.set_mode_for_test(OverviewMode::List, cx));
         let marks = |vcx: &mut gpui::VisualTestContext, prefix: &str| {
             [CHAT_API, CHAT_AUTH, CHAT_UI, CHAT_LOOSE_A]
                 .into_iter()
@@ -9814,6 +9707,7 @@ mod logic_tests {
     fn drift_marks_flag_only_drifted_chats(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, state, vcx) = outline_overview(cx, dir.path());
+        overview.update(vcx, |o, cx| o.set_mode_for_test(OverviewMode::List, cx));
         let drifted = instruction_fixture::snapshot("s1");
         let mut current = drifted.clone();
         for chat_state in &mut current.chat_instruction_states {
