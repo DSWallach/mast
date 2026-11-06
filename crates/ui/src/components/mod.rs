@@ -7,7 +7,7 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 
 mod conversation_parts;
 pub use conversation_parts::{
-    ConversationComposerBody, agent_message_theme, conversation_attach_key,
+    ConversationComposerBody, agent_message_theme, conversation_add_harness_key, conversation_attach_key,
     conversation_code_copy_label, conversation_code_frame, conversation_code_theme,
     conversation_code_token_color, conversation_column, conversation_composer_body,
     conversation_composer_content_height, conversation_composer_expanded,
@@ -15,7 +15,8 @@ pub use conversation_parts::{
     conversation_harness_tabs, conversation_input_surface, conversation_input_text_color,
     conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
     conversation_model_picker, conversation_panel_radius,
-    conversation_reveal, conversation_send_hint, conversation_send_key, conversation_skill_chip, conversation_skill_remove,
+    conversation_question_chip, conversation_reveal, conversation_send_hint, conversation_send_key,
+    conversation_skill_chip, conversation_skill_remove,
     conversation_tool_panel, conversation_tool_theme,
     conversation_user_bubble, conversation_wizard_surface, user_message_theme,
 };

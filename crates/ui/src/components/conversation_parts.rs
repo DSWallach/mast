@@ -4,6 +4,25 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_add_harness_key(theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id("area-add-harness")
+        .role(gpui::Role::Button)
+        .aria_label("Add harness")
+        .size(px(28.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .child(
+            crate::icons::icon(crate::icons::PLUS)
+                .size(px(16.0))
+                .text_color(theme.text_muted),
+        )
+}
+
 pub fn conversation_reveal<T: gpui::Styled + gpui::InteractiveElement>(
     element: T,
     theme: &Theme,
@@ -854,4 +873,65 @@ pub fn conversation_code_frame(
         .relative()
         .children(code_block_header(language, actions, theme))
         .child(body)
+}
+
+pub fn conversation_question_chip(
+    header: SharedString,
+    resolved: bool,
+    theme: &Theme,
+) -> AnyElement {
+    let value: SharedString = if resolved {
+        header
+    } else {
+        "Awaiting your answer…".into()
+    };
+    div()
+        .py(px(4.0))
+        .w_full()
+        .child(
+            div()
+                .h(px(34.0))
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .overflow_hidden()
+                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(10.0)))
+                .border_1()
+                .border_color(crate::theme::hairline(0.08))
+                .bg(crate::theme::ink(0.045))
+                .px(px(8.0))
+                .text_size(px(12.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(20.0))
+                        .rounded(px(6.0))
+                        .bg(crate::theme::ink(0.09))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("Question")),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_color(theme.text.opacity(0.9))
+                        .child(value),
+                ),
+        )
+        .into_any_element()
 }

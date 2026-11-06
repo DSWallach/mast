@@ -8703,8 +8703,7 @@ impl Render for Composer {
                         pickers.open_model_menu(window, cx);
                     }))).into_any_element()
             }).collect::<Vec<_>>();
-            let add = div().id("area-add-harness").size(px(28.0)).rounded_full().flex().items_center().justify_center()
-                    .text_color(theme.text_muted).cursor_pointer().child("+")
+            let add = crate::components::conversation_add_harness_key(&theme)
                     .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx))))
                     .into_any_element();
             crate::components::conversation_harness_tabs(&theme, tabs, add)

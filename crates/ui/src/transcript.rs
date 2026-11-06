@@ -6470,7 +6470,7 @@ impl Transcript {
                 crate::components::conversation_tool_panel(&panel_theme, identity, body)
             },
             RowKind::InputChip { header, resolved } => {
-                input_chip(header.clone(), *resolved, &theme)
+                crate::components::conversation_question_chip(header.clone(), *resolved, &theme)
             }
             RowKind::GeneratedImage {
                 owner,
@@ -7732,63 +7732,6 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 /// ChatRoundLine, the medium "Question" label, then the truncating value —
 /// the first question's header once resolved, "Awaiting your answer…" while
 /// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved {
-        header
-    } else {
-        "Awaiting your answer…".into()
-    };
-    div()
-        .py(px(4.0))
-        .w_full()
-        .child(
-            div()
-                .h(px(34.0))
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .overflow_hidden()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(crate::theme::hairline(0.08))
-                .bg(crate::theme::ink(0.045))
-                .px(px(8.0))
-                .text_size(px(12.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(20.0))
-                        .rounded(px(6.0))
-                        .bg(crate::theme::ink(0.09))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Question")),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_color(theme.text.opacity(0.9))
-                        .child(value),
-                ),
-        )
-        .into_any_element()
-}
-
 /// A small glyph standing in for the tool's icon (zeron uses an icon set; a
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
