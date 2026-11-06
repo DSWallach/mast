@@ -8632,34 +8632,8 @@ impl Render for Composer {
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. The leading utility group owns the spacing between
         // this button and the model picker.
-        let attach = div()
-            .id("composer-attach")
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .cursor_pointer()
-            // zeron composer-actions.tsx attach: `transition-colors`.
-            .bg(motion::hover_blend(
-                "composer-attach",
-                gpui::transparent_black(),
-                crate::theme::ink(0.10),
-            ))
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| crate::surface_chrome::icon_key(el, &theme, false))
-            .on_hover(motion::hover_listener("composer-attach"))
-            .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
-            .child(
-                crate::icons::icon(crate::icons::PAPERCLIP)
-                    .size(px(16.0))
-                    // The source path's painted bounds are centered at x=11
-                    // inside a 24px viewbox. Correct that optical offset while
-                    // keeping the 28px hit target geometrically centered.
-                    .relative()
-                    .left(px(1.0))
-                    .text_color(theme.text_muted),
-            );
+        let attach = crate::components::conversation_attach_key(&theme)
+            .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)));
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);

@@ -7,7 +7,7 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 
 mod conversation_parts;
 pub use conversation_parts::{
-    agent_message_theme, conversation_code_copy_label, conversation_code_frame,
+    agent_message_theme, conversation_attach_key, conversation_code_copy_label, conversation_code_frame,
     conversation_code_theme, conversation_code_token_color, conversation_column,
     conversation_composer_content_height, conversation_composer_expanded,
     conversation_composer_text_size, conversation_composer_width, conversation_input_surface,

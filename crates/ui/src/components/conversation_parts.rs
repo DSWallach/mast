@@ -4,6 +4,35 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id("composer-attach")
+        .size(px(28.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .bg(crate::motion::hover_blend(
+            "composer-attach",
+            gpui::transparent_black(),
+            crate::theme::ink(0.10),
+        ))
+        .when(
+            theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+            |el| crate::surface_chrome::icon_key(el, theme, false),
+        )
+        .on_hover(crate::motion::hover_listener("composer-attach"))
+        .child(
+            crate::icons::icon(crate::icons::PAPERCLIP)
+                .size(px(16.0))
+                .relative()
+                .left(px(1.0))
+                .text_color(theme.text_muted),
+        )
+}
+
 pub fn conversation_composer_content_height(theme: &Theme, content: f32, line: f32) -> f32 {
     if theme.ui_style.conversation == ConversationVariant::Area {
         content.max(3.0 * line)
