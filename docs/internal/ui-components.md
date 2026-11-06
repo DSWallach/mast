@@ -1166,6 +1166,11 @@ and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
 
 
+### Shell follow-ups
+
+- Restore project, branch and remote metadata parity in Area sidebar rows.
+- Triage the remaining mechanical candidate ledger below; Item/Team panels were not visually checked in the chat preview.
+
 ### Shell mechanical candidate ledger (untriaged)
 
 Untriaged; no per-style rendering difference observed for the remaining visible candidates in preview `target-clean/ui-preview/20261106-181557-290/chat.png`. The sheet does not cover every candidate or open the Item/Team panels.
