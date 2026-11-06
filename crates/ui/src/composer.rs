@@ -8097,6 +8097,7 @@ impl Composer {
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
         let guided = theme.ui_style.id == crate::ui_style::UiStyleId::Guided;
+        let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
         // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
@@ -8106,7 +8107,9 @@ impl Composer {
                 .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
                 .flex_none()
                 .rounded_full()
+                .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                 .bg(theme.text)
+                .when(key, |el| el.bg(theme.accent).border_b_2().border_color(theme.border))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -8126,7 +8129,9 @@ impl Composer {
                     .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
                     .flex_none()
                     .rounded_full()
+                    .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                     .bg(theme.text)
+                    .when(key, |el| el.bg(theme.accent).border_b_2().border_color(theme.border))
                     .flex()
                     .items_center()
                     .justify_center()

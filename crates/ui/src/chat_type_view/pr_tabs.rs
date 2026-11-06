@@ -308,6 +308,11 @@ impl ChatTypeView {
                 } else {
                     gpui::transparent_black()
                 })
+                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| {
+                    el.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+                        .border_1().border_b_2().border_color(theme.border)
+                        .bg(if selected { theme.element_active } else { theme.surface_raised })
+                })
                 .text_size(crate::typography::ui_rems(12.0))
                 .font_weight(if selected {
                     gpui::FontWeight::SEMIBOLD

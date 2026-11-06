@@ -11880,7 +11880,8 @@ fn window_control_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.border_1().border_b_2().border_color(theme.border))
         .cursor_pointer()
         // zeron window-controls.tsx: `transition-colors` — the wash fades.
         .bg(motion::hover_blend(
@@ -12067,7 +12068,8 @@ fn header_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(theme.surface_raised).border_1().border_b_2().border_color(theme.border))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
         .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft, |el| {
