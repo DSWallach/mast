@@ -573,17 +573,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
         .flex_col()
         .gap(crate::typography::ui_rems(6.0))
         .child(
-            div()
-                .debug_selector({
-                    let id = id.to_owned();
-                    move || format!("question-answer-input-{id}")
-                })
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.surface)
-                .px(crate::typography::ui_rems(8.0))
-                .py(crate::typography::ui_rems(5.0))
+            crate::components::conversation_answer_input(theme, format!("question-answer-input-{id}"))
                 // The preview root focuses itself on mouse-down; without this
                 // it runs after the input's own handler and steals focus, so a
                 // click into the field left keystrokes with nothing.
@@ -666,18 +656,7 @@ fn render_question(
         .flex_wrap();
     if let Some(id) = &card.id {
         header = header.child(
-            div()
-                .px(crate::typography::ui_rems(7.0))
-                .h(crate::typography::ui_rems(18.0))
-                .flex()
-                .items_center()
-                .rounded(px(5.0))
-                .bg(theme.text.opacity(0.10))
-                .text_size(crate::typography::ui_rems(11.0))
-                .line_height(crate::typography::ui_rems(16.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(id.clone()),
+            crate::components::conversation_question_id(theme, id.clone().into()),
         );
     }
     header = header.child(crate::components::conversation_question_pill(theme, status.label(), status_color, true));
@@ -834,20 +813,9 @@ fn render_question(
     } else {
         status_color
     };
-    div()
-        .id(SharedString::from(format!("{}-question", opts.row_key)))
-        .border_l_2()
-        .border_color(accent.opacity(0.7))
-        .bg(theme.text.opacity(0.04))
-        .rounded_tr(px(6.0))
-        .rounded_br(px(6.0))
-        .pl(crate::typography::ui_rems(12.0))
-        .pr(crate::typography::ui_rems(10.0))
-        .py(crate::typography::ui_rems(8.0))
-        .text_color(theme.text_muted)
-        .when(status == QuestionStatus::Resolved && !expanded, |card| {
-            card.opacity(0.75)
-        })
+    crate::components::conversation_question_card(theme,
+        SharedString::from(format!("{}-question", opts.row_key)), accent,
+        status == QuestionStatus::Resolved && !expanded)
         .child(body)
         .into_any_element()
 }

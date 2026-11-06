@@ -4,6 +4,52 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_answer_input(theme: &Theme, selector: String) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.surface)
+        .px(crate::typography::ui_rems(8.0))
+        .py(crate::typography::ui_rems(5.0))
+}
+
+pub fn conversation_question_id(theme: &Theme, id: SharedString) -> Div {
+    div()
+        .px(crate::typography::ui_rems(7.0))
+        .h(crate::typography::ui_rems(18.0))
+        .flex()
+        .items_center()
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
+        .bg(theme.text.opacity(0.10))
+        .text_size(crate::typography::ui_rems(11.0))
+        .line_height(crate::typography::ui_rems(16.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(id)
+}
+
+pub fn conversation_question_card(
+    theme: &Theme,
+    id: SharedString,
+    accent: Hsla,
+    dimmed: bool,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .border_l_2()
+        .border_color(accent.opacity(0.7))
+        .bg(theme.text.opacity(0.04))
+        .rounded_tr(px(theme.ui_style.tokens.panel_radius.unwrap_or(6.0)))
+        .rounded_br(px(theme.ui_style.tokens.panel_radius.unwrap_or(6.0)))
+        .pl(crate::typography::ui_rems(12.0))
+        .pr(crate::typography::ui_rems(10.0))
+        .py(crate::typography::ui_rems(8.0))
+        .text_color(theme.text_muted)
+        .when(dimmed, |card| card.opacity(0.75))
+}
+
 pub fn conversation_footer_slot(
     height: f32,
     bottom_slot: f32,
