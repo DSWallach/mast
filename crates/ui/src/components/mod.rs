@@ -7,8 +7,9 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 
 mod conversation_parts;
 pub use conversation_parts::{
-    agent_message_theme, conversation_column, conversation_tool_panel, conversation_tool_theme,
-    conversation_user_bubble, user_message_theme,
+    agent_message_theme, conversation_code_copy_label, conversation_code_frame,
+    conversation_code_theme, conversation_code_token_color, conversation_column,
+    conversation_tool_panel, conversation_tool_theme, conversation_user_bubble, user_message_theme,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

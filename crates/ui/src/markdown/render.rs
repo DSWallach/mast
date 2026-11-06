@@ -40,7 +40,6 @@ pub const CODE_LINE_HEIGHT: f32 = 18.0;
 const CODE_LINE_HEIGHT_RATIO: f32 = CODE_LINE_HEIGHT / CODE_TEXT_SIZE;
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
-const CODE_HEADER_HEIGHT: f32 = 28.0;
 const CODE_ACTION_SIZE: f32 = 22.0;
 const CODE_SCROLLBAR_HIT_HEIGHT: f32 = 10.0;
 
@@ -2454,14 +2453,7 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    let mut panel_theme = theme.clone();
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-        let panel = if theme.appearance.is_dark() { theme.surface_raised } else { theme.solid };
-        panel_theme.bg = panel;
-        panel_theme.text = theme.identity_text(panel);
-        panel_theme.text_muted = panel_theme.text;
-        panel_theme.text_faint = panel_theme.text;
-    }
+    let panel_theme = crate::components::conversation_code_theme(theme);
     let theme = &panel_theme;
     if is_mermaid(language)
         && let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref())
@@ -2498,7 +2490,7 @@ fn render_code_block(
         }
         let mut actions = vec![toggle_action];
         actions.extend(code_copy_button(code, ix, opts, theme));
-        return code_block_frame(frame_id, language, actions, diagram.body, theme)
+        return crate::components::conversation_code_frame(frame_id, language, actions, diagram.body, theme)
             .into_any_element();
     }
     render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
@@ -2581,81 +2573,9 @@ fn code_copy_button(
                 .size(px(12.0))
                 .text_color(theme.text_muted),
             )
-            .when(copied, |el| el.child(SharedString::from("Copied")))
-            .when(!copied && theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.child("Copy"))
+            .children(crate::components::conversation_code_copy_label(theme, copied))
             .into_any_element()
     })
-}
-
-fn code_block_header(
-    language: Option<&str>,
-    actions: Vec<AnyElement>,
-    theme: &Theme,
-) -> Option<gpui::Div> {
-    if language.is_none() && actions.is_empty() {
-        return None;
-    }
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-        return Some(div().h(crate::typography::ui_rems(CODE_HEADER_HEIGHT + 8.0)).relative().flex().items_center().justify_center()
-            .child(div().font_family("EB Garamond").text_size(px(16.0)).text_color(theme.text)
-                .child(SharedString::from(language.map_or_else(|| "Code".to_string(), |lang| format!("Code · {lang}")))))
-            .child(div().absolute().right(px(8.0)).top(px(4.0)).flex().items_center().gap(px(4.0)).children(actions)));
-    }
-    Some(
-        div()
-            .h(crate::typography::ui_rems(CODE_HEADER_HEIGHT))
-            .flex_none()
-            .pl(crate::typography::ui_rems(CODE_PADDING_X))
-            .pr(crate::typography::ui_rems(5.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(crate::theme::ink(0.02))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .min_w_0()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .children(language.map(|lang| SharedString::from(lang.to_string()))),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .children(actions),
-            ),
-    )
-}
-
-/// Shared visual shell for ordinary code and generated diagram fences.
-fn code_block_frame(
-    id: SharedString,
-    language: Option<&str>,
-    actions: Vec<AnyElement>,
-    body: AnyElement,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .rounded(crate::typography::ui_rems(10.0))
-        .bg(crate::theme::ink(0.035))
-        .border_1()
-        .border_color(theme.border)
-        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded(px(14.0)).bg(theme.bg).border_color(theme.bg).p(px(4.0)))
-        .overflow_hidden()
-        .relative()
-        .children(code_block_header(language, actions, theme))
-        .child(body)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2939,7 +2859,7 @@ fn render_code_block_source_with_actions(
         });
 
     let frame_body = div().w_full().relative().child(body).children(scrollbar);
-    let mut block = code_block_frame(
+    let mut block = crate::components::conversation_code_frame(
         format!("{}-code-frame{ix}", opts.row_key).into(),
         language,
         actions,
@@ -2971,12 +2891,7 @@ fn render_code_block_source_with_actions(
 /// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
 /// asked for color; these are the diff pane's hues, now shared by both).
 pub fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
-    let color = theme.syntax.color(kind);
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-        (0..=100).map(|step| crate::theme::flatten(color.opacity(1.0 - step as f32 / 100.0), theme.text))
-            .find(|candidate| crate::theme::contrast_ratio(*candidate, theme.bg) >= 7.0)
-            .unwrap_or(theme.text)
-    } else { color }
+    crate::components::conversation_code_token_color(theme, theme.syntax.color(kind))
 }
 
 /// Build the exact-cover `TextRun` list for one code line from its tokens.
