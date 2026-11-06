@@ -369,6 +369,8 @@ pub(crate) struct Walkthrough {
 /// Presentation data independent of whether the review targets a PR or branch.
 struct TourReview {
     steps: Vec<ReviewStep>,
+    highlights: Vec<mast_proto::ReviewHighlight>,
+    questions: Vec<serde_json::Value>,
     head: String,
     target_key: String,
 }
@@ -378,6 +380,10 @@ struct ReviewDocument {
     target: Option<ReviewTarget>,
     pr: Option<serde_json::Value>,
     steps: Vec<ReviewStep>,
+    #[serde(default)]
+    highlights: Vec<mast_proto::ReviewHighlight>,
+    #[serde(default)]
+    questions: Vec<serde_json::Value>,
 }
 
 impl ReviewDocument {
@@ -403,11 +409,27 @@ impl ReviewDocument {
             target,
             TourReview {
                 steps: self.steps,
+                highlights: self.highlights,
+                questions: self.questions,
                 head,
                 target_key,
             },
         ))
     }
+}
+
+fn note_body() -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(12.0))
+        .line_height(crate::typography::ui_rems(16.0))
+}
+
+fn review_question_text(question: &serde_json::Value) -> Option<String> {
+    question
+        .as_str()
+        .or_else(|| question.get("question").and_then(|value| value.as_str()))
+        .or_else(|| question.get("text").and_then(|value| value.as_str()))
+        .map(str::to_owned)
 }
 
 impl Walkthrough {
@@ -852,14 +874,14 @@ impl Render for Walkthrough {
                         ),
                 )
                 .child(
-                    div()
+                    note_body()
                         .id("review-note-body")
                         .debug_selector(|| "review-note-body".into())
                         .flex()
                         .flex_col()
                         .gap_1()
                         .when(!self.note_expanded, |el| {
-                            el.max_h(px(64.0)).overflow_hidden()
+                            el.max_h(crate::typography::ui_rems(64.0)).overflow_hidden()
                         })
                         .child(step.what.clone())
                         .child(
@@ -899,6 +921,34 @@ impl Render for Walkthrough {
                                 .child(tag.clone())
                         })),
                 )
+                .when(!self.review.highlights.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_color(theme.text_muted)
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .child("HIGHLIGHTS"),
+                    )
+                    .children(self.review.highlights.iter().map(|highlight| {
+                        div()
+                            .text_color(theme.text_muted)
+                            .child(highlight.text.clone())
+                    }))
+                })
+                .when(!self.review.questions.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_color(theme.text_muted)
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .child("QUESTIONS"),
+                    )
+                    .children(
+                        self.review
+                            .questions
+                            .iter()
+                            .filter_map(review_question_text)
+                            .map(|question| div().text_color(theme.text_muted).child(question)),
+                    )
+                })
                 .when_some(self.step_input.clone(), |el, input| {
                     el.child(
                         div()
@@ -1073,6 +1123,10 @@ impl Render for Walkthrough {
                 div()
                     .id("review-progress")
                     .debug_selector(|| "review-progress".into())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_color(theme.text_muted)
                     .child(progress)
                     .child(
                         div()
@@ -1141,6 +1195,8 @@ mod tests {
         fn from(sidecar: ReviewSidecar) -> Self {
             Self {
                 steps: sidecar.steps,
+                highlights: sidecar.highlights,
+                questions: sidecar.questions,
                 head: sidecar.pr.head_sha,
                 target_key: "pr:o/r#1".into(),
             }
@@ -1163,6 +1219,49 @@ mod tests {
         );
         review.steps[0].hunks[0].hunk_hash = Some(hunk_identity("a.rs", &files[0].hunks[0]));
         (review, files)
+    }
+
+    #[test]
+    fn note_body_uses_secondary_text_size() {
+        let mut body = note_body();
+        let mut secondary = div().text_size(crate::typography::ui_rems(12.0));
+        assert_eq!(
+            body.style().text.font_size,
+            secondary.style().text.font_size
+        );
+    }
+
+    #[test]
+    fn review_questions_accept_string_and_object_text() {
+        assert_eq!(
+            review_question_text(&serde_json::json!("Why?")),
+            Some("Why?".into())
+        );
+        assert_eq!(
+            review_question_text(&serde_json::json!({"question": "How?"})),
+            Some("How?".into())
+        );
+    }
+
+    #[test]
+    fn review_document_preserves_highlights_and_questions() {
+        let (mut review, _) = fixture();
+        review.highlights.push(
+            serde_json::from_value(serde_json::json!({
+                "kind": "risk", "severity": "high", "text": "Check migration",
+                "anchor": {"file": "a.rs", "side": "right", "startLine": 1, "endLine": 1}
+            }))
+            .unwrap(),
+        );
+        review.questions.push(serde_json::json!("Is this safe?"));
+        let document: ReviewDocument =
+            serde_json::from_value(serde_json::to_value(review).unwrap()).unwrap();
+        let (_, tour) = document.into_review().unwrap();
+        assert_eq!(tour.highlights[0].text, "Check migration");
+        assert_eq!(
+            review_question_text(&tour.questions[0]).as_deref(),
+            Some("Is this safe?")
+        );
     }
 
     #[test]
@@ -1254,7 +1353,8 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
         });
-        let (review, files) = fixture();
+        let (mut review, files) = fixture();
+        review.steps[0].what = "Long note ".repeat(30);
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
             files: Arc::new(files),
@@ -1278,10 +1378,14 @@ mod tests {
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("review-progress").is_some());
         assert!(vcx.debug_bounds("review-note").is_some());
+        let collapsed = vcx.debug_bounds("review-note-body").unwrap().size.height;
         let more = vcx.debug_bounds("review-note-more").unwrap().center();
         vcx.simulate_click(more, gpui::Modifiers::default());
         assert!(view.read_with(vcx, |view, _| view.note_expanded));
         vcx.update(|window, cx| window.draw(cx).clear());
+        let expanded = vcx.debug_bounds("review-note-body").unwrap().size.height;
+        assert!(expanded > collapsed);
+        let more = vcx.debug_bounds("review-note-more").unwrap().center();
         vcx.simulate_click(more, gpui::Modifiers::default());
         assert!(!view.read_with(vcx, |view, _| view.note_expanded));
         assert!(vcx.debug_bounds("review-uncovered").is_some());
