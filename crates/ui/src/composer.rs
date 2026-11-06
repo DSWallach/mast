@@ -8716,34 +8716,18 @@ impl Render for Composer {
             - morph_cluster_inset(expanded, layout_morph_t))
         .max(0.0);
         let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
-        let model_offset = if area { 0.0 } else { (model_side - compact_target) * model_travel + model_drift };
+        let model_offset = (model_side - compact_target) * model_travel + model_drift;
         let measured_model_bounds = self.model_bounds.clone();
-        let model_picker = div()
-            .min_w_0()
-            .max_w(px(surface_width * 0.45))
-            .relative()
-            .left(px(model_offset))
-            .opacity(if area { 1.0 } else { model_opacity })
-            .when(theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial, |el| el.child(
-                div().absolute().top(px(-8.0)).left(px(4.0)).right(px(4.0)).flex().justify_between().text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL").child("MODE")
-            ))
-            .child(self.pickers.clone())
-            .child(
+        let (model_picker, area_picker) = crate::components::conversation_model_picker(
+            &theme, surface_width, model_offset, model_opacity, self.pickers.clone().into_any_element(),
                 gpui::canvas(
                     move |bounds, _, _| measured_model_bounds.set(Some(bounds)),
                     |_, _, _, _| {},
                 )
                 .absolute()
-                .inset_0(),
-            );
-        // Area exposes the existing harness/model/account picker as a raised
-        // character tab, keeping the same accessible control and menu.
-        let (model_picker, area_picker) = if area {
-            (None, Some(model_picker))
-        } else {
-            (Some(model_picker), None)
-        };
-        let area_tabs = area.then(|| {
+                .inset_0().into_any_element(),
+        );
+        let area_tabs = {
             let selected = self.pickers.read(cx).effective_harness(cx);
             let harnesses = self.pickers.read(cx).area_harnesses(cx);
             let tabs = harnesses.into_iter().map(|harness| {
@@ -8754,14 +8738,14 @@ impl Render for Composer {
                     .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
                         pickers.pick_harness(harness, cx);
                         pickers.open_model_menu(window, cx);
-                    })))
+                    }))).into_any_element()
             }).collect::<Vec<_>>();
-            div().absolute().left(px(16.0)).right(px(16.0)).top(px(-28.0)).h(px(28.0)).flex().items_end()
-                .children(tabs).child(div().flex_1())
-                .child(div().id("area-add-harness").size(px(28.0)).rounded_full().flex().items_center().justify_center()
+            let add = div().id("area-add-harness").size(px(28.0)).rounded_full().flex().items_center().justify_center()
                     .text_color(theme.text_muted).cursor_pointer().child("+")
-                    .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx)))))
-        });
+                    .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx))))
+                    .into_any_element();
+            crate::components::conversation_harness_tabs(&theme, tabs, add)
+        };
         let body = match theme.ui_style.conversation {
         crate::ui_style::ConversationVariant::Area => {
             div().flex().flex_col()

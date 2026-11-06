@@ -4,6 +4,68 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_model_picker(
+    theme: &Theme,
+    width: f32,
+    offset: f32,
+    opacity: f32,
+    picker: AnyElement,
+    measure: AnyElement,
+) -> (Option<Div>, Option<Div>) {
+    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    let picker = div()
+        .min_w_0()
+        .max_w(px(width * 0.45))
+        .relative()
+        .left(px(if area { 0.0 } else { offset }))
+        .opacity(if area { 1.0 } else { opacity })
+        .when(
+            theme.ui_style.conversation == ConversationVariant::Industrial,
+            |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(-8.0))
+                        .left(px(4.0))
+                        .right(px(4.0))
+                        .flex()
+                        .justify_between()
+                        .text_size(crate::typography::ui_rems(8.0))
+                        .text_color(theme.text_muted)
+                        .child("MODEL")
+                        .child("MODE"),
+                )
+            },
+        )
+        .child(picker)
+        .child(measure);
+    if area {
+        (None, Some(picker))
+    } else {
+        (Some(picker), None)
+    }
+}
+
+pub fn conversation_harness_tabs(
+    theme: &Theme,
+    tabs: Vec<AnyElement>,
+    add: AnyElement,
+) -> Option<Div> {
+    (theme.ui_style.conversation == ConversationVariant::Area).then(|| {
+        div()
+            .absolute()
+            .left(px(16.0))
+            .right(px(16.0))
+            .top(px(-28.0))
+            .h(px(28.0))
+            .flex()
+            .items_end()
+            .children(tabs)
+            .child(div().flex_1())
+            .child(add)
+    })
+}
+
 pub fn conversation_message_copy_button(
     theme: &Theme,
     entry_id: &str,

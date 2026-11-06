@@ -11,7 +11,8 @@ pub use conversation_parts::{
     conversation_code_theme, conversation_code_token_color, conversation_column,
     conversation_composer_content_height, conversation_composer_expanded,
     conversation_composer_text_size, conversation_composer_width, conversation_harness_tab, conversation_input_surface,
-    conversation_message_copy_button, conversation_panel_radius, conversation_send_key, conversation_tool_panel,
+    conversation_harness_tabs, conversation_message_copy_button, conversation_model_picker,
+    conversation_panel_radius, conversation_send_key, conversation_tool_panel,
     conversation_tool_theme, conversation_user_bubble, user_message_theme,
 };
 
