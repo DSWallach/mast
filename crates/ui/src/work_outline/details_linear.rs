@@ -468,7 +468,7 @@ impl WorkItemDetails {
                     .into();
             section = section.child(
                 div().flex().child(
-                    crate::linear::panel::LinearPanel::small_button(
+                    crate::components::outline_small_button(
                         add_selector,
                         format!("Add issues from {project_name}\u{2026}"),
                         theme,

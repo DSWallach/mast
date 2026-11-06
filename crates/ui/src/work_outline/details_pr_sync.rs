@@ -24,7 +24,6 @@ use super::super::chips::TextTooltip;
 use super::super::model;
 use super::{DetailsEvent, WorkItemDetails};
 use crate::github::store::{self, SyncResult};
-use crate::linear::panel::LinearPanel;
 use crate::theme::Theme;
 
 /// Per-surface PR review sync state.
@@ -161,7 +160,7 @@ impl WorkItemDetails {
                             .child(SharedString::from(target_label)),
                     )
                     .child(
-                        LinearPanel::small_button(
+                        crate::components::outline_small_button(
                             "space-pr-sync-choose",
                             if busy {
                                 "Saving\u{2026}"
@@ -180,7 +179,7 @@ impl WorkItemDetails {
                     )
                     .when(set, |el| {
                         el.child(
-                            LinearPanel::small_button("space-pr-sync-clear", "Stop", theme)
+                            crate::components::outline_small_button("space-pr-sync-clear", "Stop", theme)
                                 .debug_selector(|| "space-pr-sync-clear".into())
                                 .tooltip(|_, cx| {
                                     cx.new(|_| {
@@ -228,7 +227,7 @@ impl WorkItemDetails {
                     .items_center()
                     .gap(px(6.0))
                     .child(
-                        LinearPanel::small_button(
+                        crate::components::outline_small_button(
                             "space-pr-sync-now",
                             if running {
                                 "Syncing\u{2026}"
@@ -411,7 +410,7 @@ impl WorkItemDetails {
         let review = |id: &'static str, label: &'static str, action: PrReviewAction| {
             let space_id = self.space_id.clone();
             let item_id = item.id.clone();
-            LinearPanel::small_button(id, label, theme)
+            crate::components::outline_small_button(id, label, theme)
                 .debug_selector(move || id.into())
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(DetailsEvent::StartPrReview {
@@ -426,26 +425,12 @@ impl WorkItemDetails {
         let refresh_pr = pr.clone();
         let open_url = pr.url.clone();
         let shell = self.shell.clone();
-        let section = div()
-            .debug_selector(|| "work-item-pr".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let section = crate::components::outline_section("work-item-pr", theme)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_detail_heading("Pull request", theme))
                     .child(
-                        div()
-                            .flex_1()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_muted)
-                            .child("Pull request"),
-                    )
-                    .child(
-                        LinearPanel::small_button(
+                        crate::components::outline_small_button(
                             "work-item-pr-refresh",
                             if loading {
                                 "Refreshing\u{2026}"
@@ -461,15 +446,8 @@ impl WorkItemDetails {
                     ),
             )
             .child(
-                div().flex().items_center().gap(px(6.0)).child(chip).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(title)),
-                ),
+                crate::components::outline_detail_row(theme).child(chip)
+                    .child(crate::components::outline_detail_row_text(title, theme)),
             )
             .when(!others.is_empty(), |el| {
                 el.child(
@@ -483,14 +461,11 @@ impl WorkItemDetails {
                 )
             })
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(review_button)
                     .child(fix_button)
                     .child(
-                        LinearPanel::small_button("work-item-pr-open", "Open on GitHub", theme)
+                        crate::components::outline_small_button("work-item-pr-open", "Open on GitHub", theme)
                             .debug_selector(|| "work-item-pr-open".into())
                             .on_click(crate::github::chip::open_pr(Some(shell), open_url)),
                     ),

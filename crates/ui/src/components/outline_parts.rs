@@ -1234,6 +1234,23 @@ pub fn outline_detail_row_text(text: String, theme: &Theme) -> Div {
         .child(SharedString::from(text))
 }
 
+/// Small action with a bounded label in an item detail row.
+pub fn outline_small_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    super::button(
+        id,
+        label,
+        super::ButtonVariant::Secondary,
+        super::ButtonSize::Sm,
+        theme,
+    )
+    .max_w(px(180.0))
+    .truncate()
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
