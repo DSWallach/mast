@@ -1030,6 +1030,39 @@ async fn rpc_surface_over_in_memory_transport() {
 }
 
 #[tokio::test]
+async fn claude_multiple_questions_resolve_through_command_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../harness/tests/fixtures/fake-claude.sh");
+    let harness = mast_harness::ClaudeHarness::new().with_executable(fixture);
+    let core = EngineCore::assemble(dir.path(), registry_with(Arc::new(harness)), HarnessId::ClaudeCode, None).unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let mut request = run_request("scenario:multi-askuser");
+    request.cwd = dir.path().to_string_lossy().into_owned();
+    queue_as_viewer(handle.doc(), "cmd-multi-run", SessionCommandPayload::Run { request, message_id: "multi-message".into() });
+    wait_for(|| core.sessions.session_status(CHAT).and_then(|s| s.awaiting_input).is_some(), "Claude questions").await;
+    let input = core.sessions.session_status(CHAT).unwrap().awaiting_input.unwrap();
+    assert_eq!(input.questions.len(), 3);
+    let answers = input.questions.iter().zip([vec!["B"], vec!["C", "D"], vec!["custom response"]])
+        .map(|(q, labels)| mast_proto::UserInputAnswer { question_id: q.id.clone(), labels: labels.into_iter().map(str::to_owned).collect() }).collect();
+    queue_as_viewer(handle.doc(), "cmd-multi-answer", SessionCommandPayload::RespondInput { request_id: input.request_id, answers });
+    let response_path = dir.path().join("multi-question-response.json");
+    wait_for(|| response_path.exists(), "Claude response").await;
+    let response: serde_json::Value = serde_json::from_slice(&std::fs::read(response_path).unwrap()).unwrap();
+    assert_eq!(response, serde_json::json!({"type":"control_response", "response":{
+        "subtype":"success", "request_id":"multi-1", "response":{"behavior":"allow", "updatedInput":{
+            "questions":[
+                {"header":"One","question":"Pick one?","options":[{"label":"A"},{"label":"B"}],"multiSelect":false},
+                {"header":"Many","question":"Pick many?","options":[{"label":"C"},{"label":"D"}],"multiSelect":true},
+                {"header":"Other","question":"Describe it?","options":[{"label":"E"},{"label":"F"}],"multiSelect":false}
+            ], "answers":{"Pick one?":"B", "Pick many?":["C","D"], "Describe it?":"custom response"}
+        }}
+    }}));
+    wait_for(|| command_status(&core, "cmd-multi-answer") == Some((SessionCommandStatus::Applied, None)), "answer command applied").await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn respond_input_resolves_pending_question() {
     // Harness that asks a question through RunControls and echoes the answer.
     struct AskingHarness;
