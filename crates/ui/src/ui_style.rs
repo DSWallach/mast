@@ -346,6 +346,119 @@ pub fn help_card(
 mod tests {
     use super::*;
     #[gpui::test]
+    fn industrial_switch_restores_saved_themes(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, Render, Window, div};
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+                div()
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (_, vcx) = cx.add_window_view(|_, _| Host);
+        vcx.update(|_, cx| {
+            crate::settings::init(Default::default(), directory.path(), cx);
+            init(UiStyleId::Minimal, cx);
+            crate::appearance::init(
+                crate::appearance::AppearanceMode::Light,
+                mast_theme::ThemeSelection {
+                    light: "github-light".into(),
+                    dark: "github-dark".into(),
+                },
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        vcx.update(|window, cx| {
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "github-light"
+            );
+            set_style(UiStyleId::Industrial, window, cx);
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "industrial-light"
+            );
+            crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "industrial-dark"
+            );
+            set_style(UiStyleId::Minimal, window, cx);
+            assert_eq!(
+                crate::theme::Theme::of(cx).variant_id.as_ref(),
+                "github-dark"
+            );
+            assert_eq!(crate::appearance::themes(cx).light, "github-light");
+        });
+    }
+
+    #[test]
+    fn industrial_uses_key_controls_and_opaque_surfaces() {
+        let style = UiStyle::INDUSTRIAL;
+        assert_eq!(style.controls, ControlVariant::Key);
+        assert_eq!(style.status_indicator, StatusIndicator::Dot);
+        assert_eq!(style.surface, SurfaceModel::Opaque);
+        assert_eq!(
+            (
+                style.tokens.control_radius,
+                style.tokens.panel_radius,
+                style.tokens.chip_radius,
+                style.tokens.rule_width
+            ),
+            (Some(4.0), Some(0.0), Some(4.0), Some(1.0))
+        );
+        assert_eq!(
+            serde_json::from_str::<UiStyleId>("\"industrial\"").unwrap(),
+            UiStyleId::Industrial
+        );
+    }
+
+    #[gpui::test]
+    fn industrial_shared_controls_render_in_both_appearances(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, Render, Window, div, prelude::*};
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+                div().children(
+                    [
+                        crate::theme::Appearance::Light,
+                        crate::theme::Appearance::Dark,
+                    ]
+                    .map(|appearance| {
+                        let id = if appearance.is_dark() {
+                            "industrial-dark"
+                        } else {
+                            "industrial-light"
+                        };
+                        let theme = crate::theme::Theme::for_selection(
+                            appearance,
+                            id,
+                            Default::default(),
+                            mast_theme::SurfacePreference::Opaque,
+                        )
+                        .with_ui_style(UiStyle::INDUSTRIAL);
+                        div()
+                            .child(
+                                crate::settings::widgets::section_card(&theme)
+                                    .child(crate::settings::widgets::badge(&theme, "Idle"))
+                                    .child(crate::settings::widgets::toggle_switch(&theme, true))
+                                    .child(crate::settings::widgets::toggle_switch(&theme, false))
+                                    .child(
+                                        crate::settings::widgets::ghost_action(&theme)
+                                            .child("Action"),
+                                    ),
+                            )
+                            .child(crate::popover::popover_card(&theme).child("Menu"))
+                    }),
+                )
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| Host);
+        vcx.update(|window, cx| window.draw(cx).clear());
+    }
+    #[gpui::test]
     fn help_card_dismissal_persists(cx: &mut gpui::TestAppContext) {
         use gpui::{Context, Render, Window, div, prelude::*};
         struct Host;
