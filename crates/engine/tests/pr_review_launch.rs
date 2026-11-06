@@ -228,7 +228,7 @@ async fn branch_review_launch_is_idempotent_and_binds_checkout() {
             branch: Some(BRANCH.into()), base_ref: Some("main".into()), base_sha: None, head_sha: head,
         },
         config: params("config", 7, PrReviewAction::CodeReview).config,
-        operation_id: "branch-review-test".into(), target_device_id: None,
+        operation_id: "branch-review-test".into(), target_device_id: None, account_id: None,
     };
     let reply = rig.client.start_branch_review(&p).await.unwrap();
     assert!(reply.prompt.contains("review_publish"));

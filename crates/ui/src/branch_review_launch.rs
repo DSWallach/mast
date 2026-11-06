@@ -36,6 +36,17 @@ pub(crate) fn target_for_checkout(
     })
 }
 
+/// Ignore stale checkout data and branches without commits beyond the base.
+pub(crate) fn target_for_resolved_checkout(
+    checkout: &DiffCheckoutCandidate,
+    range: &mast_proto::ResolveBranchReviewBaseReply,
+) -> Option<ReviewTarget> {
+    if range.ahead_count == 0 || checkout.head_sha.as_deref() != Some(range.head_sha.as_str()) {
+        return None;
+    }
+    target_for_checkout(checkout, &range.base_ref, &range.base_sha)
+}
+
 /// Reuse an operation id for retries with identical launch parameters.
 #[derive(Default)]
 pub(crate) struct BranchReviewOperations {
@@ -49,10 +60,18 @@ impl BranchReviewOperations {
         work_item_id: Option<String>,
         target: ReviewTarget,
         config: Option<ChatConfig>,
+        account_id: Option<String>,
         target_device_id: Option<String>,
     ) -> StartBranchReviewParams {
-        let key = serde_json::json!([space_id, work_item_id, target, config, target_device_id])
-            .to_string();
+        let key = serde_json::json!([
+            space_id,
+            work_item_id,
+            target,
+            config,
+            account_id,
+            target_device_id
+        ])
+        .to_string();
         let operation_id = self
             .ids
             .entry(key)
@@ -63,6 +82,7 @@ impl BranchReviewOperations {
             work_item_id,
             target,
             config,
+            account_id,
             operation_id,
             target_device_id,
         }
@@ -112,6 +132,23 @@ mod tests {
     }
 
     #[test]
+    fn resolved_range_requires_current_head_and_ahead_commits() {
+        let candidate = checkout();
+        let mut range = mast_proto::ResolveBranchReviewBaseReply {
+            base_ref: "main".into(),
+            base_sha: "base".into(),
+            head_sha: "head".into(),
+            ahead_count: 1,
+        };
+        assert!(target_for_resolved_checkout(&candidate, &range).is_some());
+        range.head_sha = "stale".into();
+        assert!(target_for_resolved_checkout(&candidate, &range).is_none());
+        range.head_sha = "head".into();
+        range.ahead_count = 0;
+        assert!(target_for_resolved_checkout(&candidate, &range).is_none());
+    }
+
+    #[test]
     fn launch_retries_reuse_operation_id_for_same_range() {
         let mut operations = BranchReviewOperations::default();
         let target = target_for_checkout(&checkout(), "main", "base").unwrap();
@@ -121,8 +158,16 @@ mod tests {
             target.clone(),
             None,
             None,
+            None,
         );
-        let retry = operations.params("space".into(), Some("item".into()), target, None, None);
+        let retry = operations.params(
+            "space".into(),
+            Some("item".into()),
+            target,
+            None,
+            None,
+            None,
+        );
         assert_eq!(first, retry);
         assert!(first.operation_id.len() <= 64);
         assert_eq!(first.target.state_key(), "branch:owner/repo#feature");
@@ -130,6 +175,7 @@ mod tests {
             "space".into(),
             Some("item".into()),
             target_for_checkout(&checkout(), "main", "another-base").unwrap(),
+            None,
             None,
             None,
         );

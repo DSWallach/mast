@@ -311,6 +311,7 @@ impl Shell {
                                 let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
                                     .find(|chat| chat.id == menu_chat_id).and_then(|chat| chat.cwd.as_deref()));
                                 this.chat_menu.open(ChatMenuState { chat_id: menu_chat_id.clone(), position: event.position, page: ChatMenuPage::Root, closeable });
+                                this.load_branch_review_target(menu_chat_id.clone(), cx);
                                 cx.notify();
                             }))
                             .child(icon(icons::MORE_HORIZONTAL).size(px(16.0)).text_color(theme.text_muted))),

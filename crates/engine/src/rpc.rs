@@ -893,6 +893,7 @@ impl EngineRpc {
             crate::pr_review_launch::PrReviewTools::default(),
         )
         .with_viewer(Self::viewer_of(&pr_review_sync))
+        .with_sessions(sessions.clone())
         .with_diff_targets(diff_targets.clone());
         // Engine assembly replaces this with the shared service
         // (`with_artifacts`), so the UI's render registration and agent

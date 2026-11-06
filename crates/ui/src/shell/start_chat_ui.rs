@@ -42,6 +42,11 @@ pub(super) struct PrLaunch {
     pub(super) item: Option<(String, String)>,
 }
 
+#[derive(Clone)]
+pub(super) struct BranchLaunch {
+    pub(super) target: mast_proto::ReviewTarget,
+}
+
 pub(super) struct StartChatDialog {
     pub(super) space_id: String,
     /// Empty in PR mode without a work item.
@@ -51,6 +56,7 @@ pub(super) struct StartChatDialog {
     /// prompt, the checkout and the PR link come from the host's
     /// `StartPrReview` when Start is confirmed; the dialog adds the agent.
     pub(super) pr: Option<PrLaunch>,
+    pub(super) branch_review: Option<BranchLaunch>,
     /// The Space's owning device.
     device_id: String,
     pub(super) input: Entity<ComposerInput>,
@@ -107,7 +113,7 @@ impl StartChatDialog {
     /// Where focus starts and returns to: the prompt, or in PR mode (which
     /// has no prompt box) the modal itself so Enter starts.
     pub(super) fn initial_focus(&self, modal: &FocusHandle, cx: &App) -> FocusHandle {
-        if self.pr.is_some() {
+        if self.pr.is_some() || self.branch_review.is_some() {
             modal.clone()
         } else {
             self.input_focus(cx)
@@ -133,7 +139,7 @@ impl StartChatDialog {
     }
 
     pub(super) fn can_start(&self, cx: &App) -> bool {
-        if self.pr.is_some() {
+        if self.pr.is_some() || self.branch_review.is_some() {
             return !self.starting;
         }
         !self.starting
@@ -288,6 +294,7 @@ impl Shell {
             item_id: item_id.to_owned(),
             item_path,
             pr: None,
+            branch_review: None,
             device_id,
             input,
             skills,
@@ -358,6 +365,27 @@ impl Shell {
         item: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
+        self.open_start_chat_for_review(Some(PrLaunch { reference, action, item: item.clone() }), None, item, cx)
+    }
+
+    pub(crate) fn open_start_chat_for_branch_review(
+        &mut self,
+        space_id: String,
+        item_id: Option<String>,
+        target: mast_proto::ReviewTarget,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let item = Some((space_id, item_id.unwrap_or_default()));
+        self.open_start_chat_for_review(None, Some(BranchLaunch { target }), item, cx)
+    }
+
+    fn open_start_chat_for_review(
+        &mut self,
+        pr: Option<PrLaunch>,
+        branch_review: Option<BranchLaunch>,
+        item: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         let (space_id, item_id) = item.clone().unwrap_or_default();
         let item_path = item
             .as_ref()
@@ -381,16 +409,10 @@ impl Shell {
         let composer_pickers = self.composer.read(cx).pickers().clone();
         let picker_device = Some(device_id.clone()).filter(|device| !device.is_empty());
         let pickers = cx.new(|cx| Pickers::new_chat_launcher(&composer_pickers, picker_device, cx));
-        let key = (reference.url(), action);
         let picker_events = cx.subscribe(
             &pickers,
             move |this: &mut Shell, _, _: &ReturnComposerFocus, cx| {
-                if let Some(dialog) = this.start_chat_dialog().filter(|dialog| {
-                    dialog
-                        .pr
-                        .as_ref()
-                        .is_some_and(|pr| (pr.reference.url(), pr.action) == key)
-                }) {
+                if let Some(dialog) = this.start_chat_dialog().filter(|dialog| dialog.pr.is_some() || dialog.branch_review.is_some()) {
                     dialog.focus_prompt_pending = true;
                     cx.notify();
                 }
@@ -422,12 +444,9 @@ impl Shell {
             space_id,
             item_id,
             item_path,
-            pr: Some(PrLaunch {
-                reference,
-                action,
-                item,
-            }),
-            device_id,
+            pr,
+            branch_review,
+            device_id: device_id.clone(),
             input,
             skills,
             skill_root: String::new(),
@@ -458,7 +477,62 @@ impl Shell {
         };
         self.begin_work_outline_modal(WorkOutlineModal::StartChat(dialog), cx);
         self.load_start_chat_sign_in_status(cx);
+        let account_device = Some(device_id).filter(|id| !id.is_empty());
+        self.state.update(cx, |state, cx| state.load_managed_accounts(account_device, cx));
         Ok(())
+    }
+
+    fn submit_start_branch_review(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.start_chat_dialog() else { return; };
+        if dialog.starting { return; }
+        let Some(branch) = dialog.branch_review.clone() else { return; };
+        let space_id = dialog.space_id.clone();
+        let item_id = (!dialog.item_id.is_empty()).then(|| dialog.item_id.clone());
+        let config = dialog.pickers.read(cx).resolved(cx).chat_config();
+        let account_id = config.as_ref().and_then(|config| crate::managed_accounts::launch_account_id(config.harness, dialog.account_choice.as_ref()));
+        let pickers = dialog.pickers.clone();
+        dialog.starting = true;
+        dialog.failure = None;
+        let params = self.branch_review_ops.params(space_id, item_id, branch.target.clone(), config, account_id, None);
+        let engine = self.state.read(cx).engine().cloned();
+        #[cfg(test)]
+        let script = self.branch_review_script.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            #[cfg(test)]
+            let scripted = script.map(|script| serde_json::to_value(&params)
+                .map_err(|error| error.to_string())
+                .and_then(|value| script(&value))
+                .and_then(|value| serde_json::from_value::<mast_proto::StartBranchReviewReply>(value).map_err(|error| error.to_string())));
+            #[cfg(not(test))]
+            let scripted: Option<Result<mast_proto::StartBranchReviewReply, String>> = None;
+            let result = if let Some(result) = scripted { result } else { match engine {
+                Some(engine) => crate::branch_review_launch::start(engine, params).await,
+                None => Err("Engine not connected".to_owned()),
+            }};
+            this.update(cx, |this, cx| {
+                let Some(dialog) = this.start_chat_dialog().filter(|dialog| {
+                    dialog.branch_review.as_ref().is_some_and(|current| current.target == branch.target)
+                }) else { return; };
+                dialog.starting = false;
+                match result {
+                    Ok(reply) => {
+                        this.branch_review_chats.insert(format!("{}\0{}", reply.space_id, branch.target.state_key()), reply.chat_id.clone());
+                        let picks = pickers.read(cx).new_chat_defaults().clone();
+                        let composer_pickers = this.composer.read(cx).pickers().clone();
+                        composer_pickers.update(cx, |composer, cx| composer.adopt_new_chat_picks(&picks, cx));
+                        this.work_outline_modal = None;
+                        this.work_outline_modal_focus_pending = false;
+                        this.work_outline_prior_focus = None;
+                        this.open_chat(reply.chat_id, cx);
+                    }
+                    Err(message) => dialog.failure = Some(LaunchFailure {
+                        code: None, message, remediation: None, unknown_outcome: false,
+                    }),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
     /// Start in PR mode: `StartPrReview` with the dialog's agent pick, then
@@ -755,7 +829,7 @@ impl Shell {
             && !modifiers.alt
             && !modifiers.control
             && self.start_chat_dialog().is_some_and(|dialog| {
-                dialog.pr.is_some()
+                (dialog.pr.is_some() || dialog.branch_review.is_some())
                     && !dialog.pickers.read(cx).is_open()
                     && (modifiers.platform || modal_focus.is_focused(window))
             })
@@ -805,6 +879,9 @@ impl Shell {
 
     /// Start (explicit): `CreateChatForWorkItem`, then open the new Chat.
     pub(super) fn submit_start_chat(&mut self, cx: &mut Context<Self>) {
+        if self.start_chat_dialog().is_some_and(|dialog| dialog.branch_review.is_some()) {
+            return self.submit_start_branch_review(cx);
+        }
         if self
             .start_chat_dialog()
             .is_some_and(|dialog| dialog.pr.is_some())
@@ -1108,6 +1185,9 @@ pub(super) fn start_chat_card(
     let can_start = dialog.can_start(cx);
     if let Some(pr) = &dialog.pr {
         return pr_start_chat_card(dialog, pr, can_start, viewport_height, theme, cx);
+    }
+    if let Some(branch) = &dialog.branch_review {
+        return branch_start_chat_card(dialog, branch, shell, can_start, theme, cx);
     }
     // Agent: the composer's own model chip (harness/model/traits popover)
     // and Ask/Auto chip, hosted in launcher mode.
@@ -1556,6 +1636,46 @@ pub(super) fn start_chat_card(
 /// The PR-mode Start Chat card: what will run (the review prompt, the PR
 /// link, where the host checks the branch out) is shown as a summary; the
 /// agent picker is the work-item dialog's own.
+fn branch_start_chat_card(
+    dialog: &StartChatDialog,
+    branch: &BranchLaunch,
+    shell: &Shell,
+    can_start: bool,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let (label, range) = match &branch.target {
+        mast_proto::ReviewTarget::Branch { branch, base_ref, head_sha, .. } => (
+            branch.clone().unwrap_or_else(|| head_sha.clone()),
+            format!("{} → {}", base_ref.as_deref().unwrap_or("base"), head_sha),
+        ),
+        _ => ("Committed work".to_owned(), String::new()),
+    };
+    let failure = dialog.failure.clone().map(|failure| error_card(
+        "start-chat-failure-message", theme, crate::chat_type_view::REVIEW_FAILURE_TITLE, failure.message,
+    ));
+    popover::dialog_card(theme)
+        .w(px(520.0))
+        .debug_selector(|| "start-chat".into())
+        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| this.start_chat_tab(event, window, cx)))
+        .child(popover::dialog_title(theme, "Review this work"))
+        .child(note("start-chat-branch", label, theme.text))
+        .child(note("start-chat-branch-range", range, theme.text_muted))
+        .child(section_label("Agent", theme))
+        .child(dialog.pickers.clone())
+        .when_some(start_chat_account_chip(dialog, shell, theme, cx), |el, chip| el.child(chip))
+        .when_some(failure, |el, failure| el.child(failure))
+        .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
+            .child(popover::btn_ghost(theme, "Cancel", "start-chat-cancel")
+                .id("start-chat-cancel")
+                .on_click(cx.listener(|this, _, window, cx| { this.resolve_work_outline_modal(false, window, cx); })))
+            .child(popover::btn_primary(theme, if dialog.starting { "Starting…" } else { "Start Chat" })
+                .id("start-chat-start").debug_selector(|| "start-chat-start".into())
+                .when(!can_start, |el| el.opacity(0.5))
+                .on_click(cx.listener(|this, _, _, cx| this.submit_start_chat(cx))))
+        ).into_any_element()
+}
+
 fn pr_start_chat_card(
     dialog: &StartChatDialog,
     pr: &PrLaunch,

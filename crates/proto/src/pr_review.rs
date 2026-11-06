@@ -40,6 +40,8 @@ pub struct StartBranchReviewParams {
     pub target: crate::ReviewTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<ChatConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     pub operation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device_id: Option<String>,

@@ -188,6 +188,38 @@ mod tests {
         })
     }
 
+    #[gpui::test]
+    fn branch_review_dialog_waits_for_start_and_sends_range(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, directory.path());
+        let calls: Calls = Arc::default();
+        let sink = calls.clone();
+        let target = mast_proto::ReviewTarget::Branch {
+            repo: Some("acme/repo".into()), checkout_path: Some("/repo/worktree".into()),
+            branch: Some("feature".into()), base_ref: Some("main".into()),
+            base_sha: Some("base".into()), head_sha: "head".into(),
+        };
+        let reply_target = target.clone();
+        shell.update(cx, |shell, cx| {
+            shell.branch_review_script = Some(Arc::new(move |params| {
+                sink.lock().unwrap().push(params.clone());
+                Ok(serde_json::json!({"chatId":"review", "spaceId":"space", "checkoutPath":"/repo/worktree", "target":reply_target, "prompt":"review"}))
+            }));
+            shell.open_start_chat_for_branch_review("space".into(), Some("item".into()), target, cx).unwrap();
+        });
+        draw(cx);
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(cx.debug_bounds("start-chat-branch").is_some());
+        click(cx, "start-chat-start");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["spaceId"], "space");
+        assert_eq!(calls[0]["workItemId"], "item");
+        assert_eq!(calls[0]["target"]["headSha"], "head");
+        assert_eq!(calls[0]["target"]["baseSha"], "base");
+        assert!(calls[0]["config"].is_object());
+    }
+
     const T1: &str = "2026-10-20T10:00:00Z";
     const T2: &str = "2026-10-21T10:00:00Z";
     const T3: &str = "2026-10-22T10:00:00Z";
