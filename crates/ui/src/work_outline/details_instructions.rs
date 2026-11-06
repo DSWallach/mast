@@ -717,11 +717,7 @@ impl WorkItemDetails {
     ) -> AnyElement {
         let effective = snapshot.effective_instructions(&item.id);
         let open = self.effective_open;
-        let mut section = div()
-            .debug_selector(|| "work-item-effective".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("work-item-effective", theme)
             .child(
                 crate::components::outline_section_header(
                     "work-item-effective-toggle",
@@ -777,13 +773,7 @@ impl WorkItemDetails {
             };
             let local = !entry.inherited;
             section = section.child(
-                div()
-                    .debug_selector(move || format!("work-item-effective-entry-{ix}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .px(px(4.0))
-                    .py(px(2.0))
+                crate::components::outline_effective_entry(ix, theme)
                     .child(
                         div()
                             .flex()
@@ -796,20 +786,7 @@ impl WorkItemDetails {
                                     .child(SharedString::from(format!("{}.", ix + 1))),
                             )
                             .child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("work-item-effective-marker-{ix}")
-                                    })
-                                    .px(px(4.0))
-                                    .rounded(px(3.0))
-                                    .when(local, |el| {
-                                        el.bg(theme.accent_wash).text_color(theme.accent)
-                                    })
-                                    .when(!local, |el| {
-                                        el.bg(theme.element_hover.opacity(0.7))
-                                            .text_color(theme.text_muted)
-                                    })
-                                    .child(if local { "Local" } else { "Inherited" }),
+                                crate::components::outline_effective_marker(ix, local, theme),
                             )
                             .child(
                                 div()
@@ -831,11 +808,7 @@ impl WorkItemDetails {
                             ),
                     )
                     .child(
-                        div()
-                            .pl(px(14.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(entry.text.clone())),
+                        crate::components::outline_effective_text(entry.text.clone(), theme),
                     ),
             );
         }

@@ -1361,6 +1361,41 @@ pub fn outline_instruction_header(index: usize, theme: &Theme) -> Div {
         ))
 }
 
+/// Effective instruction entry and provenance marker.
+pub fn outline_effective_entry(index: usize, theme: &Theme) -> Div {
+    let scale = super::layout_spacing(theme);
+    div()
+        .debug_selector(move || format!("work-item-effective-entry-{index}"))
+        .flex()
+        .flex_col()
+        .gap(px(scale))
+        .px(px(4.0 * scale))
+        .py(px(2.0 * scale))
+}
+pub fn outline_effective_marker(index: usize, local: bool, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || format!("work-item-effective-marker-{index}"))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .when(local, |el| {
+            el.bg(theme.accent_wash).text_color(theme.accent)
+        })
+        .when(!local, |el| {
+            el.bg(theme.element_hover.opacity(0.7))
+                .text_color(theme.text_muted)
+        })
+        .child(if local { "Local" } else { "Inherited" })
+}
+pub fn outline_effective_text(text: String, theme: &Theme) -> Div {
+    div()
+        .pl(px(14.0))
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .child(SharedString::from(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
