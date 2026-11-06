@@ -8416,6 +8416,9 @@ impl Shell {
             .child(filter_row)
             .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                div().px(px(12.0)).pb(px(8.0)).child(crate::surface_chrome::grille(theme))
+            ))
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
@@ -10143,6 +10146,9 @@ impl Shell {
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
             .children(new_thread_background_layer)
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                crate::surface_chrome::grille(theme).absolute().right(px(32.0)).top(px(110.0))
+            ))
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -11899,7 +11905,7 @@ fn window_control_button(
             theme.glass_hover().opacity(0.0),
             theme.glass_hover(),
         ))
-        .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
+        .when(true, |el| crate::surface_chrome::icon_key(el, theme, false))
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
@@ -12080,7 +12086,7 @@ fn header_icon_button(
         .items_center()
         .justify_center()
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
+        .when(true, |el| crate::surface_chrome::icon_key(el, theme, false))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
         .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft, |el| {
@@ -12702,6 +12708,10 @@ impl Render for Shell {
                 } else {
                     main
                 };
+                let main = if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+                    div().flex_1().min_w_0().overflow_hidden().border_1()
+                        .border_color(theme.industrial_colors().rule).bg(theme.bg).child(main).into_any_element()
+                } else { main };
                 let card: AnyElement = div()
                     .flex_1()
                     .min_w_0()
@@ -12709,6 +12719,7 @@ impl Render for Shell {
                     .flex_row()
                     .overflow_hidden()
                     .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.bg))
+                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.p(px(8.0)).rounded(px(12.0)).bg(theme.surface))
                     .child(main)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron

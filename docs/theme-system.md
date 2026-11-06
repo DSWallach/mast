@@ -74,6 +74,10 @@ right-aligned swatch control; its three-tone first swatch means “Theme default
 Glass is an adjacent conventional settings row with a compact
 `Theme default` / `Frosted` / `Opaque` selector.
 
+## Industrial color roles
+
+Industrial derives its panel, rule, key fill, key ledge, pressed fill, and signal from the active theme at runtime. The panel composites the shell over the background; the key composites the raised surface over that panel; the rule composites the strong border over the panel. The ledge blends text into the rule, pressed fill composites the active wash over the key, and signal uses the selected accent. Existing and custom themes need no additional fields. Style and theme are independent selections.
+
 ## VS Code import
 
 The importer supports JSONC, trailing commas,

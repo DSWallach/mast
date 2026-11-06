@@ -8109,14 +8109,14 @@ impl Composer {
                 .rounded_full()
                 .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                 .bg(theme.text)
-                .when(key, |el| el.bg(theme.accent).border_b_2().border_color(theme.border))
+                .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
+                .child(div().size(px(11.0)).rounded(px(3.0)).bg(if key { theme.on_accent } else { theme.bg }))
                 .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
@@ -8131,7 +8131,7 @@ impl Composer {
                     .rounded_full()
                     .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                     .bg(theme.text)
-                    .when(key, |el| el.bg(theme.accent).border_b_2().border_color(theme.border))
+                    .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -8144,7 +8144,7 @@ impl Composer {
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
-                            .text_color(theme.bg),
+                            .text_color(if key { theme.on_accent } else { theme.bg }),
                     )
                     .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
                     .into_any_element()
@@ -8668,6 +8668,7 @@ impl Render for Composer {
                 gpui::transparent_black(),
                 crate::theme::ink(0.10),
             ))
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| crate::surface_chrome::icon_key(el, &theme, false))
             .on_hover(motion::hover_listener("composer-attach"))
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
             .child(
@@ -8776,6 +8777,9 @@ impl Render for Composer {
             .relative()
             .left(px(model_offset))
             .opacity(model_opacity)
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                div().absolute().top(px(-8.0)).left(px(4.0)).right(px(4.0)).flex().justify_between().text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL").child("MODE")
+            ))
             .child(self.pickers.clone())
             .child(
                 gpui::canvas(

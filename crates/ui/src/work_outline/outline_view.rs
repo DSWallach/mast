@@ -3174,7 +3174,7 @@ impl OutlineView {
             .is_some_and(|item| item.archived || item.kept_for_descendants)
             || row
                 .chat()
-                .is_some_and(|chat| chat.chat.archived || chat.dangling)
+                .is_some_and(|chat| chat.chat.archived || (chat.dangling && !theme.appearance.is_dark()))
             || matches!(row.kind, OutlineRowKind::Space { hidden: true, .. });
         // Drag and drop: rows drag while nothing is being edited; live work
         // items are the drop targets. The indicator is static (no motion).
@@ -3562,7 +3562,12 @@ fn status_totals_element(
         .gap(px(3.0))
         .text_size(crate::typography::ui_rems(10.0))
         .text_color(theme.text_faint)
-        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| {
+            let dark = theme.appearance.is_dark();
+            el.font_family(theme.font_mono.clone()).px(px(4.0)).border_1().border_color(theme.industrial_colors().rule)
+                .bg(if dark { theme.bg } else { theme.solid })
+                .text_color(if dark { theme.text } else { theme.on_solid })
+        })
         .when_some(totals.active_label(), |el, label| {
             el.child(SharedString::from(label))
         })

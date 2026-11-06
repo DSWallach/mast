@@ -12,13 +12,17 @@ pub fn render(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
+    let industrial = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
+    let display_text = if theme.appearance.is_dark() { theme.text } else { theme.on_solid };
     let color = match fraction {
         Some(f) if f >= 0.9 => theme.danger,
         Some(f) if f >= 0.75 => theme.warning,
+        Some(_) if industrial => display_text,
+        None if industrial => display_text.opacity(0.7),
         Some(_) => theme.text_muted,
         None => theme.text_faint,
     };
-    let track = theme.text_faint.opacity(0.25);
+    let track = if industrial { display_text.opacity(0.25) } else { theme.text_faint.opacity(0.25) };
     let ring = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -65,6 +69,8 @@ pub fn render(
         .rounded(px(6.0))
         .text_size(px(11.0))
         .text_color(color)
+        .when(industrial, |el| el.rounded(px(0.0)).border_1().border_color(theme.industrial_colors().rule)
+            .bg(if theme.appearance.is_dark() { theme.bg } else { theme.solid }).font_family(theme.font_mono.clone()))
         .hover(|s| s.bg(crate::theme::ink(0.05)))
         .child(ring)
         .child(SharedString::from(label))

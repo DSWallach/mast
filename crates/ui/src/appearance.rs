@@ -142,21 +142,13 @@ pub fn surface(cx: &App) -> SurfacePreference {
 fn effective_variant(
     themes: &ThemeSelection,
     appearance: Appearance,
-    style: crate::ui_style::UiStyle,
+    _style: crate::ui_style::UiStyle,
 ) -> &str {
-    match style.paired_theme {
-        Some(pair) if appearance.is_dark() => pair.dark,
-        Some(pair) => pair.light,
-        None => themes.variant_id(model_appearance(appearance)),
-    }
+    themes.variant_id(model_appearance(appearance))
 }
 
-fn effective_accent(accent: AccentSelection, style: crate::ui_style::UiStyle) -> AccentSelection {
-    if style.paired_theme.is_some() {
-        AccentSelection::ThemeDefault
-    } else {
-        accent
-    }
+fn effective_accent(accent: AccentSelection, _style: crate::ui_style::UiStyle) -> AccentSelection {
+    accent
 }
 
 fn effective_surface(
@@ -405,51 +397,6 @@ fn apply_window_background(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn paired_theme_is_an_override_and_preserves_user_selection() {
-        let themes = ThemeSelection {
-            light: "custom-light".into(),
-            dark: "custom-dark".into(),
-        };
-        let mut style = crate::ui_style::UiStyle::MINIMAL;
-        style.paired_theme = Some(crate::ui_style::PairedTheme {
-            light: "look-light",
-            dark: "look-dark",
-        });
-        assert_eq!(
-            effective_variant(&themes, Appearance::Light, style),
-            "look-light"
-        );
-        assert_eq!(
-            effective_variant(&themes, Appearance::Dark, style),
-            "look-dark"
-        );
-        assert_eq!(
-            effective_variant(
-                &themes,
-                Appearance::Light,
-                crate::ui_style::UiStyle::MINIMAL
-            ),
-            "custom-light"
-        );
-        assert_eq!(
-            effective_variant(&themes, Appearance::Dark, crate::ui_style::UiStyle::MINIMAL),
-            "custom-dark"
-        );
-        assert_eq!(
-            effective_surface(
-                SurfacePreference::Frosted,
-                crate::ui_style::UiStyle::MINIMAL
-            ),
-            SurfacePreference::Frosted
-        );
-        style.surface = crate::ui_style::SurfaceModel::Opaque;
-        assert_eq!(
-            effective_surface(SurfacePreference::Frosted, style),
-            SurfacePreference::Opaque
-        );
-    }
 
     #[test]
     fn system_mode_follows_the_os() {
