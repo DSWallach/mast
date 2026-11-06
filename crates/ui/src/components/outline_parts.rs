@@ -1251,6 +1251,59 @@ pub fn outline_small_button(
     .truncate()
 }
 
+/// Interactive artifact row in item details.
+pub fn outline_artifact_row(id: SharedString, open: bool, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    let scale = super::layout_spacing(theme);
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap(px(6.0 * scale))
+        .px(px(4.0 * scale))
+        .py(px(2.0 * scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .when(open, |el| el.bg(theme.element_hover))
+}
+
+/// Artifact title and compact metadata.
+pub fn outline_artifact_title(title: String, theme: &Theme) -> Div {
+    div()
+        .min_w_0()
+        .flex_1()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .child(SharedString::from(title))
+}
+pub fn outline_artifact_detail(detail: String, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(detail))
+}
+pub fn outline_plan_badge(theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(
+            9.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .child("Plan")
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

@@ -321,11 +321,7 @@ impl WorkItemDetails {
             this.artifacts.collapsed = !this.artifacts.collapsed;
             cx.notify();
         }));
-        let mut section = div()
-            .debug_selector(|| "work-item-artifacts".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("work-item-artifacts", theme)
             .child(header);
         if !open {
             return section.into_any_element();
@@ -373,18 +369,7 @@ impl WorkItemDetails {
                         theme,
                     )
                 });
-            let row_el = div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(4.0))
-                .py(px(2.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .hover(|el| el.bg(theme.element_hover))
-                .when(menu_open, |el| el.bg(theme.element_hover))
+            let row_el = crate::components::outline_artifact_row(SharedString::from(selector), menu_open, theme)
                 .child(
                     crate::icons::icon(row.icon)
                         .size(px(12.0))
@@ -396,13 +381,7 @@ impl WorkItemDetails {
                         }),
                 )
                 .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text)
-                        .child(SharedString::from(row.title.clone())),
+                    crate::components::outline_artifact_title(row.title.clone(), theme),
                 )
                 .children(row.changed.map(|(from, to)| {
                     crate::artifacts::questions_ui::changed_dot(
@@ -414,24 +393,12 @@ impl WorkItemDetails {
                 }))
                 .when(row.pinned, |el| {
                     el.child(
-                        div()
-                            .flex_none()
-                            .px(px(4.0))
-                            .rounded(px(3.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(crate::typography::ui_rems(9.5))
-                            .text_color(theme.accent)
-                            .child("Plan"),
+                        crate::components::outline_plan_badge(theme),
                     )
                 })
                 .children(linear_chip)
                 .child(
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(detail)),
+                    crate::components::outline_artifact_detail(detail, theme),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_artifact(open_id.clone(), window, cx)
@@ -492,7 +459,7 @@ impl WorkItemDetails {
         }
         let register_input = self.artifacts.register_input.clone();
         section = section.child(
-            div().flex().items_center().gap(px(6.0)).child(
+            crate::components::outline_detail_row(theme).child(
                 crate::work_outline::hints::details_button(
                     "work-item-artifacts-register",
                     "Register existing file…",
