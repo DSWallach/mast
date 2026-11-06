@@ -1322,6 +1322,56 @@ pub(crate) fn wake_toggle(
     super::segmented_key(button, theme, active)
 }
 
+pub(crate) fn held_wake_badge(
+    theme: &Theme,
+    selector: String,
+    label: String,
+    border: gpui::Hsla,
+    text: gpui::Hsla,
+) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .h(px(18.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .rounded(px(5.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(border)
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(text)
+        .child(SharedString::from(label))
+}
+
+pub(crate) fn held_wake_reason(theme: &Theme, selector: String, reason: &str) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .min_w_0()
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(reason.to_owned()))
+}
+
+pub(crate) fn deliver_wake_button(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    let button = div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(theme.accent.opacity(0.5))
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.accent)
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.accent.opacity(0.12)))
+        .child("Deliver now");
+    super::segmented_key(button, theme, false)
+}
+
 pub(crate) fn spaces_filter(theme: &Theme, open: bool) -> gpui::Stateful<gpui::Div> {
     let frame = div()
         .id("spaces-filter")
