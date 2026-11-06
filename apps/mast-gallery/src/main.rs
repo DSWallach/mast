@@ -1,3 +1,5 @@
+mod screen_stubs;
+
 use gpui::{App, Context, IntoElement, Render, Window, div, prelude::*, px};
 use mast_ui::{appearance, badges, icons, settings, theme::Theme, typography, ui_style};
 
@@ -7,10 +9,28 @@ struct Gallery {
     input: gpui::Entity<mast_ui::composer::ComposerInput>,
     transcript: gpui::Entity<mast_ui::transcript::Transcript>,
     composer: gpui::Entity<mast_ui::composer::Composer>,
-    chat: bool,
+    story: Story,
+    appearance_page: gpui::Entity<settings::appearance::AppearancePage>,
     toggled: bool,
     menu_open: bool,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Story {
+    Controls,
+    Chat,
+    Outline,
+    Walkthrough,
+    Appearance,
+}
+
+const STORIES: [(Story, &str); 5] = [
+    (Story::Controls, "Controls"),
+    (Story::Chat, "Chat"),
+    (Story::Outline, "Work outline"),
+    (Story::Walkthrough, "PR walkthrough"),
+    (Story::Appearance, "Settings → Appearance"),
+];
 
 fn gallery_styles() -> &'static [ui_style::UiStyleId] {
     // TODO: Return UiStyleId::ALL when the shared registry lands.
@@ -84,25 +104,25 @@ impl Render for Gallery {
                     .flex()
                     .flex_col()
                     .gap(px(12.))
-                    .child(
-                        div()
-                            .id("controls-story")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.chat = false;
-                                cx.notify();
-                            }))
-                            .child("Controls"),
-                    )
-                    .child(
-                        div()
-                            .id("chat-story")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.chat = true;
-                                cx.notify();
-                            }))
-                            .child("Chat"),
+                    .children(
+                        STORIES
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (story, label))| {
+                                div()
+                                    .id(("story", index))
+                                    .cursor_pointer()
+                                    .px(px(8.))
+                                    .py(px(6.))
+                                    .when(self.story == story, |el| {
+                                        el.rounded(px(5.)).bg(theme.surface_raised)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.story = story;
+                                        cx.notify();
+                                    }))
+                                    .child(label)
+                            }),
                     ),
             )
             .child(
@@ -151,11 +171,32 @@ impl Render for Gallery {
                                     .child("Dark (D)"),
                             ),
                     )
-                    .when(self.chat, |el| {
-                        el.child(div().h(px(400.)).child(self.transcript.clone()))
-                            .child(self.composer.clone())
+                    .when(self.story == Story::Chat, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .h(px(500.))
+                                .child(screen_stubs::sidebar(theme))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(div().flex_1().child(self.transcript.clone()))
+                                        .child(self.composer.clone()),
+                                ),
+                        )
                     })
-                    .when(!self.chat, |el| {
+                    .when(self.story == Story::Outline, |el| {
+                        el.child(screen_stubs::outline(theme))
+                    })
+                    .when(self.story == Story::Walkthrough, |el| {
+                        el.child(screen_stubs::walkthrough(theme))
+                    })
+                    .when(self.story == Story::Appearance, |el| {
+                        el.child(self.appearance_page.clone())
+                    })
+                    .when(self.story == Story::Controls, |el| {
                         el.child("Buttons and toggles")
                             .child(
                                 div()
@@ -250,7 +291,8 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
             mast_ui::transcript::Transcript::for_doc(state.clone(), "gallery".into(), false, cx)
         }),
         composer: cx.new(|cx| mast_ui::composer::Composer::new(state.clone(), cx)),
-        chat: false,
+        story: Story::Controls,
+        appearance_page: cx.new(settings::appearance::AppearancePage::new),
         toggled: false,
         menu_open: false,
     }
@@ -319,11 +361,11 @@ mod tests {
                 appearance::AppearanceMode::Dark,
             ] {
                 cx.update(|cx| switch_appearance(mode, cx));
-                for chat in [false, true] {
+                for (story, _) in STORIES {
                     window
                         .update(cx, |gallery, _, cx| {
-                            gallery.chat = chat;
-                            gallery.menu_open = !chat;
+                            gallery.story = story;
+                            gallery.menu_open = story == Story::Controls;
                             gallery.toggled = true;
                             cx.notify();
                         })
