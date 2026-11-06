@@ -1159,3 +1159,9 @@ function or its first inline element, rather than every child `div`.
   this revision. `markdown/render.rs:2906` is an Area-specific test setup.
   Theme-only and semantic state branches remain; a component wrapper does not
   by itself migrate all of the child elements listed above.
+- Composer-facing picker audit (`0401e0448`): approval chip `pickers.rs:1389`,
+  model/harness trigger `:3731`, footer triggers `:3812`, locked footer labels
+  `:4057`, `:4150`, `:4161`, footer assembly `:4085`, and model/approval chip
+  assembly `:6019`. Their visual frames now live in `conversation_parts.rs`;
+  picker popover and menu bodies remain outside this slice. No direct style or
+  layout comparisons were present in these picker sites before migration.

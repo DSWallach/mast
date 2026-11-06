@@ -4,6 +4,39 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_picker_label(label: SharedString) -> Div {
+    div().min_w_0().truncate().child(label)
+}
+
+pub fn conversation_picker_suffix(theme: &Theme, label: SharedString, tint: Option<Hsla>) -> Div {
+    div()
+        .flex_shrink(1000.0)
+        .min_w_0()
+        .truncate()
+        .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7)))
+        .child(label)
+}
+
+pub fn conversation_picker_footer_content(
+    theme: &Theme,
+    icon: &'static str,
+    label: SharedString,
+) -> Vec<AnyElement> {
+    vec![
+        crate::icons::icon(icon)
+            .size(px(12.0))
+            .flex_none()
+            .text_color(theme.text_muted.opacity(0.7))
+            .into_any_element(),
+        conversation_picker_label(label).into_any_element(),
+        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+            .size(px(12.0))
+            .flex_none()
+            .text_color(theme.text_muted.opacity(0.5))
+            .into_any_element(),
+    ]
+}
+
 pub fn conversation_picker_footer_row() -> Div {
     div()
         .w_full()

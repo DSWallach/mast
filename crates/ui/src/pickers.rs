@@ -3787,7 +3787,7 @@ impl Pickers {
                 el.child(popover::skeleton_bar(56.0, cx.entity_id(), cx))
             })
             .when(!label_loading, |el| {
-                el.child(div().min_w_0().truncate().child(label))
+                el.child(crate::components::conversation_picker_label(label))
             })
             // The effort half of the combined model+effort chip (and the space
             // chip's "@ device" tag): muted, no icon — one button, two tones.
@@ -3795,14 +3795,7 @@ impl Pickers {
             // pressure the suffix yields FIRST (large shrink factor) so the
             // model name — the run's identity — truncates last.
             .when_some(suffix, |el, (suffix, tint)| {
-                el.child(
-                    div()
-                        .flex_shrink(1000.0)
-                        .min_w_0()
-                        .truncate()
-                        .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7)))
-                        .child(suffix),
-                )
+                el.child(crate::components::conversation_picker_suffix(theme, suffix, tint))
             })
     }
 
@@ -3827,19 +3820,7 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
-            .child(
-                crate::icons::icon(icon_path)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_muted.opacity(0.7)),
-            )
-            .child(div().min_w_0().truncate().child(label))
-            .child(
-                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_muted.opacity(0.5)),
-            )
+            .children(crate::components::conversation_picker_footer_content(theme, icon_path, label))
     }
 
     /// New-session destination controls. Machine and project form the
