@@ -414,6 +414,16 @@ fn work_outline_catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: agent_tool_names::PROPOSE_APPROVAL_RULE,
+            description: "Propose a command approval rule for user review. Creates a Required Action; never enables a rule. The user can review and accept it there.",
+            input_schema: json!({ "type": "object", "properties": {
+                "label": {"type": "string"}, "argvPrefix": {"type": "array", "items": {"type": "string"}},
+                "commandRegex": {"type": "string"}, "cwdScope": {"type": "string"},
+                "harness": {"type": "string", "enum": ["codex", "claude-code", "any"]},
+                "rationale": {"type": "string"}, "idempotencyKey": idempotency_key_schema()
+            }, "required": ["label", "idempotencyKey"] }),
+        },
+        ToolDef {
             name: agent_tool_names::ADMIN,
             description: "ADMIN CHATS ONLY (the user grants this per chat and Space, with an expiry; refused otherwise). Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. Child template rules are managed with template_set and applied with template_apply. A project is an outline item marked as a project. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?} template_set{itemId,template|null} template_apply{itemId}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
             input_schema: json!({
@@ -2592,6 +2602,7 @@ mod tests {
                         agent_tool_names::CREATE_CHILD,
                         agent_tool_names::ANSWER_USER_ACTION_REQUEST,
                         agent_tool_names::PROPOSE_INSTRUCTION,
+                        agent_tool_names::PROPOSE_APPROVAL_RULE,
                         agent_tool_names::ADMIN
                     ]
                     .contains(&def.name),

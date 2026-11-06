@@ -1043,6 +1043,7 @@ impl AgentToolsService {
             }
             tools::APPLY_CONTAINER_TEMPLATE => self.apply_container_template(context, arguments),
             tools::PROPOSE_INSTRUCTION => self.propose_instruction(context, arguments),
+            tools::PROPOSE_APPROVAL_RULE => self.propose_approval_rule(context, arguments),
             tools::ADMIN => self.admin(context, arguments),
             tools::QUEUE_CHILD_CHAT_TURN => self.queue_child_chat_turn(context, arguments),
             tools::CLAIM_CHILD_CHAT => self.claim_child_chat(context, arguments),
@@ -2094,6 +2095,25 @@ impl AgentToolsService {
             "sourceChatId": caller,
             "sourceMessageId": message_id,
         }))
+    }
+
+    fn propose_approval_rule(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        let label = arguments.get("label").and_then(Value::as_str).unwrap_or("").trim();
+        if label.is_empty() || label.chars().count() > 100 || label.chars().any(char::is_control) { return Err(AgentToolError::invalid("label must contain 1 to 100 printable characters")); }
+        let prefix = arguments.get("argvPrefix").cloned().unwrap_or_else(|| json!([]));
+        let Some(words) = prefix.as_array() else { return Err(AgentToolError::invalid("argvPrefix must be an array of strings")); };
+        if words.iter().any(|word| word.as_str().is_none_or(str::is_empty)) { return Err(AgentToolError::invalid("argvPrefix must contain nonempty strings")); }
+        let regex = arguments.get("commandRegex").and_then(Value::as_str).filter(|s| !s.is_empty());
+        if words.is_empty() && regex.is_none() { return Err(AgentToolError::invalid("provide argvPrefix or commandRegex")); }
+        let harness = arguments.get("harness").and_then(Value::as_str).unwrap_or("any");
+        if !matches!(harness, "any" | "codex" | "claude-code") { return Err(AgentToolError::invalid("invalid harness")); }
+        let cwd = arguments.get("cwdScope").and_then(Value::as_str);
+        if cwd.is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return Err(AgentToolError::invalid("cwdScope must be absolute")); }
+        let rule = json!({"label": label, "harness": harness, "argvPrefix": prefix, "commandRegex": regex, "cwdScope": cwd});
+        let rationale = arguments.get("rationale").and_then(Value::as_str).unwrap_or("");
+        let detail = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{}\n\n{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
+        let request = json!({"request": format!("Review proposed approval rule: {label}"), "detail": detail, "kind": "approve", "idempotencyKey": arguments.get("idempotencyKey")});
+        self.create_user_action_request(context, &request)
     }
 
     fn propose_instruction(

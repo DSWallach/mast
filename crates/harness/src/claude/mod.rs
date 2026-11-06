@@ -1133,6 +1133,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
             let field =
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
             UserInputQuestion {
+                command_approval: None,
                 allow_custom: true,
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),

@@ -1000,6 +1000,141 @@ impl WorkItemDetails {
         }
     }
 
+    pub(crate) fn edit_approval_rule(&mut self, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
+        self.approval_label_input.update(cx, |input, cx| input.set_text(rule.label.clone(), cx));
+        self.approval_prefix_input.update(cx, |input, cx| input.set_text(shell_words::join(&rule.argv_prefix), cx));
+        self.approval_regex_input.update(cx, |input, cx| input.set_text(rule.command_regex.clone().unwrap_or_default(), cx));
+        self.approval_cwd_input.update(cx, |input, cx| input.set_text(rule.cwd_scope.clone().unwrap_or_default(), cx));
+        self.approval_rule_draft = Some(rule);
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_approval_rule(&mut self, mut rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
+        rule.enabled = !rule.enabled;
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
+                space_id: self.space_id.clone(), rule, operation_id: super::super::actions::new_operation_id(),
+            }));
+        self.run_instruction("approval-rule:toggle", task, cx, |_| {});
+    }
+
+    pub(crate) fn save_approval_rule(&mut self, cx: &mut Context<Self>) {
+        let Some(mut rule) = self.approval_rule_draft.clone() else { return; };
+        rule.label = self.approval_label_input.read(cx).text().trim().to_owned();
+        let Ok(prefix) = shell_words::split(self.approval_prefix_input.read(cx).text()) else {
+            self.error = Some("The command prefix has an unclosed quote or escape.".into());
+            cx.notify();
+            return;
+        };
+        rule.argv_prefix = prefix;
+        let regex = self.approval_regex_input.read(cx).text().trim().to_owned();
+        rule.command_regex = (!regex.is_empty()).then_some(regex);
+        let cwd = self.approval_cwd_input.read(cx).text().trim().to_owned();
+        rule.cwd_scope = (!cwd.is_empty()).then_some(cwd);
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
+                space_id: self.space_id.clone(), rule, operation_id: super::super::actions::new_operation_id(),
+            }));
+        self.run_instruction("approval-rule:save", task, cx, |this| this.approval_rule_draft = None);
+    }
+
+    fn test_approval_command(&mut self, cx: &mut Context<Self>) {
+        let command = self.approval_test_input.read(cx).text().to_owned();
+        let Some(snapshot) = &self.snapshot else { return; };
+        let Some(path) = self.state.read(cx).space_row(&self.space_id).map(|space| space.path.clone()) else { return; };
+        let root = std::path::Path::new(&path);
+        let matches = mast_engine::approval_commands::matching_rule_labels(
+            &command, mast_proto::work_outline::ApprovalRuleHarness::Codex,
+            root, &[root], &snapshot.space_settings.approval_rules,
+        );
+        self.approval_test_result = Some(match matches {
+            Some(labels) => format!("Would allow: {}", labels.join(", ")),
+            None => "Would ask for approval".into(),
+        });
+        cx.notify();
+    }
+
+    fn prefill_approval_command(&mut self, cx: &mut Context<Self>) {
+        let command = self.approval_test_input.read(cx).text().to_owned();
+        let id = super::super::actions::new_operation_id();
+        if let Some(rule) = mast_engine::approval_commands::prefill_rule_from_command(&serde_json::Value::String(command), id) {
+            self.edit_approval_rule(rule, cx);
+        } else {
+            self.approval_test_result = Some("This command cannot be safely prefilled; enter a rule manually.".into());
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prefill_approval_command_for_test(&mut self, command: &str, cx: &mut Context<Self>) -> Option<mast_proto::work_outline::ApprovalRule> {
+        self.approval_test_input.update(cx, |input, cx| input.set_text(command.to_owned(), cx));
+        self.prefill_approval_command(cx);
+        self.approval_rule_draft.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_approval_command_for_test(&mut self, command: &str, cx: &mut Context<Self>) -> Option<String> {
+        self.approval_test_input.update(cx, |input, cx| input.set_text(command.to_owned(), cx));
+        self.test_approval_command(cx);
+        self.approval_test_result.clone()
+    }
+
+    fn render_approval_rules(&self, snapshot: &mast_proto::WorkOutlineSnapshot, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let mut rules = snapshot.space_settings.approval_rules.clone();
+        for suggestion in mast_proto::work_outline::suggested_approval_rules(&self.space_id) {
+            if !rules.iter().any(|rule| rule.id == suggestion.id) { rules.push(suggestion); }
+        }
+        let mut section = div().debug_selector(|| "space-approval-rules".into()).flex().flex_col().gap(px(6.0))
+            .child(div().text_color(theme.text).child("Approval rules"));
+        for rule in rules {
+            let updated = rule.clone();
+            let edit_rule = rule.clone();
+            let button_id = SharedString::from(format!("approval-rule-{}", rule.id));
+            let selector = button_id.clone();
+            let last_used = rule.last_used_at.and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| "Never used".into());
+            let label = SharedString::from(format!("{} · {} uses · {}", rule.label, rule.hit_count, last_used));
+            section = section.child(div().flex().items_center().gap(px(6.0))
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.text_muted).child(label))
+                .child(Self::small_button(button_id, if rule.enabled { "On" } else { "Off" }, theme)
+                    .debug_selector(move || selector.to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_approval_rule(updated.clone(), cx);
+                    })))
+                .child(Self::small_button(SharedString::from(format!("approval-rule-edit-{}", rule.id)), "Edit", theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.edit_approval_rule(edit_rule.clone(), cx)))));
+        }
+        if let Some(draft) = &self.approval_rule_draft {
+            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input)] {
+                section = section.child(div().text_color(theme.text_muted).child(label)).child(Self::input_frame(input, theme));
+            }
+            let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
+            section = section.child(Self::small_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
+                if let Some(rule) = &mut this.approval_rule_draft { rule.harness = match rule.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => mast_proto::work_outline::ApprovalRuleHarness::Codex, mast_proto::work_outline::ApprovalRuleHarness::Codex => mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode, mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => mast_proto::work_outline::ApprovalRuleHarness::Any }; }
+                cx.notify();
+            })))
+                .child(Self::small_button("approval-rule-save", "Save", theme).on_click(cx.listener(|this, _, _, cx| this.save_approval_rule(cx))))
+                .child(Self::small_button("approval-rule-cancel", "Cancel", theme).on_click(cx.listener(|this, _, _, cx| { this.approval_rule_draft = None; cx.notify(); })));
+        } else {
+            section = section.child(Self::small_button("approval-rule-add", "Add rule", theme).on_click(cx.listener(|this, _, _, cx| {
+                this.edit_approval_rule(mast_proto::work_outline::ApprovalRule {
+                    id: super::super::actions::new_operation_id(), label: String::new(), created_by: "user".into(),
+                    harness: mast_proto::work_outline::ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
+                    command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+                }, cx);
+            })));
+        }
+        section = section.child(div().text_color(theme.text_muted).child("Test as Codex in the Space root"))
+            .child(Self::input_frame(&self.approval_test_input, theme))
+            .child(Self::small_button("approval-rule-test", "Test command", theme).on_click(cx.listener(|this, _, _, cx| this.test_approval_command(cx))))
+            .child(Self::small_button("approval-rule-prefill", "Create rule from command…", theme).on_click(cx.listener(|this, _, _, cx| this.prefill_approval_command(cx))));
+        if let Some(result) = &self.approval_test_result {
+            section = section.child(div().debug_selector(|| "approval-rule-test-result".into()).text_color(theme.text_muted).child(SharedString::from(result.clone())));
+        }
+        section
+    }
+
     pub(super) fn render_space_root(
         &mut self,
         frame: gpui::Stateful<gpui::Div>,
@@ -1048,6 +1183,7 @@ impl WorkItemDetails {
         let pr_prompts = self.render_pr_prompts(theme, cx);
         let templates = self.render_templates_section(&snapshot, theme, cx);
         let friction = self.render_friction_section(theme, cx);
+        let approval_rules = self.render_approval_rules(&snapshot, theme, cx);
         frame.child(header).child(
             div()
                 .id("work-item-details-body")
@@ -1067,6 +1203,7 @@ impl WorkItemDetails {
                         .text_color(theme.text)
                         .child("Space root"),
                 )
+                .child(approval_rules)
                 .child(required_actions)
                 .child(friction)
                 .child(section)

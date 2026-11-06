@@ -99,6 +99,7 @@ impl Harness for HeldHarness {
             // Only the engine can mint a request id it will honour, so the
             // question has to go through controls rather than the stream.
             let _answer = (controls.request_input)(vec![UserInputQuestion {
+                command_approval: None,
                 allow_custom: false,
                 id: "q1".into(),
                 header: "Choose".into(),

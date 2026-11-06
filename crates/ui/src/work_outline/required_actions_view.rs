@@ -73,6 +73,23 @@ fn chat_busy(state: &AppState, chat_id: &str) -> bool {
     )
 }
 
+fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_outline::ApprovalRule> {
+    if !row.text.starts_with("Review proposed approval rule: ") { return None; }
+    let info = row.info.as_deref()?;
+    if !info.starts_with("Review this proposed rule.") && !info.starts_with("Review this proposed rule and enter it in Space settings if approved.") { return None; }
+    let json = info.split("\n\n").nth(1)?;
+    let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let object = value.as_object_mut()?;
+    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope")) { return None; }
+    object.insert("id".into(), serde_json::json!(derive_id(&row.request_id, "approval-rule")));
+    object.insert("createdBy".into(), serde_json::json!(format!("agent:{}", row.chat_id)));
+    object.insert("enabled".into(), serde_json::json!(true));
+    let rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
+    if rule.label.trim().is_empty() || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
+        || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return None; }
+    Some(rule)
+}
+
 /// Whether the busy-Chat queue send can reach `chat_id`'s host (the
 /// composer's check; without an engine the call itself reports it).
 fn queue_supported(state: &AppState, chat_id: &str) -> bool {
@@ -210,6 +227,9 @@ pub(crate) struct RequiredActionsList {
     spaces: Vec<SpaceSnapshot>,
     chats: Arc<Vec<OutlineChat>>,
     note_input: Entity<ComposerInput>,
+    approval_label_input: Entity<ComposerInput>,
+    approval_prefix_input: Entity<ComposerInput>,
+    approval_draft: Option<(String, String, String, mast_proto::work_outline::ApprovalRule)>,
     reply_inputs: HashMap<String, Entity<ComposerInput>>,
     choice_focus: HashMap<String, FocusHandle>,
     /// Complete PR links for chats relevant to a branch-only handoff.
@@ -247,6 +267,21 @@ pub(crate) struct RequiredActionsList {
 impl EventEmitter<RequiredActionsEvent> for RequiredActionsList {}
 
 impl RequiredActionsList {
+    fn accept_approval_proposal(&mut self, row: RequiredActionRow, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
+        let request_id = row.request_id.clone();
+        if !self.in_flight.insert(request_id.clone()) { return; }
+        let operation_id = derive_id(&request_id, "approval-rule-save");
+        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
+            space_id: row.space_id, rule, operation_id,
+        }));
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| match result {
+                Ok(_) => this.send_resolve(request_id.clone(), Some("Approval rule enabled".into()), derive_id(&request_id, "approval-rule-resolve"), None, Some("approved".into()), None, cx),
+                Err(error) => { this.in_flight.remove(&request_id); this.error = Some(error.message); cx.notify(); }
+            }).ok();
+        }).detach();
+    }
     pub(crate) fn new(
         state: Entity<AppState>,
         scope: RequestScope,
@@ -260,6 +295,8 @@ impl RequiredActionsList {
                 .with_text_metrics(12.0, 18.0)
                 .with_auto_grow()
         });
+        let approval_label_input = cx.new(|cx| ComposerInput::new("Rule label", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let approval_prefix_input = cx.new(|cx| ComposerInput::new("Command prefix", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let subscriptions = vec![
             cx.subscribe(&note_input, |this: &mut Self, _, event, cx| match event {
                 ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
@@ -278,6 +315,9 @@ impl RequiredActionsList {
             spaces: Vec::new(),
             chats: Arc::default(),
             note_input,
+            approval_label_input,
+            approval_prefix_input,
+            approval_draft: None,
             reply_inputs: HashMap::new(),
             choice_focus: HashMap::new(),
             handoff_chat_links: HashMap::new(),
@@ -917,6 +957,68 @@ impl RequiredActionsList {
     // Rendering
     // ----------------------------------------------------------------------
 
+    fn pending_command_approvals(&self, cx: &gpui::App) -> Vec<(String, String, String, mast_proto::UserInputQuestion)> {
+        let state = self.state.read(cx);
+        let mut pending = Vec::new();
+        for session in &state.sessions {
+            if session.status != mast_proto::SessionStatus::AwaitingInput { continue; }
+            let Some(input) = &session.awaiting_input else { continue; };
+            let Some(chat) = self.chats.iter().find(|chat| chat.id == session.chat_id && !chat.archived) else { continue; };
+            let Some(space_id) = &chat.space_id else { continue; };
+            let in_scope = match &self.scope {
+                RequestScope::Global => true,
+                RequestScope::Space(space) => space == space_id,
+                // Item-scoped Required Actions do not have a reliable session-to-item mapping here.
+                RequestScope::Subtree { .. } => false,
+            };
+            if !in_scope { continue; }
+            for question in &input.questions {
+                if matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") && question.command_approval.is_some() {
+                    pending.push((space_id.clone(), input.request_id.clone(), session.chat_id.clone(), question.clone()));
+                }
+            }
+        }
+        pending
+    }
+
+    fn prefill_pending_approval(&mut self, space_id: String, request_id: String, question: mast_proto::UserInputQuestion, cx: &mut Context<Self>) {
+        let question_id = question.id.clone();
+        let Some(details) = question.command_approval else { return; };
+        let Some(mut rule) = mast_engine::approval_commands::prefill_rule_from_command(&details.command, super::actions::new_operation_id()) else {
+            self.error = Some("This command cannot be safely prefilled. Use Space settings to create a rule manually.".into());
+            cx.notify();
+            return;
+        };
+        rule.cwd_scope = details.cwd;
+        self.approval_label_input.update(cx, |input, cx| input.set_text(rule.label.clone(), cx));
+        self.approval_prefix_input.update(cx, |input, cx| input.set_text(shell_words::join(&rule.argv_prefix), cx));
+        self.approval_draft = Some((space_id, request_id, question_id, rule));
+        cx.notify();
+    }
+
+    fn save_pending_approval(&mut self, cx: &mut Context<Self>) {
+        let Some((space_id, request_id, question_id, mut rule)) = self.approval_draft.clone() else { return; };
+        if !self.state.read(cx).sessions.iter().any(|session| session.awaiting_input.as_ref().is_some_and(|input| input.request_id == request_id && input.questions.iter().any(|question| question.id == question_id))) {
+            self.error = Some("This approval is no longer pending.".into()); cx.notify(); return;
+        }
+        rule.label = self.approval_label_input.read(cx).text().trim().to_owned();
+        let Ok(prefix) = shell_words::split(self.approval_prefix_input.read(cx).text()) else {
+            self.error = Some("The command prefix has an unclosed quote or escape.".into()); cx.notify(); return;
+        };
+        rule.argv_prefix = prefix;
+        rule.enabled = true;
+        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
+            space_id, rule, operation_id: super::actions::new_operation_id(),
+        }));
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result { Ok(_) => { this.approval_draft = None; this.error = None; }, Err(error) => this.error = Some(error.message) }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     fn button(
         id: impl Into<gpui::ElementId>,
         label: &'static str,
@@ -1032,7 +1134,9 @@ impl RequiredActionsList {
     ) -> AnyElement {
         let id = row.request_id.clone();
         let open = row.resolution.is_none();
-        let info_open = self.info_open.contains(&id);
+        let is_rule_proposal = row.text.starts_with("Review proposed approval rule: ");
+        let approval_rule = proposed_approval_rule(&row);
+        let info_open = self.info_open.contains(&id) || is_rule_proposal;
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
         let busy = self.in_flight.contains(&id);
         let attention = chips::attention_color(theme);
@@ -1256,7 +1360,7 @@ impl RequiredActionsList {
                 .items_center()
                 .gap(px(4.0))
                 .child(div().flex_1())
-                .when(row.info.is_some(), |el| {
+                .when(row.info.is_some() && !is_rule_proposal, |el| {
                     let toggle = id.clone();
                     el.child(
                         Self::button(
@@ -1313,11 +1417,14 @@ impl RequiredActionsList {
                         UserActionKind::Approve | UserActionKind::Review | UserActionKind::Handoff
                     ) {
                         let approve_id = id.clone();
+                        let proposed = approval_rule.clone();
+                        let proposed_row = row.clone();
+                        let can_approve = !busy && (!is_rule_proposal || proposed.is_some());
                         el = el.child(
                             Self::button(
                                 SharedString::from(format!("required-actions-approve-{id}")),
-                                "Approve",
-                                !busy,
+                                if is_rule_proposal { "Accept rule" } else { "Approve" },
+                                can_approve,
                                 theme,
                             )
                             .when(true, |el| crate::surface_chrome::confirm_key(el, theme))
@@ -1327,12 +1434,12 @@ impl RequiredActionsList {
                             })
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
-                                    this.decide(
-                                        approve_id.clone(),
-                                        "approved".into(),
-                                        String::new(),
-                                        cx,
-                                    )
+                                    if !can_approve { return; }
+                                    if let Some(rule) = &proposed {
+                                        this.accept_approval_proposal(proposed_row.clone(), rule.clone(), cx);
+                                    } else {
+                                        this.decide(approve_id.clone(), "approved".into(), String::new(), cx)
+                                    }
                                 },
                             )),
                         );
@@ -1973,7 +2080,8 @@ impl RequiredActionsList {
         let now = chrono::Utc::now();
         let history_count = rows.resolved.len();
         let mut body = div().flex().flex_col().gap(px(2.0));
-        if rows.open.is_empty() {
+        let pending = self.pending_command_approvals(cx);
+        if rows.open.is_empty() && pending.is_empty() {
             body = body.child(
                 div()
                     .debug_selector(|| "required-actions-empty".into())
@@ -1982,6 +2090,35 @@ impl RequiredActionsList {
                     .text_color(theme.text_faint)
                     .child("Nothing needs you right now"),
             );
+        }
+        for (space_id, request_id, chat_id, question) in pending {
+            let rule_space = space_id.clone();
+            let rule_request = request_id.clone();
+            let rule_question = question.clone();
+            let id = derive_id(&request_id, &question.id);
+            let selector = format!("approval-card-{id}");
+            let prefill_selector = format!("approval-prefill-{id}");
+            let save_selector = format!("approval-save-{id}");
+            let mut card = div().debug_selector(move || selector.clone()).flex().flex_col().gap(px(4.0))
+                .px(px(6.0)).py(px(4.0)).border_1().border_color(theme.border)
+                .child(div().text_color(theme.text).child("Approve command"))
+                .child(div().text_color(theme.text_muted).child(SharedString::from(question.question.clone())))
+                .child(Self::button(SharedString::from(format!("approval-open-{id}")), "Open chat", true, theme)
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(RequiredActionsEvent::OpenChat(chat_id.clone())))))
+                .child(Self::button(SharedString::from(format!("approval-prefill-{id}")), "Always allow commands like this…", true, theme)
+                    .debug_selector(move || prefill_selector.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.prefill_pending_approval(rule_space.clone(), rule_request.clone(), rule_question.clone(), cx))));
+            if self.approval_draft.as_ref().is_some_and(|(_, draft_request, draft_question, _)| draft_request == &request_id && draft_question == &question.id) {
+                let cwd = self.approval_draft.as_ref().and_then(|(_, _, _, rule)| rule.cwd_scope.clone()).unwrap_or_else(|| "Any permitted directory".into());
+                card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Scope: {cwd}"))))
+                    .child(self.approval_label_input.clone()).child(self.approval_prefix_input.clone())
+                    .child(Self::button(SharedString::from(format!("approval-save-{id}")), "Save and enable", true, theme)
+                        .debug_selector(move || save_selector.clone())
+                        .on_click(cx.listener(|this, _, _, cx| this.save_pending_approval(cx))))
+                    .child(Self::button(SharedString::from(format!("approval-cancel-{id}")), "Cancel", true, theme)
+                        .on_click(cx.listener(|this, _, _, cx| { this.approval_draft = None; cx.notify(); })));
+            }
+            body = body.child(card);
         }
         // Grouped Blocking → Ready to merge → FYI (rows arrive sorted that
         // way); a heading with its count opens each group that has rows.
@@ -2178,7 +2315,7 @@ impl Render for RequiredActionsList {
                 .debug_selector(|| "required-actions-list".into())
                 .child(self.render_body(rows, &theme, window, cx));
         }
-        let count = rows.open.len();
+        let count = rows.open.len() + self.pending_command_approvals(cx).len();
         let close = div()
             .id("required-actions-close")
             .debug_selector(|| "required-actions-close".into())

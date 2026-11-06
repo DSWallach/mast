@@ -1977,6 +1977,7 @@ fn elicitation_question(params: &Value) -> UserInputQuestion {
         .map(|schema| format!("\nRequested form: {schema}"))
         .unwrap_or_default();
     UserInputQuestion {
+        command_approval: None,
         allow_custom: false,
         id: new_message_id(),
         header: "MCP server request".into(),
@@ -2008,6 +2009,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                 if id.is_empty() { format!("q{ix}") } else { id }
             };
             let question = UserInputQuestion {
+                command_approval: None,
                 allow_custom: false,
                 id: new_message_id(),
                 header: {
@@ -2131,6 +2133,18 @@ fn approval_question(
         question.push_str(&format!(" Reason: {reason}"));
     }
     UserInputQuestion {
+        command_approval: if method.contains("commandExecution") {
+            params.get("command")
+                .filter(|command| command.is_string() || command.is_array())
+                .map(|command| mast_proto::CommandApproval {
+                    command: command.clone(),
+                    cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
+                    reason: reason.map(str::to_owned),
+                    sandbox_permissions: params.get("sandboxPermissions").cloned(),
+                })
+        } else {
+            None
+        },
         allow_custom: false,
         id: new_message_id(),
         header: if from_subagent {
@@ -2338,6 +2352,17 @@ mod tests {
             false,
         );
         assert!(q.question.contains("git push --force"));
+        assert_eq!(q.command_approval.unwrap().command, json!(["git", "push", "--force"]));
+
+        let q = approval_question(
+            "item/commandExecution/requestApproval",
+            &json!({"command": ["cargo", "test"], "cwd": "/w", "reason": "sandbox", "sandboxPermissions": "require_escalated"}),
+            &[], false,
+        );
+        let details = q.command_approval.unwrap();
+        assert_eq!(details.cwd.as_deref(), Some("/w"));
+        assert_eq!(details.reason.as_deref(), Some("sandbox"));
+        assert_eq!(details.sandbox_permissions, Some(json!("require_escalated")));
     }
 
     #[test]

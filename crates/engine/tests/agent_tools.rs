@@ -54,6 +54,8 @@ struct GatedHarness {
     release: Arc<Notify>,
     questions: Arc<Mutex<Vec<mast_proto::UserInputQuestion>>>,
     events: Arc<Mutex<Vec<AgentEvent>>>,
+    fake_codex: bool,
+    answers: Arc<Mutex<Vec<Vec<mast_proto::UserInputAnswer>>>>,
 }
 
 impl GatedHarness {
@@ -85,7 +87,7 @@ impl GatedHarness {
 #[async_trait]
 impl Harness for GatedHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        if self.fake_codex { HarnessId::Codex } else { HarnessId::Mock }
     }
     fn display_name(&self) -> &str {
         "Gated"
@@ -132,7 +134,8 @@ impl Harness for GatedHarness {
         let questions = self.questions.lock().unwrap().clone();
         if !questions.is_empty() {
             let answer = (controls.request_input)(questions);
-            tokio::spawn(async move { let _ = answer.await; });
+            let answers = self.answers.clone();
+            tokio::spawn(async move { if let Ok(answer) = answer.await { answers.lock().unwrap().push(answer); } });
         }
         self.spawns.lock().unwrap().push(Spawn::WithTools {
             prompt: request.prompt.clone(),
@@ -154,11 +157,15 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_for(false).await
+}
+
+async fn rig_for(fake_codex: bool) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let space_path = root.join("project");
     std::fs::create_dir_all(&space_path).unwrap();
-    let harness = GatedHarness::default();
+    let harness = GatedHarness { fake_codex, ..Default::default() };
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness.clone()));
     let core = EngineCore::assemble(
@@ -2195,6 +2202,7 @@ async fn project_destination_worker_prompt_wakes_without_watcher_delay() {
     );
     wakes.ingest_worker_signal(mast_engine::sessions::WorkerSignal::Input {
         chat_id: OTHER_CHAT.into(), input: mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion {
+            command_approval: None,
             allow_custom: false,
             id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false,
         }] },
@@ -3858,6 +3866,23 @@ async fn friction_captures_live_run_harness() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn approval_rule_proposal_only_creates_a_review_request() {
+    let rig = rig().await;
+    let root = create_item(&rig, "proposal-root", "Root", None).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let token = tokens.mint(CHAT, "proposal-run", SPACE, &rig.core.device_id);
+    tool(&rig, token.token(), "work_outline_associate_current_chat", json!({"workItemId": root, "idempotencyKey": "proposal-associate"})).await.unwrap();
+    let result = tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Rust tests", "argvPrefix": ["cargo", "test"], "harness": "codex", "idempotencyKey": "proposal-rule"
+    })).await.unwrap();
+    assert!(result["userActionRequestId"].is_string());
+    let snapshot = snapshot(&rig);
+    assert!(snapshot.space_settings.approval_rules.is_empty());
+    assert!(snapshot.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_tool_failures_and_can_be_disabled() {
     let rig = rig().await;
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
@@ -3886,7 +3911,7 @@ async fn friction_captures_tool_failures_and_can_be_disabled() {
 #[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_approval_and_answer() {
     let rig = rig().await;
-    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { command_approval: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
     let mut signals = rig.core.sessions.watch_worker_signals();
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
     let input = loop {
@@ -3902,6 +3927,43 @@ async fn friction_captures_approval_and_answer() {
     let rows = rig.core.workspace.friction_reports(SPACE);
     assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(false));
     assert_eq!(rows[0].occurrences, 1);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_rule_answers_fake_codex_without_worker_wake() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let rule = ApprovalRule {
+        id: "rule-1".into(), label: "Tests".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: vec!["cargo".into(), "test".into()],
+        command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "approval-rule".into(),
+    }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    rig.core.sessions.set_auto_capture_friction(false);
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    let mut command = run_command("test", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut command { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, command).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "automatic answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(signals.try_recv().is_err());
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].summary.contains("Auto-approved by rule rule-1"));
+    assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(true));
+    let inputs = rig.core.workspace.work_outline_inputs(SPACE);
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &inputs);
+    assert_eq!(snapshot.space_settings.approval_rules[0].hit_count, 1);
+    assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
 }

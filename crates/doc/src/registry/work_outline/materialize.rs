@@ -92,6 +92,8 @@ pub struct WorkOutlineInputs {
     pub instruction_proposals: Vec<RegistryRow>,
     /// The Space's live `workOutlineSpaceSettings` row (Linear), if any.
     pub space_settings: Option<RegistryRow>,
+    pub approval_rules: Vec<RegistryRow>,
+    pub approval_audit: Vec<mast_proto::FrictionReport>,
     /// Live `workItemTemplates` rows of this Space (project templates).
     pub templates: Vec<RegistryRow>,
 }
@@ -1008,7 +1010,21 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         execution_exceptions: execution.exceptions,
         user_action_requests: user_actions.requests,
         instruction_proposals: user_actions.proposals,
-        space_settings: super::linear::decode_space_settings(inputs.space_settings.as_ref()),
+        space_settings: {
+            let mut settings = super::linear::decode_space_settings(inputs.space_settings.as_ref());
+            settings.approval_rules = super::pr_review_sync::decode_approval_rules(&inputs.approval_rules, space_id);
+            for report in &inputs.approval_audit {
+                if report.provenance.source != mast_proto::FrictionSource::Auto || !report.approval.as_ref().is_some_and(|approval| approval.answer == Some(true)) { continue; }
+                let Some(ids) = report.summary.strip_prefix("Auto-approved by rule ") else { continue; };
+                for rule in &mut settings.approval_rules {
+                    if ids.split(", ").any(|id| id == rule.id) {
+                        rule.hit_count = rule.hit_count.saturating_add(report.occurrences);
+                        rule.last_used_at = Some(rule.last_used_at.unwrap_or(i64::MIN).max(report.last_seen));
+                    }
+                }
+            }
+            settings
+        },
         templates,
     }
 }
