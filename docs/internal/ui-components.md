@@ -1144,3 +1144,18 @@ Mechanical inventory at `4dc1911d`: each line contains an inline `div()`, radius
 
 The remaining detail sub-surfaces represented by that index include execution
 validation, exceptions, binding and editor controls (`work_outline/details_execution.rs:582,685,767,896,1076,1171`); friction (`details_friction.rs:233`); Linear links and setup (`details_linear.rs:343,531,575`); PR sync (`details_pr_sync.rs:103,275,347`); artifacts and their menu (`details_artifacts.rs:282,524`); conversion (`details_convert.rs:204`); template review (`details_template_review.rs:283,377`); and instruction revision comparisons (`revision_diff.rs:96,179,248`). The renderer and its children should be checked together: section wrappers are not evidence that their rows or controls already use a component.
+
+### Convergence triage
+
+The index above records all presentation expressions at `4dc1911d`; subsequent
+commits moved the style-sensitive outline and item-detail controls into
+`components/outline_parts.rs`. The remaining indexed expressions stay literal,
+in the baseline: structural flex containers and spacers (geometry controlled by
+the parent component), data-dependent text and semantic colors (content rather
+than an appearance selection), tooltip plumbing and event hit targets, and
+Overview chat/canvas renderers outside the requested item-panel surfaces. The
+index includes tests embedded in production files. These are not claims that
+all inline expressions were eliminated; future migrations can reduce the
+ratchet further. A direct scan of the owned production files found no branches
+on `UiStyleId`, `UiLayout`, or the appearance control, surface, status,
+conversation, and behavior variants.

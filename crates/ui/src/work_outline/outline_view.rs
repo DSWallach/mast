@@ -439,18 +439,7 @@ struct OutlineDragGhost {
 impl Render for OutlineDragGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        div()
-            .max_w(px(260.0))
-            .px(px(8.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text)
-            .truncate()
-            .child(self.title.clone())
+        crate::components::outline_drag_preview(self.title.clone(), theme)
     }
 }
 
@@ -2590,18 +2579,7 @@ impl OutlineView {
             &keymap,
             HintKey::Command(super::command::WorkOutlineCommand::CreateWorkItem),
         );
-        div()
-            .debug_selector(|| "outline-first-use".into())
-            .flex_none()
-            .mx(px(14.0))
-            .my(px(6.0))
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.0))
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.text_muted)
-            .child("No work items yet \u{2014} group Chats and share instructions under one.")
+        crate::components::outline_first_use(theme)
             .child(
                 crate::components::outline_first_use_button("outline-first-use-create", true, theme)
                     .child("Create work item")
@@ -2660,19 +2638,7 @@ impl OutlineView {
     }
 
     fn editor_box(&self, submitting: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex_1()
-            .min_w_0()
-            .h(px(20.0))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.accent)
-            .bg(theme.surface)
-            .overflow_hidden()
-            .when(submitting, |el| el.opacity(0.6))
+        crate::components::outline_editor_frame(submitting, theme)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "enter" => {
@@ -3260,18 +3226,7 @@ impl OutlineView {
         let placement = matches!(picker.purpose, PickerPurpose::Move { .. }).then(|| {
             let chip = |label: &'static str, first: bool, cx: &mut Context<Self>| {
                 let active = picker.place_first == first;
-                let selector = format!("outline-picker-place-{}", label.to_lowercase());
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .px(px(6.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .when(active, |el| {
-                        el.bg(theme.element_active).text_color(theme.text)
-                    })
-                    .when(!active, |el| el.hover(|el| el.bg(theme.element_hover)))
-                    .child(label)
+                crate::components::outline_picker_place(label, active, theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_picker_place_first(first, cx);
                     }))
@@ -3298,47 +3253,15 @@ impl OutlineView {
         });
         let rows = picker.entries.iter().enumerate().map(|(ix, entry)| {
             let active = ix == picker.active;
-            div()
-                .id(("outline-picker-entry", ix))
-                .debug_selector(move || format!("outline-picker-entry-{ix}"))
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .pl(px(8.0 + entry.depth as f32 * 12.0))
-                .pr(px(8.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text)
-                .when(active, |el| el.bg(theme.element_active))
-                .hover(|el| el.bg(theme.element_hover))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(entry.label.clone())),
-                )
+            crate::components::outline_picker_entry(ix, entry.depth, entry.label.clone(), active, theme)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.choose_picker_entry(ix, window, cx);
                 }))
         });
         Some(
-            div()
-                .id("outline-picker")
-                .debug_selector(|| "outline-picker".into())
+            crate::components::outline_picker(theme)
                 .key_context(PICKER_KEY_CONTEXT)
                 .track_focus(&self.picker_focus)
-                .mx(px(8.0))
-                .mb(px(6.0))
-                .p(px(6.0))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.surface_raised)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                     this.picker_key(event, window, cx);
                 }))
