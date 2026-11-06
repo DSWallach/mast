@@ -9099,7 +9099,7 @@ mod logic_tests {
     fn outline_mode_survives_a_fresh_overview(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (first, state, vcx) = outline_overview(cx, dir.path());
-        first.update(vcx, |o, cx| o.set_mode(OverviewMode::Outline, cx));
+        first.update(vcx, |o, cx| o.view_prefs_changed(cx));
         let flags =
             overview_positions::load_string_set(dir.path(), overview_positions::UI_FLAGS_FILE);
         assert!(flags.contains(VIEW_OUTLINE_FLAG));
