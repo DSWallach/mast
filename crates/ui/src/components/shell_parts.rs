@@ -800,6 +800,88 @@ pub(crate) fn header_icon_button(
         })
 }
 
+pub(crate) fn rail_tick(
+    theme: &Theme,
+    index: usize,
+    slot: f32,
+    active: bool,
+    hovered: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let color = if active || hovered {
+        theme.text.opacity(0.8)
+    } else {
+        crate::theme::ink(0.16)
+    };
+    let width = if hovered { 20.0 } else { 12.0 };
+    div()
+        .id(("rail-tick", index))
+        .relative()
+        .h(px(slot))
+        .w_full()
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .child(
+            div()
+                .h(px(2.0))
+                .w(px(width))
+                .rounded(px(1.0))
+                .bg(color)
+                .when(super::is_area(theme), |el| {
+                    el.h(px(4.0)).rounded_full().bg(if active {
+                        theme.identity_color("")
+                    } else {
+                        color
+                    })
+                })
+                .when(super::is_industrial(theme), |el| {
+                    el.rounded(px(0.0)).bg(if active {
+                        theme.industrial_colors().signal
+                    } else {
+                        theme.industrial_colors().rule
+                    })
+                }),
+        )
+}
+
+pub(crate) fn rail_preview(
+    theme: &Theme,
+    prompt: String,
+    reply: Option<String>,
+    bucket_len: usize,
+) -> AnyElement {
+    let theme = theme.for_popup();
+    let card = crate::popover::popover_card(&theme)
+        .w(px(280.0))
+        .p(px(Theme::SPACE_SM))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text)
+                .child(SharedString::from(prompt)),
+        )
+        .when_some(reply, |el, reply| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(reply)),
+            )
+        })
+        .when(bucket_len > 1, |el| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("{bucket_len} prompts"))),
+            )
+        });
+    crate::frost::frosted(12.0, crate::frost::MENU_BLUR, card).into_any_element()
+}
+
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
 
 /// A Windows-owned caption target using the same system glyphs and native
