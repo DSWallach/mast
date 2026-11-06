@@ -1028,9 +1028,22 @@ unknown ids instead of denying.
     MCP mutation, item control and row chip. Once Mikey restarts, set phase 0 item 9516dd7c to wait until 11-12.
   - `coworker-docs`: guides for the walkthrough, Needs-you, hand-off, templates, friction and the menu bar;
     first-run and accounts wording; the DMG hand-off; dev reports moved to docs/internal. Docs only.
-- Release runs 50–52 passed (last one: nextest 2404/2404, UI 2511/0).
-- Still building: 4c-1 `review-this-work` (5ee440aa), 4c-2 `review-explain` (13355503), UI styles slice 1
-  `ui-styles` (c120915e; default "minimal" = identity, Dense opt-in; rolls back by reverting).
+  - `ui-styles` (slice 1) + `ui-styles-guided` (slice 2): `uiStyle` setting (Settings → Appearance → Style),
+    default Minimal = identity. Dense: scaled type/rows/headers, persistent hover actions, labels, key hints.
+    Guided: labels and 32 px controls on selected headers/toolbars/sidebar/composer, status words, filled primary
+    actions, dismissible help cards (`dismissedHelpCards`), walkthrough guidance; narrow toolbars truncate labels
+    with tooltips. Follow-ups are item a59a87bc: full icon-button audit, true icon-only collapse, titlebar and
+    diff-gutter controls. Mikey hasn't seen it yet; revert the two merges if he doesn't want it.
+  - `review-this-work` (PR review 4c-1): "Review this work" on worker chats/items (sidebar, Team, item details)
+    resolves the local base/ahead range, opens Start Chat in branch-review mode (model/account) and reuses an
+    existing review.
+  - `review-explain` (4c-2): select diff lines (unified/split, drag or shift-click) or press `e` → Explain; the
+    question goes to the matching review chat, else the owning chat (queued if busy), and the reply shows inline
+    with Open in chat. "Ask about this step" in the walkthrough. A live agent round trip is untested.
+- Release runs 50–55 passed (last: nextest 2405/2405, UI 2542/0). Run 54 failed two load-sensitive tests
+  (`message_queue::queued_text_waits_for_a_steerable_turn_even_with_legacy_policy`,
+  `executable::tests::stderr_versions_are_read_and_build_metadata_does_not_break_ties`) while worker builds ran
+  alongside. Both pass alone 3/3 and in run 55; quarantine them if they recur.
 - For Mikey's morning review (Required Actions): workflow pack (mast-artifact:771f405aaf35fc7192f309027ced0a95),
   coworker readiness (mast-artifact:0497fc4075db3cd988c9c69f8e08d6de; decisions: clean-Mac tester, ad-hoc vs
   notarised DMG, delete the stale `archive/ios` + `audit-*` origin branches), UI styles
