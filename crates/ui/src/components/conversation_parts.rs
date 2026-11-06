@@ -4,6 +4,26 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_tool_header(
+    activity: bool,
+    height: f32,
+    text_size: f32,
+    line_height: f32,
+) -> Div {
+    div()
+        .group("tool-header")
+        .h(px(height))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(if activity { 0.0 } else { 8.0 }))
+        .text_size(px(text_size))
+        .line_height(px(line_height))
+}
+
 pub fn conversation_error_chip(theme: &Theme, message: SharedString) -> AnyElement {
     div()
         .py(px(4.0))

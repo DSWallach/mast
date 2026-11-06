@@ -8040,22 +8040,11 @@ fn chip_header_row(
     } else {
         theme.text_muted
     };
-    div()
-        .group("tool-header")
-        .h(px(if activity {
+    crate::components::conversation_tool_header(activity, if activity {
             CHIP_CARD_HEIGHT
         } else {
             CHIP_HEADER_HEIGHT
-        }))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(if activity { 0.0 } else { 8.0 }))
-        .text_size(px(TOOL_LABEL_SIZE))
-        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        }, TOOL_LABEL_SIZE, TOOL_LABEL_LINE_HEIGHT)
         .when(!activity, |row| {
             row.child(
                 // Subagent icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
