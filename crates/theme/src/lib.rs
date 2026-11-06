@@ -847,6 +847,17 @@ mod tests {
     }
 
     #[test]
+    fn industrial_uses_one_signal_color() {
+        let signal: Color = "#fe4b25".parse().unwrap();
+        for id in ["industrial-light", "industrial-dark"] {
+            let variant = ThemeRegistry::builtin().variant(id).unwrap();
+            assert_eq!(variant.accent.activity, signal);
+            assert_ne!(variant.colors.danger, signal);
+            assert!(variant.syntax.values().all(|color| *color != signal));
+        }
+    }
+
+    #[test]
     fn visual_fixture_matrix_covers_every_variant_and_scene() {
         let registry = ThemeRegistry::builtin();
         let variants = registry

@@ -317,13 +317,13 @@ fn industrial(dark: bool) -> ThemeVariant {
         muted,
         faint: muted,
         accent: "#fe4b25",
-        danger: "#fe4b25",
+        danger: text,
         warning: muted,
         success: muted,
         terminal_background: background,
         ansi,
         syntax: [
-            muted, text, text, text, text, text, text, text, muted, text, text, "#fe4b25",
+            muted, text, text, text, text, text, text, text, muted, text, text, text,
         ],
         source: source(
             id,
