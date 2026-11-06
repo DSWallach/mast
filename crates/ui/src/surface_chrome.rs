@@ -28,12 +28,14 @@ pub(crate) fn segmented_key<T: gpui::Styled + gpui::ParentElement>(element: T, t
 }
 
 /// Circular key with a recessed inner ring for icon-only actions.
-pub(crate) fn icon_key<T: gpui::Styled + gpui::ParentElement>(element: T, theme: &Theme, signal: bool) -> T {
+pub(crate) fn icon_key<T: gpui::Styled + gpui::ParentElement + gpui::StatefulInteractiveElement>(element: T, theme: &Theme, signal: bool) -> T {
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         let colors = theme.industrial_colors();
         let fill = if signal { colors.signal } else { colors.key };
         let ring = crate::theme::flatten(theme.text.opacity(0.18), fill);
+        let pressed = if signal { gpui::hsla(fill.h, fill.s, fill.l * 0.8, fill.a) } else { colors.pressed };
         element.rounded_full().bg(fill).border_1().border_color(colors.rule).relative()
+            .active(move |style| style.bg(pressed))
             .child(div().absolute().inset(px(3.0)).rounded_full().border_1().border_color(ring))
     } else { element }
 }
