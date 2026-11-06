@@ -4,6 +4,49 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_footer_slot(
+    height: f32,
+    bottom_slot: f32,
+    new_opacity: f32,
+    session_opacity: f32,
+    new_selectors: Option<AnyElement>,
+    footer: Option<AnyElement>,
+    usage: Option<AnyElement>,
+) -> Div {
+    div()
+        .w_full()
+        .h(px(height * bottom_slot))
+        .mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
+        .mb(px(-Theme::SPACE_SM * bottom_slot))
+        .relative()
+        .when(new_opacity > 0.0, |slot| {
+            slot.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .opacity(new_opacity)
+                    .children(new_selectors),
+            )
+        })
+        .when(session_opacity > 0.0, |slot| {
+            slot.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .w_full()
+                    .h(px(height))
+                    .flex()
+                    .items_center()
+                    .opacity(session_opacity)
+                    .child(div().flex_1().min_w_0().children(footer))
+                    .children(usage.map(|content| div().flex_none().pr(px(10.0)).child(content))),
+            )
+        })
+}
+
 pub fn conversation_tool_detail_frame() -> Div {
     div().w_full().min_w_0().flex().flex_col().overflow_hidden()
 }

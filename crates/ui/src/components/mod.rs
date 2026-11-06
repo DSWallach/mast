@@ -12,7 +12,7 @@ pub use conversation_parts::{
     conversation_code_icon_action, conversation_code_theme,
     conversation_code_token_color, conversation_column, conversation_composer_body,
     conversation_composer_content_height, conversation_composer_expanded,
-    conversation_composer_text_size, conversation_composer_width, conversation_error_chip,
+    conversation_composer_text_size, conversation_composer_width, conversation_error_chip, conversation_footer_slot,
     conversation_harness_tab, conversation_harness_tabs, conversation_input_surface,
     conversation_input_text_color,
     conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,

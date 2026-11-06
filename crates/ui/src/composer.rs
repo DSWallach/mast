@@ -8843,48 +8843,13 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let usage = self.state.read(cx).context_usage;
-            container.child(
-                div()
-                    .w_full()
-                    .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
-                    .mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
-                    .mb(px(-Theme::SPACE_SM * bottom_slot))
-                    .relative()
-                    .when(new_thread_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .px(px(10.0))
-                                .flex()
-                                .items_center()
-                                .opacity(new_thread_chrome_opacity)
-                                .children(new_thread_git_selectors),
-                        )
-                    })
-                    .when(session_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .w_full()
-                                .h(px(SESSION_FOOTER_HEIGHT))
-                                .flex()
-                                .items_center()
-                                .opacity(session_chrome_opacity)
-                                .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .children(crate::context_usage::has_window(usage).then(|| {
-                                    div().flex_none().pr(px(10.0)).child(
-                                        crate::context_usage::render(
-                                            usage,
-                                            self.state.clone(),
-                                            &theme,
-                                        ),
-                                    )
-                                })),
-                        )
-                    }),
-            )
+            let usage = (session_chrome_opacity > 0.0 && crate::context_usage::has_window(usage)).then(||
+                crate::context_usage::render(usage, self.state.clone(), &theme).into_any_element());
+            container.child(crate::components::conversation_footer_slot(
+                SESSION_FOOTER_HEIGHT, bottom_slot, new_thread_chrome_opacity, session_chrome_opacity,
+                new_thread_git_selectors.map(|el| el.into_any_element()),
+                footer.flatten().map(|el| el.into_any_element()), usage,
+            ))
         } else {
             container
         };
