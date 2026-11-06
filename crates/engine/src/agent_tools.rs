@@ -1285,6 +1285,8 @@ impl AgentToolsService {
                     "title": child.title,
                     "status": child.status,
                     "effectiveStatus": child.effective_status,
+                    "waitingUntil": child.waiting_until,
+                    "waitingReason": child.waiting_reason,
                 })
             })
             .collect();
@@ -1298,6 +1300,8 @@ impl AgentToolsService {
                 "description": item.description,
                 "status": item.status,
                 "effectiveStatus": item.effective_status,
+                "waitingUntil": item.waiting_until,
+                "waitingReason": item.waiting_reason,
                 "parentWorkItemId": item.parent_work_item_id,
                 "archived": item.archived_at.is_some(),
                 "path": path,
@@ -2445,6 +2449,8 @@ impl SubtreeWalk<'_> {
             "title": item.title,
             "status": item.status,
             "effectiveStatus": item.effective_status,
+            "waitingUntil": item.waiting_until,
+            "waitingReason": item.waiting_reason,
             "chats": chats.0,
             "openUserActionRequests": open
                 .iter()
