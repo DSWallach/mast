@@ -701,27 +701,7 @@ impl WorkItemDetails {
                 .unwrap_or_default();
             let count = group.proposals.len();
             let selector = format!("work-item-proposal-group-{instruction_id}");
-            column = column
-                .debug_selector(move || selector.clone())
-                .pl(px(14.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(if count > 1 {
-                            format!("Instruction \u{b7} {count} proposed changes")
-                        } else {
-                            "Instruction".to_owned()
-                        })),
-                )
-                .child(
-                    div()
-                        .max_h(px(54.0))
-                        .overflow_hidden()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(current)),
-                );
+            column = crate::components::outline_proposal_summary(selector, count, current, theme);
         }
         for proposal in &group.proposals {
             column = column.child(self.render_pending_proposal(
@@ -745,12 +725,7 @@ impl WorkItemDetails {
         let rationale = proposal.rationale.as_deref().filter(|r| !r.is_empty())?;
         let selector = format!("work-item-proposal-rationale-{}", proposal.id);
         Some(
-            div()
-                .debug_selector(move || selector.clone())
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_muted)
-                .italic()
-                .child(SharedString::from(format!("Why: {rationale}")))
+            crate::components::outline_proposal_rationale(selector, rationale.to_owned(), theme)
                 .into_any_element(),
         )
     }
@@ -772,13 +747,8 @@ impl WorkItemDetails {
                 proposal_diff::word_diff(runs_from, &proposal.text)
             }
         };
-        let mut body = div().flex().flex_col().gap(px(3.0));
-        let label = |text: &'static str| {
-            div()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child(text)
-        };
+        let mut body = crate::components::outline_proposal_body(theme);
+        let label = |text: &'static str| crate::components::outline_execution_line(text.into(), 10.0, theme.text_faint, theme);
         match standing {
             Standing::Current => {
                 body = body.child(crate::components::outline_proposal_diff(

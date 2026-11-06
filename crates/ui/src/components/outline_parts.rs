@@ -2291,6 +2291,49 @@ pub fn outline_instruction_excerpt(index: usize, excerpt: String, theme: &Theme)
         .child(SharedString::from(excerpt))
 }
 
+/// Summary of the instruction a proposal group changes.
+pub fn outline_proposal_summary(
+    selector: String,
+    count: usize,
+    current: String,
+    theme: &Theme,
+) -> Div {
+    outline_detail_section(theme)
+        .debug_selector(move || selector.clone())
+        .pl(px(14.0))
+        .child(outline_secondary_text(
+            if count > 1 {
+                format!("Instruction · {count} proposed changes")
+            } else {
+                "Instruction".into()
+            },
+            theme,
+        ))
+        .child(
+            div()
+                .max_h(px(54.0))
+                .overflow_hidden()
+                .text_size(crate::typography::ui_rems(
+                    11.5 + super::layout_type_adjustment(theme),
+                ))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(current)),
+        )
+}
+pub fn outline_proposal_rationale(selector: String, rationale: String, theme: &Theme) -> Div {
+    outline_secondary_text(format!("Why: {rationale}"), theme)
+        .debug_selector(move || selector.clone())
+        .italic()
+}
+
+/// Body of a proposal modification.
+pub fn outline_proposal_body(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0 * super::layout_spacing(theme)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
