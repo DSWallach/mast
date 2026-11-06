@@ -3487,9 +3487,7 @@ fn item_body(
             let date = chrono::DateTime::from_timestamp_millis(until)
                 .map(|date| date.with_timezone(&chrono::Local).format("%b %-d").to_string())
                 .unwrap_or_default();
-            el.child(div().debug_selector(|| "work-item-waiting-chip".into())
-                .flex_none().text_size(crate::typography::ui_rems(9.5)).text_color(theme.text_muted)
-                .child(SharedString::from(if due { format!("due · {date}") } else { format!("waiting · {date}") })))
+            el.child(crate::components::outline_waiting_chip(if due { format!("due · {date}") } else { format!("waiting · {date}") }, theme))
         })
         .when_some(
             chips::attention_indicator(
@@ -3530,18 +3528,7 @@ fn item_body(
         )
         .when(item.follows_template && !item.archived, |el| {
             el.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "outline-follows-template-{key}"
-                    )))
-                    .debug_selector({
-                        let selector = format!("outline-follows-template-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child("\u{25c7}")
+                crate::components::outline_glyph_marker(SharedString::from(format!("outline-follows-template-{key}")), "◇", theme)
                     .hint("Follows its parent\u{2019}s child template", HintKey::None),
             )
         })
@@ -3549,24 +3536,7 @@ fn item_body(
             item.chat_count > 0 && !compact_pr && item.compact_chat.is_none(),
             |el| {
                 el.child(
-                    div()
-                        .id(SharedString::from(format!("outline-chats-{key}")))
-                        .debug_selector({
-                            let selector = format!("outline-chats-{key}");
-                            move || selector.clone()
-                        })
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.text_faint)
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(10.0))
-                                .text_color(theme.text_faint),
-                        )
-                        .child(SharedString::from(item.chat_count.to_string()))
+                    crate::components::outline_count_marker(SharedString::from(format!("outline-chats-{key}")), crate::icons::CHAT_ROUND_LINE, item.chat_count.to_string(), theme.text_faint, theme)
                         .tooltip(move |_, cx| cx.new(|_| TextTooltip(chats_tip.clone())).into()),
                 )
             },
@@ -3574,43 +3544,13 @@ fn item_body(
         .when(item.execution_exceptions > 0, |el| {
             let tip = super::execution::exception_tooltip(item.execution_exceptions as usize);
             el.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "outline-execution-exceptions-{key}"
-                    )))
-                    .debug_selector({
-                        let selector = format!("outline-execution-exceptions-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.accent)
-                    .child(
-                        crate::icons::icon(crate::icons::FOLDER_WITH_FILES)
-                            .size(px(10.0))
-                            .text_color(theme.accent),
-                    )
-                    .child(SharedString::from(item.execution_exceptions.to_string()))
+                crate::components::outline_count_marker(SharedString::from(format!("outline-execution-exceptions-{key}")), crate::icons::FOLDER_WITH_FILES, item.execution_exceptions.to_string(), theme.accent, theme)
                     .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
             )
         })
         .when(item.has_references && !compact_pr, |el| {
             el.child(
-                div()
-                    .id(SharedString::from(format!("outline-refs-{key}")))
-                    .debug_selector({
-                        let selector = format!("outline-refs-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .child(
-                        crate::icons::icon(crate::icons::GLOBAL)
-                            .size(px(10.0))
-                            .text_color(theme.text_faint),
-                    )
+                crate::components::outline_reference_marker(SharedString::from(format!("outline-refs-{key}")), theme)
                     .tooltip(|_, cx| {
                         cx.new(|_| TextTooltip("Has external references".into()))
                             .into()

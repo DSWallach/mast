@@ -1827,6 +1827,70 @@ pub fn outline_inline_action(
         .child(label)
 }
 
+/// Waiting date displayed in an outline row.
+pub fn outline_waiting_chip(label: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "work-item-waiting-chip".into())
+        .flex_none()
+        .text_size(crate::typography::ui_rems(
+            9.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(label))
+}
+
+/// Icon and count in an outline row.
+pub fn outline_count_marker(
+    id: SharedString,
+    icon: &'static str,
+    count: String,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(color)
+        .child(crate::icons::icon(icon).size(px(10.0)).text_color(color))
+        .child(SharedString::from(count))
+}
+
+/// Compact glyph marker in an outline row.
+pub fn outline_glyph_marker(id: SharedString, glyph: &'static str, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child(glyph)
+}
+
+/// External reference marker in an outline row.
+pub fn outline_reference_marker(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .child(
+            crate::icons::icon(crate::icons::GLOBAL)
+                .size(px(10.0))
+                .text_color(theme.text_faint),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
