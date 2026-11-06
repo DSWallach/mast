@@ -2,6 +2,23 @@
 
 This is a preliminary index of style-specific references, not a complete component or call-site inventory. Line numbers refer to integration commit `99e0cd38d`. References include declarations and comparisons, not just branches.
 
+## Target appearance model (not implemented yet)
+
+Style, layout, and theme are independent settings. Style selects element design:
+Default, Industrial, or Area. Layout selects density and guidance: Minimal,
+Compact, or Guided. Theme supplies semantic colours. Components must resolve
+look tokens and variants from style, density and guidance from layout, and
+colours from the selected theme; no pairing may be assumed. Screens must not
+branch on either style or layout. The planned lint must cover both.
+
+The existing `uiStyle` combines these axes. Migration must map `minimal` to
+Default + Minimal, `dense` to Default + Compact, `guided` to Default + Guided,
+`industrial` to Industrial + Minimal, and `area` to Area + Minimal, then
+persist separate `uiStyle` and `uiLayout` values. An explicit `uiLayout` must
+remain authoritative on subsequent loads. Appearance needs separate Style,
+Layout and Theme pickers. Gallery and preview need independent style and layout
+axes, including the requested gallery keys and `--layouts` preview option.
+
 ## Style-specific references
 
 - `crates/ui/src/appearance.rs:159`: `crate::ui_style::SurfaceModel::ThemeDefault => surface,`
