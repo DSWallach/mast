@@ -1726,6 +1726,8 @@ pub struct Shell {
     pr_review_ops: crate::pr_review_launch::PrReviewOperations,
     branch_review_ops: crate::branch_review_launch::BranchReviewOperations,
     branch_review_targets: std::collections::HashMap<String, mast_proto::ReviewTarget>,
+    branch_review_range_ids: std::collections::HashMap<String, String>,
+    branch_review_loads: std::collections::HashMap<String, uuid::Uuid>,
     branch_review_chats: std::collections::HashMap<String, String>,
     #[cfg(test)]
     branch_review_script: Option<pr_review_ui::PrReviewScript>,
@@ -2255,6 +2257,8 @@ impl Shell {
             pr_review_ops: Default::default(),
             branch_review_ops: Default::default(),
             branch_review_targets: Default::default(),
+            branch_review_range_ids: Default::default(),
+            branch_review_loads: Default::default(),
             branch_review_chats: Default::default(),
             #[cfg(test)]
             branch_review_script: None,

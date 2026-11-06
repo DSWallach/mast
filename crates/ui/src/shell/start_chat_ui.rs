@@ -139,7 +139,10 @@ impl StartChatDialog {
     }
 
     pub(super) fn can_start(&self, cx: &App) -> bool {
-        if self.pr.is_some() || self.branch_review.is_some() {
+        if self.branch_review.is_some() {
+            return !self.starting && self.pickers.read(cx).resolved(cx).chat_config().is_some_and(|config| config.model.as_deref().is_some_and(|model| !model.trim().is_empty()));
+        }
+        if self.pr.is_some() {
             return !self.starting;
         }
         !self.starting
@@ -484,7 +487,7 @@ impl Shell {
 
     fn submit_start_branch_review(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.start_chat_dialog() else { return; };
-        if dialog.starting { return; }
+        if !dialog.can_start(cx) { return; }
         let Some(branch) = dialog.branch_review.clone() else { return; };
         let space_id = dialog.space_id.clone();
         let item_id = (!dialog.item_id.is_empty()).then(|| dialog.item_id.clone());

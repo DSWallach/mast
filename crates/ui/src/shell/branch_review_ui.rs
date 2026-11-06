@@ -8,14 +8,8 @@ impl Shell {
         target: &mast_proto::ReviewTarget,
         cx: &App,
     ) -> Option<String> {
-        let mast_proto::ReviewTarget::Branch {
-            checkout_path: Some(path),
-            branch: Some(branch),
-            ..
-        } = target
-        else {
-            return None;
-        };
+        let expected_id = self.branch_review_range_ids.get(worker_id)?;
+        let legacy_id = expected_id.strip_prefix("review-").unwrap_or(expected_id);
         let state = self.state.read(cx);
         let space_id = state
             .chats
@@ -27,7 +21,13 @@ impl Shell {
             .branch_review_chats
             .get(&format!("{space_id}\0{}", target.state_key()))
         {
-            return Some(chat_id.clone());
+            if !state
+                .chats
+                .iter()
+                .any(|chat| chat.id == *chat_id && chat.archived)
+            {
+                return Some(chat_id.clone());
+            }
         }
         state
             .chats
@@ -37,16 +37,27 @@ impl Shell {
                     && !chat.archived
                     && chat.space_id.as_deref() == Some(space_id)
                     && state.chat_ref_targets(&chat.id).iter().any(|range| {
-                        range.id.starts_with("review-")
+                        (range.id == *expected_id || range.id == legacy_id)
                             && range.kind == mast_proto::RefDiffKind::Branch
-                            && range.path == *path
-                            && range.head_branch == *branch
                     })
             })
             .map(|chat| chat.id.clone())
     }
     pub(crate) fn load_branch_review_target(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.branch_review_targets.remove(&chat_id);
+        self.branch_review_range_ids.remove(&chat_id);
+        let load_id = uuid::Uuid::new_v4();
+        self.branch_review_loads.insert(chat_id.clone(), load_id);
+        let Some(space_id) = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.space_id.clone())
+        else {
+            return;
+        };
         let engine = self.state.read(cx).engine().cloned();
         let task = self
             .state
@@ -65,6 +76,8 @@ impl Shell {
                 let params = mast_proto::ResolveBranchReviewBaseParams {
                     checkout_path: candidate.path.clone(),
                     branch,
+                    space_id: space_id.clone(),
+                    worker_chat_id: chat_id.clone(),
                 };
                 let Ok(value) = serde_json::to_value(params) else {
                     continue;
@@ -82,13 +95,23 @@ impl Shell {
                     continue;
                 };
                 target =
-                    crate::branch_review_launch::target_for_resolved_checkout(&candidate, &range);
+                    crate::branch_review_launch::target_for_resolved_checkout(&candidate, &range)
+                        .map(|target| (target, range.review_range_id, range.existing_chat_id));
                 if target.is_some() {
                     break;
                 }
             }
             this.update(cx, |this, cx| {
-                if let Some(target) = target {
+                if this.branch_review_loads.get(&chat_id) != Some(&load_id) {
+                    return;
+                }
+                this.branch_review_loads.remove(&chat_id);
+                if let Some((target, id, existing)) = target {
+                    if let Some(existing) = existing {
+                        this.branch_review_chats
+                            .insert(format!("{space_id}\0{}", target.state_key()), existing);
+                    }
+                    this.branch_review_range_ids.insert(chat_id.clone(), id);
                     this.branch_review_targets.insert(chat_id, target);
                 }
                 cx.notify();

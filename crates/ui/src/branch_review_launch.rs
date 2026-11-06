@@ -139,6 +139,8 @@ mod tests {
             base_sha: "base".into(),
             head_sha: "head".into(),
             ahead_count: 1,
+            review_range_id: "review-id".into(),
+            existing_chat_id: None,
         };
         assert!(target_for_resolved_checkout(&candidate, &range).is_some());
         range.head_sha = "stale".into();

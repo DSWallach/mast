@@ -218,6 +218,7 @@ impl Shell {
         self.leave_overview_for_chat(cx);
         self.set_surfaces_open(true, cx);
         self.set_right_active(RightSurface::Item, cx);
+        self.load_branch_review_target(self.active_chat.clone(), cx);
         self.chat_item_card.dismiss();
         cx.notify();
     }
@@ -927,6 +928,13 @@ impl Shell {
                 .hover(|el| el.bg(theme.element_hover))
         };
         let mut col = div().flex().flex_col().gap(px(10.0));
+        if let Some(target) = self.branch_review_target(&facts.chat_id) {
+            let exists = self.existing_branch_review(&facts.chat_id, target, cx).is_some();
+            let chat_id = facts.chat_id.clone();
+            col = col.child(link("chat-item-review-work".into(), theme.accent, false)
+                .child(if exists { "Open review" } else { "Review this work" })
+                .on_click(cx.listener(move |this, _, _, cx| this.open_branch_review_for_chat(chat_id.clone(), cx))));
+        }
 
         // Path.
         if let Some(item) = &facts.item {

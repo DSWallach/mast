@@ -19,6 +19,8 @@ use crate::entities::ChatConfig;
 pub struct ResolveBranchReviewBaseParams {
     pub checkout_path: String,
     pub branch: String,
+    pub space_id: String,
+    pub worker_chat_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +30,9 @@ pub struct ResolveBranchReviewBaseReply {
     pub base_sha: String,
     pub head_sha: String,
     pub ahead_count: u64,
+    pub review_range_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_chat_id: Option<String>,
 }
 
 /// Start a review of a committed branch range in an existing checkout.

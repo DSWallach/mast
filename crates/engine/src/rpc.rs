@@ -4339,8 +4339,17 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::ResolveBranchReviewBaseParams = parse_params(params)?;
                 let identity = self.repos.checkout_identity(std::path::Path::new(&p.checkout_path))
                     .await.map_err(|e| RpcError::Failed(e.to_string()))?;
-                let reply = crate::diff_sync::resolve_branch_review_base(&identity.root, &p.branch)
+                let mut reply = crate::diff_sync::resolve_branch_review_base(&identity.root, &p.branch, self.doc_host.device_id())
                     .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let legacy_id = reply.review_range_id.strip_prefix("review-").unwrap_or(&reply.review_range_id);
+                for row in self.workspace.all_chat_diff_targets().map_err(|e| RpcError::Failed(e.to_string()))? {
+                    if row.chat_id == p.worker_chat_id || !row.ref_targets.iter().any(|target| target.id == reply.review_range_id || target.id == legacy_id) { continue; }
+                    let chat = self.workspace.chat(&row.chat_id).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    if chat.is_some_and(|chat| !chat.archived && chat.space_id.as_deref() == Some(&p.space_id)) {
+                        reply.existing_chat_id = Some(row.chat_id);
+                        break;
+                    }
+                }
                 RpcReply::value(&reply)
             }
             methods::GET_CHECKOUT_DIFF => {

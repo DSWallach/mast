@@ -6441,9 +6441,12 @@ impl Overview {
         let chat_ids = self.state.read(cx).work_outline(&space_id).snapshot()
             .and_then(|snapshot| snapshot.items.iter().find(|item| item.id == item_id))
             .map(|item| item.chat_ids.clone()).unwrap_or_default();
-        self.shell.update(cx, |shell, cx| {
-            for chat_id in chat_ids { shell.load_branch_review_target(chat_id, cx); }
-        }).ok();
+        let shell = self.shell.clone();
+        cx.defer(move |cx| {
+            shell.update(cx, |shell, cx| {
+                for chat_id in chat_ids { shell.load_branch_review_target(chat_id, cx); }
+            }).ok();
+        });
         let details = cx.new(|cx| {
             WorkItemDetails::new(
                 self.state.clone(),

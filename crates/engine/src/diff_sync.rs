@@ -2685,12 +2685,20 @@ pub async fn resolve_range(
 pub async fn resolve_branch_review_base(
     root: &Path,
     branch: &str,
+    device_id: &str,
 ) -> Result<mast_proto::ResolveBranchReviewBaseReply, EngineError> {
     if branch.is_empty() || branch.starts_with('-') {
         return Err(EngineError::Other("branch name is required".into()));
     }
     let base_ref = match capture_git(root, &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], 1024).await {
-        Ok(result) => String::from_utf8_lossy(&result.stdout).trim().to_owned(),
+        Ok(result) => {
+            let remote = String::from_utf8_lossy(&result.stdout).trim().to_owned();
+            let local = remote.strip_prefix("refs/remotes/origin/").map(|name| format!("refs/heads/{name}"));
+            match local {
+                Some(local) if capture_git(root, &["rev-parse", "--verify", &local], 256).await.is_ok() => local,
+                _ => remote,
+            }
+        },
         Err(_) => {
             let mut found = None;
             for candidate in ["refs/heads/main", "refs/heads/master"] {
@@ -2708,11 +2716,18 @@ pub async fn resolve_branch_review_base(
     let count = capture_git(root, &["rev-list", "--count", &range_spec], 256).await?;
     let ahead_count = String::from_utf8_lossy(&count.stdout).trim().parse()
         .map_err(|_| EngineError::Other("invalid commit count".into()))?;
+    let common = capture_git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096).await?;
+    let common_path = std::path::PathBuf::from(String::from_utf8_lossy(&common.stdout).trim());
+    let common_path = std::fs::canonicalize(&common_path).unwrap_or(common_path);
+    let repository = crate::execution_scope::repository_id(device_id, &common_path);
+    let review_range_id = format!("review-{}", mast_proto::derive_id(&format!("{repository}\0{branch}"), "review-range"));
     Ok(mast_proto::ResolveBranchReviewBaseReply {
         base_ref,
         base_sha: range.merge_base,
         head_sha: range.head,
         ahead_count,
+        review_range_id,
+        existing_chat_id: None,
     })
 }
 
@@ -3067,12 +3082,12 @@ mod watch_budget_tests {
         git(&["checkout", "-b", "feature"]);
         git(&["commit", "--allow-empty", "-m", "change"]);
         let head = git(&["rev-parse", "HEAD"]);
-        let result = super::resolve_branch_review_base(directory.path(), "feature").await.unwrap();
+        let result = super::resolve_branch_review_base(directory.path(), "feature", "device").await.unwrap();
         assert_eq!(result.base_ref, "refs/heads/main");
         assert_eq!(result.base_sha, base);
         assert_eq!(result.head_sha, head);
         assert_eq!(result.ahead_count, 1);
-        assert_eq!(super::resolve_branch_review_base(directory.path(), "main").await.unwrap().ahead_count, 0);
+        assert_eq!(super::resolve_branch_review_base(directory.path(), "main", "device").await.unwrap().ahead_count, 0);
     }
 
     #[test]
