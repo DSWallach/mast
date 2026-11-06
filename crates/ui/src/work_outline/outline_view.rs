@@ -2521,8 +2521,8 @@ impl OutlineView {
     // Rendering
     // ----------------------------------------------------------------------
 
-    fn row_height(compact: bool) -> f32 {
-        if compact { 24.0 } else { 28.0 }
+    fn row_height(compact: bool, tokens: crate::ui_style::StyleTokens) -> f32 {
+        (if compact { 24.0 } else { 28.0 }) + tokens.outline_row_delta
     }
 
     fn render_rows(
@@ -2662,7 +2662,7 @@ impl OutlineView {
         div()
             .id("outline-row-editor")
             .debug_selector(|| "outline-row-editor".into())
-            .h(px(Self::row_height(compact)))
+            .h(px(Self::row_height(compact, theme.ui_style.tokens)))
             .w_full()
             .flex()
             .items_center()
@@ -3196,7 +3196,7 @@ impl OutlineView {
         div()
             .id(SharedString::from(format!("outline-row-{key}")))
             .debug_selector(move || selector.clone())
-            .h(px(Self::row_height(compact)))
+            .h(px(Self::row_height(compact, theme.ui_style.tokens)))
             .w_full()
             .flex()
             .items_center()

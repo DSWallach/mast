@@ -1324,7 +1324,7 @@ mod pinned_session_tests {
         assert_eq!(dragged_card.origin.x, source_bounds.origin.x);
         assert_eq!(
             f32::from(dragged_card.size.height),
-            super::super::sidebar_row_height(compact, show_label, true, false)
+            super::super::sidebar_row_height(compact, show_label, true, false, crate::ui_style::UiStyle::MINIMAL.tokens)
         );
         // Even a sub-row move follows the pointer immediately, before a drop slot changes.
         let pointer = from + gpui::point(px(8.0), px(7.0));
@@ -4381,6 +4381,7 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     row.branch.is_some(),
                     row.change_request.is_some(),
+                    crate::ui_style::current(cx).tokens,
                 )
             })
             .collect();
@@ -4462,6 +4463,7 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     rows[index].branch.is_some(),
                     rows[index].change_request.is_some(),
+                    crate::ui_style::current(cx).tokens,
                 );
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
@@ -4582,6 +4584,7 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     branch.is_some(),
                     change_request.is_some(),
+                    crate::ui_style::current(cx).tokens,
                 );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
@@ -5039,7 +5042,7 @@ impl Shell {
         // "Show more" matches the row slot: compact rows are 29px, so the
         // button shrinks with them instead of towering over the list.
         let more_height = if self.settings.sidebar_compact {
-            super::sidebar_row_height(true, true, false, false)
+            super::sidebar_row_height(true, true, false, false, crate::ui_style::current(cx).tokens)
         } else {
             36.0
         };
@@ -5053,6 +5056,7 @@ impl Shell {
                         self.settings.sidebar_show_project_label,
                         row.branch.is_some(),
                         row.change_request.is_some(),
+                        crate::ui_style::current(cx).tokens,
                     )
                 })
                 .sum::<f32>()
