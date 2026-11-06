@@ -7096,7 +7096,7 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx);
+        let theme = Theme::of(cx).clone();
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
@@ -7115,8 +7115,19 @@ impl Shell {
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_r_1().border_color(theme.border))
-            .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
+            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_r_1().border_color(theme.border))
+            .child(if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+                div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).flex().flex_col()
+                    .child(div().px(px(16.0)).pb(px(12.0)).font_family("EB Garamond").text_size(crate::typography::ui_rems(26.0)).text_color(theme.text_muted).child("Mast"))
+                    .child(div().id("area-new-session").mx(px(12.0)).mb(px(12.0)).px(px(12.0)).py(px(8.0))
+                        .rounded(px(12.0)).border_1().border_color(theme.border_strong).text_color(theme.text_muted)
+                        .cursor_pointer().child("+  New conversation")
+                        .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx))))
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(inner))
+            } else {
+                div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner)
+            })
             .into_any_element()
     }
 
