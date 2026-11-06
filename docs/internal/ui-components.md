@@ -1170,6 +1170,12 @@ The candidate index is not a substitute for that audit.
 
 Locations refer to shell branch `d311aee00`. This index includes tests and already migrated code, and can miss inline elements without these patterns. It is a navigation aid, not a completed manual audit. Interaction includes click, mouse-down and key-down sites; Label covers explicit text sizes; Radius covers explicit rounded shapes; ID covers element IDs.
 
+**Stays literal, in baseline:** event handlers and element IDs preserve control
+identity and behavior; drag, scroll, viewport and window-hit-test geometry is
+structural rather than a style choice. Test fixtures retain explicit setup and
+assertion values. The remaining label/radius candidates have not all been
+individually triaged, so this ledger must not be read as a completed audit.
+
 | File | Interaction lines | Label lines | Radius lines | ID lines |
 | --- | --- | --- | --- | --- |
 | `shell.rs` | 6567, 6589, 7010, 7204, 7233, 7341, 7342, 7527, 7528, 7615, 7618, 8420, 8465, 8562, 8566, 8602, 8626, 8638, 8653, 8731, 8738, 8780, 8789, 8796, 8804, 8902, 8936, 8943, 8984, 8994, 9018, 9026, 9267, 9276, 9286, 9295, 9304, 9317, 9331, 9345, 9364, 9385, 9399, 9412, 9430, 9463, 9480, 9498, 9517, 9545, 9568, 9576, 9631, 9639, 9730, 9966, 10217, 10320, 10660, 10665, 10674, 10680, 10751, 10939, 10942, 10948, 10976, 10980, 11079, 11086, 11113, 11127, 11142, 11156, 11291, 11349, 11426, 11462, 11548, 11575, 11956, 15353 | 1106, 1128, 6519, 6539, 7163, 7190, 7229, 7407, 7445, 7480, 7663, 7708, 7789, 8264, 8283, 8417, 8592, 8851, 8920, 8968, 9948, 9956, 10137, 10234, 10240, 10401, 10447, 10640, 10719, 10728, 10739, 11275, 11287, 11318, 11327, 11344, 11439, 11457, 11499, 11508, 11530, 11542, 11561, 11571, 11934 | 1102, 1124, 6668, 6981, 7187, 7226, 7405, 7424, 7583, 8414, 8864, 8869, 10210, 10225, 10627, 10702, 11284, 11301, 11342, 11420, 11453, 11488, 11526, 11540, 11930 | 909, 6560, 6787, 7179, 7221, 7498, 7567, 7835, 8195, 8208, 8304, 8379, 8409, 8601, 8613, 8625, 8637, 8652, 8730, 8737, 8779, 8788, 8795, 8803, 8901, 8935, 8942, 8983, 8990, 9017, 9025, 9265, 9275, 9285, 9294, 9303, 9316, 9330, 9344, 9363, 9384, 9398, 9411, 9428, 9462, 9479, 9497, 9516, 9567, 9575, 9630, 9638, 9698, 9964, 9985, 10108, 10129, 10208, 10305, 10623, 10747, 10817, 11112, 11126, 11141, 11155, 11281, 11336, 11417, 11450, 11535, 11570, 11916 |
