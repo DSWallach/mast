@@ -1731,7 +1731,9 @@ impl Render for WorkItemDetails {
                         .min_w_0()
                         .truncate()
                         .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(if missing {
+                        .text_color(if missing && theme.appearance.is_dark() {
+                            theme.text_muted
+                        } else if missing {
                             theme.text_faint
                         } else {
                             theme.text

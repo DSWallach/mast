@@ -3174,7 +3174,7 @@ impl OutlineView {
             .is_some_and(|item| item.archived || item.kept_for_descendants)
             || row
                 .chat()
-                .is_some_and(|chat| chat.chat.archived || chat.dangling)
+                .is_some_and(|chat| chat.chat.archived || (chat.dangling && !theme.appearance.is_dark()))
             || matches!(row.kind, OutlineRowKind::Space { hidden: true, .. });
         // Drag and drop: rows drag while nothing is being edited; live work
         // items are the drop targets. The indicator is static (no motion).
