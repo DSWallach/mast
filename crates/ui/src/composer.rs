@@ -8966,7 +8966,7 @@ impl Render for Composer {
                 surface.child(div().absolute().left(px(16.0)).top(px(-25.0))
                     .rounded_t(px(12.0)).px(px(8.0)).h(px(25.0))
                     .flex().items_center().bg(identity).text_color(theme.identity_text(identity))
-                    .child(picker))
+                    .child(div().rounded(px(8.0)).bg(theme.surface).px(px(4.0)).child(picker)))
             })
             .child({
                 let measured = self.surface_bounds.clone();
