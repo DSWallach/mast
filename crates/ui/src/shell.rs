@@ -7558,7 +7558,7 @@ impl Shell {
         };
         let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
-        let selected_wash = crate::theme::glass_selected_bg();
+        let selected_wash = if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque { theme.element_active } else { crate::theme::glass_selected_bg() };
         let subline = if search_query.is_some() {
             theme.text_muted
         } else {

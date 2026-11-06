@@ -276,7 +276,7 @@ fn zeron_dark() -> ThemeVariant {
 }
 
 fn industrial(dark: bool) -> ThemeVariant {
-    let (id, name, appearance, background, shell, key, text, muted, rule, ansi) = if dark {
+    let (id, name, appearance, background, shell, key, active, text, muted, rule, ansi) = if dark {
         (
             "industrial-dark",
             "Industrial Dark",
@@ -284,6 +284,7 @@ fn industrial(dark: bool) -> ThemeVariant {
             "#242622",
             "#30322e",
             "#3a3c37",
+            "#1d1f1c",
             "#f5f3ed",
             "#bcbdb6",
             "#777970",
@@ -297,6 +298,7 @@ fn industrial(dark: bool) -> ThemeVariant {
             "#f5f3ed",
             "#e6e4dd",
             "#efeee8",
+            "#d3d2cb",
             "#272a27",
             "#666862",
             "#aaa9a2",
@@ -337,7 +339,7 @@ fn industrial(dark: bool) -> ThemeVariant {
     result.colors.border_strong = c(rule);
     result.colors.input = c(key);
     result.colors.hover = c(key);
-    result.colors.active = c(shell);
+    result.colors.active = c(active);
     result.source.asset_hash.clear();
     let encoded = serde_json::to_vec(&result).expect("built-in theme serializes");
     result.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
