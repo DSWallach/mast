@@ -18,6 +18,7 @@ pub use conversation_parts::{
     conversation_harness_tab, conversation_harness_tabs, conversation_input_surface,
     conversation_input_text_color,
     conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
+    conversation_message_expander,
     conversation_model_picker, conversation_panel_radius, conversation_question_card,
     conversation_question_chip, conversation_question_id, conversation_question_pill,
     conversation_answer_input,

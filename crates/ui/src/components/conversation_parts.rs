@@ -4,6 +4,46 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_message_expander(
+    theme: &Theme,
+    row_id: &str,
+    expanded: bool,
+    line_height: f32,
+) -> gpui::Stateful<Div> {
+    let selector = format!("{row_id}-expander");
+    let hover_color = theme.text;
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .group("user-message-toggle")
+        .role(gpui::Role::Button)
+        .aria_label(if expanded {
+            "Collapse message"
+        } else {
+            "Expand message"
+        })
+        .aria_expanded(expanded)
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .text_size(crate::typography::ui_rems(14.0))
+        .line_height(crate::typography::ui_rems(line_height))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(move |s| s.text_color(hover_color))
+        .child(if expanded { "Show less" } else { "Show more" })
+        .child(
+            crate::icons::icon(if expanded {
+                crate::icons::ALT_ARROW_UP
+            } else {
+                crate::icons::ALT_ARROW_DOWN
+            })
+            .size(px(12.0))
+            .text_color(theme.text_muted)
+            .group_hover("user-message-toggle", move |s| s.text_color(hover_color)),
+        )
+}
+
 pub fn conversation_appshot_strip(gap: f32, pad_x: f32, pad_top: f32) -> gpui::Stateful<Div> {
     div()
         .id("composer-appshots-strip")

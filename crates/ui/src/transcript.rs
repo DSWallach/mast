@@ -5624,38 +5624,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let toggle_key = row_id.clone();
-        let glyph = if expanded {
-            crate::icons::ALT_ARROW_UP
-        } else {
-            crate::icons::ALT_ARROW_DOWN
-        };
-        let label = if expanded { "Show less" } else { "Show more" };
-        let button = div()
-            .id(SharedString::from(format!("{row_id}-expander")))
-            .debug_selector({ let selector = format!("{row_id}-expander"); move || selector.clone() })
-            .group("user-message-toggle")
-            .role(gpui::Role::Button)
-            .aria_label(if expanded {
-                "Collapse message"
-            } else {
-                "Expand message"
-            })
-            .aria_expanded(expanded)
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .text_size(crate::typography::ui_rems(14.0))
-            .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-            .text_color(theme.text_muted)
-            .cursor_pointer()
-            .hover(|s| s.text_color(theme.text))
-            .child(label)
-            .child(
-                crate::icons::icon(glyph)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .group_hover("user-message-toggle", |s| s.text_color(theme.text)),
-            )
+        let button = crate::components::conversation_message_expander(theme, row_id, expanded, USER_LINE_HEIGHT)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_user_fold(
                     toggle_key.clone(),
