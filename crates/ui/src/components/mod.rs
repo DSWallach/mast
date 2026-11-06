@@ -403,3 +403,30 @@ pub fn display(theme: &Theme) -> Div {
         .font_family(theme.font_mono.clone())
         .text_size(crate::typography::ui_rems(10.0))
 }
+
+/// Semantic status colour supplied by the active theme.
+#[derive(Clone, Copy)]
+pub enum Status {
+    Success,
+    Warning,
+    Danger,
+}
+
+pub fn status_dot(theme: &Theme, status: Status) -> Div {
+    let color = match status {
+        Status::Success => theme.success,
+        Status::Warning => theme.warning,
+        Status::Danger => theme.danger,
+    };
+    div().size(px(7.0)).rounded_full().bg(color)
+}
+
+/// A single selectable segment. The caller owns selection and activation.
+pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div {
+    let item = div()
+        .when(selected, |el| {
+            el.px(px(8.0)).py(px(5.0)).bg(theme.surface_raised)
+        })
+        .child(label.into());
+    segmented_key(item, theme, selected)
+}

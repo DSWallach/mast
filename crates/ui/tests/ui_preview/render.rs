@@ -84,27 +84,18 @@ impl Render for Controls {
                     .flex()
                     .items_center()
                     .gap(px(16.))
-                    .child(
-                        div()
-                            .px(px(8.))
-                            .py(px(5.))
-                            .bg(t.surface_raised)
-                            .child("Overview"),
-                    )
-                    .child("Activity")
+                    .child(mast_ui::components::tab(t, "Overview", true))
+                    .child(mast_ui::components::tab(t, "Activity", false))
                     .children(
                         [
-                            (t.success, "Ready"),
-                            (t.warning, "Waiting"),
-                            (t.danger, "Error"),
+                            (mast_ui::components::Status::Success, "Ready"),
+                            (mast_ui::components::Status::Warning, "Waiting"),
+                            (mast_ui::components::Status::Danger, "Error"),
                         ]
                         .into_iter()
-                        .map(|(color, label)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .child(div().size(px(7.)).rounded_full().bg(color))
+                        .map(|(status, label)| {
+                            div().flex().items_center().gap(px(4.))
+                                .child(mast_ui::components::status_dot(t, status))
                                 .child(label)
                         }),
                     ),
