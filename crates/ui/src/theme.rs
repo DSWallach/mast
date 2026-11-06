@@ -819,7 +819,7 @@ impl Theme {
     /// Preserve the identity hue while making prose readable on the main surface.
     pub fn identity_foreground(&self, fill: Hsla) -> Hsla {
         (0..=100)
-            .map(|step| mix(fill, self.text, step as f32 / 100.0))
+            .map(|step| flatten(fill.opacity(1.0 - step as f32 / 100.0), self.text))
             .find(|color| contrast_ratio(*color, self.bg) >= 4.5)
             .unwrap_or(self.text)
     }
