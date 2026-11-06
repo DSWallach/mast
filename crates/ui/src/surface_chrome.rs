@@ -20,8 +20,8 @@ pub(crate) fn segmented_key<T: gpui::Styled + gpui::ParentElement>(element: T, t
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         element.rounded(px(4.0))
             .bg(if active { theme.industrial_colors().pressed } else { theme.industrial_colors().key })
-            .border_1().border_color(theme.industrial_colors().rule).relative()
-            .child(div().absolute().left(px(5.0)).right(px(5.0)).bottom_0().h(px(2.0)).bg(key_ledge(theme)))
+            .border_1().border_color(theme.industrial_colors().rule)
+            .shadow(vec![gpui::BoxShadow { color: key_ledge(theme), offset: gpui::point(px(0.0), px(2.0)), blur_radius: px(0.0), spread_radius: px(0.0), inset: false }])
     } else {
         element
     }

@@ -6327,25 +6327,22 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
-                    column = column.child(
-                        div().w_full().flex().justify_end().child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(self.content_width * 0.8))
-                                .bg(crate::theme::user_bubble_bg())
-                                .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(Theme::BUBBLE_RADIUS)))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
-                                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(14.0)))
-                                .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-                                .text_color(theme.text)
-                                .when(pending, |el| el.opacity(0.65))
-                                .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, false, &theme, window, cx,
-                                )),
-                        ),
-                    );
+                    let bubble = div()
+                        .min_w_0().max_w(px(self.content_width * 0.8))
+                        .bg(crate::theme::user_bubble_bg())
+                        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(Theme::BUBBLE_RADIUS)))
+                        .px(px(16.0)).py(px(10.0))
+                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
+                        .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(14.0)))
+                        .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT)).text_color(theme.text)
+                        .when(pending, |el| el.opacity(0.65))
+                        .child(self.render_user_body(&row.id, ix, text, mentions, false, &theme, window, cx));
+                    let bubble = if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+                        div().min_w_0().max_w(px(self.content_width * 0.8)).flex().flex_col().items_end().gap(px(4.0))
+                            .child(div().text_size(crate::typography::ui_rems(9.0)).text_color(theme.text_muted).child("YOU"))
+                            .child(bubble).into_any_element()
+                    } else { bubble.into_any_element() };
+                    column = column.child(div().w_full().flex().justify_end().child(bubble));
                 }
                 column.into_any_element()
             }
@@ -6528,6 +6525,17 @@ impl Transcript {
                     )).into_any_element()
             },
         };
+
+        let is_first_entry_row = ix == 0 || self.rows.get(ix - 1).is_some_and(|previous| previous.entry_id != row.entry_id);
+        let inner = if theme.ui_style.controls == crate::ui_style::ControlVariant::Key
+            && matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
+            let model = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).and_then(|config| config.model.clone());
+            div().flex().flex_col().gap(px(4.0))
+                .when(is_first_entry_row, |el| el.child(div().flex().items_center().gap(px(8.0))
+                    .child(div().text_size(crate::typography::ui_rems(9.0)).text_color(theme.text_muted).child("AGENT"))
+                    .when_some(model, |el, model| el.child(crate::surface_chrome::display(&theme).child(model)))))
+                .child(div().p(px(10.0)).border_1().border_color(theme.industrial_colors().rule).bg(theme.industrial_colors().panel).child(inner)).into_any_element()
+        } else { inner };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
         // entry's last row. Timestamp, copy action, and copied feedback only

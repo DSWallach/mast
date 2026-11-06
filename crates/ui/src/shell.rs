@@ -10146,8 +10146,8 @@ impl Shell {
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
             .children(new_thread_background_layer)
-            .when(!has_selection && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                crate::surface_chrome::grille(theme).absolute().right(px(32.0)).bottom(px(36.0))
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                crate::surface_chrome::grille(theme).absolute().right(px(32.0)).top(px(110.0))
             ))
             .child(
                 // Full-height underlay: the transcript viewport spans the

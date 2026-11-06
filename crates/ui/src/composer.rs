@@ -8778,7 +8778,7 @@ impl Render for Composer {
             .left(px(model_offset))
             .opacity(model_opacity)
             .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                div().absolute().top(px(-8.0)).left(px(4.0)).text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL / MODE")
+                div().absolute().top(px(-8.0)).left(px(4.0)).right(px(4.0)).flex().justify_between().text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL").child("MODE")
             ))
             .child(self.pickers.clone())
             .child(
