@@ -5369,7 +5369,7 @@ impl Composer {
                             .justify_center()
                             .cursor_pointer()
                             .shadow_sm()
-                            .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
+                            .when(true, |el| crate::components::conversation_reveal(el, theme, group, false))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 // The button overhangs the thumbnail, whose
                                 // hitbox is right underneath — don't let the
@@ -5568,7 +5568,7 @@ impl Composer {
                     .justify_center()
                     .cursor_pointer()
                     .shadow_sm()
-                    .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
+                    .when(true, |el| crate::components::conversation_reveal(el, theme, group, false))
                     .tooltip(move |_, cx| {
                         cx.new(|_| AppshotActionTooltip(remove_label.clone()))
                             .into()
@@ -6418,7 +6418,7 @@ impl Composer {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .when(true, |el| crate::ui_style::reveal_on_hover(el, row_group, theme.ui_style, selected))
+            .when(true, |el| crate::components::conversation_reveal(el, theme, row_group, selected))
             .hover(|s| s.bg(crate::theme::ink(0.08)))
             .tooltip(|_, cx| {
                 cx.new(|_| {

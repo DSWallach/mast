@@ -484,7 +484,7 @@ pub fn render_tree(
     div()
         .flex()
         .flex_col()
-        .gap(crate::typography::ui_rems(theme.ui_style.tokens.grid.unwrap_or(MD_BLOCK_GAP)))
+        .gap(crate::typography::ui_rems(crate::components::conversation_markdown_gap(theme, MD_BLOCK_GAP)))
         .children(tree.blocks.iter().enumerate().map(|(ix, top)| {
             let document = highlight(ix);
             render_block(
@@ -2328,7 +2328,7 @@ fn text_element(
         inner
     };
     div()
-        .text_size(crate::typography::ui_rems(if size == MD_TEXT_SIZE { theme.ui_style.tokens.body_size.unwrap_or(size) } else { size }))
+        .text_size(crate::typography::ui_rems(crate::components::conversation_markdown_text_size(theme, size, MD_TEXT_SIZE)))
         .line_height(crate::typography::ui_rems(line_height))
         .child(content)
         .into_any_element()

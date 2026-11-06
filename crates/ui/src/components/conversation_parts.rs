@@ -4,6 +4,27 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_reveal<T: gpui::Styled + gpui::InteractiveElement>(
+    element: T,
+    theme: &Theme,
+    group: impl Into<SharedString>,
+    visible: bool,
+) -> T {
+    crate::ui_style::reveal_on_hover(element, group, theme.ui_style, visible)
+}
+
+pub fn conversation_markdown_gap(theme: &Theme, fallback: f32) -> f32 {
+    theme.ui_style.tokens.grid.unwrap_or(fallback)
+}
+
+pub fn conversation_markdown_text_size(theme: &Theme, size: f32, body_size: f32) -> f32 {
+    if size == body_size {
+        theme.ui_style.tokens.body_size.unwrap_or(size)
+    } else {
+        size
+    }
+}
+
 pub fn conversation_skill_chip(theme: &Theme, index: usize) -> gpui::Stateful<Div> {
     let area = theme.ui_style.conversation == ConversationVariant::Area;
     div()

@@ -13,8 +13,9 @@ pub use conversation_parts::{
     conversation_composer_content_height, conversation_composer_expanded,
     conversation_composer_text_size, conversation_composer_width, conversation_harness_tab,
     conversation_harness_tabs, conversation_input_surface, conversation_input_text_color,
-    conversation_message_copy_button, conversation_model_picker, conversation_panel_radius,
-    conversation_send_hint, conversation_send_key, conversation_skill_chip, conversation_skill_remove,
+    conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
+    conversation_model_picker, conversation_panel_radius,
+    conversation_reveal, conversation_send_hint, conversation_send_key, conversation_skill_chip, conversation_skill_remove,
     conversation_tool_panel, conversation_tool_theme,
     conversation_user_bubble, conversation_wizard_surface, user_message_theme,
 };
