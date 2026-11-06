@@ -27,11 +27,11 @@ Logins you already added under **Settings → Accounts** show up in the Space ac
 
 ## Troubleshooting a first chat
 
-If the selected account is signed out, the chat preflight offers **Sign in…** or **Start anyway**. For Default, sign in through **Settings → Agents**; for a Space account, use **Settings → Space accounts** and **Sign in again**. Check the chat header for its pinned account. `mast doctor` checks local prerequisites and suggests fixes.
+If the selected account is signed out, the chat preflight offers **Sign in…** or **Start anyway**. For Default, sign in through **Settings → Accounts**; for a Space account, use the **Space accounts** section on that page and **Sign in again**. Check the chat header for its pinned account. `mast doctor` checks local prerequisites and suggests fixes.
 
 ## Usage
 
-**Settings → Space accounts** lists each account with its usage windows.
+The **Space accounts** section of **Settings → Accounts** lists each account with its usage windows.
 
 ## Try it
 
