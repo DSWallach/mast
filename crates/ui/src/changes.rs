@@ -61,6 +61,7 @@ use crate::theme::Theme;
 use mast_syntax::LanguageId as Lang;
 
 mod file_list;
+mod explanation;
 mod ref_picker;
 mod review_state;
 pub(crate) mod walkthrough;
@@ -2006,6 +2007,13 @@ pub struct Changes {
     review_error: Option<String>,
     seen_candidates: HashMap<String, review_state::SeenCandidate>,
     seen_hunks: std::collections::HashSet<String>,
+    explanation_selection: Option<explanation::DiffSelection>,
+    explanation_hunk: Option<(usize, usize)>,
+    explanation_unified_rows: Option<(usize, usize, SourceSide)>,
+    explanation_panel: Option<explanation::ExplanationPanel>,
+    explanation_task: Option<Task<()>>,
+    explanation_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    explanation_shell: Option<gpui::WeakEntity<crate::shell::Shell>>,
     seen_task: Option<Task<()>>,
     seen_last_render: std::time::Instant,
     seen_scroll_epoch: u64,
@@ -2245,6 +2253,13 @@ impl Changes {
             review_error: None,
             seen_candidates: HashMap::new(),
             seen_hunks: std::collections::HashSet::new(),
+            explanation_selection: None,
+            explanation_hunk: None,
+            explanation_unified_rows: None,
+            explanation_panel: None,
+            explanation_task: None,
+            explanation_cancelled: None,
+            explanation_shell: None,
             seen_task: None,
             seen_last_render: std::time::Instant::now(),
             seen_scroll_epoch: 0,
@@ -2408,6 +2423,9 @@ impl Changes {
         self.sync_scope_with_owner();
         self.diffs.clear();
         self.parsed = None;
+        self.explanation_selection = None;
+        self.explanation_unified_rows = None;
+        self.cancel_explanation();
         self.rows.clear();
         self.row_ranges.clear();
         self.section_headers.clear();
@@ -2868,6 +2886,9 @@ impl Changes {
     fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
         if self.scope != scope {
             self.scope = scope;
+            self.explanation_selection = None;
+            self.explanation_unified_rows = None;
+            self.cancel_explanation();
             self.reset_horizontal_scroll();
             if scope == DiffScope::History {
                 self.history_pane(cx)
@@ -3122,6 +3143,11 @@ impl Changes {
     /// `splice` shifts the logical scroll anchor by the count delta, so
     /// content below the fold stays put.
     fn replace_file_body(&mut self, file_ix: usize, new_body: Vec<DiffRow>) {
+        if self.explanation_selection.take().is_some() {
+            self.explanation_unified_rows = None;
+            self.explanation_hunk = None;
+            self.cancel_explanation();
+        }
         self.seen_candidates.clear();
         let Some(range) = self.row_ranges.get(file_ix).and_then(Clone::clone) else {
             return;
@@ -3467,6 +3493,11 @@ impl Changes {
 
     fn reflatten(&mut self, cx: &mut Context<Self>) {
         self.seen_candidates.clear();
+        if self.explanation_selection.take().is_some() {
+            self.explanation_unified_rows = None;
+            self.explanation_hunk = None;
+            self.cancel_explanation();
+        }
         let Some(parsed) = &self.parsed else {
             cx.notify();
             return;
@@ -4390,21 +4421,34 @@ impl Changes {
                     return row;
                 };
                 let path = file_diff.path.clone();
+                let source_side = match side { CommentSide::Old => SourceSide::Old, CommentSide::New => SourceSide::New };
                 let hovered = self.hovering(&path, (side, line_no));
                 let move_path = path.clone();
                 let leave_path = path.clone();
+                let select_path = path.clone();
+                let selected = self.explanation_unified_rows.map_or_else(|| self.explanation_line_selected(&path, source_side, line_no), |(start, end, _)| self.explanation_selection.as_ref().is_some_and(|s| s.path == path) && (start.min(end)..=start.max(end)).contains(&ix));
+                let selection_end = self.explanation_unified_rows.map_or_else(|| self.explanation_selection.as_ref().is_some_and(|s| s.path == path && s.side == source_side && s.extent == line_no), |(_, end, _)| end == ix && self.explanation_selection.as_ref().is_some_and(|s| s.path == path));
                 div()
                     .id(("diff-line", ix))
                     .w_full()
                     .relative()
+                    .when(selected, |el| el.bg(theme.element_active))
                     .child(row)
+                    .when(selection_end, |el| el.child(self.render_explanation(&theme, cx)))
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        window.focus(&this.diff_focus, cx);
+                        this.select_unified_explanation_line(&select_path, source_side, line_no, ix, event.modifiers.shift, cx);
+                    }))
                     .when(hovered, |el| {
                         el.child(positioned_adder(
                             comment_adder_left(side, gutter_px),
                             render_comment_adder(&path, side, line_no, &theme, cx),
                         ))
                     })
-                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                        if event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == move_path) {
+                            this.select_unified_explanation_line(&move_path, source_side, line_no, ix, true, cx);
+                        }
                         this.set_hover(&move_path, Some((side, line_no)), cx);
                     }))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -4477,21 +4521,46 @@ impl Changes {
                 // Cards for old-side notes still render (they are pushed by
                 // the row, not the column), so switching layouts never hides
                 // one that is already staged.
+                let left_number = left.and_then(|line| line.old_no);
+                let left_path = path.clone();
+                let left_move_path = path.clone();
                 let left = cell(left, true)
-                    .map(IntoElement::into_any_element)
+                    .map(|cell| cell.id(("split-old", ix)).relative()
+                        .when(left_number.is_some_and(|number| self.explanation_line_selected(&path, SourceSide::Old, number)), |el| el.bg(theme.element_active))
+                        .when(left_number.is_some_and(|number| self.explanation_selection.as_ref().is_some_and(|s| s.path == path.as_ref() && s.side == SourceSide::Old && s.extent == number)), |el| el.child(self.render_explanation(&theme, cx)))
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            window.focus(&this.diff_focus, cx);
+                            if let Some(number) = left_number { this.select_explanation_line(&left_path, SourceSide::Old, number, event.modifiers.shift, cx); }
+                        }))
+                        .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                            if let Some(number) = left_number && event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == left_move_path.as_ref() && s.side == SourceSide::Old) {
+                                this.select_explanation_line(&left_move_path, SourceSide::Old, number, true, cx);
+                            }
+                        }))
+                        .into_any_element())
                     .unwrap_or_else(|| split_filler().into_any_element());
                 let right = match (cell(right, false), right.and_then(line_anchor)) {
                     (Some(cell), Some(anchor)) => {
                         let (side, line_no) = anchor;
                         let (move_path, leave_path) = (path.clone(), path.clone());
-                        cell.id(("split-new", ix))
+                        let select_path = path.clone();
+                        cell.id(("split-new", ix)).relative()
+                            .when(self.explanation_line_selected(&path, SourceSide::New, line_no), |el| el.bg(theme.element_active))
+                            .when(self.explanation_selection.as_ref().is_some_and(|s| s.path == path.as_ref() && s.side == SourceSide::New && s.extent == line_no), |el| el.child(self.render_explanation(&theme, cx)))
+                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                window.focus(&this.diff_focus, cx);
+                                this.select_explanation_line(&select_path, SourceSide::New, line_no, event.modifiers.shift, cx);
+                            }))
                             .when(self.hovering(&path, anchor), |el| {
                                 el.relative().child(positioned_adder(
                                     split_adder_left(gutter_px),
                                     render_comment_adder(&path, side, line_no, &theme, cx),
                                 ))
                             })
-                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                                if event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == move_path.as_ref() && s.side == SourceSide::New) {
+                                    this.select_explanation_line(&move_path, SourceSide::New, line_no, true, cx);
+                                }
                                 this.set_hover(&move_path, Some(anchor), cx);
                             }))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -6889,6 +6958,8 @@ impl Render for Changes {
                                     .child(
                                         div()
                                             .track_focus(&self.diff_focus)
+                                            .key_context("ChangesDiff")
+                                            .on_action(cx.listener(|this, _: &explanation::ExplainDiff, _, cx| this.explain_focused_hunk(cx)))
                                             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                                                 this.diff_key_down(event, window, cx);
                                             }))
@@ -6967,6 +7038,26 @@ mod tests {
     use chrono::Utc;
 
     mod ref_targets;
+
+    #[gpui::test]
+    fn explanation_selection_extends_only_within_file_and_side(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window.update(cx, |changes, _, cx| {
+            changes.select_explanation_line("a", SourceSide::New, 5, false, cx);
+            changes.select_explanation_line("a", SourceSide::New, 3, true, cx);
+            assert!(changes.explanation_line_selected("a", SourceSide::New, 4));
+            changes.select_explanation_line("a", SourceSide::Old, 8, true, cx);
+            assert!(!changes.explanation_line_selected("a", SourceSide::New, 4));
+            assert!(changes.explanation_line_selected("a", SourceSide::Old, 8));
+        }).unwrap();
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(
@@ -8036,6 +8127,107 @@ index 1111111..2222222 160000
             changes.go_to_line(2, cx);
             assert!(changes.list.logical_scroll_top().item_ix >= replacement);
         }).unwrap();
+    }
+
+    #[gpui::test]
+    fn explaining_focused_hunk_selects_it_without_sending(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window.update(cx, |changes, _, cx| {
+            let files = parse_patch(PATCH);
+            let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |_| false);
+            let hunk_row = rows.iter().position(|row| matches!(row, DiffRow::HunkHeader { file: 0, hunk: 0 })).unwrap();
+            changes.list.reset_with_uniform_height(rows.len(), px(20.0));
+            changes.rows = rows;
+            changes.row_ranges = ranges.into_iter().map(Some).collect();
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 0, deletions: 0, file_count: files.len(), horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes.list.scroll_to(gpui::ListOffset { item_ix: hunk_row, offset_in_item: px(0.0) });
+            changes.explain_focused_hunk(cx);
+            assert_eq!(changes.explanation_hunk, Some((0, 0)));
+            assert!(changes.explanation_selection.is_some());
+            assert!(changes.explanation_panel.is_none());
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn explaining_selected_lines_sends_the_diff_to_the_owner(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (view, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(Arc::new(move |method, params| {
+                    recorded.lock().unwrap().push((method.to_owned(), params));
+                    Ok(serde_json::json!({"id":"message"}))
+                })));
+                state
+            });
+            let mut changes = Changes::new(state, cx);
+            changes.owner = Some(ChangesTarget { chat_id: "owner".into(), device_id: "local".into(), cwd: None, checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false, range: None });
+            let files = parse_patch("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n");
+            let (rows, _) = flatten_rows(&files, &[], None, DiffMode::Unified, |_| false);
+            changes.rows = rows;
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes
+        });
+        view.update(vcx, |changes, cx| {
+            let old = changes.rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 0, line: 0, .. })).unwrap();
+            let new = changes.rows.iter().position(|row| matches!(row, DiffRow::Line { file: 0, hunk: 0, line: 1, .. })).unwrap();
+            changes.select_unified_explanation_line("a.rs", SourceSide::Old, 1, old, false, cx);
+            changes.select_unified_explanation_line("a.rs", SourceSide::New, 1, new, true, cx);
+            changes.explain_selection(cx);
+        });
+        vcx.run_until_parked();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, mast_rpc::methods::QUEUE_MESSAGE);
+        assert_eq!(calls[0].1["chatId"], "owner");
+        let text = calls[0].1["text"].as_str().unwrap();
+        assert!(text.contains("File: a.rs\nSide: mixed\nLines: old:1 → new:1"));
+        assert!(text.ends_with("-old\n+new\n"));
+    }
+
+    #[gpui::test]
+    fn explaining_selected_lines_prefers_matching_review_chat(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (view, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.chats = vec![serde_json::from_value(serde_json::json!({"id":"owner", "deviceId":"local", "spaceId":"space", "archived":false, "createdAt":"2026-07-19T12:00:00Z"})).unwrap()];
+                let artifact = serde_json::from_value(serde_json::json!({"id":"review", "spaceId":"space", "deviceId":"local", "chatId":"review-chat", "kind":"review"})).unwrap();
+                state.set_test_artifacts(mast_proto::ArtifactsSnapshot { space_id: "space".into(), revision: 1, artifacts: vec![artifact] });
+                state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(Arc::new(move |method, params| {
+                    recorded.lock().unwrap().push((method.to_owned(), params));
+                    if method == mast_rpc::methods::ARTIFACT_CONTENT { Ok(serde_json::json!({"artifactId":"review", "content":"{\"target\":{\"kind\":\"pr\",\"repo\":\"o/r\",\"number\":1,\"headSha\":\"head\",\"baseSha\":\"base\"}}"})) }
+                    else { Ok(serde_json::json!({"id":"message"})) }
+                })));
+                state
+            });
+            let mut changes = Changes::new(state, cx);
+            changes.owner = Some(ChangesTarget { chat_id: "owner".into(), device_id: "local".into(), cwd: None, checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false, range: None });
+            changes.review_target = Some("pr:o/r#1".into());
+            let files = parse_patch("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n");
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(Vec::new()), files: Arc::new(files), origins: Arc::new(Vec::new()), submodules: Arc::new(Vec::new()), layout: Arc::new(Vec::new()) });
+            changes
+        });
+        view.update(vcx, |changes, cx| {
+            changes.select_explanation_line("a.rs", SourceSide::New, 1, false, cx);
+            changes.explain_selection(cx);
+        });
+        vcx.run_until_parked();
+        let calls = calls.lock().unwrap();
+        let send = calls.iter().find(|(method, _)| method == mast_rpc::methods::QUEUE_MESSAGE).unwrap();
+        assert_eq!(send.1["chatId"], "review-chat");
     }
 
     fn diff(checkout: &str, device: &str, cwd: &str, patch: &str) -> CheckoutDiff {
