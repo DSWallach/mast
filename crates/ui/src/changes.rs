@@ -63,6 +63,7 @@ use mast_syntax::LanguageId as Lang;
 mod file_list;
 mod ref_picker;
 mod review_state;
+pub(crate) mod walkthrough;
 
 use file_list::*;
 use review_state::*;
@@ -1987,11 +1988,17 @@ pub struct Changes {
     review_head_for: Option<String>,
     review_head: Option<(String, String)>,
     review_checkout_matches: Option<bool>,
+    review_branch_repositories: HashMap<(String, String), Option<String>>,
+    review_branch_lookup: Option<(String, String)>,
+    review_branch_lookup_task: Option<Task<()>>,
     review_status_task: Option<Task<()>>,
     review_status_checked: Option<std::time::Instant>,
     review_status_base: Option<String>,
     review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
+    review_walkthrough: bool,
+    walkthrough_target: Option<mast_proto::ReviewTarget>,
+    review_tour: bool,
     review_task: Option<Task<()>>,
     review_save_task: Option<Task<()>>,
     review_pending: HashMap<String, mast_proto::DiffReviewState>,
@@ -2220,11 +2227,17 @@ impl Changes {
             review_head_for: None,
             review_head: None,
             review_checkout_matches: None,
+            review_branch_repositories: HashMap::new(),
+            review_branch_lookup: None,
+            review_branch_lookup_task: None,
             review_status_task: None,
             review_status_checked: None,
             review_status_base: None,
             review_closed: false,
             review_state: None,
+            review_walkthrough: false,
+            walkthrough_target: None,
+            review_tour: false,
             review_task: None,
             review_save_task: None,
             review_pending: HashMap::new(),
@@ -6872,7 +6885,7 @@ impl Render for Changes {
                                     .flex_row()
                                     .flex_1()
                                     .min_h_0()
-                                    .child(self.render_file_list(&theme, cx))
+                                    .children((!self.review_tour).then(|| self.render_file_list(&theme, cx)))
                                     .child(
                                         div()
                                             .track_focus(&self.diff_focus)
