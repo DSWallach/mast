@@ -556,36 +556,42 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
     let (outline_groups, command_groups) = groups.split_at(3);
     popover::dialog_card(theme)
         .w(px(600.0))
-        .id("work-outline-shortcuts-scroll")
         .max_h(px(viewport_height * 0.7))
-        .overflow_y_scroll()
         .debug_selector(|| "work-outline-shortcuts".into())
         .child(popover::dialog_title(theme, "Outline shortcuts"))
         .child(
             div()
-                .mt(px(12.0))
+                .id("work-outline-shortcuts-scroll")
+                .min_h_0()
+                .overflow_y_scroll()
                 .flex()
-                .gap(px(24.0))
+                .flex_col()
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
+                        .mt(px(12.0))
                         .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .children(outline_groups.iter().map(group_el)),
+                        .gap(px(24.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(10.0))
+                                .children(outline_groups.iter().map(group_el)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(10.0))
+                                .children(command_groups.iter().map(group_el)),
+                        ),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .children(command_groups.iter().map(group_el)),
-                ),
+                .child(icon_legend(theme)),
         )
-        .child(icon_legend(theme))
         .child(
             div()
                 .mt(px(14.0))
@@ -1972,6 +1978,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn overview_pull_requests_button_opens_the_pr_page(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        shell.update_in(cx, |shell, window, cx| {
+            shell.run_work_outline_command(WorkOutlineCommand::OpenOutline, window, cx);
+        });
+        redraw(cx);
+        let button = cx.debug_bounds("overview-pull-requests").unwrap().center();
+        cx.simulate_click(button, gpui::Modifiers::default());
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::PrReviewChats)));
+    }
+
+    #[gpui::test]
     fn show_outline_shortcuts_opens_the_reference_and_escape_closes_it(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1987,6 +2007,8 @@ mod tests {
         assert!(shortcuts_open(&shell, cx));
         redraw(cx);
         assert!(cx.debug_bounds("work-outline-shortcuts").is_some());
+        let height = cx.debug_bounds("work-outline-shortcuts").unwrap().size.height;
+        cx.update(|window, _| assert!(height <= window.viewport_size().height * 0.7));
         for group in ["navigate", "edit", "restructure", "commands"] {
             let selector: &'static str =
                 Box::leak(format!("work-outline-shortcuts-{group}").into_boxed_str());
