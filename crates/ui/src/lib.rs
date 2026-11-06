@@ -92,6 +92,7 @@ pub mod theme_library;
 pub mod transcript;
 pub(crate) use mast_proto::message_source;
 pub mod typography;
+pub mod ui_style;
 pub(crate) mod work_outline;
 pub mod workspace_chip;
 mod workspace_links;

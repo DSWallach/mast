@@ -753,6 +753,7 @@ pub struct UiSettings {
     pub ui_font_family: crate::typography::UiFontFamily,
     /// Base size for interface and conversational prose.
     pub ui_font_size: crate::typography::UiFontSize,
+    pub ui_style: crate::ui_style::UiStyleId,
     /// Terminal family and absolute pixel size. Only fixed-width families
     /// qualify, including compatible Nerd Fonts.
     pub terminal_font_family: crate::typography::UiFontFamily,
@@ -867,6 +868,7 @@ impl Default for UiSettings {
             git_history_author_display: GitHistoryAuthorDisplay::default(),
             ui_font_family: crate::typography::UiFontFamily::default(),
             ui_font_size: crate::typography::UiFontSize::default(),
+            ui_style: crate::ui_style::UiStyleId::default(),
             terminal_font_family: crate::typography::UiFontFamily::GeistMono,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             code_font_family: crate::typography::UiFontFamily::GeistMono,
