@@ -2399,6 +2399,136 @@ pub(crate) fn start_chat_section_label(text: &'static str, theme: &Theme) -> gpu
         .child(text)
 }
 
+pub(crate) fn start_chat_note(
+    selector: &'static str,
+    text: impl Into<SharedString>,
+    color: gpui::Hsla,
+) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.into())
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(color)
+        .child(text.into())
+}
+
+pub(crate) fn start_chat_worktree_input(theme: &Theme) -> gpui::Div {
+    div()
+        .ml(px(22.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.input_bg)
+        .when(super::is_industrial(theme), |el| {
+            el.rounded(px(0.0))
+                .border_color(theme.industrial_colors().rule)
+        })
+}
+
+pub(crate) fn start_chat_prompt(theme: &Theme) -> gpui::Div {
+    div()
+        .relative()
+        .debug_selector(|| "start-chat-prompt".into())
+        .flex_none()
+        .mt(px(8.0))
+        .w_full()
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.input_bg)
+        .when(super::is_industrial(theme), |el| {
+            el.rounded(px(0.0))
+                .border_color(theme.industrial_colors().rule)
+        })
+}
+
+pub(crate) fn start_chat_instructions_toggle(
+    theme: &Theme,
+    open: bool,
+    count: usize,
+) -> gpui::Stateful<gpui::Div> {
+    let toggle = div()
+        .id("start-chat-instructions-toggle")
+        .debug_selector(|| "start-chat-instructions-toggle".into())
+        .mt(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(
+            icon(if open {
+                crate::icons::ALT_ARROW_DOWN
+            } else {
+                crate::icons::ALT_ARROW_RIGHT
+            })
+            .size(px(10.0))
+            .text_color(theme.text_muted),
+        )
+        .child(SharedString::from(format!(
+            "Effective instructions ({count})"
+        )));
+    super::segmented_key(toggle, theme, open)
+}
+
+pub(crate) fn start_chat_instruction(
+    theme: &Theme,
+    order: u32,
+    scope: &str,
+    inherited: bool,
+    text: &str,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(10.5))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(format!(
+                    "{}. {}{}",
+                    order + 1,
+                    scope,
+                    if inherited { " (inherited)" } else { "" }
+                ))),
+        )
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text)
+                .child(SharedString::from(text.to_owned())),
+        )
+}
+
+pub(crate) fn start_chat_readout(theme: &Theme, selector: &'static str, text: String) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.into())
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.input_bg)
+        .when(super::is_industrial(theme), |el| {
+            el.rounded(px(0.0))
+                .border_color(theme.industrial_colors().rule)
+                .font_family(theme.font_mono.clone())
+        })
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text)
+        .child(SharedString::from(text))
+}
+
 pub(crate) fn start_chat_account_toggle(
     theme: &Theme,
     open: bool,
