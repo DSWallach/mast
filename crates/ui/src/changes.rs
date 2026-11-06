@@ -61,6 +61,7 @@ use crate::theme::Theme;
 use mast_syntax::LanguageId as Lang;
 
 mod file_list;
+mod explanation;
 mod ref_picker;
 mod review_state;
 pub(crate) mod walkthrough;
