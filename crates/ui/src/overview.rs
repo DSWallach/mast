@@ -1320,18 +1320,14 @@ fn pr_action_badge(action: PrAction) -> (&'static str, gpui::Hsla) {
 /// as Outline, alone or alongside the outline flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum OverviewMode {
-    #[default]
     List,
+    #[default]
     Outline,
 }
 
 impl OverviewMode {
-    fn from_flags(flags: &BTreeSet<String>) -> Self {
-        if flags.contains(VIEW_OUTLINE_FLAG) || flags.contains(LEGACY_VIEW_CANVAS_FLAG) {
-            Self::Outline
-        } else {
-            Self::List
-        }
+    fn from_flags(_flags: &BTreeSet<String>) -> Self {
+        Self::Outline
     }
 
     /// The flag written for this mode (`None` = List, written as absence).
@@ -1822,7 +1818,7 @@ impl Overview {
             body_focus: cx.focus_handle(),
             list_selected: None,
             list_order: Vec::new(),
-            view_mode: OverviewMode::List,
+            view_mode: OverviewMode::Outline,
             expanded: HashSet::new(),
             link_status: HashMap::new(),
             link_status_pending: HashSet::new(),
@@ -4594,22 +4590,6 @@ impl Render for Overview {
             self.sync_outline(cx);
         }
 
-        let toggle = |mode: OverviewMode, label: String, current: OverviewMode| {
-            let active = mode == current;
-            div()
-                .id(SharedString::from(format!("overview-mode-{mode:?}")))
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .child(SharedString::from(label))
-        };
-
         let new_chat_button = self.render_new_chat_button(&theme, cx);
 
         let title_row = div()
@@ -4658,43 +4638,7 @@ impl Render for Overview {
                     // Leftmost of the header's action cluster — the overview's
                     // one clearly-primary button (see `render_new_chat_button`).
                     .child(new_chat_button)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .p(px(2.0))
-                            .rounded(px(6.0))
-                            .bg(theme.element_hover.opacity(0.5))
-                            .child(
-                                toggle(OverviewMode::List, "List".into(), self.view_mode)
-                                    .hint("List view", HintKey::None)
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.set_mode(OverviewMode::List, cx);
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                toggle(OverviewMode::Outline, "Outline".into(), self.view_mode)
-                                    .hint(
-                                        "Outline: work items and their Chats",
-                                        HintKey::Command(WorkOutlineCommand::OpenOutline),
-                                    )
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, window, cx| {
-                                            this.set_mode(OverviewMode::Outline, cx);
-                                            let handle = gpui::Focusable::focus_handle(
-                                                this.outline.read(cx),
-                                                cx,
-                                            );
-                                            window.focus(&handle, cx);
-                                        }),
-                                    ),
-                            ),
-                    ),
+
             );
 
         let pill = |id: &'static str, label: String, active: bool| {
@@ -7851,7 +7795,7 @@ mod logic_tests {
             prefs.groups,
             vec![GroupDimension::Repo, GroupDimension::Ticket]
         );
-        assert_eq!(prefs.mode, OverviewMode::List);
+        assert_eq!(prefs.mode, OverviewMode::Outline);
         // Every dimension's key round-trips.
         for dim in [GroupDimension::Repo, GroupDimension::Ticket] {
             assert_eq!(
@@ -7868,7 +7812,7 @@ mod logic_tests {
     fn overview_mode_loads_a_saved_canvas_view_as_outline_and_writes_exactly_one() {
         let flags =
             |keys: &[&str]| -> BTreeSet<String> { keys.iter().map(|k| k.to_string()).collect() };
-        assert_eq!(OverviewMode::from_flags(&flags(&[])), OverviewMode::List);
+        assert_eq!(OverviewMode::from_flags(&flags(&[])), OverviewMode::Outline);
         // The removed Canvas view: alone, or next to the outline flag.
         assert_eq!(
             OverviewMode::from_flags(&flags(&["viewMode:canvas"])),
@@ -7885,7 +7829,7 @@ mod logic_tests {
         // Unknown / stale values read as List, never fail.
         assert_eq!(
             OverviewMode::from_flags(&flags(&["viewMode:myPrs", "viewMode:board"])),
-            OverviewMode::List
+            OverviewMode::Outline
         );
         // The writer purges every `viewMode:` entry and writes one.
         for mode in [OverviewMode::List, OverviewMode::Outline] {
@@ -7914,7 +7858,7 @@ mod logic_tests {
                 "{mode:?}: {set:?}"
             );
             assert!(!set.contains(LEGACY_VIEW_CANVAS_FLAG));
-            assert_eq!(view_prefs_from_flags(&set).mode, mode);
+            assert_eq!(view_prefs_from_flags(&set).mode, OverviewMode::Outline);
             assert!(set.contains("prSidebarOpen"), "unrelated flags survive");
         }
         // Re-saving a loaded Canvas view writes only the outline flag.
