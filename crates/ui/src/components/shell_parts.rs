@@ -2697,3 +2697,38 @@ pub(crate) fn sidebar_faded_label(
     .fade_right(true)
     .fade_label_overflow(&overflow)
 }
+
+/// Exact active-session row height. Harness identity lives on the title line
+/// and the Working glyph lives in the status corner, so neither adds a third
+/// line. Compact rows omit the metadata line and its preceding gap entirely;
+/// branch / pull-request rows add the exact height of their tallest child.
+/// Keeping this calculation beside the renderer's metrics prevents disclosure
+/// clips when view options alter the row structure.
+pub(crate) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
+    let mut metadata_height: f32 = 0.0;
+    if shows_branch {
+        metadata_height = metadata_height.max(14.0);
+    }
+    if shows_pull_request {
+        metadata_height = metadata_height.max(16.0);
+    }
+    if metadata_height == 0.0 {
+        45.0
+    } else {
+        47.0 + metadata_height
+    }
+}
+pub(crate) fn sidebar_row_height(
+    compact: bool,
+    show_label: bool,
+    branch: bool,
+    pr: bool,
+    tokens: crate::ui_style::StyleTokens,
+) -> f32 {
+    if compact {
+        tokens.sidebar_row_compact_h
+    } else {
+        chat_row_height(branch, pr) - (if show_label { 0.0 } else { 16.0 })
+            + tokens.sidebar_row_extra_h
+    }
+}

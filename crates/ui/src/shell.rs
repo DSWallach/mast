@@ -28,7 +28,12 @@ use mast_proto::{AuthState, WorkspaceScope};
 use mast_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
-use crate::components::shell_parts::{sidebar_faded_label, header_icon_button, linux_caption_button, nav_history_button, window_control_button, windows_caption_button};
+#[cfg(test)]
+use crate::components::shell_parts::chat_row_height;
+use crate::components::shell_parts::{
+    header_icon_button, linux_caption_button, nav_history_button, sidebar_faded_label,
+    sidebar_row_height, window_control_button, windows_caption_button,
+};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
 use crate::icons::{self, icon};
@@ -853,34 +858,6 @@ fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bo
             .iter()
             .zip(new)
             .any(|((old_key, _), (new_key, _))| old_key != new_key)
-}
-
-/// Exact active-session row height. Harness identity lives on the title line
-/// and the Working glyph lives in the status corner, so neither adds a third
-/// line. Compact rows omit the metadata line and its preceding gap entirely;
-/// branch / pull-request rows add the exact height of their tallest child.
-/// Keeping this calculation beside the renderer's metrics prevents disclosure
-/// clips when view options alter the row structure.
-pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
-    let mut metadata_height: f32 = 0.0;
-    if shows_branch {
-        metadata_height = metadata_height.max(14.0);
-    }
-    if shows_pull_request {
-        metadata_height = metadata_height.max(16.0);
-    }
-    if metadata_height == 0.0 {
-        45.0
-    } else {
-        47.0 + metadata_height
-    }
-}
-fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool, tokens: crate::ui_style::StyleTokens) -> f32 {
-    if compact {
-        tokens.sidebar_row_compact_h
-    } else {
-        chat_row_height(branch, pr) - (if show_label { 0.0 } else { 16.0 }) + tokens.sidebar_row_extra_h
-    }
 }
 
 /// Flex gap between sidebar list items.
