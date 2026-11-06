@@ -26,22 +26,17 @@ pub(super) fn hash64(parts: &[&str]) -> u64 {
 /// Stable identity for the changed lines of a hunk. Context and line numbers
 /// are excluded so an unrelated edit above the hunk does not invalidate it.
 pub(super) fn hunk_identity(path: &str, hunk: &Hunk) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut hash = Sha256::new();
-    hash.update((path.len() as u64).to_be_bytes());
-    hash.update(path.as_bytes());
-    for line in &hunk.lines {
-        let tag = match line.kind {
-            LineKind::Add => b'+',
-            LineKind::Del => b'-',
-            LineKind::Context | LineKind::Meta => continue,
-        };
-        hash.update([tag]);
-        hash.update((line.text.len() as u64).to_be_bytes());
-        hash.update(line.text.as_bytes());
-    }
-    format!("{:x}", hash.finalize())
+    mast_proto::review_hunk_identity(
+        path,
+        hunk.lines.iter().filter_map(|line| {
+            let tag = match line.kind {
+                LineKind::Add => b'+',
+                LineKind::Del => b'-',
+                LineKind::Context | LineKind::Meta => return None,
+            };
+            Some((tag, line.text.as_str()))
+        }),
+    )
 }
 
 pub(super) fn hunk_identities(files: &[FileDiff]) -> Vec<Vec<String>> {

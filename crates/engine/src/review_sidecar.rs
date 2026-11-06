@@ -2,7 +2,6 @@
 use std::path::Path;
 
 use mast_proto::{ReviewAnchor, ReviewSide, ReviewSidecar};
-use sha2::{Digest, Sha256};
 
 #[derive(Debug)]
 struct Hunk {
@@ -55,13 +54,13 @@ fn range(value: &str) -> Option<(u32, u32)> {
     ))
 }
 
-fn parse_hunks(patch: &str) -> Vec<Hunk> {
+fn parse_hunks(path: &str, patch: &str) -> Vec<Hunk> {
     let mut hunks = Vec::new();
     let mut current: Option<(Hunk, String)> = None;
     for line in patch.split_inclusive('\n') {
         if let Some(header) = line.strip_prefix("@@ -") {
             if let Some((mut hunk, lines)) = current.take() {
-                hunk.hash = format!("{:x}", Sha256::digest(lines.as_bytes()));
+                hunk.hash = hunk_identity(path, &lines);
                 hunks.push(hunk);
             }
             let mut fields = header.split_whitespace();
@@ -84,15 +83,26 @@ fn parse_hunks(patch: &str) -> Vec<Hunk> {
                 ));
             }
         } else if let Some((_, lines)) = current.as_mut()
-            && line.starts_with([' ', '+', '-', '\\']) {
-                lines.push_str(line);
-            }
+            && line.starts_with([' ', '+', '-', '\\'])
+        {
+            lines.push_str(line);
+        }
     }
     if let Some((mut hunk, lines)) = current {
-        hunk.hash = format!("{:x}", Sha256::digest(lines.as_bytes()));
+        hunk.hash = hunk_identity(path, &lines);
         hunks.push(hunk);
     }
     hunks
+}
+
+fn hunk_identity(path: &str, patch: &str) -> String {
+    mast_proto::review_hunk_identity(
+        path,
+        patch.lines().filter_map(|line| {
+            let tag = *line.as_bytes().first()?;
+            matches!(tag, b'+' | b'-').then(|| (tag, &line[1..]))
+        }),
+    )
 }
 
 fn matching_hunk(hunks: &[Hunk], side: ReviewSide, start: u32, end: u32) -> Option<&Hunk> {
@@ -162,7 +172,8 @@ pub fn validate_review(
                 &pathspec,
             ],
         )?;
-        entries.push((file, parse_hunks(&String::from_utf8_lossy(&patch))));
+        let hunks = parse_hunks(&file, &String::from_utf8_lossy(&patch));
+        entries.push((file, hunks));
     }
     let valid = || {
         let mut text = String::from("Valid hunks per file:");
@@ -265,6 +276,7 @@ mod tests {
                 head_sha: head.into(),
                 base_sha: base.into(),
             },
+            target: None,
             summary: "Change a line".into(),
             verdict_hint: None,
             steps: vec![],
@@ -293,6 +305,13 @@ mod tests {
         assert_eq!(
             good.highlights[0].anchor.hunk_hash.as_ref().unwrap().len(),
             64
+        );
+        assert_eq!(
+            good.highlights[0].anchor.hunk_hash.as_deref(),
+            Some(
+                mast_proto::review_hunk_identity("file.txt", [(b'-', "two"), (b'+', "changed")])
+                    .as_str()
+            )
         );
         let mut bad = review(&base, &head);
         bad.highlights[0].anchor.file = "missing".into();

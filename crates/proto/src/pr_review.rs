@@ -13,6 +13,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::ChatConfig;
 
+/// Start a review of a committed branch range in an existing checkout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartBranchReviewParams {
+    pub space_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
+    pub target: crate::ReviewTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ChatConfig>,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartBranchReviewReply {
+    pub chat_id: String,
+    pub space_id: String,
+    pub checkout_path: String,
+    pub target: crate::ReviewTarget,
+    pub prompt: String,
+}
+
 /// Which launcher skill the Chat runs (launch.sh's `fix-ci | code-review`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
