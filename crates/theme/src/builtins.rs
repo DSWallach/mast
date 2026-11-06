@@ -13,6 +13,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     REGISTRY.get_or_init(|| ThemeRegistry {
         families: vec![
             family("mast", "Mast", vec![zeron_light(), zeron_dark()]),
+            family("area", "Area", vec![area(false), area(true)]),
             family(
                 "industrial",
                 "Industrial",
@@ -270,6 +271,62 @@ fn zeron_dark() -> ThemeVariant {
             "native",
             "https://github.com/zeronsh/comet",
             "d138049",
+            "MIT",
+        ),
+    })
+}
+
+fn area(dark: bool) -> ThemeVariant {
+    let (id, name, appearance, background, shell, text, muted, ansi) = if dark {
+        (
+            "area-dark",
+            "Area Dark",
+            Appearance::Dark,
+            "#183028",
+            "#183028",
+            "#D6F1DB",
+            "#B5B5B5",
+            ANSI_DARK,
+        )
+    } else {
+        (
+            "area-light",
+            "Area Light",
+            Appearance::Light,
+            "#F3F3F3",
+            "#D6F1DB",
+            "#183028",
+            "#183028",
+            ANSI_LIGHT,
+        )
+    };
+    variant(Seeds {
+        id,
+        family_id: "area",
+        name,
+        appearance,
+        treatment: SurfaceTreatment::Opaque,
+        background,
+        shell,
+        raised: shell,
+        card: background,
+        text,
+        muted,
+        faint: muted,
+        accent: "#3F69CC",
+        danger: text,
+        warning: text,
+        success: text,
+        terminal_background: background,
+        ansi,
+        syntax: [
+            muted, text, text, text, text, text, text, text, muted, text, text, text,
+        ],
+        source: source(
+            id,
+            "native",
+            "https://github.com/Pluto8195/mast",
+            "area-palette",
             "MIT",
         ),
     })
