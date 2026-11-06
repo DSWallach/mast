@@ -4953,21 +4953,7 @@ impl Composer {
             let remove = name.clone();
             let label: SharedString = format!("/{name}").into();
             row = row.child(
-                div()
-                    .id(("composer-skill-chip", ix))
-                    .flex_none()
-                    .h(px(crate::badges::BADGE_HEIGHT))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .pl(px(8.0))
-                    .pr(px(4.0))
-                    .rounded(px(8.0))
-                    .bg(crate::theme::ink(0.06))
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
+                crate::components::conversation_skill_chip(theme, ix)
                     .tooltip(|_, cx| {
                         cx.new(|_| {
                             crate::workspace_chip::WorkspaceChipTooltip(
@@ -4987,27 +4973,12 @@ impl Composer {
                     )
                     .child(label)
                     .child(
-                        div()
-                            .id(("composer-skill-remove", ix))
-                            .role(gpui::Role::Button)
-                            .aria_label("Remove skill")
-                            .size(px(16.0))
-                            .rounded(px(4.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.08)))
+                        crate::components::conversation_skill_remove(theme, ix)
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.remove_skill(&remove, cx);
-                            }))
-                            .child(
-                                crate::icons::icon(crate::icons::CLOSE)
-                                    .size(px(10.0))
-                                    .text_color(theme.text_muted),
-                            ),
+                            })),
                     ),
             );
         }
@@ -5330,15 +5301,7 @@ impl Composer {
         if staged.is_empty() {
             return None;
         }
-        let mut strip = div()
-            .w_full()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP));
+        let mut strip = crate::components::conversation_attachment_strip(STRIP_GAP, STRIP_PAD_X, STRIP_PAD_TOP);
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
             let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
@@ -5349,14 +5312,7 @@ impl Composer {
                     .flex_none()
                     .relative()
                     .child(
-                        div()
-                            .id(("composer-att-thumb", ix))
-                            .size(px(STRIP_THUMB))
-                            .rounded(px(8.0))
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(crate::theme::hairline(0.10))
-                            .cursor_pointer()
+                        crate::components::conversation_attachment_thumb(ix, STRIP_THUMB)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 preview.viewer.reset();
                                 this.preview = Some(preview.clone());
@@ -5385,32 +5341,14 @@ impl Composer {
                     // draw order and images render last, so without it the
                     // thumbnail paints OVER this button (user report).
                     .child(crate::frost::layered(
-                        div()
-                            .id(("composer-att-remove", ix))
-                            .absolute()
-                            .top(px(-6.0))
-                            .right(px(-6.0))
-                            .size(px(18.0))
-                            .rounded_full()
-                            .bg(theme.bg)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .shadow_sm()
-                            .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
+                        crate::components::conversation_attachment_remove(theme, ix, group)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 // The button overhangs the thumbnail, whose
                                 // hitbox is right underneath — don't let the
                                 // same click also open the preview.
                                 cx.stop_propagation();
                                 this.remove_attachment(&remove_id, cx);
-                            }))
-                            .child(
-                                crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            ),
+                            })),
                     )),
             );
         }
@@ -5427,14 +5365,7 @@ impl Composer {
         if appshots.is_empty() {
             return None;
         }
-        let mut strip = div()
-            .id("composer-appshots-strip")
-            .flex()
-            .flex_row()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP))
-            .overflow_x_scroll();
+        let mut strip = crate::components::conversation_appshot_strip(STRIP_GAP, STRIP_PAD_X, STRIP_PAD_TOP);
         let max_image_width = self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH)
             - 2.0 * Theme::SPACE_LG
             - 2.0
@@ -5467,20 +5398,7 @@ impl Composer {
             let (image_width, image_height) =
                 appshot_contained_size(appshot.screenshot_dimensions, max_image_width);
             let tile_width = (image_width + 2.0 * APPSHOT_IMAGE_INSET).max(APPSHOT_TILE_MIN_WIDTH);
-            let mut card = div()
-                .id(("composer-appshot", ix))
-                .group(group.clone())
-                .relative()
-                .w(px(tile_width))
-                .h(px(APPSHOT_TILE_HEIGHT))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .items_center()
-                .rounded(px(14.0))
-                .overflow_hidden()
-                .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::ink(0.045)))
+            let mut card = crate::components::conversation_appshot_card(ix, group.clone(), tile_width, APPSHOT_TILE_HEIGHT)
                 .tooltip(move |_, cx| {
                     cx.new(|_| AppshotActionTooltip(preview_label.clone()))
                         .into()
@@ -5584,20 +5502,7 @@ impl Composer {
                 ));
             }
             card = card.child(crate::frost::layered(
-                div()
-                    .id(("composer-appshot-remove", ix))
-                    .absolute()
-                    .top(px(6.0))
-                    .right(px(6.0))
-                    .size(px(22.0))
-                    .rounded_full()
-                    .bg(theme.bg.opacity(0.92))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .shadow_sm()
-                    .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
+                crate::components::conversation_appshot_remove(theme, ix, group)
                     .tooltip(move |_, cx| {
                         cx.new(|_| AppshotActionTooltip(remove_label.clone()))
                             .into()
@@ -5622,12 +5527,7 @@ impl Composer {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.remove_appshot(&remove_id, cx);
-                    }))
-                    .child(
-                        crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                            .size(px(15.0))
-                            .text_color(theme.text_muted),
-                    ),
+                    })),
             ));
             // Entity-owned timestamps prevent the entrance replaying on route remount.
             if let Some(start) = self.appshot_entrances.get(&appshot.id) {
@@ -6447,7 +6347,7 @@ impl Composer {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .when(true, |el| crate::ui_style::reveal_on_hover(el, row_group, theme.ui_style, selected))
+            .when(true, |el| crate::components::conversation_reveal(el, theme, row_group, selected))
             .hover(|s| s.bg(crate::theme::ink(0.08)))
             .tooltip(|_, cx| {
                 cx.new(|_| {
@@ -7976,17 +7876,12 @@ impl Composer {
                 })
         });
 
-        div()
+        crate::components::conversation_wizard_surface(div()
             .id("question-panel")
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
-            }))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(COMPOSER_RADIUS)))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.input_glass_bg())
-            .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg())
+            })), &theme, COMPOSER_RADIUS)
             .flex()
             .flex_col()
             .child(
@@ -8097,73 +7992,21 @@ impl Composer {
     fn render_send_button(
         &mut self,
         mode: SendButtonMode,
+        identity: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
-        let guided = theme.ui_style.layout == crate::ui_style::UiLayout::Guided;
-        let (area, key) = match theme.ui_style.conversation {
-            crate::ui_style::ConversationVariant::Area => (true, false),
-            crate::ui_style::ConversationVariant::Industrial => (false, true),
-            crate::ui_style::ConversationVariant::Standard => (false, false),
-        };
-        // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
-        // send/queue, a dark rounded square on the same light circle to stop.
-        match mode {
-            SendButtonMode::Stop => div()
-                .id("composer-stop")
-                .size(px(28.0))
-                .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
-                .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
-                .flex_none()
-                .rounded_full()
-                .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
-                .bg(theme.text)
-                .when(area, |el| el.bg(theme.text_muted))
-                .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }))
-                .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
-                .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child("Stop")))
-                .into_any_element(),
-            SendButtonMode::Send | SendButtonMode::Queue => {
-                // Share the submission guard with Enter, including pending
-                // edits and the new-session runnable-agent check.
-                let blocked = self.send_blocked(cx);
-                div()
-                    .id("composer-send")
-                    .size(px(28.0))
-                    .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
-                    .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
-                    .flex_none()
-                    .rounded_full()
-                    .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
-                    .bg(theme.text)
-                    .when(area, |el| el.bg(theme.text_muted))
-                    .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(blocked, |el| el.opacity(0.35))
-                    .when(!blocked, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
-                    })
-                    .child(
-                        crate::icons::icon(crate::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }),
-                    )
-                    .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
-                    .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child(if mode == SendButtonMode::Queue { "QUEUE" } else { "SEND" })))
-                    .into_any_element()
-            }
-        }
+        let stop = mode == SendButtonMode::Stop;
+        let blocked = !stop && self.send_blocked(cx);
+        crate::components::conversation_send_key(theme, identity, stop, mode == SendButtonMode::Queue)
+            .when(blocked, |el| el.opacity(0.35))
+            .when(!blocked, |el| {
+                el.cursor_pointer().hover(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if stop { this.interrupt_selected(cx); } else { this.on_submit(cx); }
+                    }))
+            })
+            .into_any_element()
     }
 }
 
@@ -8197,10 +8040,8 @@ impl Render for Composer {
         }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
-        let area = matches!(theme.ui_style.conversation, crate::ui_style::ConversationVariant::Area);
-        let identity_key = self.pickers.read(cx).effective_harness(cx).map(|harness| format!("harness:{harness:?}")).unwrap_or_default();
-        let identity = theme.identity_color(&identity_key);
-        let identity_text = area.then(|| theme.identity_text(identity));
+        let identity = theme.identity_color(&self.current_key);
+        let identity_text = crate::components::conversation_input_text_color(&theme, identity);
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
@@ -8212,9 +8053,14 @@ impl Render for Composer {
             self.reset_slash(None, cx);
         }
         let mode = self.button_mode(cx);
+        let text_size = crate::components::conversation_composer_text_size(&theme, INPUT_TEXT_SIZE);
         // Shape the current draft before sizing the pill. Waiting for the child
         // layout leaves the parent using the previous edit's height.
         self.input.update(cx, |input, cx| {
+            if input.text_size != text_size {
+                input.text_size = text_size;
+                input.needs_measure = true;
+            }
             if input.identity_text != identity_text {
                 input.identity_text = identity_text;
                 input.needs_measure = true;
@@ -8222,7 +8068,7 @@ impl Render for Composer {
             if input.needs_measure && input.last_width > 0.0 {
                 let mut style = window.text_style();
                 style.font_family = theme.font_sans.clone();
-                style.font_size = crate::typography::ui_rems(INPUT_TEXT_SIZE).into();
+                style.font_size = crate::typography::ui_rems(text_size).into();
                 style.color = if let Some(color) = identity_text { color } else if input.content.is_empty() {
                     theme.text_faint
                 } else {
@@ -8241,6 +8087,7 @@ impl Render for Composer {
                 input.layout_epoch,
             )
         };
+        let content_height = crate::components::conversation_composer_content_height(&theme, content_height, INPUT_LINE_HEIGHT);
         let now = Instant::now();
         // Only measurements taken *after* the last flip may drive the next one
         // (at most one flip per layout pass — a flip invalidates the widths).
@@ -8337,7 +8184,7 @@ impl Render for Composer {
                     route_snap,
                 )
             };
-        let expanded = self.expanded_mode;
+        let expanded = crate::components::conversation_composer_expanded(&theme, self.expanded_mode);
 
         // Chat-scoped failures render only under their own chat; a global
         // failure (no key) renders everywhere.
@@ -8380,7 +8227,7 @@ impl Render for Composer {
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
-            .max_w(px(COMPOSER_MAX_WIDTH))
+            .max_w(px(crate::components::conversation_composer_width(&theme, COMPOSER_MAX_WIDTH, Theme::SPACE_LG)))
             .mx_auto()
             .flex()
             .flex_col()
@@ -8624,7 +8471,7 @@ impl Render for Composer {
                 morph_t
             };
         let text_pt = morph_text_pad(layout_morph_t);
-        let surface_radius = theme.ui_style.tokens.panel_radius.unwrap_or(COMPOSER_RADIUS - 4.0 * dock_amount);
+        let surface_radius = crate::components::conversation_panel_radius(&theme, COMPOSER_RADIUS - 4.0 * dock_amount);
         let route_to_single_line =
             self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
@@ -8670,39 +8517,13 @@ impl Render for Composer {
             }
         });
 
-        let send_button = self.render_send_button(mode, cx);
+        let send_button = self.render_send_button(mode, identity, cx);
         // Attach button — opens the native image picker (the original's hidden
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. The leading utility group owns the spacing between
         // this button and the model picker.
-        let attach = div()
-            .id("composer-attach")
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .cursor_pointer()
-            // zeron composer-actions.tsx attach: `transition-colors`.
-            .bg(motion::hover_blend(
-                "composer-attach",
-                gpui::transparent_black(),
-                crate::theme::ink(0.10),
-            ))
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| crate::surface_chrome::icon_key(el, &theme, false))
-            .on_hover(motion::hover_listener("composer-attach"))
-            .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
-            .child(
-                crate::icons::icon(crate::icons::PAPERCLIP)
-                    .size(px(16.0))
-                    // The source path's painted bounds are centered at x=11
-                    // inside a 24px viewbox. Correct that optical offset while
-                    // keeping the 28px hit target geometrically centered.
-                    .relative()
-                    .left(px(1.0))
-                    .text_color(theme.text_muted),
-            );
+        let attach = crate::components::conversation_attach_key(&theme)
+            .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)));
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
@@ -8722,7 +8543,7 @@ impl Render for Composer {
         };
         // Compensate for the transcript canvas beneath the frosted surface.
         // Keep the opaque fallback when frost is disabled or unsupported.
-        let pill = div()
+        let pill = crate::components::conversation_input_surface(div()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -8732,14 +8553,7 @@ impl Render for Composer {
                         window.focus(&this.input.focus_handle(cx), cx);
                     }
                 }),
-            )
-            .rounded(px(surface_radius))
-            .border_1()
-            .border_color(pill_border)
-            .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
-            .when(!theme.is_frost(), |el| el.bg(theme.input_glass_bg()))
-            .when(area, |el| el.bg(identity).border_color(identity))
-            .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg());
+            ), &theme, identity, surface_radius, pill_border);
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
@@ -8771,13 +8585,11 @@ impl Render for Composer {
             .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
                 f32::from(bounds.size.width)
             });
-        let send_hint = (theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline
-            && mode != SendButtonMode::Stop && surface_width >= 480.0)
-            .then(|| crate::work_outline::hints::kbd_chip(&theme, match crate::settings::current(cx).composer_send_behavior {
+        let send_hint = crate::components::conversation_send_hint(&theme, mode != SendButtonMode::Stop, surface_width,
+            match crate::settings::current(cx).composer_send_behavior {
                 crate::settings::ComposerSendBehavior::Enter => "enter",
                 crate::settings::ComposerSendBehavior::ModEnter => "mod-enter",
-            }));
-        let has_send_hint = send_hint.is_some();
+            });
         let model_travel = (surface_width
             - PILL_BORDER_V
             - 12.0
@@ -8792,198 +8604,60 @@ impl Render for Composer {
             - morph_cluster_inset(expanded, layout_morph_t))
         .max(0.0);
         let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
-        let model_offset = if area { 0.0 } else { (model_side - compact_target) * model_travel + model_drift };
+        let model_offset = (model_side - compact_target) * model_travel + model_drift;
         let measured_model_bounds = self.model_bounds.clone();
-        let model_picker = div()
-            .min_w_0()
-            .max_w(px(surface_width * 0.45))
-            .relative()
-            .left(px(model_offset))
-            .opacity(if area { 1.0 } else { model_opacity })
-            .when(theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial, |el| el.child(
-                div().absolute().top(px(-8.0)).left(px(4.0)).right(px(4.0)).flex().justify_between().text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL").child("MODE")
-            ))
-            .child(self.pickers.clone())
-            .child(
+        let (model_picker, area_picker) = crate::components::conversation_model_picker(
+            &theme, surface_width, model_offset, model_opacity, self.pickers.clone().into_any_element(),
                 gpui::canvas(
                     move |bounds, _, _| measured_model_bounds.set(Some(bounds)),
                     |_, _, _, _| {},
                 )
                 .absolute()
-                .inset_0(),
-            );
-        // Area exposes the existing harness/model/account picker as a raised
-        // character tab, keeping the same accessible control and menu.
-        let (model_picker, area_picker) = if area {
-            (None, Some(model_picker))
-        } else {
-            (Some(model_picker), None)
-        };
-        let area_tabs = area.then(|| {
+                .inset_0().into_any_element(),
+        );
+        let area_tabs = {
             let selected = self.pickers.read(cx).effective_harness(cx);
             let harnesses = self.pickers.read(cx).area_harnesses(cx);
             let tabs = harnesses.into_iter().map(|harness| {
                 let (path, _) = crate::pickers::harness_brand_icon(harness);
                 let selected = selected == Some(harness);
                 let tab_identity = theme.identity_color(&format!("harness:{harness:?}"));
-                div().id(SharedString::from(format!("area-harness-{harness:?}")))
-                    .size(px(28.0)).rounded_t(px(14.0)).flex().items_center().justify_center()
-                    .bg(tab_identity)
-                    .text_color(theme.identity_text(tab_identity))
-                    .when(!selected, |el| el.opacity(0.75))
-                    .cursor_pointer().child(crate::icons::icon(path).size(px(16.0)).text_color(theme.identity_text(tab_identity)))
+                crate::components::conversation_harness_tab(&theme, SharedString::from(format!("area-harness-{harness:?}")), tab_identity, identity, path, selected)
                     .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
                         pickers.pick_harness(harness, cx);
                         pickers.open_model_menu(window, cx);
-                    })))
+                    }))).into_any_element()
             }).collect::<Vec<_>>();
-            div().absolute().left(px(16.0)).right(px(16.0)).top(px(-28.0)).h(px(28.0)).flex().items_end()
-                .children(tabs).child(div().flex_1())
-                .child(div().id("area-add-harness").size(px(28.0)).rounded_full().flex().items_center().justify_center()
-                    .text_color(theme.text_muted).cursor_pointer().child("+")
-                    .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx)))))
-        });
-        let body = match theme.ui_style.conversation {
-        crate::ui_style::ConversationVariant::Area => {
-            div().flex().flex_col()
-                .child(pill.h(px(pill_height)).overflow_hidden().flex().flex_col()
-                    .children(comments_chip).children(skill_chips).children(appshot_strip).children(strip)
-                    .child(div().flex_1().min_h_0().overflow_hidden().px(px(16.0)).pt(px(text_pt)).child(self.render_input_with_completion())))
-                .child(div().h(px(40.0)).w_full().relative().flex().items_center().justify_center()
-                    .child(div().absolute().left_0().top(px(6.0)).flex().items_center().gap(px(2.0))
-                        .text_color(theme.text_muted).child(attach).child("Attach"))
-                    .child(send_button)
-                    .child(div().absolute().right_0().top(px(4.0)).max_w(px(surface_width * 0.35)).children(area_picker)))
-        },
-        crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Industrial => if expanded {
-            // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
-            // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
-            // stationary bottom — constant screen-y through the morph, with
-            // the 4.5px compact↔expanded centering delta gliding out. The
-            // text viewport follows the animated height so it cannot paint
-            // over the controls. Its width stays fixed (no tween rewraps);
-            // top padding eases 12→16. Attachment and Send stay on the bottom
-            // anchor while the model chip fades between its horizontal slots.
-            pill.h(px(pill_height))
-                .overflow_hidden()
-                .relative()
-                .flex()
-                .flex_col()
-                .children(comments_chip)
-                .children(skill_chips)
-                .children(appshot_strip)
-                .children(strip)
-                .child(
-                    div()
-                        .h(px(textarea_height))
-                        .flex_none()
-                        .overflow_hidden()
-                        .px(px(16.0))
-                        .pt(px(text_pt))
-                        .pb(px(4.0))
-                        .child(self.render_input_with_completion()),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(-cluster_dy))
-                        .h(px(ACTIONS_ROW_HEIGHT))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        // Shared group geometry (see CLUSTER_X_DELTA): the
-                        // attachment belongs to the utility pickers, while
-                        // Send has a larger structural separation.
-                        .gap(px(ACTION_PRIMARY_GAP))
-                        .pl(px(12.0))
-                        .pr(px(morph_cluster_inset(true, layout_morph_t)))
-                        .pt(px(2.0))
-                        .pb(px(12.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach)
-                                .children(model_picker),
-                        )
-                        .children(send_hint)
-                        .child(send_button),
-                )
+            let add = crate::components::conversation_add_harness_key(&theme)
+                    .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx))))
+                    .into_any_element();
+            crate::components::conversation_harness_tabs(&theme, tabs, add)
+        };
+        let text_glide = if self.dock_frame.is_some_and(|frame| frame.active) {
+            collapse_text_glide(dock_height(0.0), dock_amount)
         } else {
-            // Compact pill: attachment on the left, input in the middle,
-            // then model and Send on the right, all on one 47px line.
-            // The row is BOTTOM-justified: during the collapse morph the pill
-            // top sweeps down over a stationary row, the text walks down from
-            // its expanded resting place via a decaying relative offset, and
-            // attachment/Send hold their spots (4.5px centering delta gliding
-            // in), with the model handoff sharing that same timeline.
-            let text_glide = if self.dock_frame.is_some_and(|frame| frame.active) {
-                collapse_text_glide(dock_height(0.0), dock_amount)
-            } else {
-                match self.flip_morph {
-                    Some(m) if morphing => collapse_text_glide(m.from, morph_t),
-                    _ => 0.0,
-                }
-            };
-            pill.h(px(pill_height))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .children(comments_chip)
-                .children(skill_chips)
-                .children(appshot_strip)
-                .children(strip)
-                .child(
-                    div()
-                        .h(px(COMPACT_TOTAL_HEIGHT - PILL_BORDER_V))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex_none()
-                                .pl(px(12.0))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .child(attach),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px(px(8.0))
-                                .relative()
-                                .top(px(-text_glide))
-                                .child(self.render_input_with_completion()),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(surface_width * 0.45))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .children(model_picker),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .pl(px(ACTION_PRIMARY_GAP))
-                                .pr(px(morph_cluster_inset(false, layout_morph_t)))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .when(has_send_hint, |el| el.flex().items_center().gap(px(4.0)))
-                                .children(send_hint)
-                                .child(send_button),
-                        ),
-                )
-        }};
+            match self.flip_morph {
+                Some(m) if morphing => collapse_text_glide(m.from, morph_t),
+                _ => 0.0,
+            }
+        };
+        let strips = comments_chip.into_iter().map(|el| el.into_any_element())
+            .chain(skill_chips.into_iter().map(|el| el.into_any_element()))
+            .chain(appshot_strip)
+            .chain(strip.into_iter().map(|el| el.into_any_element()))
+            .collect();
+        let body = crate::components::conversation_composer_body(&theme, crate::components::ConversationComposerBody {
+            pill, input: self.render_input_with_completion().into_any_element(), strips,
+            attach: attach.into_any_element(), send: send_button,
+            model: model_picker.map(|el| el.into_any_element()),
+            area_model: area_picker.map(|el| el.into_any_element()),
+            send_hint: send_hint.map(|el| el.into_any_element()),
+            expanded, pill_height, textarea_height, text_padding: text_pt,
+            cluster_offset: cluster_dy,
+            expanded_inset: morph_cluster_inset(true, layout_morph_t),
+            compact_inset: morph_cluster_inset(false, layout_morph_t),
+            text_glide, surface_width,
+        });
         let new_thread_target_selectors = (new_thread_chrome_opacity > 0.0).then(|| {
             self.pickers.update(cx, |pickers, cx| {
                 pickers.render_new_thread_target_selectors(cx)
@@ -9094,48 +8768,13 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let usage = self.state.read(cx).context_usage;
-            container.child(
-                div()
-                    .w_full()
-                    .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
-                    .mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
-                    .mb(px(-Theme::SPACE_SM * bottom_slot))
-                    .relative()
-                    .when(new_thread_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .px(px(10.0))
-                                .flex()
-                                .items_center()
-                                .opacity(new_thread_chrome_opacity)
-                                .children(new_thread_git_selectors),
-                        )
-                    })
-                    .when(session_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .w_full()
-                                .h(px(SESSION_FOOTER_HEIGHT))
-                                .flex()
-                                .items_center()
-                                .opacity(session_chrome_opacity)
-                                .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .children(crate::context_usage::has_window(usage).then(|| {
-                                    div().flex_none().pr(px(10.0)).child(
-                                        crate::context_usage::render(
-                                            usage,
-                                            self.state.clone(),
-                                            &theme,
-                                        ),
-                                    )
-                                })),
-                        )
-                    }),
-            )
+            let usage = (session_chrome_opacity > 0.0 && crate::context_usage::has_window(usage)).then(||
+                crate::context_usage::render(usage, self.state.clone(), &theme).into_any_element());
+            container.child(crate::components::conversation_footer_slot(
+                SESSION_FOOTER_HEIGHT, bottom_slot, new_thread_chrome_opacity, session_chrome_opacity,
+                new_thread_git_selectors.map(|el| el.into_any_element()),
+                footer.flatten().map(|el| el.into_any_element()), usage,
+            ))
         } else {
             container
         };

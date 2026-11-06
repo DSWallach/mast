@@ -40,7 +40,6 @@ pub const CODE_LINE_HEIGHT: f32 = 18.0;
 const CODE_LINE_HEIGHT_RATIO: f32 = CODE_LINE_HEIGHT / CODE_TEXT_SIZE;
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
-const CODE_HEADER_HEIGHT: f32 = 28.0;
 const CODE_ACTION_SIZE: f32 = 22.0;
 const CODE_SCROLLBAR_HIT_HEIGHT: f32 = 10.0;
 
@@ -485,7 +484,7 @@ pub fn render_tree(
     div()
         .flex()
         .flex_col()
-        .gap(crate::typography::ui_rems(theme.ui_style.tokens.grid.unwrap_or(MD_BLOCK_GAP)))
+        .gap(crate::typography::ui_rems(crate::components::conversation_markdown_gap(theme, MD_BLOCK_GAP)))
         .children(tree.blocks.iter().enumerate().map(|(ix, top)| {
             let document = highlight(ix);
             render_block(
@@ -546,53 +545,6 @@ pub(crate) fn take_question_log() -> Vec<(String, bool, bool, usize)> {
     QUESTION_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
 
-fn question_pill(label: &str, color: Hsla, filled: bool) -> gpui::Div {
-    div()
-        .px(crate::typography::ui_rems(7.0))
-        .h(crate::typography::ui_rems(18.0))
-        .flex()
-        .items_center()
-        .rounded(px(9.0))
-        .border_1()
-        .border_color(color.opacity(0.55))
-        .when(filled, |pill| pill.bg(color.opacity(0.14)))
-        .text_size(crate::typography::ui_rems(11.0))
-        .line_height(crate::typography::ui_rems(16.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color)
-        .child(label.to_owned())
-}
-
-fn answer_button(
-    id: SharedString,
-    selector: String,
-    label: &'static str,
-    primary: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let color = if primary {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
-    div()
-        .id(id)
-        .debug_selector(move || selector.clone())
-        .px(crate::typography::ui_rems(8.0))
-        .h(crate::typography::ui_rems(20.0))
-        .flex()
-        .items_center()
-        .rounded(px(5.0))
-        .cursor_pointer()
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .when(primary, |button| button.bg(color.opacity(0.12)))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(color)
-        .hover(|style| style.bg(color.opacity(0.2)))
-        .child(label)
-}
-
 /// The "Answer" button of an open question, or its input with Send / Cancel.
 fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Theme) -> AnyElement {
     let editing = ui.editing.as_deref() == Some(id) && ui.input.is_some();
@@ -603,7 +555,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
             .flex()
             .flex_row()
             .child(
-                answer_button(
+                crate::components::conversation_answer_button(
                     SharedString::from(format!("{row_key}-answer-{id}")),
                     format!("question-answer-{id}"),
                     "Answer",
@@ -621,17 +573,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
         .flex_col()
         .gap(crate::typography::ui_rems(6.0))
         .child(
-            div()
-                .debug_selector({
-                    let id = id.to_owned();
-                    move || format!("question-answer-input-{id}")
-                })
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.surface)
-                .px(crate::typography::ui_rems(8.0))
-                .py(crate::typography::ui_rems(5.0))
+            crate::components::conversation_answer_input(theme, format!("question-answer-input-{id}"))
                 // The preview root focuses itself on mouse-down; without this
                 // it runs after the input's own handler and steals focus, so a
                 // click into the field left keystrokes with nothing.
@@ -644,7 +586,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
                 .flex_row()
                 .gap(crate::typography::ui_rems(6.0))
                 .child(
-                    answer_button(
+                    crate::components::conversation_answer_button(
                         SharedString::from(format!("{row_key}-answer-send-{id}")),
                         format!("question-answer-send-{id}"),
                         "Send",
@@ -654,7 +596,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
                     .on_click(move |_, window, cx| send(target.clone(), window, cx)),
                 )
                 .child(
-                    answer_button(
+                    crate::components::conversation_answer_button(
                         SharedString::from(format!("{row_key}-answer-cancel-{id}")),
                         format!("question-answer-cancel-{id}"),
                         "Cancel",
@@ -714,23 +656,12 @@ fn render_question(
         .flex_wrap();
     if let Some(id) = &card.id {
         header = header.child(
-            div()
-                .px(crate::typography::ui_rems(7.0))
-                .h(crate::typography::ui_rems(18.0))
-                .flex()
-                .items_center()
-                .rounded(px(5.0))
-                .bg(theme.text.opacity(0.10))
-                .text_size(crate::typography::ui_rems(11.0))
-                .line_height(crate::typography::ui_rems(16.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(id.clone()),
+            crate::components::conversation_question_id(theme, id.clone().into()),
         );
     }
-    header = header.child(question_pill(status.label(), status_color, true));
+    header = header.child(crate::components::conversation_question_pill(theme, status.label(), status_color, true));
     if card.blocking {
-        header = header.child(question_pill("Blocking", theme.danger, false));
+        header = header.child(crate::components::conversation_question_pill(theme, "Blocking", theme.danger, false));
     }
     if collapsible {
         let ui = opts.question.clone().expect("collapsible implies an owner");
@@ -882,20 +813,9 @@ fn render_question(
     } else {
         status_color
     };
-    div()
-        .id(SharedString::from(format!("{}-question", opts.row_key)))
-        .border_l_2()
-        .border_color(accent.opacity(0.7))
-        .bg(theme.text.opacity(0.04))
-        .rounded_tr(px(6.0))
-        .rounded_br(px(6.0))
-        .pl(crate::typography::ui_rems(12.0))
-        .pr(crate::typography::ui_rems(10.0))
-        .py(crate::typography::ui_rems(8.0))
-        .text_color(theme.text_muted)
-        .when(status == QuestionStatus::Resolved && !expanded, |card| {
-            card.opacity(0.75)
-        })
+    crate::components::conversation_question_card(theme,
+        SharedString::from(format!("{}-question", opts.row_key)), accent,
+        status == QuestionStatus::Resolved && !expanded)
         .child(body)
         .into_any_element()
 }
@@ -2329,7 +2249,7 @@ fn text_element(
         inner
     };
     div()
-        .text_size(crate::typography::ui_rems(if size == MD_TEXT_SIZE { theme.ui_style.tokens.body_size.unwrap_or(size) } else { size }))
+        .text_size(crate::typography::ui_rems(crate::components::conversation_markdown_text_size(theme, size, MD_TEXT_SIZE)))
         .line_height(crate::typography::ui_rems(line_height))
         .child(content)
         .into_any_element()
@@ -2454,14 +2374,7 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    let mut panel_theme = theme.clone();
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-        let panel = if theme.appearance.is_dark() { theme.surface_raised } else { theme.solid };
-        panel_theme.bg = panel;
-        panel_theme.text = theme.identity_text(panel);
-        panel_theme.text_muted = panel_theme.text;
-        panel_theme.text_faint = panel_theme.text;
-    }
+    let panel_theme = crate::components::conversation_code_theme(theme);
     let theme = &panel_theme;
     if is_mermaid(language)
         && let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref())
@@ -2498,7 +2411,7 @@ fn render_code_block(
         }
         let mut actions = vec![toggle_action];
         actions.extend(code_copy_button(code, ix, opts, theme));
-        return code_block_frame(frame_id, language, actions, diagram.body, theme)
+        return crate::components::conversation_code_frame(frame_id, language, actions, diagram.body, theme)
             .into_any_element();
     }
     render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
@@ -2511,31 +2424,12 @@ fn code_icon_action(
     handler: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
     theme: &Theme,
 ) -> AnyElement {
-    let fade_key = id.to_string();
-    div()
-        .id(id)
-        .size(px(CODE_ACTION_SIZE))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(crate::motion::hover_blend(
-            &fade_key,
-            gpui::transparent_black(),
-            crate::theme::ink(0.08),
-        ))
-        .on_hover(crate::motion::hover_listener(fade_key))
+    crate::components::conversation_code_icon_action(theme, id, icon_path, CODE_ACTION_SIZE)
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             handler(window, cx);
         })
         .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label)).into())
-        .child(
-            crate::icons::icon(icon_path)
-                .size(px(13.0))
-                .text_color(theme.text_muted),
-        )
         .into_any_element()
 }
 
@@ -2550,112 +2444,13 @@ fn code_copy_button(
         let code_text: SharedString = code.to_string().into();
         let handler = copy.handler.clone();
         let fade_key = format!("{}-copy{ix}", opts.row_key);
-        div()
-            .id(SharedString::from(fade_key.clone()))
-            .h(px(CODE_ACTION_SIZE))
-            .px(px(6.0))
-            .rounded(px(5.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .bg(crate::motion::hover_blend(
-                &fade_key,
-                gpui::transparent_black(),
-                crate::theme::ink(0.08),
-            ))
-            .on_hover(crate::motion::hover_listener(fade_key))
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
+        crate::components::conversation_code_copy_action(theme, SharedString::from(fade_key), copied, CODE_ACTION_SIZE)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 handler(ix, code_text.clone(), window, cx);
             })
-            .child(
-                crate::icons::icon(if copied {
-                    crate::icons::CHECK
-                } else {
-                    crate::icons::COPY
-                })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-            )
-            .when(copied, |el| el.child(SharedString::from("Copied")))
-            .when(!copied && theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.child("Copy"))
             .into_any_element()
     })
-}
-
-fn code_block_header(
-    language: Option<&str>,
-    actions: Vec<AnyElement>,
-    theme: &Theme,
-) -> Option<gpui::Div> {
-    if language.is_none() && actions.is_empty() {
-        return None;
-    }
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-        return Some(div().h(crate::typography::ui_rems(CODE_HEADER_HEIGHT + 8.0)).relative().flex().items_center().justify_center()
-            .child(div().font_family("EB Garamond").text_size(px(16.0)).text_color(theme.text)
-                .child(SharedString::from(language.map_or_else(|| "Code".to_string(), |lang| format!("Code · {lang}")))))
-            .child(div().absolute().right(px(8.0)).top(px(4.0)).flex().items_center().gap(px(4.0)).children(actions)));
-    }
-    Some(
-        div()
-            .h(crate::typography::ui_rems(CODE_HEADER_HEIGHT))
-            .flex_none()
-            .pl(crate::typography::ui_rems(CODE_PADDING_X))
-            .pr(crate::typography::ui_rems(5.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(crate::theme::ink(0.02))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .min_w_0()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .children(language.map(|lang| SharedString::from(lang.to_string()))),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .children(actions),
-            ),
-    )
-}
-
-/// Shared visual shell for ordinary code and generated diagram fences.
-fn code_block_frame(
-    id: SharedString,
-    language: Option<&str>,
-    actions: Vec<AnyElement>,
-    body: AnyElement,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .rounded(crate::typography::ui_rems(10.0))
-        .bg(crate::theme::ink(0.035))
-        .border_1()
-        .border_color(theme.border)
-        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded(px(14.0)).bg(theme.bg).border_color(theme.bg).p(px(4.0)))
-        .overflow_hidden()
-        .relative()
-        .children(code_block_header(language, actions, theme))
-        .child(body)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2939,7 +2734,7 @@ fn render_code_block_source_with_actions(
         });
 
     let frame_body = div().w_full().relative().child(body).children(scrollbar);
-    let mut block = code_block_frame(
+    let mut block = crate::components::conversation_code_frame(
         format!("{}-code-frame{ix}", opts.row_key).into(),
         language,
         actions,
@@ -2971,12 +2766,7 @@ fn render_code_block_source_with_actions(
 /// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
 /// asked for color; these are the diff pane's hues, now shared by both).
 pub fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
-    let color = theme.syntax.color(kind);
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-        (0..=100).map(|step| crate::theme::flatten(color.opacity(1.0 - step as f32 / 100.0), theme.text))
-            .find(|candidate| crate::theme::contrast_ratio(*candidate, theme.bg) >= 7.0)
-            .unwrap_or(theme.text)
-    } else { color }
+    crate::components::conversation_code_token_color(theme, theme.syntax.color(kind))
 }
 
 /// Build the exact-cover `TextRun` list for one code line from its tokens.
