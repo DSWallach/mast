@@ -2058,6 +2058,37 @@ pub fn outline_linear_retained(id: String, text: String, theme: &Theme) -> State
         .child(div().truncate().child(SharedString::from(text)))
 }
 
+/// Heading for an overview list lane.
+pub fn outline_lane_heading(text: String, color: gpui::Hsla, depth: usize, theme: &Theme) -> Div {
+    let top = depth == 0;
+    let label = if top && !super::is_area(theme) {
+        text.to_uppercase()
+    } else {
+        text
+    };
+    div()
+        .flex_none()
+        .text_color(color)
+        .border_color(color)
+        .when(top, |el| {
+            el.text_size(crate::typography::ui_rems(
+                13.0 + super::layout_type_adjustment(theme),
+            ))
+            .font_weight(gpui::FontWeight::BOLD)
+            .pb(px(6.0 * super::layout_spacing(theme)))
+            .border_b_2()
+        })
+        .when(!top, |el| {
+            el.text_size(crate::typography::ui_rems(
+                10.0 + super::layout_type_adjustment(theme),
+            ))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .pb(px(3.0 * super::layout_spacing(theme)))
+            .border_b_1()
+        })
+        .child(SharedString::from(label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

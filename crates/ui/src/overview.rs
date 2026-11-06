@@ -5269,35 +5269,6 @@ fn unread_done_ribbon(scale: f32) -> gpui::Div {
         .bg(gpui::white())
 }
 
-/// `.lane-header` / `.lane-header.nested` (`session_canvas.html:299-315`):
-/// text in the group's color, underlined in the same color; top level is
-/// 13px bold uppercase with a 2px rule, nested is 10px semibold mixed-case
-/// with a 1px rule.
-fn lane_header(text: String, color: gpui::Hsla, depth: usize) -> gpui::Div {
-    let top = depth == 0;
-    div()
-        .flex_none()
-        .text_color(color)
-        .border_color(color)
-        .when(top, |el| {
-            el.text_size(crate::typography::ui_rems(13.0))
-                .font_weight(gpui::FontWeight::BOLD)
-                .pb(px(6.0))
-                .border_b_2()
-        })
-        .when(!top, |el| {
-            el.text_size(crate::typography::ui_rems(10.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .pb(px(3.0))
-                .border_b_1()
-        })
-        .child(SharedString::from(if top {
-            text.to_uppercase()
-        } else {
-            text
-        }))
-}
-
 impl Overview {
     fn render_list_body(
         &mut self,
@@ -5441,7 +5412,7 @@ impl Overview {
                 .pr(px(10.0))
                 .pt(px(if depth == 0 { 14.0 } else { 8.0 }))
                 .pb(px(2.0))
-                .child(lane_header(format!("{label} ({count})"), color, depth))
+                .child(crate::components::outline_lane_heading(format!("{label} ({count})"), color, depth, &theme))
                 .into_any_element(),
             ListPresentationItem::Row { row_index, .. } => {
                 let rows = self.list_rows.clone();
