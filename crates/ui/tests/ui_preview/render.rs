@@ -354,6 +354,7 @@ impl Render for ComponentMatrix {
                         &theme,
                         theme.identity_color(""),
                         true,
+                        true,
                         Some("Model".into()),
                         div().child("Reply").into_any_element(),
                     ),

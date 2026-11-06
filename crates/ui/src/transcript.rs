@@ -6559,7 +6559,8 @@ impl Transcript {
         let is_first_entry_row = ix == 0 || self.rows.get(ix - 1).is_some_and(|previous| previous.entry_id != row.entry_id);
         let inner = if matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
             let model = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).and_then(|config| config.model.clone());
-            crate::components::agent_message_bubble(&theme, identity, is_first_entry_row, model, inner)
+            let first_block = matches!(&row.kind, RowKind::Markdown { block_ix, .. } | RowKind::LiveMarkdown { block_ix, .. } if *block_ix == 0);
+            crate::components::agent_message_bubble(&theme, identity, is_first_entry_row, first_block, model, inner)
         } else { inner };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the

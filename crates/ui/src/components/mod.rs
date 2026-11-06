@@ -674,6 +674,7 @@ pub fn agent_message_bubble(
     theme: &Theme,
     identity: gpui::Hsla,
     first: bool,
+    first_block: bool,
     model: Option<String>,
     content: AnyElement,
 ) -> AnyElement {
@@ -710,7 +711,7 @@ pub fn agent_message_bubble(
         div()
             .relative()
             .min_w_0()
-            .when(first, |el| {
+            .when(first_block, |el| {
                 el.child(
                     div()
                         .absolute()
