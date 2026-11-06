@@ -35,11 +35,7 @@ fn layout_type_adjustment(theme: &Theme) -> f32 {
 }
 
 fn layout_spacing(theme: &Theme) -> f32 {
-    match theme.ui_style.layout {
-        crate::ui_style::UiLayout::Minimal => 1.0,
-        crate::ui_style::UiLayout::Compact => 0.75,
-        crate::ui_style::UiLayout::Guided => 1.25,
-    }
+    theme.ui_style.spacing_scale().small / crate::surface_chrome::CONTROL_GAP
 }
 
 /// A button without an event handler. Callers attach their action after building.
@@ -516,7 +512,7 @@ pub fn display(theme: &Theme) -> Div {
         .py(px(3.0 * layout_spacing(theme)))
         .font_family(theme.font_mono.clone())
         .text_size(crate::typography::ui_rems(
-            10.0 + layout_type_adjustment(theme),
+            theme.ui_style.type_roles().label.unwrap_or(10.0) + layout_type_adjustment(theme),
         ));
     if is_industrial(theme) {
         let background = if theme.appearance.is_dark() {

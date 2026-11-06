@@ -21,15 +21,13 @@ axes, including the requested gallery keys and `--layouts` preview option.
 
 ## Token audit (in progress)
 
-`UiStyle::resolve` combines the look with the layout's control size, row
-metrics, type scale, and guidance behavior. Look-specific radius, surface,
-control, conversation, status and font variants remain independent of that
-selection. `type_roles`, `radius_roles`, and `spacing_scale` expose the current
-values, but the display role currently aliases title, bubble aliases panel,
-and the spacing scale has no value for the Default look. Those aliases and
-fallbacks are provisional; audit them against each migrated surface before
-calling the token work complete. Several components still use legacy sizes
-and do not yet consume every role or fully adapt to layout.
+`UiStyle::resolve` combines look tokens with the layout's row metrics, control
+size, type scale, spacing, and guidance. Type roles include an independent
+display field; radius roles include an independent bubble field. The spacing
+scale derives from the existing control gap and the selected layout. Optional
+look metrics retain each primitive's established Default/Minimal fallback.
+Some components still use legacy metrics and need a per-surface audit before
+the token migration can be considered complete.
 
 ## Named control candidates and call-site counts
 

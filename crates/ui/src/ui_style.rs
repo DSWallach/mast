@@ -78,6 +78,7 @@ pub struct StyleTokens {
     pub control_radius: Option<f32>,
     pub panel_radius: Option<f32>,
     pub chip_radius: Option<f32>,
+    pub bubble_radius: Option<f32>,
     pub rule_width: Option<f32>,
     /// Optional grid and type roles; absent values preserve existing metrics.
     pub grid: Option<f32>,
@@ -85,6 +86,7 @@ pub struct StyleTokens {
     pub secondary_size: Option<f32>,
     pub body_size: Option<f32>,
     pub title_size: Option<f32>,
+    pub display_size: Option<f32>,
 }
 
 /// Optional values preserve each existing primitive's Minimal metrics.
@@ -99,9 +101,9 @@ pub struct TypeRoles {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpacingScale {
-    pub small: Option<f32>,
-    pub medium: Option<f32>,
-    pub large: Option<f32>,
+    pub small: f32,
+    pub medium: f32,
+    pub large: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -208,12 +210,14 @@ impl UiStyle {
             control_radius: None,
             panel_radius: None,
             chip_radius: None,
+            bubble_radius: None,
             rule_width: None,
             grid: None,
             label_size: None,
             secondary_size: None,
             body_size: None,
             title_size: None,
+            display_size: None,
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
@@ -245,12 +249,14 @@ impl UiStyle {
             control_radius: None,
             panel_radius: None,
             chip_radius: None,
+            bubble_radius: None,
             rule_width: None,
             grid: None,
             label_size: None,
             secondary_size: None,
             body_size: None,
             title_size: None,
+            display_size: None,
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
@@ -282,12 +288,14 @@ impl UiStyle {
             control_radius: None,
             panel_radius: None,
             chip_radius: None,
+            bubble_radius: None,
             rule_width: None,
             grid: None,
             label_size: None,
             secondary_size: None,
             body_size: None,
             title_size: None,
+            display_size: None,
         },
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
@@ -315,12 +323,14 @@ impl UiStyle {
             control_radius: Some(4.0),
             panel_radius: Some(0.0),
             chip_radius: Some(4.0),
+            bubble_radius: Some(0.0),
             rule_width: Some(1.0),
             grid: Some(8.0),
             label_size: Some(10.0),
             secondary_size: Some(12.0),
             body_size: Some(13.0),
             title_size: Some(16.0),
+            display_size: Some(10.0),
             ..Self::MINIMAL.tokens
         },
         surface: SurfaceModel::Opaque,
@@ -342,12 +352,14 @@ impl UiStyle {
             control_radius: Some(12.0),
             panel_radius: Some(14.0),
             chip_radius: Some(12.0),
+            bubble_radius: Some(14.0),
             rule_width: None,
             grid: Some(8.0),
             label_size: Some(10.0),
             secondary_size: Some(12.0),
             body_size: Some(13.0),
             title_size: Some(20.0),
+            display_size: Some(20.0),
             ..Self::MINIMAL.tokens
         },
         surface: SurfaceModel::Opaque,
@@ -374,17 +386,22 @@ impl UiStyle {
             secondary: self.tokens.secondary_size,
             body: self.tokens.body_size,
             title: self.tokens.title_size,
-            display: self.tokens.title_size,
+            display: self.tokens.display_size,
         }
     }
 
+    /// Spacing derives from the existing control gap and the independent layout.
     pub fn spacing_scale(self) -> SpacingScale {
-        let grid = self.tokens.grid;
-        let scale = self.tokens.type_scale;
+        let base = crate::surface_chrome::CONTROL_GAP;
+        let factor = match self.layout {
+            UiLayout::Minimal => 1.0,
+            UiLayout::Compact => 0.75,
+            UiLayout::Guided => 1.25,
+        };
         SpacingScale {
-            small: grid.map(|value| value * 0.5 * scale),
-            medium: grid.map(|value| value * scale),
-            large: grid.map(|value| value * 2.0 * scale),
+            small: base * factor,
+            medium: base * 2.0 * factor,
+            large: base * 4.0 * factor,
         }
     }
 
@@ -393,7 +410,7 @@ impl UiStyle {
             control: self.tokens.control_radius,
             chip: self.tokens.chip_radius,
             panel: self.tokens.panel_radius,
-            bubble: self.tokens.panel_radius,
+            bubble: self.tokens.bubble_radius,
         }
     }
 
@@ -556,6 +573,25 @@ pub fn help_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spacing_and_radius_roles_follow_layout_and_style_independently() {
+        let base = UiStyle::resolve(UiStyleId::Default, UiLayout::Minimal).spacing_scale();
+        for &id in UiStyleId::ALL {
+            let compact = UiStyle::resolve(id, UiLayout::Compact);
+            let guided = UiStyle::resolve(id, UiLayout::Guided);
+            assert_eq!(compact.spacing_scale().small, base.small * 0.75);
+            assert_eq!(guided.spacing_scale().small, base.small * 1.25);
+            assert_eq!(
+                compact.radius_roles().bubble,
+                UiStyle::of(id).radius_roles().bubble
+            );
+            assert_eq!(
+                guided.type_roles().display,
+                UiStyle::of(id).type_roles().display
+            );
+        }
+    }
+
     #[test]
     fn each_layout_preserves_each_style_look() {
         for &id in UiStyleId::ALL {
