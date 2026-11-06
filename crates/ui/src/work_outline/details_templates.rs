@@ -12,7 +12,7 @@
 //!
 //! A child module of `details_panel` (like the other sections), so it uses
 //! the surface's private state directly.
-use gpui::{AnyElement, Context, Focusable as _, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Focusable as _, Window, div, prelude::*};
 use mast_proto::{DeleteWorkItemTemplateParams, SaveWorkItemTemplateParams, WorkItemTemplateView};
 
 use super::super::actions::new_operation_id;

@@ -11,7 +11,7 @@
 //!
 //! A child module of `details_panel`, so it uses the surface's private
 //! state directly.
-use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, prelude::*};
 use mast_proto::{
     TemplateChange, WorkItemView, WorkOutlineMutation, diff_template_against_project,
 };

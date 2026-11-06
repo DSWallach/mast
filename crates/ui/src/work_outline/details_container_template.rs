@@ -17,7 +17,7 @@
 //! `details_panel`, so it uses the surface's private state directly.
 use std::collections::HashMap;
 
-use gpui::{AnyElement, Context, Entity, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, div, prelude::*, px};
 use mast_proto::{
     ApplyContainerTemplateParams, ContainerTemplate, RuleInstruction, RuleNode,
     SetContainerTemplateParams, WorkItemView, WorkOutlineMutation, WorkOutlineSnapshot,
