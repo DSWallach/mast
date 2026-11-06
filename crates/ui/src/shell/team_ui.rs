@@ -314,62 +314,30 @@ impl Shell {
                     .gap(px(6.0))
                     .child(div().flex_none().child(indicator))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(SharedString::from(worker.title.clone())),
+                        crate::components::shell_parts::worker_title(theme, worker.title.clone()),
                     )
                     .children(stalled.map(|(label, color)| {
-                        div()
+                        crate::components::shell_parts::worker_metadata(theme, label, color)
                             .debug_selector({
                                 let selector = format!("{prefix}-stalled-{id}");
                                 move || selector.clone()
                             })
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(color)
-                            .child(SharedString::from(label))
                     }))
                     .children((!unseen.is_empty()).then(|| {
                         let tip = SharedString::from(format!(
                             "Unseen by the orchestrator:\n{}",
                             unseen.join("\n")
                         ));
-                        div()
-                            .id(SharedString::from(format!("{prefix}-unseen-{id}")))
-                            .debug_selector({
-                                let selector = format!("{prefix}-unseen-{id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(3.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.warning)
-                            .child(div().size(px(5.0)).rounded_full().bg(theme.warning))
-                            .child("unseen")
+                        crate::components::shell_parts::worker_unseen_badge(theme, format!("{prefix}-unseen-{id}"))
                             .tooltip(move |_, cx| {
                                 cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()
                             })
                     }))
                     .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(status.color)
-                            .child(SharedString::from(worker.state.label())),
+                        crate::components::shell_parts::worker_metadata(theme, worker.state.label().to_owned(), status.color),
                     )
                     .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(age)),
+                        crate::components::shell_parts::worker_metadata(theme, age, theme.text_faint),
                     ),
             );
         if let Some(report) = self.latest_report_for_worker(&id) {

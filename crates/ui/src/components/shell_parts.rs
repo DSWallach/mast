@@ -1171,6 +1171,46 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         })
 }
 
+pub(crate) fn worker_title(theme: &Theme, title: String) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(SharedString::from(title))
+}
+
+pub(crate) fn worker_metadata(theme: &Theme, label: String, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .flex_none()
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(color)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(SharedString::from(label))
+}
+
+pub(crate) fn worker_unseen_badge(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    let badge = div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.warning)
+        .child(div().size(px(5.0)).rounded_full().bg(theme.warning))
+        .child("unseen")
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.warning.opacity(0.12))
+        });
+    super::segmented_key(badge, theme, false)
+}
+
 pub(crate) fn archived_worker_toggle(
     theme: &Theme,
     shown: bool,
