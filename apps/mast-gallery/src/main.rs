@@ -12,11 +12,14 @@ struct Gallery {
     menu_open: bool,
 }
 
-const STYLES: [ui_style::UiStyleId; 3] = [
-    ui_style::UiStyleId::Minimal,
-    ui_style::UiStyleId::Dense,
-    ui_style::UiStyleId::Guided,
-];
+fn gallery_styles() -> &'static [ui_style::UiStyleId] {
+    // TODO: Return UiStyleId::ALL when the shared registry lands.
+    &[
+        ui_style::UiStyleId::Minimal,
+        ui_style::UiStyleId::Dense,
+        ui_style::UiStyleId::Guided,
+    ]
+}
 
 fn switch_style(id: ui_style::UiStyleId, window: &mut Window, cx: &mut App) {
     ui_style::set_style_in_memory(id, cx);
@@ -56,12 +59,18 @@ impl Render for Gallery {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
-                    "1" => switch_style(STYLES[0], window, cx),
-                    "2" => switch_style(STYLES[1], window, cx),
-                    "3" => switch_style(STYLES[2], window, cx),
                     "l" => switch_appearance(appearance::AppearanceMode::Light, cx),
                     "d" => switch_appearance(appearance::AppearanceMode::Dark, cx),
-                    _ => return,
+                    key => {
+                        let Some(index) = key.parse::<usize>().ok().filter(|n| (1..=9).contains(n))
+                        else {
+                            return;
+                        };
+                        let Some(&style) = gallery_styles().get(index - 1) else {
+                            return;
+                        };
+                        switch_style(style, window, cx);
+                    }
                 }
                 cx.notify();
             }))
@@ -107,20 +116,22 @@ impl Render for Gallery {
                         div()
                             .flex()
                             .gap(px(8.))
-                            .children(STYLES.into_iter().enumerate().map(|(index, id)| {
-                                div()
-                                    .id(("style", index))
-                                    .px(px(8.))
-                                    .py(px(4.))
-                                    .rounded(px(4.))
-                                    .bg(theme.surface_raised)
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |_, _, window, cx| {
-                                        switch_style(id, window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child(format!("{} {:?}", index + 1, id))
-                            }))
+                            .children(gallery_styles().iter().copied().enumerate().map(
+                                |(index, id)| {
+                                    div()
+                                        .id(("style", index))
+                                        .px(px(8.))
+                                        .py(px(4.))
+                                        .rounded(px(4.))
+                                        .bg(theme.surface_raised)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |_, _, window, cx| {
+                                            switch_style(id, window, cx);
+                                            cx.notify();
+                                        }))
+                                        .child(format!("{} {:?}", index + 1, id))
+                                },
+                            ))
                             .child(
                                 div()
                                     .id("light")
@@ -302,7 +313,7 @@ mod tests {
             window.focus(&focus, cx);
             gallery(focus, cx)
         });
-        for style in STYLES {
+        for &style in gallery_styles() {
             for mode in [
                 appearance::AppearanceMode::Light,
                 appearance::AppearanceMode::Dark,
