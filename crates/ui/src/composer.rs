@@ -8100,70 +8100,21 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
-        let guided = theme.ui_style.layout == crate::ui_style::UiLayout::Guided;
-        let (area, key) = match theme.ui_style.conversation {
-            crate::ui_style::ConversationVariant::Area => (true, false),
-            crate::ui_style::ConversationVariant::Industrial => (false, true),
-            crate::ui_style::ConversationVariant::Standard => (false, false),
-        };
-        // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
-        // send/queue, a dark rounded square on the same light circle to stop.
-        match mode {
-            SendButtonMode::Stop => div()
-                .id("composer-stop")
-                .size(px(28.0))
-                .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
-                .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
-                .flex_none()
-                .rounded_full()
-                .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
-                .bg(theme.text)
-                .when(area, |el| el.bg(theme.text_muted))
-                .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }))
-                .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
-                .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child("Stop")))
-                .into_any_element(),
-            SendButtonMode::Send | SendButtonMode::Queue => {
-                // Share the submission guard with Enter, including pending
-                // edits and the new-session runnable-agent check.
-                let blocked = self.send_blocked(cx);
-                div()
-                    .id("composer-send")
-                    .size(px(28.0))
-                    .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
-                    .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
-                    .flex_none()
-                    .rounded_full()
-                    .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
-                    .bg(theme.text)
-                    .when(area, |el| el.bg(theme.text_muted))
-                    .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(blocked, |el| el.opacity(0.35))
-                    .when(!blocked, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
-                    })
-                    .child(
-                        crate::icons::icon(crate::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }),
-                    )
-                    .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
-                    .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child(if mode == SendButtonMode::Queue { "QUEUE" } else { "SEND" })))
-                    .into_any_element()
-            }
-        }
+        let identity_key = self.pickers.read(cx).effective_harness(cx)
+            .map(|harness| format!("harness:{harness:?}"))
+            .unwrap_or_default();
+        let identity = theme.identity_color(&identity_key);
+        let stop = mode == SendButtonMode::Stop;
+        let blocked = !stop && self.send_blocked(cx);
+        crate::components::conversation_send_key(theme, identity, stop, mode == SendButtonMode::Queue)
+            .when(blocked, |el| el.opacity(0.35))
+            .when(!blocked, |el| {
+                el.cursor_pointer().hover(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if stop { this.interrupt_selected(cx); } else { this.on_submit(cx); }
+                    }))
+            })
+            .into_any_element()
     }
 }
 
@@ -8212,9 +8163,14 @@ impl Render for Composer {
             self.reset_slash(None, cx);
         }
         let mode = self.button_mode(cx);
+        let text_size = crate::components::conversation_composer_text_size(&theme, INPUT_TEXT_SIZE);
         // Shape the current draft before sizing the pill. Waiting for the child
         // layout leaves the parent using the previous edit's height.
         self.input.update(cx, |input, cx| {
+            if input.text_size != text_size {
+                input.text_size = text_size;
+                input.needs_measure = true;
+            }
             if input.identity_text != identity_text {
                 input.identity_text = identity_text;
                 input.needs_measure = true;
@@ -8222,7 +8178,7 @@ impl Render for Composer {
             if input.needs_measure && input.last_width > 0.0 {
                 let mut style = window.text_style();
                 style.font_family = theme.font_sans.clone();
-                style.font_size = crate::typography::ui_rems(INPUT_TEXT_SIZE).into();
+                style.font_size = crate::typography::ui_rems(text_size).into();
                 style.color = if let Some(color) = identity_text { color } else if input.content.is_empty() {
                     theme.text_faint
                 } else {
@@ -8241,6 +8197,7 @@ impl Render for Composer {
                 input.layout_epoch,
             )
         };
+        let content_height = crate::components::conversation_composer_content_height(&theme, content_height, INPUT_LINE_HEIGHT);
         let now = Instant::now();
         // Only measurements taken *after* the last flip may drive the next one
         // (at most one flip per layout pass — a flip invalidates the widths).
@@ -8337,7 +8294,7 @@ impl Render for Composer {
                     route_snap,
                 )
             };
-        let expanded = self.expanded_mode;
+        let expanded = crate::components::conversation_composer_expanded(&theme, self.expanded_mode);
 
         // Chat-scoped failures render only under their own chat; a global
         // failure (no key) renders everywhere.
@@ -8380,7 +8337,7 @@ impl Render for Composer {
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
-            .max_w(px(COMPOSER_MAX_WIDTH))
+            .max_w(px(crate::components::conversation_composer_width(&theme, COMPOSER_MAX_WIDTH, Theme::SPACE_LG)))
             .mx_auto()
             .flex()
             .flex_col()

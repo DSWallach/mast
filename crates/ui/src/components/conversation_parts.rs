@@ -4,6 +4,136 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_composer_content_height(theme: &Theme, content: f32, line: f32) -> f32 {
+    if theme.ui_style.conversation == ConversationVariant::Area {
+        content.max(3.0 * line)
+    } else {
+        content
+    }
+}
+
+pub fn conversation_composer_expanded(theme: &Theme, expanded: bool) -> bool {
+    expanded || theme.ui_style.conversation == ConversationVariant::Area
+}
+
+pub fn conversation_composer_text_size(theme: &Theme, size: f32) -> f32 {
+    if theme.ui_style.conversation == ConversationVariant::Area {
+        15.0
+    } else {
+        size
+    }
+}
+
+pub fn conversation_composer_width(theme: &Theme, width: f32, gutter: f32) -> f32 {
+    if theme.ui_style.conversation == ConversationVariant::Area {
+        width.min(720.0 + 2.0 * gutter)
+    } else {
+        width
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn area_composer_has_three_lines_and_matches_conversation_width() {
+        let mut theme = Theme::light();
+        theme.ui_style = crate::ui_style::UiStyle::AREA;
+        assert!(conversation_composer_expanded(&theme, false));
+        assert_eq!(
+            conversation_composer_content_height(&theme, 22.0, 22.0),
+            66.0
+        );
+        assert_eq!(conversation_composer_width(&theme, 768.0, 16.0), 752.0);
+        theme.ui_style = crate::ui_style::UiStyle::MINIMAL;
+        assert!(!conversation_composer_expanded(&theme, false));
+        assert_eq!(
+            conversation_composer_content_height(&theme, 22.0, 22.0),
+            22.0
+        );
+        assert_eq!(conversation_composer_width(&theme, 768.0, 16.0), 768.0);
+    }
+}
+
+/// Send, queue, and interrupt control; callers attach the corresponding action.
+pub fn conversation_send_key(
+    theme: &Theme,
+    identity: Hsla,
+    stop: bool,
+    queue: bool,
+) -> gpui::Stateful<Div> {
+    use crate::ui_style::{ConversationVariant, UiLayout};
+    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    let key = theme.ui_style.conversation == ConversationVariant::Industrial;
+    let guided = theme.ui_style.layout == UiLayout::Guided;
+    let fill = if area {
+        crate::theme::flatten(theme.text_muted.opacity(0.28), identity)
+    } else {
+        theme.text
+    };
+    let text = if area {
+        theme.identity_text(fill)
+    } else if key {
+        theme.on_accent
+    } else {
+        theme.bg
+    };
+    let label = if stop {
+        "Stop"
+    } else if queue {
+        "Queue"
+    } else {
+        "Send"
+    };
+    let icon = if stop {
+        div()
+            .size(px(11.0))
+            .rounded(px(3.0))
+            .bg(text)
+            .into_any_element()
+    } else {
+        crate::icons::icon(crate::icons::ARROW_UP)
+            .size(px(14.0))
+            .text_color(text)
+            .into_any_element()
+    };
+    div()
+        .id(if stop {
+            "composer-stop"
+        } else {
+            "composer-send"
+        })
+        .size(px(28.0))
+        .when(guided, |el| {
+            el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0))
+        })
+        .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
+        .flex_none()
+        .rounded_full()
+        .when_some(theme.ui_style.tokens.control_radius, |el, radius| {
+            el.rounded(px(radius))
+        })
+        .bg(fill)
+        .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon)
+        .when(guided || area, |el| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(text)
+                    .child(if area && !stop {
+                        label.to_uppercase()
+                    } else {
+                        label.to_string()
+                    }),
+            )
+        })
+}
+
 pub fn conversation_code_theme(theme: &Theme) -> Theme {
     let mut result = theme.clone();
     if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
