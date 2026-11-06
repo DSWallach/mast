@@ -701,7 +701,7 @@ impl Shell {
             .h(px(24.0))
             .flex_none()
             .px(px(8.0))
-            .rounded(px(6.0))
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
             .flex()
             .items_center()
             .gap(px(5.0))
@@ -714,6 +714,8 @@ impl Shell {
             })
             .when(active, |el| el.bg(crate::theme::wash(0.10)))
             .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(if active { theme.element_active } else { theme.surface_raised }).border_1().border_b_2().border_color(theme.border))
+            .when(active && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(div().size(px(6.0)).rounded_full().bg(theme.accent)))
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
                 this.set_right_active(RightSurface::Item, cx);
