@@ -7506,6 +7506,8 @@ impl Shell {
                 None => div()
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
+                    .when(theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot, |el| el.flex().items_center().gap(px(8.0)).child(crate::status_style::indicator_for_theme(crate::status_style::Status::Idle, &theme)))
+                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
                     .child(time_ago.clone())
                     .into_any_element(),
             }
@@ -7793,6 +7795,7 @@ impl Shell {
                                 .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(subline)
+                                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
                                 .child(compact_jump_label.unwrap_or(time_ago)),
                         )
                     }),

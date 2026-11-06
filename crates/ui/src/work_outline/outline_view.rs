@@ -3562,6 +3562,7 @@ fn status_totals_element(
         .gap(px(3.0))
         .text_size(crate::typography::ui_rems(10.0))
         .text_color(theme.text_faint)
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
         .when_some(totals.active_label(), |el, label| {
             el.child(SharedString::from(label))
         })

@@ -1208,6 +1208,7 @@ impl WorkItemDetails {
         open: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
+        let has_count = label.chars().any(|c| c.is_ascii_digit());
         let label = if theme.ui_style.tokens.label_size.is_some() { crate::popover::tracked_upper(&label) } else { label };
         div()
             .id(id)
@@ -1217,6 +1218,7 @@ impl WorkItemDetails {
             .cursor_pointer()
             .text_size(crate::typography::ui_rems(theme.ui_style.tokens.label_size.unwrap_or(11.0)))
             .font_weight(gpui::FontWeight::SEMIBOLD)
+            .when(has_count && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
             .text_color(theme.text_muted)
             .hover(|el| el.text_color(theme.text))
             .child(
@@ -1807,6 +1809,7 @@ impl Render for WorkItemDetails {
                             .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_muted)
+                            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
                             .child(SharedString::from(format!(
                                 "Chats ({})",
                                 item.chat_ids.len()
