@@ -121,43 +121,16 @@ impl WorkItemDetails {
         let set = destination.is_some();
         let picker_open = self.pr_sync.picker_open;
         let busy = self.pr_sync.setting;
-        let mut section = div()
-            .debug_selector(|| "space-pr-sync".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("space-pr-sync", theme)
+            .child(crate::components::outline_list_heading("PR review sync".into(), theme))
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
-                    .child("PR review sync"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(if set {
-                                "Syncing into"
-                            } else {
-                                "Auto-sync review requests into\u{2026}"
-                            }),
+                        crate::components::outline_execution_line(if set { "Syncing into" } else { "Auto-sync review requests into…" }.into(), 11.5, theme.text_muted, theme).flex_none(),
                     )
                     .child(
-                        div()
-                            .debug_selector(|| "space-pr-sync-destination".into())
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(if set { theme.text } else { theme.text_faint })
-                            .child(SharedString::from(target_label)),
+                        crate::components::outline_execution_line(target_label, 11.5, if set { theme.text } else { theme.text_faint }, theme)
+                            .debug_selector(|| "space-pr-sync-destination".into()).flex_1().min_w_0().truncate(),
                     )
                     .child(
                         crate::components::outline_small_button(
@@ -197,17 +170,7 @@ impl WorkItemDetails {
                     }),
             )
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_faint)
-                    .child(if set {
-                        "Every open PR that requests your review in this Space\u{2019}s \
-                         repositories gets an item here, with a Required Action per review \
-                         round. Kept in step every 3 minutes; nothing is written to GitHub."
-                    } else {
-                        "Off: choose a work item and every PR that requests your review gets \
-                         an item there automatically."
-                    }),
+                crate::components::outline_execution_line(if set { "Every open PR that requests your review in this Space’s repositories gets an item here, with a Required Action per review round. Kept in step every 3 minutes; nothing is written to GitHub." } else { "Off: choose a work item and every PR that requests your review gets an item there automatically." }.into(), 11.0, theme.text_faint, theme),
             );
         if picker_open {
             section = section.child(self.render_destination_picker(snapshot, theme, cx));
@@ -222,10 +185,7 @@ impl WorkItemDetails {
                 .cloned();
             let running = matches!(result, Some(SyncResult::Running));
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(
                         crate::components::outline_small_button(
                             "space-pr-sync-now",
@@ -242,28 +202,16 @@ impl WorkItemDetails {
                     .when_some(result.filter(|_| !running), |el, result| {
                         let failed = matches!(result, SyncResult::Failed(_));
                         el.child(
-                            div()
-                                .debug_selector(|| "space-pr-sync-result".into())
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(if failed {
-                                    theme.warning
-                                } else {
-                                    theme.text_faint
-                                })
-                                .child(SharedString::from(result.line())),
+                            crate::components::outline_execution_line(result.line(), 10.5, if failed { theme.warning } else { theme.text_faint }, theme)
+                                .debug_selector(|| "space-pr-sync-result".into()).flex_1().min_w_0(),
                         )
                     }),
             );
         }
         if let Some(error) = self.pr_sync.error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "space-pr-sync-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_execution_line(error, 11.0, theme.warning, theme)
+                    .debug_selector(|| "space-pr-sync-error".into()),
             );
         }
         section.into_any_element()
