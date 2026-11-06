@@ -716,6 +716,28 @@ pub fn outline_proposal_provenance(theme: &Theme) -> Div {
         .text_color(theme.text_faint)
 }
 
+/// Waiting-date section and its label.
+pub fn outline_waiting_section(theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "work-item-waiting-control".into())
+        .flex()
+        .flex_col()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+        .child(
+            div()
+                .text_color(theme.text_muted)
+                .text_size(crate::typography::ui_rems(
+                    11.0 + super::layout_type_adjustment(theme),
+                ))
+                .child("Waiting until…"),
+        )
+}
+
+/// Footer keeps destructive actions at their natural width.
+pub fn outline_details_footer() -> Div {
+    div().flex().items_start()
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

@@ -1885,12 +1885,12 @@ impl Render for WorkItemDetails {
 
         // Archive / restore.
         let footer = if item.archived_at.is_some() {
-            div().child(
+            crate::components::outline_details_footer().child(
                 crate::work_outline::hints::details_button("work-item-restore", "Restore", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.restore(cx))),
             )
         } else {
-            div().flex().items_start().child(
+            crate::components::outline_details_footer().child(
                 crate::work_outline::hints::details_button("work-item-archive", "Archive…", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.request_archive(cx))),
             )
@@ -1906,9 +1906,7 @@ impl Render for WorkItemDetails {
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))
                 .child(status_row)
-                .child(div().debug_selector(|| "work-item-waiting-control".into())
-                    .flex().flex_col().gap(px(4.0))
-                    .child(div().text_color(theme.text_muted).text_size(crate::typography::ui_rems(11.0)).child("Waiting until…"))
+                .child(crate::components::outline_waiting_section(&theme)
                     .when_some(item.waiting_until, |el, until| {
                         let date = chrono::DateTime::from_timestamp_millis(until)
                             .map(|date| date.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string()).unwrap_or_default();
