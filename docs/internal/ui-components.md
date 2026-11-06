@@ -1122,3 +1122,11 @@ not a complete inventory of every inline element.
   `:2975`; question cards `:675`.
 - Further audit is needed for inline message actions, all tool details, composer
   tabs and selectors, and the rest of `composer/` and `markdown/`.
+- Additional candidates: `composer/skill_completion.rs:638` completion rows;
+  `composer/instruction_reset.rs:643` reset prompt; `markdown/link_destination.rs:26`
+  destination card; `markdown/render.rs:565` answer button, `:596` answer
+  affordance, `:674` question card, `:945` block contents, `:1220` table,
+  `:2534` code copy action and `:2604` code source; `transcript.rs:7821`
+  tool-patch header, `:7877` detail body, `:8015` more-lines row, `:8087`
+  tool header, `:8443` activity rail and `:8543` tool chip. These references
+  are from `d68928981` and need individual review as migration continues.
