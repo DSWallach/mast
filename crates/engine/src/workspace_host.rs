@@ -816,6 +816,22 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.diff_review_state(target)))
     }
 
+    /// Initialize PR marks from a branch once, under the workspace lock.
+    pub fn inherit_diff_review_state(&self, target: &str, branch: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
+        Ok(self.mutate(|doc| {
+            if let Some(state) = doc.diff_review_state(target) {
+                return Ok(Some(state));
+            }
+            let Some(mut state) = doc.diff_review_state(branch) else {
+                return Ok(None);
+            };
+            state.target = target.to_owned();
+            state.viewed_files.clear();
+            doc.put_diff_review_state(&state)?;
+            Ok::<_, mast_doc::DocError>(Some(state))
+        })?)
+    }
+
     pub fn put_diff_review_state(&self, state: &mast_proto::DiffReviewState) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.put_diff_review_state(state))?)
     }
@@ -2998,6 +3014,25 @@ mod tests {
         host.create_chat("c1", None, Some("test-device"), None, None)
             .unwrap();
         (dir, host)
+    }
+
+    #[tokio::test]
+    async fn branch_review_marks_are_inherited_once() {
+        let (_dir, host) = linkable_test_host();
+        let mut branch = mast_proto::DiffReviewState {
+            target: "branch:owner/repo#feature".into(),
+            head_sha: Some("abc".into()),
+            ..Default::default()
+        };
+        branch.viewed_hunks.insert("a".repeat(64));
+        branch.viewed_files.insert("changed.rs".into());
+        host.put_diff_review_state(&branch).unwrap();
+        let mut inherited = host.inherit_diff_review_state("pr:owner/repo#42", &branch.target).unwrap().unwrap();
+        assert_eq!(inherited.viewed_hunks, branch.viewed_hunks);
+        assert!(inherited.viewed_files.is_empty());
+        inherited.viewed_hunks.clear();
+        host.put_diff_review_state(&inherited).unwrap();
+        assert!(host.inherit_diff_review_state(&inherited.target, &branch.target).unwrap().unwrap().viewed_hunks.is_empty());
     }
 
     #[tokio::test]

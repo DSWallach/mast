@@ -4132,10 +4132,21 @@ impl RpcService for EngineRpc {
                     .and_then(serde_json::Value::as_str)
                     .filter(|target| !target.trim().is_empty())
                     .ok_or_else(|| RpcError::Failed("target is required".into()))?;
-                let state = self
+                let mut state = self
                     .workspace
                     .diff_review_state(target)
                     .map_err(|error| RpcError::Failed(error.to_string()))?;
+                // A PR can inherit the marks recorded while its branch was
+                // reviewed. Only initialize an absent PR row; subsequent reads
+                // must not resurrect marks the reviewer explicitly cleared.
+                if state.is_none() && target.starts_with("pr:") {
+                    if let Some(branch) = params.get("branchTarget").and_then(serde_json::Value::as_str)
+                        .filter(|branch| branch.starts_with("branch:"))
+                    {
+                        state = self.workspace.inherit_diff_review_state(target, branch)
+                            .map_err(|error| RpcError::Failed(error.to_string()))?;
+                    }
+                }
                 RpcReply::value(&mast_proto::DiffReviewStateReply { state })
             }
             methods::SET_DIFF_REVIEW_STATE => {
