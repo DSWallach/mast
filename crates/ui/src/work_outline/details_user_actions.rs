@@ -634,23 +634,7 @@ impl WorkItemDetails {
                     .child("No pending proposals"),
             );
         }
-        for group in proposal_diff::group_pending(pending) {
-            let target_item = required_actions::proposal_target_item(&group.proposals[0]);
-            let target_label = match target_item {
-                Some(id) => model::path_label(model::item_path(snapshot, id).iter().map(|item| item.title.as_str())),
-                None => "Space root".to_owned(),
-            };
-            let reach = instructions::affected_descendant_count(snapshot, target_item);
-            section = section.child(self.render_proposal_group(
-                group,
-                snapshot,
-                &target_label,
-                reach,
-                now,
-                theme,
-                cx,
-            ));
-        }
+        section = section.children(self.render_pending_proposal_groups(pending, snapshot, theme, cx));
         if !reviewed.is_empty() {
             let history_open = self.proposal_history_open;
             section = section.child(
@@ -689,6 +673,32 @@ impl WorkItemDetails {
             );
         }
         Some(section.into_any_element())
+    }
+
+    pub(super) fn render_pending_proposal_groups(
+        &self,
+        proposals: Vec<WorkItemInstructionProposalView>,
+        snapshot: &WorkOutlineSnapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let now = chrono::Utc::now();
+        proposal_diff::group_pending(proposals)
+            .into_iter()
+            .map(|group| {
+                let target_item = required_actions::proposal_target_item(&group.proposals[0]);
+                let target_label = match target_item {
+                    Some(id) => model::path_label(
+                        model::item_path(snapshot, id)
+                            .iter()
+                            .map(|item| item.title.as_str()),
+                    ),
+                    None => "Space root".to_owned(),
+                };
+                let reach = instructions::affected_descendant_count(snapshot, target_item);
+                self.render_proposal_group(group, snapshot, &target_label, reach, now, theme, cx)
+            })
+            .collect()
     }
 
     /// One group of pending proposals. Edits and removes of one instruction

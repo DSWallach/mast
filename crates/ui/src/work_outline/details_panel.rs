@@ -247,6 +247,7 @@ pub(crate) struct WorkItemDetails {
     pub(crate) required_actions_open: Option<bool>,
     /// Proposed instructions: collapsed until opened.
     pub(crate) proposals_open: bool,
+    pub(crate) template_proposals_open: bool,
     pub(crate) proposal_review: Option<ProposalReview>,
     proposal_input: Entity<ComposerInput>,
     /// `/` skill autocomplete on the proposal review text.
@@ -468,6 +469,7 @@ impl WorkItemDetails {
             required_actions,
             required_actions_open: None,
             proposals_open: false,
+            template_proposals_open: false,
             proposal_review: None,
             proposal_input,
             proposal_skills,

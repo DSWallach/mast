@@ -552,15 +552,24 @@ impl WorkItemDetails {
             .filter(|proposal| proposal.target.scope == mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate
                 && proposal.target.container_work_item_id.as_deref() == Some(item.id.as_str())
                 && super::super::required_actions::is_pending(proposal))
-            .count();
-        if proposals > 0 {
+            .cloned()
+            .collect::<Vec<_>>();
+        if !proposals.is_empty() {
             section = section.child(
-                Self::small_button("work-item-template-proposals", "Review proposed instructions", theme)
+                Self::small_button("work-item-template-proposals", if self.template_proposals_open { "Hide proposed instructions" } else { "Review proposed instructions" }, theme)
+                    .debug_selector(|| "work-item-template-proposals".into())
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.proposals_open = true;
+                        this.template_proposals_open = !this.template_proposals_open;
                         cx.notify();
                     })),
             );
+            if self.template_proposals_open {
+                section = section.child(
+                    div().debug_selector(|| "work-item-template-proposals-inline".into())
+                        .flex().flex_col().gap(px(4.0))
+                        .children(self.render_pending_proposal_groups(proposals, snapshot, theme, cx)),
+                );
+            }
         }
         if state.has_rules && !editing {
             section = section.child(
