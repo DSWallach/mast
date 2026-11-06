@@ -982,6 +982,40 @@ pub(crate) fn panel_chip(
         .child(SharedString::from(label))
 }
 
+pub(crate) fn spaces_filter(theme: &Theme, open: bool) -> gpui::Stateful<gpui::Div> {
+    let frame = div()
+        .id("spaces-filter")
+        .flex_1()
+        .min_w_0()
+        .h(px(29.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(Theme::SPACE_SM))
+        .rounded(px(8.0))
+        .px(px(Theme::SPACE_SM))
+        .text_size(crate::typography::ui_rems(13.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(motion::hover_blend(
+            "spaces-filter",
+            theme.text.opacity(0.8),
+            theme.text,
+        ))
+        .bg(if open {
+            theme.glass_hover()
+        } else {
+            motion::hover_blend(
+                "spaces-filter",
+                theme.glass_hover().opacity(0.0),
+                theme.glass_hover(),
+            )
+        })
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .on_hover(motion::hover_listener("spaces-filter"))
+        .cursor_pointer();
+    super::segmented_key(frame, theme, open)
+}
+
 /// A Windows-owned caption target using the same system glyphs and native
 /// non-client hit-test areas as GPUI/Zed's platform titlebar.
 pub(crate) fn windows_caption_button(
