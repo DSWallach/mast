@@ -1942,6 +1942,122 @@ pub fn outline_chat_reference(
         })
 }
 
+/// Warning chip for a Linear link requiring repair.
+pub fn outline_linear_fix(id: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.warning.opacity(0.6))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.warning)
+        .hover(|el| el.bg(theme.element_hover))
+        .child("Fix link")
+}
+
+/// Linked Linear issue chip.
+pub fn outline_linear_issue(
+    id: String,
+    text: String,
+    dot: gpui::Hsla,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .max_w(px(180.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .child(div().flex_none().size(px(6.0)).rounded_full().bg(dot))
+        .child(div().min_w_0().truncate().child(SharedString::from(text)))
+}
+
+/// Linked Linear project chip.
+pub fn outline_linear_project(id: String, name: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .max_w(px(140.0))
+        .flex()
+        .items_center()
+        .gap(px(3.0 * super::layout_spacing(theme)))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .child(
+            crate::icons::icon(crate::icons::CHECKLIST)
+                .size(px(10.0))
+                .text_color(theme.text_faint),
+        )
+        .child(div().min_w_0().truncate().child(SharedString::from(name)))
+}
+
+/// Linear destination and retained-item markers.
+pub fn outline_linear_destination(id: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .px(px(3.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .child(
+            crate::icons::icon(crate::icons::CHECKLIST)
+                .size(px(10.0))
+                .text_color(theme.accent),
+        )
+        .child("↓")
+}
+pub fn outline_linear_retained(id: String, text: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .max_w(px(160.0))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.warning.opacity(0.6))
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.warning)
+        .child(div().truncate().child(SharedString::from(text)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

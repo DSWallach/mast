@@ -237,25 +237,12 @@ impl OutlineView {
 /// of the project id (pasted before My projects knew it). The caller adds
 /// the click.
 pub(crate) fn fix_link_chip(id: String, project: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    let selector = id.clone();
     let tip: SharedString = format!(
         "This link to {project} was pasted as a URL. Fix link relinks it by the project\u{2019}s \
          id so its issues land here"
     )
     .into();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(theme.warning.opacity(0.6))
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.warning)
-        .hover(|el| el.bg(theme.element_hover))
-        .child("Fix link")
+    crate::components::outline_linear_fix(id, theme)
         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
@@ -608,7 +595,6 @@ pub(crate) fn issue_chip(
     shell: Option<WeakEntity<crate::shell::Shell>>,
     theme: &Theme,
 ) -> AnyElement {
-    let selector = id.clone();
     let (dot, text, tip): (gpui::Hsla, String, String) = match entry {
         Some(IssueEntry::Ready { issue, .. }) => (
             crate::linear::hex_color(&issue.state.color, theme.text_muted),
@@ -627,22 +613,7 @@ pub(crate) fn issue_chip(
         ),
     };
     let tip: SharedString = format!("{tip}\nClick to open in Linear").into();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .max_w(px(180.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text_muted)
-        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-        .child(div().flex_none().size(px(6.0)).rounded_full().bg(dot))
-        .child(div().min_w_0().truncate().child(SharedString::from(text)))
+    crate::components::outline_linear_issue(id, text, dot, theme)
         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(open_link(shell, url))
@@ -657,28 +628,8 @@ pub(crate) fn project_chip(
     shell: Option<WeakEntity<crate::shell::Shell>>,
     theme: &Theme,
 ) -> AnyElement {
-    let selector = id.clone();
     let tip: SharedString = format!("Linear project: {name}\nClick to open in Linear").into();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .max_w(px(140.0))
-        .flex()
-        .items_center()
-        .gap(px(3.0))
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text_muted)
-        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-        .child(
-            crate::icons::icon(crate::icons::CHECKLIST)
-                .size(px(10.0))
-                .text_color(theme.text_faint),
-        )
-        .child(div().min_w_0().truncate().child(SharedString::from(name)))
+    crate::components::outline_linear_project(id, name, theme)
         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(open_link(shell, url))
@@ -687,24 +638,7 @@ pub(crate) fn project_chip(
 
 /// The small marker on the Space's linked Linear item.
 pub(crate) fn assigned_destination_marker(id: String, theme: &Theme) -> AnyElement {
-    let selector = id.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .px(px(3.0))
-        .rounded(px(3.0))
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.accent)
-        .child(
-            crate::icons::icon(crate::icons::CHECKLIST)
-                .size(px(10.0))
-                .text_color(theme.accent),
-        )
-        .child("\u{2193}")
+    crate::components::outline_linear_destination(id, theme)
         .tooltip(|_, cx| {
             cx.new(|_| {
                 TextTooltip(
@@ -720,22 +654,10 @@ pub(crate) fn assigned_destination_marker(id: String, theme: &Theme) -> AnyEleme
 /// Why an auto-added child's ticket no longer matches ("Started in Linear",
 /// "Moved to project X"): the child is kept because it was touched.
 pub(crate) fn left_marker(id: String, text: String, theme: &Theme) -> AnyElement {
-    let selector = id.clone();
     let tip: SharedString =
         format!("{text}. This item is kept because you worked on it; untouched ones are archived")
             .into();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .max_w(px(160.0))
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(theme.warning.opacity(0.6))
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.warning)
-        .child(div().truncate().child(SharedString::from(text)))
+    crate::components::outline_linear_retained(id, text, theme)
         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
         .into_any_element()
 }
