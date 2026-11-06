@@ -22,6 +22,18 @@ fn is_area(theme: &Theme) -> bool {
     theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area
 }
 
+/// Preserve a red danger role; neutral theme danger roles fall back to the
+/// theme's red terminal role, then the existing Cofactr signal colour.
+fn danger_fill(theme: &Theme) -> gpui::Hsla {
+    fn is_red(color: gpui::Hsla) -> bool {
+        color.s >= 0.25 && (color.h <= 0.10 || color.h >= 0.90)
+    }
+    [theme.danger_strong, theme.terminal.ansi[1]]
+        .into_iter()
+        .find(|color| is_red(*color))
+        .unwrap_or_else(|| gpui::rgb(0xfe4b25).into())
+}
+
 fn identity_foreground_on(theme: &Theme, identity: gpui::Hsla, surface: gpui::Hsla) -> gpui::Hsla {
     let foreground = theme.identity_foreground(identity);
     if crate::theme::contrast_ratio(foreground, surface) >= 4.5 {
@@ -124,12 +136,15 @@ pub fn button_with_identity(
             };
             button.child(label)
         }
-        ButtonVariant::Danger => button
-            .bg(theme.danger_strong)
-            .text_color(theme.identity_text(theme.danger_strong))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .hover(|el| el.opacity(0.9))
-            .child(label),
+        ButtonVariant::Danger => {
+            let fill = danger_fill(theme);
+            button
+                .bg(fill)
+                .text_color(theme.identity_text(fill))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .hover(|el| el.opacity(0.9))
+                .child(label)
+        }
         ButtonVariant::Ghost => {
             let button = button
                 .text_color(theme.text_muted)
@@ -841,9 +856,14 @@ mod tests {
                 Default::default(),
                 mast_theme::SurfacePreference::Opaque,
             );
-            let danger_text = theme.identity_text(theme.danger_strong);
+            let fill = danger_fill(&theme);
             assert!(
-                crate::theme::contrast_ratio(danger_text, theme.danger_strong) >= 4.5,
+                fill.s >= 0.25 && (fill.h <= 0.10 || fill.h >= 0.90),
+                "danger hue in {id}"
+            );
+            let danger_text = theme.identity_text(fill);
+            assert!(
+                crate::theme::contrast_ratio(danger_text, fill) >= 4.5,
                 "danger in {id}"
             );
             let identity = theme.identity_color("");
