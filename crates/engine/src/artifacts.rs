@@ -1308,7 +1308,7 @@ impl ArtifactsService {
             let revision = params.revision.unwrap_or(0);
             return Ok(encode_reply(&artifact, kind, revision, &path, bytes));
         }
-        let (revision, bytes) = match params.revision {
+        let (revision, mut bytes) = match params.revision {
             Some(number) => {
                 let revision = artifact.revision(number).ok_or_else(|| {
                     ArtifactError::not_found(format!(
@@ -1350,6 +1350,15 @@ impl ArtifactsService {
                 }
             },
         };
+        if artifact.kind == ArtifactKind::Review
+            && let Some(chat_id) = artifact.chat_id.as_deref()
+            && let Ok(mut review) = serde_json::from_slice::<mast_proto::ReviewSidecar>(&bytes)
+        {
+            self.normalize_review_hashes(chat_id, &mut review);
+            if let Ok(normalized) = serde_json::to_vec(&review) {
+                bytes = normalized;
+            }
+        }
         Ok(encode_reply(
             &artifact,
             artifact.kind,
@@ -1367,6 +1376,54 @@ impl ArtifactsService {
             std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
                 .map_err(|e| io_error("read snapshot of", Path::new(&artifact.stored_path), e))
         })
+    }
+
+    fn normalize_review_hashes(&self, chat_id: &str, review: &mut mast_proto::ReviewSidecar) {
+        let checkout = match &review.target {
+            Some(mast_proto::ReviewTarget::Branch { checkout_path, .. }) => checkout_path.clone(),
+            _ => None,
+        }
+        .or_else(|| {
+            self.workspace()
+                .chat_diff_targets(chat_id)
+                .ok()
+                .flatten()
+                .and_then(|row| {
+                    row.ref_targets
+                        .into_iter()
+                        .find(|target| {
+                            target.pr_number == Some(review.pr.number)
+                                && target
+                                    .pr_url
+                                    .as_deref()
+                                    .and_then(crate::work_outline_pr_links::pull_request_from_url)
+                                    .is_some_and(|pr| {
+                                        review.pr.repo.eq_ignore_ascii_case(&format!(
+                                            "{}/{}",
+                                            pr.owner, pr.repo
+                                        ))
+                                    })
+                        })
+                        .map(|target| target.path)
+                        .or(row.selected)
+                })
+        })
+        .or_else(|| {
+            self.workspace()
+                .chat(chat_id)
+                .ok()
+                .flatten()
+                .and_then(|chat| chat.cwd)
+        });
+        if let Some(checkout) = checkout {
+            let head = review.pr.head_sha.clone();
+            let mut normalized = review.clone();
+            if crate::review_sidecar::validate_review(Path::new(&checkout), &mut normalized, &head)
+                .is_ok()
+            {
+                *review = normalized;
+            }
+        }
     }
 
     /// The questions in the artifact's current revision, read from its
@@ -2002,48 +2059,175 @@ impl ArtifactsService {
 
     /// Publish a validated pull request review as a chat-scoped artifact.
     pub fn agent_review_publish(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
-        let url = arguments
-            .get("prUrl")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ArtifactError::invalid("prUrl is required"))?;
-        let head = arguments
-            .get("headSha")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ArtifactError::invalid("headSha is required"))?;
-        let mut review: mast_proto::ReviewSidecar = serde_json::from_value(
-            arguments
-                .get("review")
-                .cloned()
-                .ok_or_else(|| ArtifactError::invalid("review is required"))?,
-        )
-        .map_err(|e| ArtifactError::invalid(format!("invalid review: {e}")))?;
-        let pr = crate::work_outline_pr_links::pull_request_from_url(url)
-            .ok_or_else(|| ArtifactError::invalid("prUrl must identify a GitHub pull request"))?;
-        if !review
-            .pr
-            .repo
-            .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
-            || review.pr.number != pr.number
-        {
-            return Err(ArtifactError::invalid("review.pr does not match prUrl"));
-        }
         let space = self.local_space(&caller.space_id)?;
-        let cwd = self
+        let mut cwd = self
             .workspace()
             .chat(&caller.chat_id)
             .ok()
             .flatten()
             .and_then(|c| c.cwd)
             .filter(|c| !c.is_empty())
-            .unwrap_or(space.path);
-        crate::review_sidecar::validate_review(Path::new(&cwd), &mut review, head)
+            .unwrap_or_else(|| space.path.clone());
+        let mut target: Option<mast_proto::ReviewTarget> = arguments
+            .get("target")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+        let mut value = arguments
+            .get("review")
+            .cloned()
+            .ok_or_else(|| ArtifactError::invalid("review is required"))?;
+        let head = match &target {
+            Some(mast_proto::ReviewTarget::Branch {
+                repo,
+                checkout_path,
+                base_ref,
+                base_sha,
+                head_sha,
+                ..
+            }) => {
+                if repo.as_deref().is_none_or(str::is_empty)
+                    && checkout_path.as_deref().is_none_or(str::is_empty)
+                {
+                    return Err(ArtifactError::invalid(
+                        "branch target requires repo or checkoutPath",
+                    ));
+                }
+                if let Some(path) = checkout_path {
+                    cwd = path.clone();
+                } else if let Some(repo) = repo {
+                    cwd = crate::pr_review_launch::checkout_for_repo(&space, repo)
+                        .ok_or_else(|| {
+                            ArtifactError::invalid("no checkout found for branch target repo")
+                        })?
+                        .to_string_lossy()
+                        .into_owned();
+                }
+                let base = base_sha
+                    .as_deref()
+                    .or(base_ref.as_deref())
+                    .filter(|s| !s.is_empty() && !s.starts_with('-'))
+                    .ok_or_else(|| {
+                        ArtifactError::invalid("branch target requires baseRef or baseSha")
+                    })?;
+                let base = git(
+                    Path::new(&cwd),
+                    &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                )
+                .ok_or_else(|| {
+                    ArtifactError::invalid("branch base does not resolve to a commit")
+                })?;
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| ArtifactError::invalid("review must be an object"))?;
+                object.insert("pr".into(), json!({"repo": repo.as_deref().unwrap_or(&cwd), "number": 0, "baseSha": base, "headSha": head_sha}));
+                head_sha.clone()
+            }
+            Some(mast_proto::ReviewTarget::PullRequest {
+                repo,
+                number,
+                head_sha,
+                base_sha,
+            }) => {
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| ArtifactError::invalid("review must be an object"))?;
+                if !object.contains_key("pr") {
+                    object.insert("pr".into(), json!({"repo": repo, "number": number, "baseSha": base_sha, "headSha": head_sha}));
+                }
+                head_sha.clone()
+            }
+            None => arguments
+                .get("headSha")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ArtifactError::invalid("headSha is required"))?
+                .to_owned(),
+        };
+        let mut review: mast_proto::ReviewSidecar = serde_json::from_value(value)
+            .map_err(|e| ArtifactError::invalid(format!("invalid review: {e}")))?;
+        if arguments
+            .get("headSha")
+            .and_then(Value::as_str)
+            .is_some_and(|specified| !specified.eq_ignore_ascii_case(&head))
+        {
+            return Err(ArtifactError::invalid("headSha does not match target"));
+        }
+        if let Some(mast_proto::ReviewTarget::Branch { repo, .. }) = &mut target
+            && repo.as_deref().is_none_or(str::is_empty)
+        {
+            let path = Path::new(&cwd);
+            *repo = git(path, &["remote", "get-url", "origin"])
+                .and_then(|url| crate::pr_review_launch::github_slug(&url))
+                .or_else(|| {
+                    git(
+                        path,
+                        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                    )
+                });
+            if repo.is_none() {
+                return Err(ArtifactError::invalid(
+                    "could not identify target repository",
+                ));
+            }
+        }
+        if let Some(mast_proto::ReviewTarget::Branch { checkout_path, .. }) = &mut target
+            && checkout_path.is_none()
+        {
+            *checkout_path = Some(cwd.clone());
+        }
+        if let Some(url) = arguments.get("prUrl").and_then(Value::as_str) {
+            let pr = crate::work_outline_pr_links::pull_request_from_url(url).ok_or_else(|| {
+                ArtifactError::invalid("prUrl must identify a GitHub pull request")
+            })?;
+            if !review
+                .pr
+                .repo
+                .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
+                || review.pr.number != pr.number
+            {
+                return Err(ArtifactError::invalid("review.pr does not match prUrl"));
+            }
+        } else if target.is_none() {
+            return Err(ArtifactError::invalid("prUrl or target is required"));
+        }
+        if let Some(mast_proto::ReviewTarget::PullRequest {
+            repo,
+            number,
+            head_sha,
+            base_sha,
+        }) = &target
+        {
+            if !review.pr.repo.eq_ignore_ascii_case(repo)
+                || review.pr.number != *number
+                || !review.pr.head_sha.eq_ignore_ascii_case(head_sha)
+                || !review.pr.base_sha.eq_ignore_ascii_case(base_sha)
+            {
+                return Err(ArtifactError::invalid("review.pr does not match target"));
+            }
+        }
+        review.target = target;
+        crate::review_sidecar::validate_review(Path::new(&cwd), &mut review, &head)
             .map_err(ArtifactError::invalid)?;
         let dir = tempfile::tempdir().map_err(|e| ArtifactError::io(e.to_string()))?;
         let source = dir.path().join("pull-request.review.json");
         let bytes = serde_json::to_vec_pretty(&review)
             .map_err(|e| ArtifactError::invalid(e.to_string()))?;
         std::fs::write(&source, bytes).map_err(|e| io_error("write review", &source, e))?;
-        let title = format!("Review {}#{}", review.pr.repo, review.pr.number);
+        let title = match &review.target {
+            Some(target @ mast_proto::ReviewTarget::Branch { .. }) => {
+                format!("Review {}", target.state_key())
+            }
+            _ => format!("Review {}#{}", review.pr.repo, review.pr.number),
+        };
+        // Titles are truncated for display; retain the whole branch identity
+        // in a bounded role so long names cannot alias the same artifact.
+        let role = match &review.target {
+            Some(target @ mast_proto::ReviewTarget::Branch { .. }) => {
+                Some(mast_proto::derive_id(&target.state_key(), "review-target"))
+            }
+            _ => None,
+        };
         let reply = self.record(PublishRequest {
             space_id: caller.space_id.clone(),
             work_item_id: None,
@@ -2051,7 +2235,7 @@ impl ArtifactsService {
             source,
             title,
             kind: Some(ArtifactKind::Review),
-            role: None,
+            role,
             note: String::new(),
             pin_as_plan: false,
             operation_id: None,
@@ -2065,6 +2249,20 @@ impl ArtifactsService {
 
     /// Read the latest review published by this chat, optionally for one PR.
     pub fn agent_review_get(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
+        let mut requested_target: Option<mast_proto::ReviewTarget> = arguments
+            .get("target")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+        if let Some(mast_proto::ReviewTarget::Branch { repo, checkout_path: Some(path), .. }) = &mut requested_target
+            && repo.as_deref().is_none_or(str::is_empty)
+        {
+            let path = Path::new(path.as_str());
+            *repo = git(path, &["remote", "get-url", "origin"])
+                .and_then(|url| crate::pr_review_launch::github_slug(&url))
+                .or_else(|| git(path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+        }
         let requested = arguments
             .get("prUrl")
             .and_then(Value::as_str)
@@ -2087,8 +2285,20 @@ impl ArtifactsService {
         artifacts.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
         for artifact in artifacts {
             let bytes = self.current_bytes(&artifact)?;
-            let review: mast_proto::ReviewSidecar = serde_json::from_slice(&bytes)
+            let mut review: mast_proto::ReviewSidecar = serde_json::from_slice(&bytes)
                 .map_err(|e| ArtifactError::invalid(format!("invalid stored review: {e}")))?;
+            if let Some(target) = &requested_target {
+                let key = review
+                    .target
+                    .as_ref()
+                    .map(mast_proto::ReviewTarget::state_key)
+                    .unwrap_or_else(|| {
+                        format!("pr:{}#{}", review.pr.repo.to_lowercase(), review.pr.number)
+                    });
+                if target.state_key() != key {
+                    continue;
+                }
+            }
             if let Some(pr) = &requested {
                 if review.pr.number != pr.number
                     || !review
@@ -2099,32 +2309,49 @@ impl ArtifactsService {
                     continue;
                 }
             }
-            let current_head = self
-                .workspace()
-                .chat_diff_targets(&caller.chat_id)
-                .ok()
-                .flatten()
-                .and_then(|row| {
-                    row.ref_targets.into_iter().find(|target| {
-                        target.pr_number == Some(review.pr.number)
-                            && target
-                                .pr_url
-                                .as_deref()
-                                .and_then(crate::work_outline_pr_links::pull_request_from_url)
-                                .is_some_and(|pr| {
-                                    review
-                                        .pr
-                                        .repo
-                                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
-                                })
+            self.normalize_review_hashes(&caller.chat_id, &mut review);
+            let branch_head = match &review.target {
+                Some(mast_proto::ReviewTarget::Branch {
+                    checkout_path: Some(path),
+                    branch: Some(branch),
+                    ..
+                }) => git(
+                    Path::new(path),
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("refs/heads/{branch}^{{commit}}"),
+                    ],
+                ),
+                _ => None,
+            };
+            let current_head = branch_head.or_else(|| {
+                self.workspace()
+                    .chat_diff_targets(&caller.chat_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|row| {
+                        row.ref_targets.into_iter().find(|target| {
+                            target.pr_number == Some(review.pr.number)
+                                && target
+                                    .pr_url
+                                    .as_deref()
+                                    .and_then(crate::work_outline_pr_links::pull_request_from_url)
+                                    .is_some_and(|pr| {
+                                        review.pr.repo.eq_ignore_ascii_case(&format!(
+                                            "{}/{}",
+                                            pr.owner, pr.repo
+                                        ))
+                                    })
+                        })
                     })
-                })
-                .and_then(|target| {
-                    git(
-                        Path::new(&target.path),
-                        &["rev-parse", "--verify", &target.head_ref],
-                    )
-                });
+                    .and_then(|target| {
+                        git(
+                            Path::new(&target.path),
+                            &["rev-parse", "--verify", &target.head_ref],
+                        )
+                    })
+            });
             let stale = current_head
                 .as_ref()
                 .map(|head| !head.eq_ignore_ascii_case(&review.pr.head_sha));

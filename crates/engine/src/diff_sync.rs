@@ -654,6 +654,9 @@ async fn resolve_row_targets(
 /// (loose ref, then `packed-refs`) — no spawn. `None` for a missing ref or a
 /// symbolic one.
 pub(crate) fn read_ref_sha(common_dir: &Path, reference: &str) -> Option<String> {
+    if valid_object_id(reference) {
+        return Some(reference.to_owned());
+    }
     if reference.contains("..") || reference.starts_with('/') {
         return None;
     }
@@ -3008,6 +3011,13 @@ mod watch_budget_tests {
         Capture, CheckoutIdentity, MAX_EXPANDED_SUBMODULES, MAX_SUBMODULE_METADATA_BYTES,
         MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget, parse_raw_diff, watch_targets,
     };
+
+    #[test]
+    fn fixed_range_head_resolves_without_a_ref_file() {
+        let sha = "a".repeat(40);
+        assert_eq!(super::read_ref_sha(std::path::Path::new("/missing"), &sha), Some(sha));
+        assert_eq!(super::read_ref_sha(std::path::Path::new("/missing"), "../head"), None);
+    }
 
     #[test]
     fn submodule_metadata_budget_is_shared_and_hard_capped() {

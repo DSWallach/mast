@@ -252,6 +252,7 @@ pub mod methods {
     /// to the Space's owning device (`pr-review-launch-v1`). Errors are
     /// `pr-review/<code>: <message>`.
     pub const START_PR_REVIEW: &str = "StartPrReview";
+    pub const START_BRANCH_REVIEW: &str = "StartBranchReview";
     // ── Linear integration v1 (`mast_proto::linear`, docs/internal/plans/work-outline/
     // linear-contract.md). All local/IPC (the key is this device's), never
     // forwardable. Failures are `linear/<code>: <message>`
