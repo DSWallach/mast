@@ -1463,6 +1463,48 @@ pub(crate) fn worker_metadata(theme: &Theme, label: String, color: gpui::Hsla) -
         .child(SharedString::from(label))
 }
 
+pub(crate) fn worker_activity(
+    theme: &Theme,
+    selector: String,
+    text: String,
+    expanded: bool,
+) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .pl(px(13.0))
+        .when(!expanded, |el| el.truncate())
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(if expanded {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(SharedString::from(text))
+}
+
+pub(crate) fn worker_report_toggle(
+    theme: &Theme,
+    id: String,
+    selector: String,
+    text: String,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .pl(px(13.0))
+        .truncate()
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(SharedString::from(text))
+}
+
 pub(crate) fn worker_unseen_badge(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
     let badge = div()
         .id(SharedString::from(selector.clone()))
