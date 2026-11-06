@@ -8109,7 +8109,7 @@ impl Composer {
                 .rounded_full()
                 .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                 .bg(theme.text)
-                .when(key, |el| el.rounded_full().bg(theme.accent).border_b_2().border_color(theme.industrial_colors().key_ledge))
+                .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -8131,7 +8131,7 @@ impl Composer {
                     .rounded_full()
                     .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                     .bg(theme.text)
-                    .when(key, |el| el.rounded_full().bg(theme.accent).border_b_2().border_color(theme.industrial_colors().key_ledge))
+                    .when(key, |el| crate::surface_chrome::icon_key(el, theme, true))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -8668,6 +8668,7 @@ impl Render for Composer {
                 gpui::transparent_black(),
                 crate::theme::ink(0.10),
             ))
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| crate::surface_chrome::icon_key(el, &theme, false))
             .on_hover(motion::hover_listener("composer-attach"))
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
             .child(
@@ -8776,6 +8777,9 @@ impl Render for Composer {
             .relative()
             .left(px(model_offset))
             .opacity(model_opacity)
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                div().absolute().top(px(-8.0)).left(px(4.0)).text_size(crate::typography::ui_rems(8.0)).text_color(theme.text_muted).child("MODEL / MODE")
+            ))
             .child(self.pickers.clone())
             .child(
                 gpui::canvas(

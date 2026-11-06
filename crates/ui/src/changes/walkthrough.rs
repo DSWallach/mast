@@ -1076,7 +1076,7 @@ impl Render for Walkthrough {
                         .cursor_pointer()
                         .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.self_start().flex().items_center().gap(px(8.0)).px(px(16.0)).py(px(8.0)))
                         .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, selected_reviewed))
-                        .when(!selected_reviewed && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(theme.accent).text_color(theme.on_accent))
+                        .when(!selected_reviewed && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| { let foreground = if crate::theme::contrast_ratio(theme.text, theme.success) >= crate::theme::contrast_ratio(theme.bg, theme.success) { theme.text } else { theme.bg }; el.bg(theme.success).text_color(foreground) })
                         .children(crate::surface_chrome::active_key_dot(&theme, selected_reviewed))
                         .child("Mark reviewed")
                         .on_click(cx.listener(|this, _, _, cx| this.mark_step(cx))),
@@ -1115,9 +1115,10 @@ impl Render for Walkthrough {
             ))
             .when(!self.target_selected && self.changes.is_some(), |view| {
                 view.child(
-                    div()
+                    div().flex().flex_col().gap(px(12.0))
                         .text_color(theme.text_muted)
-                        .child("Select the review target in Changes to track progress."),
+                        .child("Select the review target in Changes to track progress.")
+                        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(crate::surface_chrome::grille(&theme))),
                 )
             })
             .when_some(self.stale_head.clone(), |view, head| {
@@ -1175,7 +1176,7 @@ impl Render for Walkthrough {
                     .gap_2()
                     .text_color(theme.text_muted)
                     .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
-                    .child(progress)
+                    .child(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { crate::surface_chrome::display(&theme).child(progress).into_any_element() } else { div().child(progress).into_any_element() })
                     .child(
                         div()
                             .id("review-mode")

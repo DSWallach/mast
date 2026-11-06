@@ -1584,10 +1584,9 @@ impl Render for WorkItemDetails {
             .items_center()
             .gap(px(8.0))
             .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                div().px(px(8.0)).py(px(4.0)).border_1().border_color(theme.industrial_colors().rule)
-                    .bg(theme.input_bg).font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
-                    .child(SharedString::from(format!("STATUS  {}", chips::base_status_label(item.status).to_uppercase())))
+                div().flex().flex_col().gap(px(2.0))
+                    .child(div().text_size(crate::typography::ui_rems(9.0)).text_color(theme.text_muted).child("STATUS"))
+                    .child(crate::surface_chrome::display(&theme).child(SharedString::from(chips::base_status_label(item.status).to_uppercase())))
             ))
             .child(
                 div()
