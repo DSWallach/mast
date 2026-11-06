@@ -1,6 +1,6 @@
 # Work Outline — implementation handoff
 
-Prepared 2026-10-14, last updated 2026-11-02. Read this first in a new chat picking up the Work Outline work.
+Prepared 2026-10-14, last updated 2026-11-06. Read this first in a new chat picking up the Work Outline work.
 
 ## Where things are
 
@@ -857,6 +857,25 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   existing handlers; review cards get a primary Open, handoff cards show Branch/Tests + Diff/PR; `detail`
   renders as Markdown and legacy text auto-links mast-artifact ids and PR URLs. Release run: nextest
   2269/2269, UI 2424/0. Phases 4–6 (inline answers + replaceOpen, handoff lifecycle, preview surfaces) not started.
+- **PR review phase 4: walkthrough + review any diff** (2026-11-06, `review-targets`, `review-walkthrough`, Terra).
+  Review targets are `ReviewTarget::Pr | Branch`. `review_publish` takes an optional `target`; branch anchors are
+  validated against merge-base...head. Branch sidecars still carry a synthetic `pr` #0 for legacy readers; the UI
+  reads `target`. Sidecar hunks use the shared `review_hunk_identity` (path + changed lines), the same as Changes;
+  legacy sidecars are normalized on read (review_get and artifact reads), and unnormalizable ones show Outdated
+  rather than range-matching. Review state is keyed by `target.state_key()` (`branch:<repo>#<branch>`). Opening a PR
+  review inherits matching branch hunk marks, even with a cold status cache. `StartBranchReview` /
+  `RpcClient::start_branch_review` launches a review chat on a fixed commit range (works for unpushed worker
+  branches); it has no UI button yet (phase 4c). UI: a Review surface as a right-pane tab plus a full-width route
+  sharing one view. Tour/free modes, step notes with risk, "N / M reviewed", `v` mark reviewed (manual only), and the
+  2 s on-screen soft signal (faint, not counted). "Not in the tour" lists uncovered hunks. Keys n/p, ]/[, v, t are
+  rebindable and excluded in inputs. Stale banner when the head moves. Known gaps: local or non-GitHub repos keep the
+  old `ref:` key, so Changes marks aren't shared with the walkthrough there; remote-device forwarding untested.
+  Release run: UI 2506/0. Mikey's decisions: keep the ordered explanation but never take the diff away; manual
+  reviewed plus a soft signal; tab AND full-width; self-review and pre-PR worker review are a must.
+- **Child-template proposal visibility** (2026-11-06, `child-template-proposal-visibility`, Terra): child-template
+  proposals now also show on the container item, its template editor and the Space proposal list, with navigation
+  to the container. When `ruleNodeId` is omitted it resolves to the node the proposer follows, or the template root
+  for a direct child. If nothing resolves it errors, and legacy null-node proposals can't silently apply to 0 items.
 - **PR review phase 3** (2026-11-04 overnight, `pr-review-search`): ⌘O quick open (fuzzy, recents, changed-in-diff
   group, `:line`), ⇧⌘F in-process streamed content search (ignore + grep-searcher; case/word/regex,
   include/exclude globs, caps, cancellation, only-changed-files), ⌘G go to line in files and diffs, file
@@ -999,7 +1018,10 @@ unknown ids instead of denying.
 
 **Running:** none.
 
-**Observing (minimal-talk phase 0, approved 2026-11-05):** item 9516dd7c, worker chat 4ccb0a0d (Codex Terra, idle).
+**Next up:** PR review phase 4c (item 035cd13b, pending): select a change → quick explanation (Mikey asked for
+this), ask about this step, and a "Review this work" button on worker chats/items calling `start_branch_review`.
+
+**Observing (minimal-talk phase 0, approved 2026-11-05):** item 9516dd7c, worker chat 4ccb0a0d (archived).
 Baseline for the warehouse dashboard, with Basedash, Kit Line and StockLot as comparisons, is in the observation log
 (mast-artifact:0b48afa290246f61b51f8ca21765e793), rev 2. Window 2026-11-05 → 11-12. Around 11-12, take a fresh
 read-only snapshot and APFS-clone it into `.worktrees/phase0-data/` (gitignored; Codex asks approval for every read
@@ -1007,11 +1029,14 @@ outside its workspace). Then have a worker follow the log's re-run steps and pro
 worker runtime status and PR/Linear sync visibility. Delete `.worktrees/phase0-data/` after.
 
 **Waiting on Mikey:**
-- Active-checkout tracking design (Needs-you, parked item 40377ea3). PR review brief (unlocks PR review phase 4).
+- Active-checkout tracking design (Needs-you, parked item 40377ea3).
 - Proposed instruction edit on Mast Dev (install step → install script, proposal acd9f3ef): accept it.
 - Cofactr: accept Space-root proposal 8838b1f4; admin-chat follow-ups (Q-7, archive the old Project Template copy,
   Tickets rules rev 3, ENG-3222).
-- Whether `peon_hook.py` (agent-mode-tools root, symlinked from ~/bin) is still called by a Claude Code hook; delete if not.
+- `peon_hook.py`: still called (3 hooks in ~/.claude/settings.json, 6 in ~/.codex/hooks.json, and Codex's notify
+  `--previous-notify` chain), but it posts to port 8765, where nothing listens since the tray was retired. Removing
+  the hook entries needs Mikey's OK, because agents don't edit ~/.claude or ~/.codex. Then delete the script, its
+  ~/bin symlink and /tmp/peon_hook.log.
 
 **Queued (agreed):**
 1. Coworker readiness: workflow pack (export Mikey's instructions/templates/model routing as an optional importable
@@ -1019,7 +1044,7 @@ worker runtime status and PR/Linear sync visibility. Delete `.worktrees/phase0-d
 2. Retire the agent-mode-tools wrapper (Space root → plain clone of Pluto8195/mast, worktrees under it, move the
    `.zeron/`/`.mast/` artifact folders incl. the brand kit, update root instructions/HANDOFF/memory; drops the
    submodule-bump step). Needs a quiet window with no workers.
-3. Later: PR review phase 4 (walkthrough), item-tab artifact surfacing design (171cde5a), container templates phases
+3. Later: PR review phases 5–7 (drafts/threads, post to GitHub, re-review), item-tab artifact surfacing design (171cde5a), container templates phases
    2+, one attention model / one chat-status model (design first), the cross-device archive race follow-up from
    stale-coordinator-wakes, optional "move ~/.zeron to ~/.mast" Settings action.
 4. Known bug to file/fix: Claude Code's multi-question ask-user prompt in Mast returns "rejected" and drops answers
