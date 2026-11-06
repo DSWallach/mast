@@ -592,6 +592,17 @@ fn git_graph_tone(mut color: Hsla) -> Hsla {
     color
 }
 
+/// Derived semantic colors for ruled panels and tactile controls.
+#[derive(Debug, Clone, Copy)]
+pub struct IndustrialColors {
+    pub panel: Hsla,
+    pub rule: Hsla,
+    pub key: Hsla,
+    pub key_ledge: Hsla,
+    pub pressed: Hsla,
+    pub signal: Hsla,
+}
+
 /// The app theme. Two concrete instances — [`Theme::dark`] and [`Theme::light`].
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -1280,6 +1291,21 @@ impl Theme {
         self
     }
 
+    /// Palette roles for opaque, ruled controls, derived from this theme.
+    pub fn industrial_colors(&self) -> IndustrialColors {
+        let panel = flatten(self.surface, self.bg);
+        let key = flatten(self.surface_raised, panel);
+        let rule = flatten(self.border_strong, panel);
+        IndustrialColors {
+            panel,
+            rule,
+            key,
+            key_ledge: flatten(self.text.opacity(0.28), rule),
+            pressed: flatten(self.element_active, key),
+            signal: self.accent,
+        }
+    }
+
     pub fn with_ui_style(mut self, style: crate::ui_style::UiStyle) -> Self {
         self.ui_style = style;
         self
@@ -1912,6 +1938,21 @@ pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn industrial_colors_derive_from_active_theme() {
+        for (appearance, id) in [(Appearance::Light, "industrial-light"), (Appearance::Dark, "github-dark")] {
+            let theme = Theme::for_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque);
+            let colors = theme.industrial_colors();
+            assert_eq!(colors.panel, flatten(theme.surface, theme.bg));
+            assert_eq!(colors.rule, flatten(theme.border_strong, colors.panel));
+            assert_eq!(colors.key, flatten(theme.surface_raised, colors.panel));
+            assert_eq!(colors.key_ledge, flatten(theme.text.opacity(0.28), colors.rule));
+            assert_eq!(colors.pressed, flatten(theme.element_active, colors.key));
+            assert_eq!(colors.signal, theme.accent);
+        }
+    }
+
 
     fn srgb_u8(c: [f32; 3]) -> [u8; 3] {
         [
