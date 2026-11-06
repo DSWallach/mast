@@ -173,6 +173,13 @@ pub fn init(id: UiStyleId, cx: &mut gpui::App) {
     cx.set_global(UiStyleState(id));
 }
 
+/// Change the presentation style without saving device settings.
+pub fn set_style_in_memory(id: UiStyleId, cx: &mut gpui::App) {
+    cx.set_global(UiStyleState(id));
+    crate::typography::reinstall_theme(cx);
+    cx.refresh_windows();
+}
+
 pub fn current(cx: &gpui::App) -> UiStyle {
     UiStyle::of(
         cx.try_global::<UiStyleState>()

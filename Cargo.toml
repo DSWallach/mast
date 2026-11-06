@@ -14,6 +14,7 @@ members = [
     "crates/syntax",
     "crates/mcp",
     "apps/mast",
+    "apps/mast-gallery",
     "tools/mast-metrics",
 ]
 

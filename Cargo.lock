@@ -5156,6 +5156,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mast-gallery"
+version = "0.2.82"
+dependencies = [
+ "gpui",
+ "gpui-base",
+ "gpui_platform",
+ "mast-doc",
+ "mast-ui",
+ "tempfile",
+]
+
+[[package]]
 name = "mast-harness"
 version = "0.2.82"
 dependencies = [
