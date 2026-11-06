@@ -865,6 +865,19 @@ mod tests {
     }
 
     #[test]
+    fn area_identity_palette_is_theme_owned() {
+        let registry = ThemeRegistry::builtin();
+        for id in ["area-light", "area-dark"] {
+            let variant = registry.variant(id).unwrap();
+            let palette = variant.identity_palette();
+            assert_eq!(palette[0], "#3F69CC".parse().unwrap());
+            assert_eq!(palette[1], "#FE4B25".parse().unwrap());
+            assert_eq!(palette[3], "#DFBE1B".parse().unwrap());
+            assert_eq!(palette[4], "#38D059".parse().unwrap());
+        }
+    }
+
+    #[test]
     fn visual_fixture_matrix_covers_every_variant_and_scene() {
         let registry = ThemeRegistry::builtin();
         let variants = registry

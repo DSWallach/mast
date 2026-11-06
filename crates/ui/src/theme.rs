@@ -805,7 +805,7 @@ impl Theme {
             (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
         });
         let indices = [4, 1, 5, 3, 2, 6];
-        self.terminal.ansi[indices[(hash % 6) as usize]]
+        flatten(self.terminal.ansi[indices[(hash % 6) as usize]], self.bg)
     }
 
     /// Select a theme text role with the strongest contrast on an identity fill.
