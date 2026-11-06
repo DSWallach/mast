@@ -27,7 +27,9 @@ impl Shell {
         {
             return Some(host.clone());
         }
-        let host = cx.new(|cx| ReviewHost::new(self.state.clone(), chat_id.clone(), &artifact, cx));
+        let shell = cx.weak_entity();
+        let host =
+            cx.new(|cx| ReviewHost::new(self.state.clone(), chat_id.clone(), &artifact, shell, cx));
         self.review_hosts.insert(
             chat_id,
             (artifact.id, artifact.current_revision, host.clone()),

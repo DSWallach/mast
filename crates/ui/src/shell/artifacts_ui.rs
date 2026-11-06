@@ -472,6 +472,19 @@ mod tests {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("review-progress").is_some());
+        assert!(vcx.debug_bounds("review-stale").is_none());
+        shell.update(vcx, |shell, cx| shell.state.update(cx, |state, cx| {
+            let frame = serde_json::from_value(serde_json::json!([{"chatId":"c1", "targets":[], "refTargets":[{
+                "id":"ref", "kind":"pr", "label":"PR #1", "path":"/work/alpha", "checkoutId":"c",
+                "repoName":"r", "headBranch":"feature", "headRef":"refs/heads/feature",
+                "baseBranch":"main", "baseRef":"refs/heads/main", "prUrl":"https://github.com/o/r/pull/1", "headSha":"moved"
+            }]}])).unwrap();
+            state.apply_chat_diff_targets(frame);
+            cx.notify();
+        }));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("review-stale").is_some());
     }
 
     #[gpui::test]
