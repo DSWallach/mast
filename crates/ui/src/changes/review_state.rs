@@ -240,6 +240,16 @@ impl Changes {
                         range.head_sha.clone(),
                     ));
                 }
+                if self.scope == DiffScope::Range {
+                    let path = owner.cwd.as_ref()?;
+                    let repo = self.review_branch_repositories.get(&(owner.chat_id.clone(), path.clone()))?;
+                    let target = mast_proto::ReviewTarget::Branch {
+                        repo: Some(repo.clone()), checkout_path: Some(path.clone()),
+                        branch: Some(range.head_branch.clone()), base_ref: Some(range.base_ref.clone()),
+                        base_sha: None, head_sha: range.head_sha.clone().unwrap_or_default(),
+                    };
+                    return Some((target.state_key(), range.head_sha.clone()));
+                }
             }
             if let Some(pr) = &self.review_pr
                 && owner.range.is_none()
@@ -269,6 +279,24 @@ impl Changes {
         self.pinned_cwd
             .as_deref()
             .map(|path| (format!("diff:local:{path}"), None))
+    }
+
+    /// A PR range names its source branch even when the PR status cache is cold.
+    fn branch_target_for_pr(&self, target: &str) -> Option<String> {
+        let pr = target.strip_prefix("pr:").and_then(mast_proto::PullRequestRef::parse_external_id)?;
+        let owner = self.owner.as_ref()?;
+        let branch = match &owner.range {
+            Some(range) if self.scope == DiffScope::Range
+                && (range.head_ref == format!("refs/remotes/origin/{}", range.head_branch)
+                    || range.head_ref == format!("refs/heads/{}", range.head_branch))
+                && range.pr_url.as_deref()
+                .and_then(crate::chat_work_context::parse_pr_url)
+                .is_some_and(|candidate| candidate.external_id().eq_ignore_ascii_case(&pr.external_id())) => &range.head_branch,
+            None if self.scope == DiffScope::Branch && self.review_checkout_matches == Some(true) => owner.branch.as_ref()?,
+            _ => return None,
+        };
+        if branch.is_empty() { return None; }
+        Some(format!("branch:{}/{}#{branch}", pr.owner.to_lowercase(), pr.repo.to_lowercase()))
     }
 
     /// Resolve launcher reviews and chats attached to a PR review item.
@@ -472,6 +500,48 @@ impl Changes {
                 return;
             }
         }
+        if self.review_identity(cx).is_none()
+            && self.scope == DiffScope::Range
+            && let Some((chat_id, path)) = self.owner.as_ref().and_then(|owner| {
+                owner.range.as_ref()?;
+                Some((owner.chat_id.clone(), owner.cwd.clone()?))
+            })
+        {
+            let key = (chat_id.clone(), path.clone());
+            if self.review_error.is_some() {
+                if self.review_branch_lookup.as_ref() == Some(&key) { return; }
+                self.review_error = None;
+            }
+            if self.review_branch_lookup.as_ref() == Some(&key) && self.review_branch_lookup_task.is_some() { return; }
+            self.review_target = None;
+            self.review_state = None;
+            self.review_task = None;
+            self.review_branch_lookup = Some(key.clone());
+            let task = self.state.update(cx, |state, cx| state.list_chat_diff_checkouts(&chat_id, cx));
+            self.review_branch_lookup_task = Some(cx.spawn(async move |this, cx| {
+                let result = task.await.and_then(|checkouts| checkouts.into_iter()
+                    .find(|checkout| checkout.path == path)
+                    .and_then(|checkout| checkout.repo_slug)
+                    .filter(|repo| !repo.is_empty())
+                    .ok_or_else(|| "Could not identify the branch repository for review state".to_owned()));
+                this.update(cx, |this, cx| {
+                    if this.review_branch_lookup.as_ref() != Some(&key) { return; }
+                    this.review_branch_lookup = None;
+                    this.review_branch_lookup_task = None;
+                    match result {
+                        Ok(repo) => { this.review_branch_repositories.insert(key, repo); this.ensure_review_state(cx); }
+                        Err(error) => {
+                            let still_needed = this.scope == DiffScope::Range && this.owner.as_ref().is_some_and(|owner|
+                                owner.chat_id == key.0 && owner.cwd.as_deref() == Some(key.1.as_str()) && owner.range.is_some())
+                                && this.review_identity(cx).is_none();
+                            if still_needed { this.review_branch_lookup = Some(key); this.review_error = Some(error); }
+                        }
+                    }
+                    cx.notify();
+                }).ok();
+            }));
+            return;
+        }
         let Some((target, head_sha)) = self.review_identity(cx) else {
             return;
         };
@@ -499,12 +569,13 @@ impl Changes {
             return;
         }
         self.review_state = None;
+        let branch_target = self.branch_target_for_pr(&target);
+        let mut params = serde_json::json!({"target": target});
+        if let Some(branch_target) = branch_target {
+            params["branchTarget"] = serde_json::json!(branch_target);
+        }
         let task = self.state.update(cx, |state, cx| {
-            state.chat_diff_rpc(
-                methods::GET_DIFF_REVIEW_STATE,
-                serde_json::json!({"target": target}),
-                cx,
-            )
+            state.chat_diff_rpc(methods::GET_DIFF_REVIEW_STATE, params, cx)
         });
         self.review_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await.and_then(|value| {
@@ -786,6 +857,72 @@ mod mark_tests {
     use super::*;
 
     #[gpui::test]
+    fn branch_ranges_and_cold_pr_reads_share_the_normalized_branch_key(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+        let calls = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+        let captured = calls.clone();
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let mut state = AppState::new();
+            state.chat_diff_rpc_override = Some(Arc::new(move |method, params| {
+                captured.lock().unwrap().push((method.into(), params));
+                match method {
+                    methods::LIST_CHAT_DIFF_CHECKOUTS => Ok(serde_json::json!({"candidates":[{
+                        "path":"/repo", "kind":"own", "repoName":"r", "repoSlug":"O/R",
+                        "branch":"main", "headSha":"abc", "bound":false, "selected":true
+                    }]})),
+                    methods::GET_DIFF_REVIEW_STATE => Ok(serde_json::json!({"state":null})),
+                    _ => Err("not available in test".into()),
+                }
+            }));
+            let state = cx.new(|_| state);
+            let owner = ChangesTarget { chat_id: "chat".into(), device_id: "device".into(), cwd: Some("/repo".into()), checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false,
+                range: Some(crate::work_outline::execution::RefRange { label: "branch".into(), head_branch: "feature".into(), head_ref: "refs/remotes/origin/feature".into(), head_sha: Some("abc".into()), pr_url: None, base_branch: "main".into(), base_ref: "refs/remotes/origin/main".into() }) };
+            let mut changes = Changes::with_owner(state, Some(owner), cx);
+            changes.scope = DiffScope::Range;
+            changes
+        });
+        changes.update(vcx, |changes, cx| changes.ensure_review_state(cx));
+        vcx.run_until_parked();
+        assert!(calls.lock().unwrap().iter().any(|(method, params)| method == methods::GET_DIFF_REVIEW_STATE && params["target"] == "branch:o/r#feature" && params.get("branchTarget").is_none()));
+        changes.update(vcx, |changes, cx| {
+            changes.owner.as_mut().unwrap().range.as_mut().unwrap().pr_url = Some("https://github.com/o/r/pull/7".into());
+            changes.ensure_review_state(cx);
+        });
+        vcx.run_until_parked();
+        assert!(calls.lock().unwrap().iter().any(|(method, params)| method == methods::GET_DIFF_REVIEW_STATE && params["target"] == "pr:o/r#7" && params["branchTarget"] == "branch:o/r#feature"));
+        changes.update(vcx, |changes, _| {
+            changes.owner.as_mut().unwrap().range.as_mut().unwrap().head_ref = "refs/pull/7/head".into();
+            assert!(changes.branch_target_for_pr("pr:o/r#7").is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn unknown_repository_does_not_write_a_guessed_branch_key(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = calls.clone();
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let mut state = AppState::new();
+            state.chat_diff_rpc_override = Some(Arc::new(move |method, _| {
+                captured.lock().unwrap().push(method.into());
+                Ok(serde_json::json!({"candidates":[{"path":"/repo","kind":"own","repoName":"r","bound":false,"selected":true}]}))
+            }));
+            let state = cx.new(|_| state);
+            let owner = ChangesTarget { chat_id: "chat".into(), device_id: "device".into(), cwd: Some("/repo".into()), checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false,
+                range: Some(crate::work_outline::execution::RefRange { label: "branch".into(), head_branch: "feature".into(), head_ref: "refs/heads/feature".into(), head_sha: Some("abc".into()), pr_url: None, base_branch: "main".into(), base_ref: "refs/heads/main".into() }) };
+            let mut changes = Changes::with_owner(state, Some(owner), cx);
+            changes.scope = DiffScope::Range;
+            changes
+        });
+        changes.update(vcx, |changes, cx| changes.ensure_review_state(cx));
+        vcx.run_until_parked();
+        assert!(changes.read_with(vcx, |changes, _| changes.review_error.is_some()));
+        assert!(!calls.lock().unwrap().iter().any(|method| method == methods::GET_DIFF_REVIEW_STATE));
+    }
+
+    #[gpui::test]
     fn branch_review_uses_target_key_only_for_matching_checkout_and_branch(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -810,7 +947,7 @@ mod mark_tests {
                 });
                 assert_eq!(changes.review_identity(cx).unwrap().0, "branch:o/r#abc");
                 changes.owner.as_mut().unwrap().range.as_mut().unwrap().head_sha = Some("different".into());
-                assert_eq!(changes.review_identity(cx).unwrap().0, "ref:device:/repo:refs/heads/other");
+                assert!(changes.review_identity(cx).is_none());
             });
         });
     }
