@@ -4,6 +4,10 @@ use mast_ui::{appearance, badges, icons, settings, theme::Theme, typography, ui_
 // This initial story exercises the actual message badge, including its hover card.
 struct Gallery {
     focus: gpui::FocusHandle,
+    input: gpui::Entity<mast_ui::composer::ComposerInput>,
+    transcript: gpui::Entity<mast_ui::transcript::Transcript>,
+    composer: gpui::Entity<mast_ui::composer::Composer>,
+    chat: bool,
 }
 
 const STYLES: [ui_style::UiStyleId; 3] = [
@@ -66,7 +70,29 @@ impl Render for Gallery {
                     .p(px(20.))
                     .border_r_1()
                     .border_color(theme.border)
-                    .child("Controls"),
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .id("controls-story")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.chat = false;
+                                cx.notify();
+                            }))
+                            .child("Controls"),
+                    )
+                    .child(
+                        div()
+                            .id("chat-story")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.chat = true;
+                                cx.notify();
+                            }))
+                            .child("Chat"),
+                    ),
             )
             .child(
                 div()
@@ -112,9 +138,50 @@ impl Render for Gallery {
                                     .child("Dark (D)"),
                             ),
                     )
-                    .child("Message badge")
-                    .child(badges::render("gallery-badge", &badge, theme)),
+                    .when(self.chat, |el| {
+                        el.child(div().h(px(400.)).child(self.transcript.clone()))
+                            .child(self.composer.clone())
+                    })
+                    .when(!self.chat, |el| {
+                        el.child("Input")
+                            .child(
+                                div()
+                                    .w(px(360.))
+                                    .p(px(8.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .rounded(px(6.))
+                                    .child(self.input.clone()),
+                            )
+                            .child("Message badge")
+                            .child(badges::render("gallery-badge", &badge, theme))
+                    }),
             )
+    }
+}
+
+fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
+    use mast_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+    let state = cx.new(|_| {
+        let mut state = mast_ui::state::AppState::new();
+        let entry = |id: &str, role, text: &str| SessionMessageEntry {
+            id: id.into(), role, parts: vec![MessagePart::Text { id: format!("{id}-text"), text: text.into() }],
+            created_at: 0, device_id: "fixture".into(), status: Some(MessageStatus::Complete), continuation_of: None,
+        };
+        state.set_subagent_snapshot("gallery".into(), vec![
+            entry("user", MessageRole::User, "Can you review the changes?"),
+            entry("assistant", MessageRole::Assistant, "I found **two improvements**.\n\n- Simplify the state update\n- Add a regression test"),
+        ]);
+        state
+    });
+    Gallery {
+        focus,
+        input: cx.new(|cx| mast_ui::composer::ComposerInput::new("Type a message…", cx)),
+        transcript: cx.new(|cx| {
+            mast_ui::transcript::Transcript::for_doc(state.clone(), "gallery".into(), false, cx)
+        }),
+        composer: cx.new(|cx| mast_ui::composer::Composer::new(state.clone(), cx)),
+        chat: false,
     }
 }
 
@@ -124,6 +191,7 @@ fn init(cx: &mut App, data_dir: &std::path::Path) {
     settings::init(settings.clone(), data_dir, cx);
     let fonts = typography::register_fonts(cx);
     ui_style::init(settings.ui_style, cx);
+    mast_ui::composer::init(cx, settings.composer_send_behavior);
     typography::init(
         settings.ui_font_family,
         settings.ui_font_size,
@@ -153,7 +221,7 @@ fn main() {
                 cx.new(|cx| {
                     let focus = cx.focus_handle();
                     window.focus(&focus, cx);
-                    Gallery { focus }
+                    gallery(focus, cx)
                 })
             })
             .expect("gallery window");
@@ -166,7 +234,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn badge_story_renders_headlessly() {
+    fn stories_render_in_each_style_and_appearance() {
         gpui_platform::headless().run(|cx| {
             let dir = tempfile::tempdir().unwrap();
             init(cx, dir.path());
@@ -175,15 +243,31 @@ mod tests {
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
-                        Gallery { focus }
+                        gallery(focus, cx)
                     })
                 })
                 .unwrap();
-            cx.update_window(window.into(), |_, window, cx| {
-                window.refresh();
-                let _ = window.draw(cx);
-            })
-            .unwrap();
+            let gallery = window.entity(cx).unwrap();
+            for style in STYLES {
+                for mode in [
+                    appearance::AppearanceMode::Light,
+                    appearance::AppearanceMode::Dark,
+                ] {
+                    switch_appearance(mode, cx);
+                    for chat in [false, true] {
+                        gallery.update(cx, |gallery, cx| {
+                            gallery.chat = chat;
+                            cx.notify();
+                        });
+                        cx.update_window(window.into(), |_, window, cx| {
+                            switch_style(style, window, cx);
+                            window.refresh();
+                            let _ = window.draw(cx);
+                        })
+                        .unwrap();
+                    }
+                }
+            }
         });
     }
 }
