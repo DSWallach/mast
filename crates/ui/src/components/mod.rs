@@ -22,6 +22,15 @@ fn is_area(theme: &Theme) -> bool {
     theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area
 }
 
+fn identity_foreground_on(theme: &Theme, identity: gpui::Hsla, surface: gpui::Hsla) -> gpui::Hsla {
+    let foreground = theme.identity_foreground(identity);
+    if crate::theme::contrast_ratio(foreground, surface) >= 4.5 {
+        foreground
+    } else {
+        theme.text
+    }
+}
+
 fn is_industrial(theme: &Theme) -> bool {
     theme.ui_style.controls == crate::ui_style::ControlVariant::Key
 }
@@ -117,7 +126,7 @@ pub fn button_with_identity(
         }
         ButtonVariant::Danger => button
             .bg(theme.danger_strong)
-            .text_color(gpui::white())
+            .text_color(theme.identity_text(theme.danger_strong))
             .font_weight(gpui::FontWeight::MEDIUM)
             .hover(|el| el.opacity(0.9))
             .child(label),
@@ -187,7 +196,11 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .when(is_area(theme), |el| {
             el.bg(theme.identity_color("").opacity(0.12))
                 .border_color(gpui::transparent_black())
-                .text_color(theme.identity_foreground(theme.identity_color("")))
+                .text_color(identity_foreground_on(
+                    theme,
+                    theme.identity_color(""),
+                    crate::theme::flatten(theme.identity_color("").opacity(0.12), theme.surface),
+                ))
         })
         .child(label.into())
 }
@@ -737,7 +750,7 @@ pub fn agent_message_bubble(
             .text_size(crate::typography::ui_rems(
                 16.0 + layout_type_adjustment(theme),
             ))
-            .text_color(theme.identity_foreground(identity))
+            .text_color(identity_foreground_on(theme, identity, theme.surface))
             .child(content)
             .into_any_element()
     } else {
@@ -815,4 +828,40 @@ pub fn section_header(
                 )
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dark_theme_component_foregrounds_contrast() {
+        for id in ["mast-dark", "industrial-dark", "area-dark"] {
+            let theme = Theme::for_selection(
+                crate::theme::Appearance::Dark,
+                id,
+                Default::default(),
+                mast_theme::SurfacePreference::Opaque,
+            );
+            let danger_text = theme.identity_text(theme.danger_strong);
+            assert!(
+                crate::theme::contrast_ratio(danger_text, theme.danger_strong) >= 4.5,
+                "danger in {id}"
+            );
+            let identity = theme.identity_color("");
+            let chip = crate::theme::flatten(identity.opacity(0.12), theme.surface);
+            assert!(
+                crate::theme::contrast_ratio(identity_foreground_on(&theme, identity, chip), chip)
+                    >= 4.5,
+                "chip in {id}"
+            );
+            assert!(
+                crate::theme::contrast_ratio(
+                    identity_foreground_on(&theme, identity, theme.surface),
+                    theme.surface
+                ) >= 4.5,
+                "agent in {id}"
+            );
+        }
+    }
 }

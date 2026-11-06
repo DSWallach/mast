@@ -19,15 +19,27 @@ remain authoritative on subsequent loads. Appearance needs separate Style,
 Layout and Theme pickers. Gallery and preview need independent style and layout
 axes, including the requested gallery keys and `--layouts` preview option.
 
-## Token audit (in progress)
+## Token audit
 
-`UiStyle::resolve` combines look tokens with the layout's row metrics, control
-size, type scale, spacing, and guidance. Type roles include an independent
-display field; radius roles include an independent bubble field. The spacing
-scale derives from the existing control gap and the selected layout. Optional
-look metrics retain each primitive's established Default/Minimal fallback.
-Some components still use legacy metrics and need a per-surface audit before
-the token migration can be considered complete.
+`UiStyle::resolve` supplies look roles and independently applies layout metrics
+and behavior. Type roles include an independent display field; radius roles
+include an independent bubble field. The spacing scale derives from the
+existing control gap and layout. The remaining optional role fallbacks are
+intentional: Default/Minimal preserves each original primitive's geometry.
+
+| Component | Default fallback when the look leaves a role unset |
+| --- | --- |
+| Button | Existing small/medium radii and type metrics |
+| Card | Existing 12 px panel radius |
+| Menu item | Existing menu radius and 13 px body size |
+| Search and dialog input | Existing 8 px control radius |
+| Readout | Existing 10 px label size |
+| User bubble | Existing `Theme::BUBBLE_RADIUS` and 14 px body size |
+| Guided section help | Existing 12 px secondary size |
+
+The identity-color fallback in selected rows is a contrast fallback, not a
+size token. The component migration slices must continue replacing their own
+legacy metrics with these roles as they adopt components.
 
 ## Audited helper examples
 
