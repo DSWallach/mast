@@ -1343,6 +1343,7 @@ impl Render for WorkItemDetails {
             .flex_col()
             .border_l_1()
             .border_color(theme.border)
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.border_l_2().border_color(theme.industrial_colors().rule))
             .bg(theme.surface)
             .children(crate::ui_style::help_card("item-details", "Use item details to manage instructions, references, and work status.", &theme, cx))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
@@ -1492,6 +1493,9 @@ impl Render for WorkItemDetails {
                     .text_color(theme.text_muted)
                     .children(crumbs),
             )
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                div().flex().gap(px(2.0)).children((0..5).map(|_| div().w(px(2.0)).h(px(10.0)).bg(theme.industrial_colors().rule)))
+            ))
             .child(close);
 
         let title: AnyElement = if self.editing_title {
@@ -1543,7 +1547,11 @@ impl Render for WorkItemDetails {
                 .when(!active, |el| el.text_color(theme.text_muted))
                 .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.flex().items_center().gap(px(8.0)))
                 .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
-                .children(crate::surface_chrome::active_key_dot(&theme, active))
+                .when(active && status == WorkItemStatus::Completed && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| {
+                    let foreground = if crate::theme::contrast_ratio(theme.text, theme.success) >= crate::theme::contrast_ratio(theme.bg, theme.success) { theme.text } else { theme.bg };
+                    el.bg(theme.success).text_color(foreground)
+                })
+                .children(crate::surface_chrome::active_key_dot(&theme, active && status != WorkItemStatus::Completed))
                 .hover(|el| el.text_color(theme.text))
                 .child(chips::base_status_label(status))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_status(status, cx)))
@@ -1575,6 +1583,12 @@ impl Render for WorkItemDetails {
             .flex()
             .items_center()
             .gap(px(8.0))
+            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                div().px(px(8.0)).py(px(4.0)).border_1().border_color(theme.industrial_colors().rule)
+                    .bg(theme.input_bg).font_family(theme.font_mono.clone())
+                    .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
+                    .child("STATUS")
+            ))
             .child(
                 div()
                     .flex()
