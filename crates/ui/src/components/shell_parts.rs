@@ -373,6 +373,54 @@ pub(crate) fn header_attention_badge(
     super::segmented_key(badge, theme, false)
 }
 
+pub(crate) fn admin_badge(
+    theme: &Theme,
+    selector: String,
+    text: String,
+    border: gpui::Hsla,
+    color: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    let badge = div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .max_w_full()
+        .h(px(20.0))
+        .pl(px(6.0))
+        .pr(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(5.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(border)
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(color)
+        .child(icon(crate::icons::SHIELD).size(px(12.0)).text_color(color))
+        .child(div().min_w_0().truncate().child(SharedString::from(text)));
+    super::segmented_key(badge, theme, false)
+}
+
+pub(crate) fn admin_revoke_button(
+    theme: &Theme,
+    selector: String,
+    label: String,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(5.0))
+        .rounded(px(3.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .role(gpui::Role::Button)
+        .aria_label(SharedString::from(format!("{label}: revoke")))
+        .child(crate::admin::REVOKE_LABEL)
+}
+
 pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let menu = div()
         .id("chat-header-menu")

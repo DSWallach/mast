@@ -245,44 +245,9 @@ impl Shell {
         let revoke = format!("{prefix}-admin-revoke");
         let chat_id = chat_id.to_owned();
         Some(
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector({
-                    let selector = selector.clone();
-                    move || selector.clone()
-                })
-                .flex_none()
-                .max_w_full()
-                .h(px(20.0))
-                .pl(px(6.0))
-                .pr(px(2.0))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(border)
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(color)
-                .child(icon(icons::SHIELD).size(px(12.0)).text_color(color))
+            crate::components::shell_parts::admin_badge(theme, selector, text.clone(), border, color)
                 .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(text.clone())),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(revoke.clone()))
-                        .debug_selector(move || revoke.clone())
-                        .flex_none()
-                        .px(px(5.0))
-                        .rounded(px(3.0))
-                        .cursor_pointer()
-                        .hover(|el| el.bg(theme.element_hover))
-                        .role(gpui::Role::Button)
-                        .aria_label(SharedString::from(format!("{text}: revoke")))
-                        .child(admin::REVOKE_LABEL)
+                    crate::components::shell_parts::admin_revoke_button(theme, revoke, text)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.revoke_chat_admin(&chat_id, cx);
