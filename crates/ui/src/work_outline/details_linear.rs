@@ -322,13 +322,7 @@ impl WorkItemDetails {
         }
         let selector = format!("work-item-{field}-synced");
         Some(
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child("Synced from Linear")
+            crate::components::outline_linear_sync_marker(selector, theme)
                 .tooltip(|_, cx| {
                     cx.new(|_| {
                         TextTooltip("Follows the Linear issue until you edit it here".into())

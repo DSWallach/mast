@@ -386,11 +386,8 @@ impl WorkItemDetails {
             )
             .when_some(synced, |el, line| {
                 el.child(
-                    div()
-                        .debug_selector(|| "work-item-pr-synced".into())
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(line)),
+                    crate::components::outline_execution_line(line, 10.5, theme.text_faint, theme)
+                        .debug_selector(|| "work-item-pr-synced".into()),
                 )
             });
         Some(section.into_any_element())

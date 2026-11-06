@@ -2757,6 +2757,20 @@ pub fn outline_linear_hint(theme: &Theme) -> Div {
         )
 }
 
+/// Marker for a field still synchronized from Linear.
+pub fn outline_linear_sync_marker(id: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child("Synced from Linear")
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
