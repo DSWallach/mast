@@ -871,6 +871,7 @@ pub mod agent_tools {
         pub const ANSWER_USER_ACTION_REQUEST: &str = "answer_user_action_request";
         /// Propose an instruction for the item, its parent, or the Space root.
         pub const PROPOSE_INSTRUCTION: &str = "work_outline_propose_instruction";
+        pub const PROPOSE_APPROVAL_RULE: &str = "propose_approval_rule";
         /// Make an item (or every direct child of a container) follow its
         /// container template: adopts existing items by title, creates the rest.
         pub const APPLY_CONTAINER_TEMPLATE: &str = "work_outline_apply_container_template";
@@ -942,7 +943,7 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 12] = [
+        pub const WORK_OUTLINE: [&str; 13] = [
             READ_CURRENT,
             READ_SUBTREE,
             CREATE_CHILD,
@@ -954,6 +955,7 @@ pub mod agent_tools {
             ANSWER_USER_ACTION_REQUEST,
             APPLY_CONTAINER_TEMPLATE,
             PROPOSE_INSTRUCTION,
+            PROPOSE_APPROVAL_RULE,
             ADMIN,
         ];
     }
@@ -1235,6 +1237,12 @@ pub mod agent_tools {
                 p("toolCallId", "string"),
             ],
             example: r#"{"text": "Run cargo fmt before committing.", "idempotencyKey": "propose-fmt"}"#,
+        },
+        ToolUsage {
+            tool: tools::PROPOSE_APPROVAL_RULE,
+            required: &[p("label", "rule label"), KEY_CREATE],
+            optional: &[p("argvPrefix", "command argument prefix"), p("commandRegex", "command regex"), p("cwdScope", "absolute working directory scope"), p("harness", "codex, claude-code, or any"), p("rationale", "reason for the proposal")],
+            example: r#"{"label":"Rust tests","argvPrefix":["cargo","test"],"idempotencyKey":"propose-tests"}"#,
         },
         ToolUsage {
             tool: tools::REPORT_FRICTION,

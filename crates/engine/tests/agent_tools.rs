@@ -3866,6 +3866,23 @@ async fn friction_captures_live_run_harness() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn approval_rule_proposal_only_creates_a_review_request() {
+    let rig = rig().await;
+    let root = create_item(&rig, "proposal-root", "Root", None).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let token = tokens.mint(CHAT, "proposal-run", SPACE, &rig.core.device_id);
+    tool(&rig, token.token(), "work_outline_associate_current_chat", json!({"workItemId": root, "idempotencyKey": "proposal-associate"})).await.unwrap();
+    let result = tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Rust tests", "argvPrefix": ["cargo", "test"], "harness": "codex", "idempotencyKey": "proposal-rule"
+    })).await.unwrap();
+    assert!(result["userActionRequestId"].is_string());
+    let snapshot = snapshot(&rig);
+    assert!(snapshot.space_settings.approval_rules.is_empty());
+    assert!(snapshot.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_tool_failures_and_can_be_disabled() {
     let rig = rig().await;
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
