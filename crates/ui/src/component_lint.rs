@@ -10,7 +10,7 @@ fn count_numeric_call(source: &str, outer: &str, inner: &str) -> usize {
                 return false;
             };
             // Do not match an inner call belonging to a later expression.
-            if tail[..inner_offset].contains(['\n', ')', ';']) {
+            if tail[..inner_offset].contains([')', ';']) {
                 return false;
             }
             tail[inner_offset + inner.len()..]
@@ -68,4 +68,11 @@ fn presentation_literals_and_branches_do_not_increase() {
     {
         assert!(count <= limit, "{name} count increased: {count} > {limit}");
     }
+}
+
+#[test]
+fn numeric_call_counts_qualified_and_multiline_literals() {
+    let source = ".text_size(\n crate::typography::ui_rems(13.0)) .text_size(ui_rems(size)) .rounded(\n px(4.0))";
+    assert_eq!(count_numeric_call(source, ".text_size(", "ui_rems("), 1);
+    assert_eq!(count_numeric_call(source, ".rounded(", "px("), 1);
 }
