@@ -1054,14 +1054,7 @@ fn error_card(
         ))
 }
 
-fn section_label(text: &'static str, theme: &Theme) -> gpui::Div {
-    div()
-        .mt(px(10.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted)
-        .child(text)
-}
+use crate::components::shell_parts::start_chat_section_label as section_label;
 
 fn device_name(shell: &Shell, device_id: &str, cx: &App) -> String {
     shell

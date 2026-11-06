@@ -1244,6 +1244,18 @@ pub(crate) fn section_label(
         )
 }
 
+pub(crate) fn start_chat_section_label(text: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .mt(px(10.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(text)
+}
+
 pub(crate) fn team_button(
     theme: &Theme,
     id: impl Into<String>,
