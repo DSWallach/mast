@@ -2794,29 +2794,7 @@ impl OutlineView {
         let disclosure = if row.has_children {
             let toggle_key = key.clone();
             let collapsed = row.collapsed;
-            div()
-                .id(SharedString::from(format!("outline-disclosure-{key}")))
-                .debug_selector({
-                    let selector = format!("outline-disclosure-{key}");
-                    move || selector.clone()
-                })
-                .flex_none()
-                .size(px(14.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .hover(|el| el.bg(theme.element_hover))
-                .child(
-                    crate::icons::icon(if collapsed {
-                        crate::icons::ALT_ARROW_RIGHT
-                    } else {
-                        crate::icons::ALT_ARROW_DOWN
-                    })
-                    .size(px(10.0))
-                    .text_color(theme.text_muted),
-                )
+            crate::components::outline_disclosure(SharedString::from(format!("outline-disclosure-{key}")), collapsed, theme)
                 .hint(
                     if collapsed { "Expand" } else { "Collapse" },
                     HintKey::Outline(if collapsed {
@@ -2831,7 +2809,7 @@ impl OutlineView {
                 }))
                 .into_any_element()
         } else {
-            div().flex_none().size(px(14.0)).into_any_element()
+            crate::components::outline_disclosure_space().into_any_element()
         };
         let body: AnyElement = match &row.kind {
             OutlineRowKind::Space {
@@ -2863,20 +2841,7 @@ impl OutlineView {
                             .child("Hidden"),
                     )
                     .child(
-                        div()
-                            .id(SharedString::from(format!("outline-space-unhide-{key}")))
-                            .debug_selector({
-                                let selector = format!("outline-space-unhide-{space_id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .px(px(4.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
-                            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                            .child("Unhide")
+                        crate::components::outline_inline_action(SharedString::from(format!("outline-space-unhide-{key}")), format!("outline-space-unhide-{space_id}"), "Unhide", theme.text_muted, theme)
                             .hint("Show this Space in the Outline again", HintKey::None)
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation()
@@ -2929,22 +2894,7 @@ impl OutlineView {
                         el.child(self.proposals_chip(&key, space_id, "", proposals, theme, cx))
                     })
                     .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "outline-space-instructions-{key}"
-                            )))
-                            .debug_selector({
-                                let selector = format!("outline-space-instructions-{space_id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .px(px(4.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_faint)
-                            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                            .child("Instructions")
+                        crate::components::outline_inline_action(SharedString::from(format!("outline-space-instructions-{key}")), format!("outline-space-instructions-{space_id}"), "Instructions", theme.text_faint, theme)
                             .tooltip(|_, cx| {
                                 cx.new(|_| TextTooltip("Space-root instructions".into()))
                                     .into()

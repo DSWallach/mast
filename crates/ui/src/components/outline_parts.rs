@@ -1774,6 +1774,59 @@ pub fn outline_details_list(theme: &Theme) -> Div {
         .gap(px(2.0 * super::layout_spacing(theme)))
 }
 
+/// Expand/collapse control in an outline row.
+pub fn outline_disclosure(id: SharedString, collapsed: bool, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .size(px(14.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(3.0)))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .child(
+            crate::icons::icon(if collapsed {
+                crate::icons::ALT_ARROW_RIGHT
+            } else {
+                crate::icons::ALT_ARROW_DOWN
+            })
+            .size(px(10.0))
+            .text_color(theme.text_muted),
+        )
+}
+pub fn outline_disclosure_space() -> Div {
+    div().flex_none().size(px(14.0))
+}
+
+/// Small inline action in an outline row.
+pub fn outline_inline_action(
+    id: SharedString,
+    selector: String,
+    label: &'static str,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(3.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(color)
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text));
+    crate::surface_chrome::segmented_key(button, theme, false)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
