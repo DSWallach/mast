@@ -81,16 +81,7 @@ pub(crate) fn matching_rules<'a>(
     let mut matches = Vec::new();
     for segment in &segments {
         let (assignments, argv) = normalize_segment(segment)?;
-        if !segment.pipeline_input
-            && argv.len() == 3
-            && argv[0] == "ulimit"
-            && argv[1] == "-n"
-            && !argv[2].is_empty()
-            && argv[2].bytes().all(|c| c.is_ascii_digit())
-        {
-            continue;
-        }
-        if segment.pipeline_input && matches!(argv[0].as_str(), "rg" | "head" | "/usr/bin/head") {
+        if known_wrapper(segment, &argv) {
             continue;
         }
         let rule = rules.iter().find(|rule| {
@@ -135,6 +126,16 @@ pub(crate) fn matching_rules<'a>(
     (!matches.is_empty()).then_some(matches)
 }
 
+fn known_wrapper(segment: &CommandSegment, argv: &[String]) -> bool {
+    (!segment.pipeline_input
+        && argv.len() == 3
+        && argv[0] == "ulimit"
+        && argv[1] == "-n"
+        && !argv[2].is_empty()
+        && argv[2].bytes().all(|c| c.is_ascii_digit()))
+        || (segment.pipeline_input && matches!(argv[0].as_str(), "rg" | "head" | "/usr/bin/head"))
+}
+
 /// Preview the same fail-closed decision used by the engine.
 pub fn matching_rule_labels(
     command: &str,
@@ -153,13 +154,23 @@ pub fn matching_rule_labels(
     .map(|matches| matches.into_iter().map(|rule| rule.label.clone()).collect())
 }
 
-/// Prefill a disabled argument-prefix rule for a single safely parsed command.
+/// Prefill a disabled argument-prefix rule when exactly one segment needs a rule.
 pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<ApprovalRule> {
     let segments = parse_command(command)?;
-    if segments.len() != 1 || !passes_safety_rails(&segments) {
+    if !passes_safety_rails(&segments) {
         return None;
     }
-    let (_, argv_prefix) = normalize_segment(&segments[0])?;
+    let mut command = None;
+    for segment in &segments {
+        let (_, argv) = normalize_segment(segment)?;
+        if known_wrapper(segment, &argv) {
+            continue;
+        }
+        if command.replace(argv).is_some() {
+            return None;
+        }
+    }
+    let argv_prefix = command?;
     Some(ApprovalRule {
         id,
         label: "Command approval".into(),
@@ -206,10 +217,10 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
             .argv
             .iter()
             .any(|arg| arg.contains("sudo") || arg.contains("rm -rf") || arg.contains("git push"))
-            || segment
-                .argv
-                .windows(2)
-                .any(|pair| (pair[0] == "git" && pair[1] == "push") || (pair[0] == "rm" && matches!(pair[1].as_str(), "-rf" | "-fr")))
+            || segment.argv.windows(2).any(|pair| {
+                (pair[0] == "git" && pair[1] == "push")
+                    || (pair[0] == "rm" && matches!(pair[1].as_str(), "-rf" | "-fr"))
+            })
         {
             return false;
         }
@@ -754,5 +765,12 @@ mod tests {
         assert!(!rule.enabled);
         assert_eq!(rule.argv_prefix, ["pgrep", "worker process"]);
         assert!(prefill_rule_from_command(&json!("ps; rm -rf x"), "id".into()).is_none());
+        let rule = prefill_rule_from_command(
+            &json!("ulimit -n 4096; perl -e 'alarm 120; exec @ARGV' cargo test -p mast-ui"),
+            "id".into(),
+        )
+        .unwrap();
+        assert_eq!(rule.argv_prefix, ["cargo", "test", "-p", "mast-ui"]);
+        assert!(prefill_rule_from_command(&json!("ps; pgrep cargo"), "id".into()).is_none());
     }
 }
