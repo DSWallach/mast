@@ -40,6 +40,10 @@ pub fn render_to_png<V: Render + 'static>(
     });
     let window = cx.open_window(size, build_view)?;
     cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())?;
+    // GPUI animation elements use wall-clock time; settle entrance animations.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())?;
     let image = cx.capture_screenshot(window.into())?;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
