@@ -1047,6 +1047,75 @@ pub fn outline_section_message(text: String, color: gpui::Hsla, theme: &Theme) -
         .child(SharedString::from(text))
 }
 
+/// Blueprint list section.
+pub fn outline_blueprints_section(theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "space-templates".into())
+        .flex()
+        .flex_col()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+        .child(outline_list_heading("Blueprints".into(), theme))
+}
+
+/// Explanation in a blueprint section.
+pub fn outline_blueprint_explanation(text: &'static str, theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(text)
+}
+
+/// Blueprint list row.
+pub fn outline_blueprint_row(selector: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+}
+
+/// Expandable blueprint label.
+pub fn outline_blueprint_toggle(
+    id: impl Into<gpui::ElementId>,
+    label: String,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .hover(|el| el.text_color(theme.text_muted))
+        .child(SharedString::from(label))
+}
+
+/// Blueprint preview container and one line of its tree.
+pub fn outline_blueprint_preview(selector: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_col()
+        .gap(px(super::layout_spacing(theme)))
+        .pl(px(12.0))
+}
+pub fn outline_blueprint_line(depth: usize, text: String, dim: bool, theme: &Theme) -> Div {
+    div()
+        .pl(px(12.0 * depth as f32))
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if dim { theme.text_muted } else { theme.text })
+        .child(SharedString::from(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
