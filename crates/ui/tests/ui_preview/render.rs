@@ -296,7 +296,7 @@ impl Render for ComponentMatrix {
         for (row, name) in names.into_iter().enumerate() {
             let mut line = div()
                 .flex()
-                .h(px(55.))
+                .min_h(px(55.))
                 .items_center()
                 .child(div().w(px(150.)).child(name));
             for (column, (&style, &layout)) in UiStyleId::ALL
@@ -359,7 +359,14 @@ impl Render for ComponentMatrix {
                         div().child("Reply").into_any_element(),
                     ),
                 };
-                line = line.child(div().w(px(170.)).child(element));
+                line = line.child(
+                    div()
+                        .w(px(170.))
+                        .when(matches!(row, 0..=8 | 15..=16), |cell| {
+                            cell.flex().items_start()
+                        })
+                        .child(element),
+                );
             }
             table = table.child(line);
         }

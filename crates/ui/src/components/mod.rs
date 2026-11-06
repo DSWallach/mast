@@ -362,6 +362,7 @@ pub fn list_row(theme: &Theme, selected: bool) -> Div {
     };
     let colors = theme.industrial_colors();
     card_row(theme, true)
+        .px(px(12.0 * layout_spacing(theme)))
         .when(selected && !is_area(theme) && !is_industrial(theme), |el| {
             el.bg(theme.element_active)
         })
@@ -608,7 +609,7 @@ pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div
     let identity = theme.identity_color("");
     let item = div()
         .when(selected || area, |el| {
-            el.px(px(8.0 * layout_spacing(theme)))
+            el.px(px(12.0 * layout_spacing(theme)))
                 .py(px(5.0 * layout_spacing(theme)))
         })
         .when(selected && !area, |el| el.bg(theme.surface_raised))
@@ -733,18 +734,12 @@ pub fn agent_message_bubble(
             .into_any_element()
     } else if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area {
         div()
-            .relative()
+            .flex()
+            .items_baseline()
+            .gap(px(8.0))
             .min_w_0()
             .when(first_block, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left(px(-18.0))
-                        .top(px(4.0))
-                        .size(px(10.0))
-                        .rounded_full()
-                        .bg(identity),
-                )
+                el.child(div().flex_none().size(px(10.0)).rounded_full().bg(identity))
             })
             .font_family("EB Garamond")
             .text_size(crate::typography::ui_rems(
@@ -791,6 +786,7 @@ pub fn icon_button(
         .cursor_pointer()
         .flex()
         .items_center()
+        .justify_center()
         .gap(px(4.0))
         .size(px(theme.ui_style.tokens.control_size))
         .when(is_area(theme), |el| {
@@ -803,7 +799,9 @@ pub fn icon_button(
                 .text_color(theme.text),
         );
     let control = icon_key(control, theme, false);
-    control.when(labels, |el| el.w_auto().child(label))
+    control.when(labels, |el| {
+        el.w_auto().px(px(8.0 * layout_spacing(theme))).child(label)
+    })
 }
 
 /// Section title with optional guidance for the Guided layout.
