@@ -20,7 +20,7 @@
 
 ## Saved accounts
 
-Logins you already added under **Settings → Accounts** show up in the Space picker as saved logins. Choosing one moves it into a new Space account. Two limits:
+Logins you already added under **Settings → Accounts** show up in the Space account picker as saved logins. Choosing one moves it into a new Space account. Two limits:
 
 - The login you currently use as Default cannot be moved. Use **Add account** to sign in again.
 - A moved login leaves the global switcher, and Mast stops refreshing it there, so two copies never fight over one token.
