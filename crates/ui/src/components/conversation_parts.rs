@@ -1003,7 +1003,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
                     .child(
                         div()
                             .min_w_0()
-                            .max_w(px(surface_width * 0.35))
+                            .max_w(px(surface_width * 0.55))
                             .children(area_model),
                     )
                     .child(send),
@@ -1149,7 +1149,7 @@ pub fn conversation_model_picker(
     let area = theme.ui_style.conversation == ConversationVariant::Area;
     let picker = div()
         .min_w_0()
-        .max_w(px(width * 0.45))
+        .max_w(px(width * if area { 0.55 } else { 0.45 }))
         .relative()
         .left(px(if area { 0.0 } else { offset }))
         .opacity(if area { 1.0 } else { opacity })
@@ -1235,9 +1235,11 @@ pub fn conversation_harness_tab(
     theme: &Theme,
     id: SharedString,
     identity: Hsla,
+    active_identity: Hsla,
     icon: &'static str,
     selected: bool,
 ) -> gpui::Stateful<Div> {
+    let identity = if selected { active_identity } else { identity };
     div()
         .id(id)
         .size(px(28.0))
