@@ -2320,9 +2320,25 @@ async fn request_link_and_fact_limits() {
     )
     .await
     .unwrap();
+    // Too many links or facts is still refused.
     for (key, links, facts) in [
         ("links-count", json!(vec![link.clone(); 9]), json!([])),
         ("facts-count", json!([]), json!(vec![fact.clone(); 9])),
+    ] {
+        assert!(
+            tool(
+                &rig,
+                &rig.token,
+                "work_outline_create_user_action_request",
+                create(key, links, facts)
+            )
+            .await
+            .is_err(),
+            "{key}"
+        );
+    }
+    // Over-long labels and values are truncated and accepted with a warning.
+    for (key, links, facts) in [
         (
             "link-label",
             json!([{ "label":"x".repeat(41), "target":{"type":"url", "url":"https://example.com"}}]),
@@ -2339,17 +2355,16 @@ async fn request_link_and_fact_limits() {
             json!([{ "label":"x", "value":"x".repeat(121)}]),
         ),
     ] {
-        assert!(
-            tool(
-                &rig,
-                &rig.token,
-                "work_outline_create_user_action_request",
-                create(key, links, facts)
-            )
-            .await
-            .is_err(),
-            "{key}"
-        );
+        let reply = tool(
+            &rig,
+            &rig.token,
+            "work_outline_create_user_action_request",
+            create(key, links, facts),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{key}: {error:?}"));
+        let warnings = reply["warnings"].as_array().map_or(0, Vec::len);
+        assert!(warnings > 0, "{key}: expected a truncation warning, got {reply}");
     }
 }
 
