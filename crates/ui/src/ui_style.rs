@@ -160,7 +160,9 @@ pub fn reveal_on_hover<T: gpui::Styled + gpui::InteractiveElement>(
     if style.behavior.reveal == Reveal::Always {
         element.opacity(1.0)
     } else {
-        element.opacity(if visible { 1.0 } else { 0.0 }).group_hover(group, |s| s.opacity(1.0))
+        element
+            .opacity(if visible { 1.0 } else { 0.0 })
+            .group_hover(group, |s| s.opacity(1.0))
     }
 }
 
@@ -209,6 +211,41 @@ mod tests {
             ),
             (1.0, 29.0, 0.0, 0.0, 28.0, 16.0)
         );
+        assert_eq!(
+            UiStyle::MINIMAL.behavior,
+            StyleBehavior {
+                labels: LabelMode::IconOnly,
+                reveal: Reveal::Hover,
+                hints: HintMode::Tooltip,
+                motion: Motion::Soft,
+                status_words: false,
+                help_cards: false,
+                status_bar: false,
+                outline_columns: false,
+                walkthrough_rail: false,
+            }
+        );
+    }
+    #[test]
+    fn guided_metrics_and_help_card_dismissals() {
+        let style = UiStyle::GUIDED;
+        assert_eq!(
+            (
+                style.tokens.control_size,
+                style.tokens.sidebar_row_extra_h,
+                style.tokens.outline_row_delta
+            ),
+            (32.0, 4.0, 6.0)
+        );
+        assert_eq!(style.behavior.labels, LabelMode::All);
+        assert!(style.behavior.help_cards);
+        let mut settings = crate::settings::UiSettings::default();
+        assert!(settings.dismissed_help_cards.is_empty());
+        settings.dismissed_help_cards.push("review-intro".into());
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert!(encoded.contains("dismissedHelpCards"));
+        let decoded: crate::settings::UiSettings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.dismissed_help_cards, settings.dismissed_help_cards);
     }
     #[test]
     fn settings_default_unknown_and_dense() {

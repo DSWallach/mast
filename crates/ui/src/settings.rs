@@ -754,6 +754,8 @@ pub struct UiSettings {
     /// Base size for interface and conversational prose.
     pub ui_font_size: crate::typography::UiFontSize,
     pub ui_style: crate::ui_style::UiStyleId,
+    /// Help cards dismissed on this device.
+    pub dismissed_help_cards: Vec<String>,
     /// Terminal family and absolute pixel size. Only fixed-width families
     /// qualify, including compatible Nerd Fonts.
     pub terminal_font_family: crate::typography::UiFontFamily,
@@ -869,6 +871,7 @@ impl Default for UiSettings {
             ui_font_family: crate::typography::UiFontFamily::default(),
             ui_font_size: crate::typography::UiFontSize::default(),
             ui_style: crate::ui_style::UiStyleId::default(),
+            dismissed_help_cards: Vec::new(),
             terminal_font_family: crate::typography::UiFontFamily::GeistMono,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             code_font_family: crate::typography::UiFontFamily::GeistMono,
