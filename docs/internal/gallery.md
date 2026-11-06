@@ -13,9 +13,8 @@ Settings → Appearance mounts the real Appearance page.
 
 The chat sidebar, Work outline with item details, and PR walkthrough are static
 fixture stubs: their real views are coupled to shell state and RPC-backed review
-loading. Their controls do not implement the real views' behavior. Additional
-control coverage is still needed for icon buttons, tabs, status dots and the
-actual sidebar and outline rows.
+loading. Their controls do not implement the real views' behavior. The icon button, tabs, status dots, sidebar rows and outline rows are
+illustrative fixtures rather than the actual production controls.
 
 The temporary style list reflects the three styles on the integration branch;
 `gallery_styles()` must return `UiStyleId::ALL` when the shared registry lands.

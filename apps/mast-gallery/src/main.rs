@@ -13,6 +13,7 @@ struct Gallery {
     appearance_page: gpui::Entity<settings::appearance::AppearancePage>,
     toggled: bool,
     menu_open: bool,
+    tab: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -228,6 +229,63 @@ impl Render for Gallery {
                                         theme, "Active",
                                     )),
                             )
+                            .child("Icon buttons, tabs and status")
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .child(
+                                        div()
+                                            .id("icon-plus")
+                                            .cursor_pointer()
+                                            .p(px(6.))
+                                            .rounded(px(5.))
+                                            .bg(theme.surface_raised)
+                                            .child(
+                                                icons::icon(icons::PLUS)
+                                                    .size(px(16.))
+                                                    .text_color(theme.text),
+                                            ),
+                                    )
+                                    .children(["Overview", "Activity"].into_iter().enumerate().map(
+                                        |(index, label)| {
+                                            div()
+                                                .id(("tab", index))
+                                                .cursor_pointer()
+                                                .px(px(8.))
+                                                .py(px(5.))
+                                                .when(self.tab == index, |el| {
+                                                    el.bg(theme.surface_raised).rounded(px(5.))
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.tab = index;
+                                                    cx.notify();
+                                                }))
+                                                .child(label)
+                                        },
+                                    ))
+                                    .children(
+                                        [
+                                            (theme.success, "Ready"),
+                                            (theme.warning, "Waiting"),
+                                            (theme.danger, "Error"),
+                                        ]
+                                        .into_iter()
+                                        .map(
+                                            |(color, label)| {
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.))
+                                                    .child(
+                                                        div().size(px(7.)).rounded_full().bg(color),
+                                                    )
+                                                    .child(label)
+                                            },
+                                        ),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .id("menu-toggle")
@@ -295,6 +353,7 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
         appearance_page: cx.new(settings::appearance::AppearancePage::new),
         toggled: false,
         menu_open: false,
+        tab: 0,
     }
 }
 
