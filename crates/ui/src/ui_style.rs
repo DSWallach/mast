@@ -257,6 +257,7 @@ pub fn set_style(id: UiStyleId, window: &mut gpui::Window, cx: &mut gpui::App) -
     cx.set_global(UiStyleState(id));
     window.set_rem_size(gpui::px(crate::typography::effective_rem_px(cx)));
     crate::typography::reinstall_theme(cx);
+    crate::appearance::reapply_window_background(cx);
     crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
         settings.ui_style = id
     });
