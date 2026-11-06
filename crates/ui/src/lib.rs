@@ -69,6 +69,7 @@ pub mod pickers;
 pub mod popover;
 pub(crate) mod pr_page;
 pub(crate) mod pr_review_launch;
+pub(crate) mod branch_review_launch;
 pub mod project_actions;
 pub mod queue;
 pub mod rail;
