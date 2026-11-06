@@ -4,6 +4,35 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_tool_chip_frame(
+    rail: bool,
+    row_height: f32,
+    card_height: f32,
+    gap: f32,
+    reveal: f32,
+) -> Div {
+    div()
+        .when(rail, |el| el.ml(px(gap)))
+        .my(px((row_height - card_height) / 2.0))
+        .h(px(card_height))
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .when(!rail, |card| {
+            card.rounded(px(9.0))
+                .border_1()
+                .border_color(crate::theme::hairline(0.07))
+                .bg(crate::theme::ink(0.03))
+        })
+        .when(rail && reveal < 1.0, |card| {
+            card.relative()
+                .top(px(4.0 * (1.0 - reveal)))
+                .opacity(reveal)
+        })
+}
+
 pub fn conversation_code_icon_action(
     theme: &Theme,
     id: SharedString,

@@ -8469,26 +8469,7 @@ fn tool_chip(
             ))
         })
         .child(
-            div()
-                .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
-                .my(px((row_height - CHIP_CARD_HEIGHT) / 2.0))
-                .h(px(CHIP_CARD_HEIGHT))
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .when(!rail, |card| {
-                    card.rounded(px(9.0))
-                        .border_1()
-                        .border_color(crate::theme::hairline(0.07))
-                        .bg(crate::theme::ink(0.03))
-                })
-                .when(rail && content_reveal < 1.0, |card| {
-                    card.relative()
-                        .top(px(4.0 * (1.0 - content_reveal)))
-                        .opacity(content_reveal)
-                })
+            crate::components::conversation_tool_chip_frame(rail, row_height, CHIP_CARD_HEIGHT, ACTIVITY_TEXT_GAP, content_reveal)
                 .child(chip_header_row(tool, None, theme, view, cx)),
         )
         .into_any_element()
