@@ -1674,6 +1674,7 @@ struct InputLayoutKey {
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
+    identity_text: Option<gpui::Hsla>,
     /// Key context for the binding map ("Composer", or "PaletteSearch" for
     /// palette filters whose navigation keys must bubble).
     key_context: &'static str,
@@ -1781,6 +1782,7 @@ impl ComposerInput {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            identity_text: None,
             key_context,
             accessibility_role: Role::MultilineTextInput,
             focus_handle: cx.focus_handle(),
@@ -3870,7 +3872,9 @@ impl Render for ComposerInput {
         } else {
             theme
         };
-        let text_color = if self.content.is_empty() {
+        let text_color = if let Some(color) = self.identity_text {
+            color
+        } else if self.content.is_empty() {
             theme.text_faint
         } else {
             theme.text
@@ -8183,6 +8187,9 @@ impl Render for Composer {
         }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
+        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
+        let identity = theme.identity_color(self.state.read(cx).selected_chat.as_deref().unwrap_or(""));
+        let identity_text = area.then(|| theme.identity_text(identity));
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
@@ -8197,11 +8204,15 @@ impl Render for Composer {
         // Shape the current draft before sizing the pill. Waiting for the child
         // layout leaves the parent using the previous edit's height.
         self.input.update(cx, |input, cx| {
+            if input.identity_text != identity_text {
+                input.identity_text = identity_text;
+                input.needs_measure = true;
+            }
             if input.needs_measure && input.last_width > 0.0 {
                 let mut style = window.text_style();
                 style.font_family = theme.font_sans.clone();
                 style.font_size = crate::typography::ui_rems(INPUT_TEXT_SIZE).into();
-                style.color = if input.content.is_empty() {
+                style.color = if let Some(color) = identity_text { color } else if input.content.is_empty() {
                     theme.text_faint
                 } else {
                     theme.text
@@ -8715,6 +8726,7 @@ impl Render for Composer {
             .border_color(pill_border)
             .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
             .when(!theme.is_frost(), |el| el.bg(theme.input_glass_bg()))
+            .when(area, |el| el.bg(identity).border_color(identity))
             .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the

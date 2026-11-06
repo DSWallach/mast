@@ -6346,7 +6346,11 @@ impl Transcript {
                                 .when(pending, |el| el.opacity(0.65))
                                 .child({
                                     let mut bubble_theme = theme.clone();
-                                    if area { bubble_theme.text = theme.identity_text(identity); }
+                                    if area {
+                                        bubble_theme.text = theme.identity_text(identity);
+                                        bubble_theme.code_wash = bubble_theme.text;
+                                        bubble_theme.code_text = identity;
+                                    }
                                     self.render_user_body(&row.id, ix, text, mentions, false, &bubble_theme, window, cx)
                                 }),
                         ),
@@ -6358,7 +6362,7 @@ impl Transcript {
                 let mut theme = theme.clone();
                 if area {
                     theme.font_sans = "EB Garamond".into();
-                    if crate::theme::contrast_ratio(identity, theme.bg) >= 4.5 { theme.text = identity; }
+                    theme.text = theme.identity_foreground(identity);
                 }
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
@@ -6396,7 +6400,7 @@ impl Transcript {
                 let mut theme = theme.clone();
                 if area {
                     theme.font_sans = "EB Garamond".into();
-                    if crate::theme::contrast_ratio(identity, theme.bg) >= 4.5 { theme.text = identity; }
+                    theme.text = theme.identity_foreground(identity);
                 }
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();

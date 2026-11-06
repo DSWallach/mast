@@ -815,6 +815,14 @@ impl Theme {
             .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
             .unwrap_or(self.text)
     }
+
+    /// Preserve the identity hue while making prose readable on the main surface.
+    pub fn identity_foreground(&self, fill: Hsla) -> Hsla {
+        (0..=100)
+            .map(|step| mix(fill, self.text, step as f32 / 100.0))
+            .find(|color| contrast_ratio(*color, self.bg) >= 4.5)
+            .unwrap_or(self.text)
+    }
     // ---- numbers drive layout (px) ----
     /// Frost translucency over the blurred window background (macOS vibrancy
     /// or Windows Acrylic). Linux stays opaque because compositor blur is not

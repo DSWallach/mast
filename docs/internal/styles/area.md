@@ -24,3 +24,8 @@ Mast's actions are **inferences**, not details established by the case study.
 Theme and style remain independent; neither the source palette nor a fixed hue
 is required by the shape of the interface. Motion is not established by these
 still images.
+
+The optional Area themes derive six identity colours from their ANSI palette.
+Purple (#8B7CF6) is an additional Mast palette colour: the requested Cofactr
+swatches did not include a purple. The pale blue-white sidebar and dark blue
+surface are adaptations of the reference rather than sampled brand colours.

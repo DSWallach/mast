@@ -481,6 +481,8 @@ mod tests {
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
                 "github-light"
             );
+            set_style(UiStyleId::Area, window, cx);
+            assert_eq!(crate::theme::Theme::of(cx).variant_id.as_ref(), "github-light");
             crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
             assert_eq!(
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
@@ -493,6 +495,17 @@ mod tests {
             );
             assert_eq!(crate::appearance::themes(cx).light, "github-light");
         });
+    }
+
+    #[test]
+    fn area_uses_soft_character_geometry() {
+        let style = UiStyle::AREA;
+        assert_eq!(style.tokens.control_radius, Some(12.0));
+        assert_eq!(style.tokens.panel_radius, Some(14.0));
+        assert_eq!(style.tokens.rule_width, None);
+        assert_eq!(style.status_indicator, StatusIndicator::Dot);
+        assert_eq!(style.font_preference, FontPreference::Geist);
+        assert_eq!(UiStyle::MINIMAL.tokens.control_radius, None);
     }
 
     #[test]
