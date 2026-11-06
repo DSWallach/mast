@@ -201,11 +201,7 @@ pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div 
 /// Small label above a group of controls (`text-[13px] font-medium`) — the
 /// "Theme" caption over a picker, not a page headline.
 pub fn field_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .text_size(crate::typography::ui_rems(13.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text)
-        .child(label.into())
+    crate::components::field_label(theme, label)
 }
 
 /// A row of equally-sized preview cards for picking one of N *visual* options.
@@ -288,29 +284,13 @@ pub fn option_card(
 /// — the card tone, thinned to a translucent tint over glass so the card
 /// reads as frost instead of a solid slab ([`Theme::card_glass_bg`]).
 pub fn section_card(theme: &Theme) -> gpui::Div {
-    div()
-        .mt(px(24.0))
-        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(12.0)))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.card_glass_bg())
-        .overflow_hidden()
-        .flex()
-        .flex_col()
+    crate::components::section_card(theme)
 }
 
 /// One card row: `border-t border-border px-5 py-3.5 first:border-t-0` with the
 /// quiet hover wash.
 pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
-    div()
-        .px(px(20.0))
-        .py(px(14.0))
-        .when(!first, |el| el.border_t_1().border_color(theme.border))
-        .hover(|s| s.bg(ink(0.015)))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(14.0))
+    crate::components::card_row(theme, first)
 }
 
 /// The identity tile on a row: `size-9 rounded-[10px] border bg-white/[0.03]`
@@ -375,106 +355,20 @@ pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
 
 /// Right-anchored badge pill: `rounded-full border px-2 py-0.5 text-[10.5px]`.
 pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .flex_none()
-        .px(px(8.0))
-        .py(px(2.0))
-        .rounded_full()
-        .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
-            el.rounded(px(radius))
-        })
-        .border_1()
-        .border_color(theme.border)
-        .text_size(crate::typography::ui_rems(10.5))
-        .text_color(theme.text_muted)
-        .child(label.into())
+    crate::components::badge(theme, label)
 }
 
 /// Emerald status pill (the Accounts "Active" badge:
 /// `bg-emerald-400/[0.12] text-emerald-300/90`).
 pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
-    let emerald = theme.success;
-    let emerald_text = theme.success_muted; // emerald-300
-    div()
-        .flex_none()
-        .px(px(8.0))
-        .py(px(2.0))
-        .rounded_full()
-        .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
-            el.rounded(px(radius))
-        })
-        .bg(emerald.opacity(0.12))
-        .text_size(crate::typography::ui_rems(10.5))
-        .text_color(emerald_text.opacity(0.9))
-        .child(label.into())
+    crate::components::badge_active(theme, label)
 }
 
 /// Display-only toggle switch (zeron branch-picker.tsx `Toggle`): an 18×32
 /// pill whose knob slides right and track flips white when on. State is owned
 /// by the parent row — the caller adds `.id(..)` and `.on_click(..)`.
 pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
-    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-        return div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(8.0))
-            .h(px(24.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.industrial_colors().rule)
-            .bg(theme.industrial_colors().key)
-            .text_size(crate::typography::ui_rems(10.0))
-            .text_color(theme.text)
-            .child(
-                div()
-                    .relative()
-                    .w(px(36.0))
-                    .h(px(12.0))
-                    .border_1()
-                    .border_color(theme.industrial_colors().rule)
-                    .bg(theme.industrial_colors().pressed)
-                    .child(div().absolute().left(px(5.0)).bottom(px(-4.0)).w(px(1.0)).h(px(3.0)).bg(theme.industrial_colors().rule))
-                    .child(div().absolute().right(px(5.0)).bottom(px(-4.0)).w(px(1.0)).h(px(3.0)).bg(theme.industrial_colors().rule))
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(1.0))
-                            .left(px(if on { 25.0 } else { 1.0 }))
-                            .size(px(8.0))
-                            .rounded_full()
-                            .border_1().border_color(theme.industrial_colors().rule)
-                            .bg(theme.industrial_colors().key)
-                            .when(on, |el| {
-                                el.child(
-                                    div()
-                                        .size(px(4.0))
-                                        .m(px(2.0))
-                                        .rounded_full()
-                                        .bg(theme.accent),
-                                )
-                            }),
-                    ),
-            )
-            .child(if on { "ON" } else { "OFF" });
-    }
-    div()
-        .flex_none()
-        .w(px(32.0))
-        .h(px(18.0))
-        .rounded_full()
-        .bg(if on { theme.text } else { ink(0.15) })
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .top(px(2.0))
-                .left(px(if on { 16.0 } else { 2.0 }))
-                .size(px(14.0))
-                .rounded_full()
-                .bg(if on { theme.on_solid } else { ink(0.7) }),
-        )
+    crate::components::toggle_switch(theme, on)
 }
 
 /// A small quiet ghost action (`rounded-lg px-2.5 py-1.5 text-[12px]

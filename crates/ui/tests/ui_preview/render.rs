@@ -73,10 +73,10 @@ impl Render for Controls {
                         mast_ui::components::ButtonSize::Md,
                         t,
                     ))
-                    .child(mast_ui::settings::widgets::toggle_switch(t, true))
-                    .child(mast_ui::settings::widgets::toggle_switch(t, false))
-                    .child(mast_ui::settings::widgets::badge(t, "Draft"))
-                    .child(mast_ui::settings::widgets::badge_active(t, "Active")),
+                    .child(mast_ui::components::toggle_switch(t, true))
+                    .child(mast_ui::components::toggle_switch(t, false))
+                    .child(mast_ui::components::badge(t, "Draft"))
+                    .child(mast_ui::components::badge_active(t, "Active")),
             )
             .child("Tabs and status")
             .child(
@@ -111,12 +111,7 @@ impl Render for Controls {
             )
             .child("Input")
             .child(
-                div()
-                    .w(px(360.))
-                    .p(px(8.))
-                    .border_1()
-                    .border_color(t.border)
-                    .child(self.input.clone()),
+                mast_ui::components::dialog_field(t, self.input.clone().into_any_element()).w(px(360.)),
             )
     }
 }
