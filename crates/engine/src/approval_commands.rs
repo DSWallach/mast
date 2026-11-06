@@ -161,10 +161,22 @@ pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<Approval
         return None;
     }
     let mut command = None;
+    let mut require_isolated_home = false;
     for segment in &segments {
-        let (_, argv) = normalize_segment(segment)?;
+        let (assignments, argv) = normalize_segment(segment)?;
         if known_wrapper(segment, &argv) {
             continue;
+        }
+        if assignments.iter().any(|assignment| {
+            matches!(
+                assignment.split_once('=').map(|(name, _)| name),
+                Some("HOME" | "CLAUDE_CONFIG_DIR" | "CODEX_HOME")
+            )
+        }) {
+            if !isolated_configuration(&assignments) {
+                return None;
+            }
+            require_isolated_home = true;
         }
         if command.replace(argv).is_some() {
             return None;
@@ -180,7 +192,7 @@ pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<Approval
         argv_prefix,
         command_regex: None,
         cwd_scope: None,
-        require_isolated_home: false,
+        require_isolated_home,
         hit_count: 0,
         last_used_at: None,
     })
@@ -772,5 +784,14 @@ mod tests {
         .unwrap();
         assert_eq!(rule.argv_prefix, ["cargo", "test", "-p", "mast-ui"]);
         assert!(prefill_rule_from_command(&json!("ps; pgrep cargo"), "id".into()).is_none());
+        assert!(prefill_rule_from_command(&json!("HOME=/tmp cargo test"), "id".into()).is_none());
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let path = home.path().to_str().unwrap();
+        let command = format!("HOME={path} CLAUDE_CONFIG_DIR={path} CODEX_HOME={path} cargo test");
+        assert!(
+            prefill_rule_from_command(&json!(command), "id".into())
+                .unwrap()
+                .require_isolated_home
+        );
     }
 }
