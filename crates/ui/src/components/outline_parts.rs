@@ -2835,6 +2835,27 @@ pub fn outline_effective_source(index: usize, title: String, theme: &Theme) -> S
         .child(SharedString::from(title))
 }
 
+/// Space-root details heading.
+pub fn outline_space_header(label: String, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(14.0))
+        .pt(px(10.0))
+        .child(
+            outline_detail_text(label, 10.5, theme.text_muted, theme)
+                .flex_1()
+                .min_w_0()
+                .truncate(),
+        )
+}
+pub fn outline_space_title(theme: &Theme) -> Div {
+    outline_detail_text("Space root".into(), 15.0, theme.text, theme)
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

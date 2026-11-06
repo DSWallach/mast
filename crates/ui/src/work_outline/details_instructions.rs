@@ -975,30 +975,11 @@ impl WorkItemDetails {
             .space_row(&self.space_id)
             .map(|space| space.display_name().to_owned())
             .unwrap_or_default();
-        let header = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(14.0))
-            .pt(px(10.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(label)),
-            )
+        let header = crate::components::outline_space_header(label, theme)
             .child(close);
         let Some(snapshot) = self.snapshot.clone() else {
             return frame.child(header).child(
-                div()
-                    .px(px(16.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child("Loading\u{2026}"),
+                crate::components::outline_detail_text("Loading…".into(), 12.0, theme.text_muted, theme).px(px(16.0)),
             );
         };
         let required_actions = self.render_required_actions_section(&snapshot, theme, cx);
@@ -1012,24 +993,9 @@ impl WorkItemDetails {
         let friction = self.render_friction_section(theme, cx);
         let approval_rules = self.render_approval_rules(&snapshot, theme, cx);
         frame.child(header).child(
-            div()
-                .id("work-item-details-body")
+            crate::components::outline_details_body(theme)
                 .debug_selector(|| "space-root-details".into())
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .px(px(14.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(15.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child("Space root"),
-                )
+                .child(crate::components::outline_space_title(theme))
                 .child(approval_rules)
                 .child(required_actions)
                 .child(friction)
