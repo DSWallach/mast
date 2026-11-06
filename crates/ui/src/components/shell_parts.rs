@@ -968,6 +968,91 @@ pub(crate) fn sidebar_idle_time(theme: &Theme, time: SharedString) -> AnyElement
         .into_any_element()
 }
 
+pub(crate) fn sidebar_jump_badge(theme: &Theme, label: SharedString) -> AnyElement {
+    let tone = theme.text_muted;
+    div()
+        .h(px(16.0))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .px(px(4.0))
+        .rounded(px(4.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .bg(tone.opacity(0.08))
+        .text_size(crate::typography::ui_rems(10.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(tone.opacity(0.85))
+        .font_family(theme.font_mono.clone())
+        .child(label)
+        .into_any_element()
+}
+
+pub(crate) fn sidebar_archive_glyph(
+    theme: &Theme,
+    compact: bool,
+    archived: bool,
+    compact_icon_size: f32,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(18.0))
+        .when(!compact, |el| {
+            el.px(px(4.0))
+                .mr(px(-4.0))
+                .rounded(px(5.0))
+                .bg(crate::theme::wash(0.10))
+                .hover(|el| el.bg(crate::theme::wash(0.18)))
+        })
+        .child(
+            icon(if archived {
+                crate::icons::ARCHIVE_UP_MINIMALISTIC
+            } else {
+                crate::icons::ARCHIVE_MINIMALISTIC
+            })
+            .size(px(if compact { compact_icon_size } else { 11.0 }))
+            .flex_none()
+            .text_color(theme.text_muted),
+        )
+        .when(!compact, |el| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(if archived {
+                        "Unarchive"
+                    } else {
+                        "Archive"
+                    })),
+            )
+        })
+        .into_any_element()
+}
+
+pub(crate) fn sidebar_status_word(
+    label: &'static str,
+    color: gpui::Hsla,
+    glyph: AnyElement,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .child(glyph)
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(10.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(color)
+                .child(SharedString::from(label)),
+        )
+        .into_any_element()
+}
+
 pub(crate) fn sidebar_compact_time(
     theme: &Theme,
     id: String,
@@ -1430,6 +1515,17 @@ pub(crate) fn titlebar_title(theme: &Theme, title: SharedString, on_canvas: bool
             el.font_weight(gpui::FontWeight::SEMIBOLD)
         })
         .child(title)
+}
+
+pub(crate) fn titlebar_route_label(theme: &Theme, label: &'static str) -> gpui::Div {
+    div()
+        .debug_selector(|| "titlebar-title".into())
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(SharedString::from(label))
 }
 
 pub(crate) fn titlebar_target(theme: &Theme, target: SharedString) -> gpui::Div {

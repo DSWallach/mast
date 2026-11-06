@@ -6514,11 +6514,7 @@ impl Shell {
                     .pl(px(self.title_bar_content_start()))
                     .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
                     .child(
-                        div()
-                            .debug_selector(|| "titlebar-title".into())
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from("Overview")),
+                        crate::components::shell_parts::titlebar_route_label(&theme, "Overview"),
                     );
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("overview-header-titlebar", bar, cx)
@@ -6534,11 +6530,7 @@ impl Shell {
                     .pl(px(self.title_bar_content_start()))
                     .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
                     .child(
-                        div()
-                            .debug_selector(|| "titlebar-title".into())
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from("Pull requests")),
+                        crate::components::shell_parts::titlebar_route_label(&theme, "Pull requests"),
                     );
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("pr-review-chats-header-titlebar", bar, cx)
@@ -7349,65 +7341,9 @@ impl Shell {
             // rounded 4, borderless 0.08-fill with 0.85 text of one tone —
             // neutral here — and the label in the badge's mono at 10 MEDIUM.
             // Any other geometry reads as a second badge system on the row.
-            {
-                let tone = theme.text_muted;
-                div()
-                    .h(px(16.0))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(tone.opacity(0.08))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(tone.opacity(0.85))
-                    .font_family(theme.font_mono.clone())
-                    .child(label)
-                    .into_any_element()
-            }
+            crate::components::shell_parts::sidebar_jump_badge(theme, label)
         } else if corner_hovered {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(18.0))
-                .when(!compact, |el| {
-                    el.px(px(4.0))
-                        .mr(px(-4.0))
-                        .rounded(px(5.0))
-                        .bg(crate::theme::wash(0.10))
-                        .hover(|s| s.bg(crate::theme::wash(0.18)))
-                })
-                .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(if compact {
-                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
-                    } else {
-                        11.0
-                    }))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-                )
-                .when(!compact, |el| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
-                                "Unarchive"
-                            } else {
-                                "Archive"
-                            })),
-                    )
-                })
-                .into_any_element()
+            crate::components::shell_parts::sidebar_archive_glyph(theme, compact, archived, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)
         } else if compact {
             if remote {
                 icon(icons::REMOTE_SERVER)
@@ -7425,20 +7361,7 @@ impl Shell {
                     // remaining statuses use a compact dot.
                     let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
                     let glyph = crate::components::shell_parts::sidebar_status_glyph(theme, resolved_status, working, status == mast_proto::ChatIndicator::Completed, format!("{row_id}-working"), status_color, self.sidebar_pane.entity_id(), cx);
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(glyph)
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(status_color)
-                                .child(SharedString::from(label)),
-                        )
-                        .into_any_element()
+                    crate::components::shell_parts::sidebar_status_word(label, status_color, glyph)
                 }
                 None => crate::components::shell_parts::sidebar_idle_time(theme, time_ago.clone()),
             }
