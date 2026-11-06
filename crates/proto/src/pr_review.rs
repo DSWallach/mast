@@ -13,6 +13,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::ChatConfig;
 
+/// Resolve a committed branch's local review range without fetching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveBranchReviewBaseParams {
+    pub checkout_path: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveBranchReviewBaseReply {
+    pub base_ref: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub ahead_count: u64,
+}
+
 /// Start a review of a committed branch range in an existing checkout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

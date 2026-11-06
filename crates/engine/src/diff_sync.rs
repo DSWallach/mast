@@ -2681,6 +2681,41 @@ pub async fn resolve_range(
     })
 }
 
+/// Resolve a branch against the local remote-default ref, without fetching.
+pub async fn resolve_branch_review_base(
+    root: &Path,
+    branch: &str,
+) -> Result<mast_proto::ResolveBranchReviewBaseReply, EngineError> {
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err(EngineError::Other("branch name is required".into()));
+    }
+    let base_ref = match capture_git(root, &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], 1024).await {
+        Ok(result) => String::from_utf8_lossy(&result.stdout).trim().to_owned(),
+        Err(_) => {
+            let mut found = None;
+            for candidate in ["refs/heads/main", "refs/heads/master"] {
+                if capture_git(root, &["rev-parse", "--verify", candidate], 256).await.is_ok() {
+                    found = Some(candidate.to_owned());
+                    break;
+                }
+            }
+            found.ok_or_else(|| EngineError::Other("No default branch is configured".into()))?
+        }
+    };
+    let head_ref = format!("refs/heads/{branch}");
+    let range = resolve_range(root, &base_ref, &head_ref).await?;
+    let range_spec = format!("{}..{}", range.merge_base, range.head);
+    let count = capture_git(root, &["rev-list", "--count", &range_spec], 256).await?;
+    let ahead_count = String::from_utf8_lossy(&count.stdout).trim().parse()
+        .map_err(|_| EngineError::Other("invalid commit count".into()))?;
+    Ok(mast_proto::ResolveBranchReviewBaseReply {
+        base_ref,
+        base_sha: range.merge_base,
+        head_sha: range.head,
+        ahead_count,
+    })
+}
+
 /// "Diff branch / PR…" capture: `merge-base(base_ref, head_ref)` against
 /// `head_ref`, read from refs only (no working tree, no untracked files).
 pub async fn capture_range_diff(
@@ -3011,6 +3046,34 @@ mod watch_budget_tests {
         Capture, CheckoutIdentity, MAX_EXPANDED_SUBMODULES, MAX_SUBMODULE_METADATA_BYTES,
         MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget, parse_raw_diff, watch_targets,
     };
+
+    #[tokio::test]
+    async fn branch_review_base_counts_commits_without_fetching() {
+        let directory = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = mast_harness::git_command()
+                .current_dir(directory.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["commit", "--allow-empty", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "feature"]);
+        git(&["commit", "--allow-empty", "-m", "change"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let result = super::resolve_branch_review_base(directory.path(), "feature").await.unwrap();
+        assert_eq!(result.base_ref, "refs/heads/main");
+        assert_eq!(result.base_sha, base);
+        assert_eq!(result.head_sha, head);
+        assert_eq!(result.ahead_count, 1);
+        assert_eq!(super::resolve_branch_review_base(directory.path(), "main").await.unwrap().ahead_count, 0);
+    }
 
     #[test]
     fn fixed_range_head_resolves_without_a_ref_file() {

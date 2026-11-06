@@ -2179,6 +2179,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
+            | methods::RESOLVE_BRANCH_REVIEW_BASE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
             // Terminals live on the chat's host device.
             | methods::OPEN_TERMINAL
@@ -4333,6 +4334,14 @@ impl RpcService for EngineRpc {
             // working tree against merge-base(baseRef, HEAD); `turn` diffs the
             // turn-start tree snapshot against the current tree; anything else
             // is the plain working-tree capture.
+            methods::RESOLVE_BRANCH_REVIEW_BASE => {
+                let p: mast_proto::ResolveBranchReviewBaseParams = parse_params(params)?;
+                let identity = self.repos.checkout_identity(std::path::Path::new(&p.checkout_path))
+                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let reply = crate::diff_sync::resolve_branch_review_base(&identity.root, &p.branch)
+                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
+            }
             methods::GET_CHECKOUT_DIFF => {
                 // Keep the scoped-diff future off the dispatcher's stack. The
                 // per-commit path adds another nested git-capture future.

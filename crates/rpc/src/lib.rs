@@ -253,6 +253,7 @@ pub mod methods {
     /// `pr-review/<code>: <message>`.
     pub const START_PR_REVIEW: &str = "StartPrReview";
     pub const START_BRANCH_REVIEW: &str = "StartBranchReview";
+    pub const RESOLVE_BRANCH_REVIEW_BASE: &str = "ResolveBranchReviewBase";
     // ── Linear integration v1 (`mast_proto::linear`, docs/internal/plans/work-outline/
     // linear-contract.md). All local/IPC (the key is this device's), never
     // forwardable. Failures are `linear/<code>: <message>`
