@@ -177,6 +177,30 @@ pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     super::icon_key(menu, theme, false)
 }
 
+pub(crate) fn review_chip(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .h(px(20.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.element_hover.opacity(0.55))
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface_raised),
+        )
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.accent)
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(
