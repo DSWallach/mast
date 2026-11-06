@@ -4,6 +4,115 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_attachment_strip(gap: f32, pad_x: f32, pad_top: f32) -> Div {
+    div()
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(gap))
+        .px(px(pad_x))
+        .pt(px(pad_top))
+}
+
+pub fn conversation_attachment_thumb(index: usize, size: f32) -> gpui::Stateful<Div> {
+    div()
+        .id(("composer-att-thumb", index))
+        .size(px(size))
+        .rounded(px(8.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(crate::theme::hairline(0.10))
+        .cursor_pointer()
+}
+
+pub fn conversation_attachment_remove(
+    theme: &Theme,
+    index: usize,
+    group: SharedString,
+) -> gpui::Stateful<Div> {
+    conversation_reveal(
+        div()
+            .id(("composer-att-remove", index))
+            .absolute()
+            .top(px(-6.0))
+            .right(px(-6.0))
+            .size(px(18.0))
+            .rounded_full()
+            .bg(theme.bg)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .shadow_sm(),
+        theme,
+        group,
+        false,
+    )
+    .child(
+        crate::icons::icon(crate::icons::CLOSE_CIRCLE)
+            .size(px(14.0))
+            .text_color(theme.text_muted),
+    )
+}
+
+pub fn conversation_tool_file_badge(
+    theme: &Theme,
+    path: &str,
+    name: SharedString,
+    failed: bool,
+    hover_text: bool,
+) -> AnyElement {
+    let hover_color = theme.text;
+    let radius = theme.ui_style.tokens.chip_radius.unwrap_or(5.0);
+    let badge = div()
+        .min_w_0()
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .gap(px(6.0))
+        .rounded(px(radius))
+        .bg(theme.ink(0.06))
+        .pl(px(1.0))
+        .pr(px(6.0))
+        .text_color(if failed {
+            theme.danger
+        } else {
+            theme.text.opacity(0.85)
+        })
+        .child(
+            div()
+                .size(px(20.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .bg(crate::file_icons::well_bg(theme))
+                .child(
+                    crate::file_icons::icon(
+                        crate::file_icons::FileIconIdentity::file(path),
+                        theme.appearance,
+                    )
+                    .size(px(14.0)),
+                ),
+        )
+        .child(div().min_w_0().truncate().child(name))
+        .map(|badge| {
+            if hover_text {
+                badge
+                    .id("tool-file-badge")
+                    .group_hover("tool-header", move |style| style.text_color(hover_color))
+                    .into_any_element()
+            } else {
+                badge.into_any_element()
+            }
+        });
+    crate::frost::frosted(radius, 16.0, badge).into_any_element()
+}
+
 pub fn conversation_tool_stat_row(
     theme: &Theme,
     path: &str,

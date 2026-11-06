@@ -8,6 +8,7 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 mod conversation_parts;
 pub use conversation_parts::{
     ConversationComposerBody, agent_message_theme, conversation_add_harness_key, conversation_answer_button,
+    conversation_attachment_remove, conversation_attachment_strip, conversation_attachment_thumb,
     conversation_attach_key, conversation_code_copy_action, conversation_code_frame,
     conversation_code_icon_action, conversation_code_theme,
     conversation_code_token_color, conversation_column, conversation_composer_body,
@@ -23,7 +24,7 @@ pub use conversation_parts::{
     conversation_skill_remove, conversation_subagent_chip_frame, conversation_thought_line, conversation_tool_chip_frame,
     conversation_tool_detail_frame, conversation_tool_group_header, conversation_tool_more_lines,
     conversation_tool_output_line,
-    conversation_tool_header, conversation_tool_icon_tile, conversation_tool_patch_header,
+    conversation_tool_file_badge, conversation_tool_header, conversation_tool_icon_tile, conversation_tool_patch_header,
     conversation_tool_stat_row,
     conversation_tool_panel, conversation_tool_theme, conversation_user_bubble,
     conversation_wizard_surface, user_message_theme,

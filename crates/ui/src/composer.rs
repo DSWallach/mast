@@ -5301,15 +5301,7 @@ impl Composer {
         if staged.is_empty() {
             return None;
         }
-        let mut strip = div()
-            .w_full()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP));
+        let mut strip = crate::components::conversation_attachment_strip(STRIP_GAP, STRIP_PAD_X, STRIP_PAD_TOP);
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
             let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
@@ -5320,14 +5312,7 @@ impl Composer {
                     .flex_none()
                     .relative()
                     .child(
-                        div()
-                            .id(("composer-att-thumb", ix))
-                            .size(px(STRIP_THUMB))
-                            .rounded(px(8.0))
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(crate::theme::hairline(0.10))
-                            .cursor_pointer()
+                        crate::components::conversation_attachment_thumb(ix, STRIP_THUMB)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 preview.viewer.reset();
                                 this.preview = Some(preview.clone());
@@ -5356,32 +5341,14 @@ impl Composer {
                     // draw order and images render last, so without it the
                     // thumbnail paints OVER this button (user report).
                     .child(crate::frost::layered(
-                        div()
-                            .id(("composer-att-remove", ix))
-                            .absolute()
-                            .top(px(-6.0))
-                            .right(px(-6.0))
-                            .size(px(18.0))
-                            .rounded_full()
-                            .bg(theme.bg)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .shadow_sm()
-                            .when(true, |el| crate::components::conversation_reveal(el, theme, group, false))
+                        crate::components::conversation_attachment_remove(theme, ix, group)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 // The button overhangs the thumbnail, whose
                                 // hitbox is right underneath — don't let the
                                 // same click also open the preview.
                                 cx.stop_propagation();
                                 this.remove_attachment(&remove_id, cx);
-                            }))
-                            .child(
-                                crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            ),
+                            })),
                     )),
             );
         }
