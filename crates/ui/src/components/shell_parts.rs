@@ -1376,6 +1376,11 @@ pub(crate) fn panel_chip(
 }
 
 pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    let vertical_padding = match theme.ui_style.layout {
+        crate::ui_style::UiLayout::Minimal => 5.0,
+        crate::ui_style::UiLayout::Compact => 3.0,
+        crate::ui_style::UiLayout::Guided => 7.0,
+    };
     div()
         .id(SharedString::from(selector.clone()))
         .debug_selector(move || selector.clone())
@@ -1383,7 +1388,7 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         .flex_col()
         .gap(px(2.0))
         .px(px(6.0))
-        .py(px(5.0))
+        .py(px(vertical_padding))
         .rounded(px(5.0))
         .border_1()
         .border_color(theme.border)
@@ -1698,10 +1703,15 @@ pub(crate) fn item_accordion_header(
     icon_path: &'static str,
 ) -> gpui::Stateful<gpui::Div> {
     let toggle = format!("chat-item-{name}-toggle");
+    let height = match theme.ui_style.layout {
+        crate::ui_style::UiLayout::Minimal => 22.0,
+        crate::ui_style::UiLayout::Compact => 20.0,
+        crate::ui_style::UiLayout::Guided => 26.0,
+    };
     div()
         .id(SharedString::from(toggle.clone()))
         .debug_selector(move || toggle.clone())
-        .h(px(22.0))
+        .h(px(height))
         .flex()
         .items_center()
         .gap(px(5.0))
