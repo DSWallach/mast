@@ -102,12 +102,6 @@ pub enum FontPreference {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PairedTheme {
-    pub light: &'static str,
-    pub dark: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabelMode {
     IconOnly,
     Primary,
@@ -151,7 +145,6 @@ pub struct UiStyle {
     pub controls: ControlVariant,
     pub status_indicator: StatusIndicator,
     pub font_preference: FontPreference,
-    pub paired_theme: Option<PairedTheme>,
 }
 
 impl UiStyle {
@@ -178,7 +171,6 @@ impl UiStyle {
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
-        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
             reveal: Reveal::Hover,
@@ -214,7 +206,6 @@ impl UiStyle {
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
-        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::Primary,
             reveal: Reveal::Always,
@@ -250,7 +241,6 @@ impl UiStyle {
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
-        paired_theme: None,
         behavior: StyleBehavior {
             labels: LabelMode::All,
             reveal: Reveal::Always,
@@ -283,10 +273,6 @@ impl UiStyle {
         controls: ControlVariant::Key,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
-        paired_theme: Some(PairedTheme {
-            light: "industrial-light",
-            dark: "industrial-dark",
-        }),
         behavior: StyleBehavior {
             motion: Motion::Instant,
             ..Self::MINIMAL.behavior
@@ -424,7 +410,7 @@ mod tests {
         }
     }
     #[gpui::test]
-    fn industrial_switch_restores_saved_themes(cx: &mut gpui::TestAppContext) {
+    fn style_switch_preserves_selected_themes(cx: &mut gpui::TestAppContext) {
         use gpui::{Context, Render, Window, div};
         struct Host;
         impl Render for Host {
@@ -456,12 +442,12 @@ mod tests {
             set_style(UiStyleId::Industrial, window, cx);
             assert_eq!(
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
-                "industrial-light"
+                "github-light"
             );
             crate::appearance::set_mode(crate::appearance::AppearanceMode::Dark, cx);
             assert_eq!(
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
-                "industrial-dark"
+                "github-dark"
             );
             set_style(UiStyleId::Minimal, window, cx);
             assert_eq!(
@@ -539,11 +525,20 @@ mod tests {
                                     ),
                             )
                             .child(crate::popover::popover_card(&theme).child("Menu"))
-                            .child(crate::popover::dialog_card(&theme)
-                                .child(crate::popover::dialog_title(&theme, "Title"))
-                                .child(crate::popover::dialog_field(&theme, div().child("Input").into_any_element()))
-                                .child(crate::popover::btn_primary(&theme, "Apply"))
-                                .child(crate::popover::btn_ghost(&theme, "Cancel", "industrial-test-cancel")))
+                            .child(
+                                crate::popover::dialog_card(&theme)
+                                    .child(crate::popover::dialog_title(&theme, "Title"))
+                                    .child(crate::popover::dialog_field(
+                                        &theme,
+                                        div().child("Input").into_any_element(),
+                                    ))
+                                    .child(crate::popover::btn_primary(&theme, "Apply"))
+                                    .child(crate::popover::btn_ghost(
+                                        &theme,
+                                        "Cancel",
+                                        "industrial-test-cancel",
+                                    )),
+                            )
                     }),
                 )
             }
@@ -604,7 +599,6 @@ mod tests {
             UiStyle::MINIMAL.font_preference,
             FontPreference::UserDefault
         );
-        assert_eq!(UiStyle::MINIMAL.paired_theme, None);
         assert_eq!(
             (
                 t.type_scale,
