@@ -39,5 +39,3 @@ With **Open web links in Mast** on, PR, ticket and web links open in a pane besi
 3. On a PR, click **Review** and start the chat.
 4. Right-click an outline item and set it as the PR sync destination. Wait about three minutes.
 5. If you use Linear, connect it and add one issue by hand.
-
-<!-- TODO(Mikey): a screenshot of the PR page and one of the Inbox column with GitHub and Linear sections. -->

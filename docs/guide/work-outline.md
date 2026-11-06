@@ -47,5 +47,3 @@ An item with exactly one live chat shows as one row. The row splits into an item
 3. Press `⌘Z` to undo the nesting.
 4. Ask the chat to create a Required Action ("ask me which database to use") and answer it with **Reply & resolve**.
 5. Press `⌘I` on a one-chat row.
-
-<!-- TODO(Mikey): a screenshot of the outline with a nested item, a compact row and a User Action Required badge. -->

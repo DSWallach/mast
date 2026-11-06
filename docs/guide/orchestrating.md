@@ -97,5 +97,3 @@ An admin chat can do what you can do in the app, across one Space, so it can reo
 3. Watch both appear under the item in the outline.
 4. When a worker raises **Ready to merge**, open the Required Actions list and read it.
 5. Ask the coordinator to merge it and resolve the action.
-
-<!-- TODO(Mikey): a recording of steps 2-4 (two workers appearing, the status light changing, the Ready to merge action) would make this page much clearer. -->
