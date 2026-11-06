@@ -13727,6 +13727,27 @@ mod tests {
         list.iter().map(|(k, h)| (k.to_string(), *h)).collect()
     }
 
+    #[gpui::test]
+    fn header_buttons_render_for_each_style(cx: &mut gpui::TestAppContext) {
+        struct StyleHost;
+        impl gpui::Render for StyleHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let styles = [crate::ui_style::UiStyle::MINIMAL, crate::ui_style::UiStyle::DENSE, crate::ui_style::UiStyle::GUIDED];
+                div().flex().children(styles.into_iter().enumerate().map(|(index, style)| {
+                    let theme = Theme::default().with_ui_style(style);
+                    let id = ["style-minimal", "style-dense", "style-guided"][index];
+                    header_icon_button(id, icons::PEN, "Rename", true, &theme, |_, _, _| {})
+                        .debug_selector(move || id.into())
+                }))
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| StyleHost);
+        vcx.update(|window, cx| window.draw(cx).clear());
+        for id in ["style-minimal", "style-dense", "style-guided"] {
+            assert!(vcx.debug_bounds(id).is_some());
+        }
+    }
+
     #[test]
     fn sidebar_style_metrics_preserve_minimal_and_keep_rows_positive() {
         let minimal = crate::ui_style::UiStyle::MINIMAL.tokens;
