@@ -3867,6 +3867,13 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
     }
     let status = crate::status_style::Status::from(chat.status);
     let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-chat-status-{key}"), cx.entity_id(), cx);
+    let status_label = match chat.status {
+        mast_proto::ChatIndicator::Working => "Working",
+        mast_proto::ChatIndicator::AwaitingInput => "Needs you",
+        mast_proto::ChatIndicator::Errored => "Failed",
+        mast_proto::ChatIndicator::Completed => "Done",
+        mast_proto::ChatIndicator::Idle => "Idle",
+    };
     div()
         .flex_1()
         .min_w_0()
@@ -3874,6 +3881,9 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
         .items_center()
         .gap(px(6.0))
         .child(indicator)
+        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted).child(status_label))
+        })
         .child(
             div()
                 .flex_1()
