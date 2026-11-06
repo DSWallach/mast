@@ -314,7 +314,7 @@ pub(crate) fn surface_add_button(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         ))
         .on_hover(motion::hover_listener(fade))
         .block_mouse_except_scroll();
-    super::icon_key(button, theme, false)
+    super::segmented_key(button, theme, false)
 }
 
 pub(crate) fn activity_indicator(
@@ -496,7 +496,7 @@ pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
                 .size(px(16.0))
                 .text_color(theme.text_muted),
         );
-    super::icon_key(menu, theme, false)
+    super::segmented_key(menu, theme, false)
 }
 
 pub(crate) fn review_chip(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
@@ -829,7 +829,9 @@ pub(crate) fn area_sidebar_chat_row(
             .flex()
             .items_center()
             .gap(px(4.0))
-            .child(crate::status_style::indicator_for_theme(status, theme))
+            .when(status != crate::status_style::Status::Idle, |el| {
+                el.child(crate::status_style::indicator_for_theme(status, theme))
+            })
             .when(theme.ui_style.behavior.status_words, |el| {
                 el.child(
                     div()
@@ -1257,7 +1259,7 @@ pub(crate) fn window_control_button(
         .when(super::is_area(theme), |el| {
             el.rounded_full().bg(theme.identity_color("").opacity(0.12))
         })
-        .when(true, |el| super::icon_key(el, theme, false))
+        .when(true, |el| super::segmented_key(el, theme, false))
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
@@ -1341,11 +1343,12 @@ pub(crate) fn header_icon_button(
         .when(super::is_area(theme), |el| {
             el.rounded_full().bg(theme.identity_color("").opacity(0.12))
         })
-        .when(true, |el| super::icon_key(el, theme, false))
+        .when(true, |el| super::segmented_key(el, theme, false))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
         .when(
-            theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft,
+            !super::is_industrial(theme)
+                && theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft,
             |el| {
                 el.bg(motion::hover_blend(
                     &fade_key,
@@ -1356,9 +1359,13 @@ pub(crate) fn header_icon_button(
             },
         )
         .when(
-            theme.ui_style.behavior.motion == crate::ui_style::Motion::Instant,
+            !super::is_industrial(theme)
+                && theme.ui_style.behavior.motion == crate::ui_style::Motion::Instant,
             |el| el.hover(|el| el.bg(crate::theme::wash(0.11))),
         )
+        .when(super::is_industrial(theme), |el| {
+            el.hover(|style| style.bg(theme.industrial_colors().pressed))
+        })
         // Same occlusion + click-swallowing as [`window_control_button`]: this
         // button sits inside the chat header's titlebar drag region, so its
         // rect must be carved out of the strip's drag/double-click surface.
@@ -2257,7 +2264,7 @@ pub(crate) fn account_menu_trigger(
         })
         .on_hover(motion::hover_listener("user-menu-trigger"))
         .child(avatar);
-    super::icon_key(trigger, theme, false)
+    super::segmented_key(trigger, theme, false)
 }
 
 /// A Windows-owned caption target using the same system glyphs and native
@@ -2335,7 +2342,7 @@ pub(crate) fn linux_caption_button(
         .when(super::is_area(theme), |el| {
             el.rounded_full().bg(theme.identity_color("").opacity(0.12))
         })
-        .when(true, |el| super::icon_key(el, theme, false))
+        .when(true, |el| super::segmented_key(el, theme, false))
         .cursor_pointer()
         .hover(move |style| style.bg(hover_bg))
         .occlude()
