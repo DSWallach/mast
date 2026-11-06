@@ -20,6 +20,39 @@ pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
         })
 }
 
+pub(crate) fn update_strip(
+    theme: &Theme,
+    label: SharedString,
+    failed: bool,
+    clickable: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let tone = if failed { theme.danger } else { theme.accent };
+    let (background, hover) = if failed {
+        (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
+    } else {
+        (theme.accent_wash, theme.accent.opacity(0.16))
+    };
+    let strip = div()
+        .id("update-strip")
+        .mx(px(Theme::SPACE_SM))
+        .px(px(Theme::SPACE_SM))
+        .py(px(6.0))
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .bg(background)
+        .flex()
+        .flex_row()
+        .items_center()
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(tone)
+        .child(div().flex_1().min_w_0().child(label))
+        .when(clickable, |el| {
+            el.cursor_pointer().hover(move |el| el.bg(hover))
+        });
+    super::segmented_key(strip, theme, false)
+}
+
 pub(crate) fn offline_indicator(theme: &Theme) -> AnyElement {
     div()
         .size(px(5.0))
