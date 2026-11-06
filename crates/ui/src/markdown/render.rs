@@ -2503,31 +2503,12 @@ fn code_icon_action(
     handler: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
     theme: &Theme,
 ) -> AnyElement {
-    let fade_key = id.to_string();
-    div()
-        .id(id)
-        .size(px(CODE_ACTION_SIZE))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(crate::motion::hover_blend(
-            &fade_key,
-            gpui::transparent_black(),
-            crate::theme::ink(0.08),
-        ))
-        .on_hover(crate::motion::hover_listener(fade_key))
+    crate::components::conversation_code_icon_action(theme, id, icon_path, CODE_ACTION_SIZE)
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             handler(window, cx);
         })
         .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label)).into())
-        .child(
-            crate::icons::icon(icon_path)
-                .size(px(13.0))
-                .text_color(theme.text_muted),
-        )
         .into_any_element()
 }
 
@@ -2542,38 +2523,11 @@ fn code_copy_button(
         let code_text: SharedString = code.to_string().into();
         let handler = copy.handler.clone();
         let fade_key = format!("{}-copy{ix}", opts.row_key);
-        div()
-            .id(SharedString::from(fade_key.clone()))
-            .h(px(CODE_ACTION_SIZE))
-            .px(px(6.0))
-            .rounded(px(5.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .bg(crate::motion::hover_blend(
-                &fade_key,
-                gpui::transparent_black(),
-                crate::theme::ink(0.08),
-            ))
-            .on_hover(crate::motion::hover_listener(fade_key))
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
+        crate::components::conversation_code_copy_action(theme, SharedString::from(fade_key), copied, CODE_ACTION_SIZE)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 handler(ix, code_text.clone(), window, cx);
             })
-            .child(
-                crate::icons::icon(if copied {
-                    crate::icons::CHECK
-                } else {
-                    crate::icons::COPY
-                })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-            )
-            .children(crate::components::conversation_code_copy_label(theme, copied))
             .into_any_element()
     })
 }

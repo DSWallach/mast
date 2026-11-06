@@ -4,6 +4,71 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_code_icon_action(
+    theme: &Theme,
+    id: SharedString,
+    icon: &'static str,
+    size: f32,
+) -> gpui::Stateful<Div> {
+    let fade_key = id.to_string();
+    div()
+        .id(id)
+        .size(px(size))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(crate::motion::hover_blend(
+            &fade_key,
+            gpui::transparent_black(),
+            crate::theme::ink(0.08),
+        ))
+        .on_hover(crate::motion::hover_listener(fade_key))
+        .child(
+            crate::icons::icon(icon)
+                .size(px(13.0))
+                .text_color(theme.text_muted),
+        )
+}
+
+pub fn conversation_code_copy_action(
+    theme: &Theme,
+    id: SharedString,
+    copied: bool,
+    size: f32,
+) -> gpui::Stateful<Div> {
+    let fade_key = id.to_string();
+    div()
+        .id(id)
+        .h(px(size))
+        .px(px(6.0))
+        .rounded(px(5.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .cursor_pointer()
+        .bg(crate::motion::hover_blend(
+            &fade_key,
+            gpui::transparent_black(),
+            crate::theme::ink(0.08),
+        ))
+        .on_hover(crate::motion::hover_listener(fade_key))
+        .text_size(px(10.5))
+        .text_color(theme.text_muted)
+        .child(
+            crate::icons::icon(if copied {
+                crate::icons::CHECK
+            } else {
+                crate::icons::COPY
+            })
+            .size(px(12.0))
+            .text_color(theme.text_muted),
+        )
+        .children(conversation_code_copy_label(theme, copied))
+}
+
 pub fn conversation_tool_icon_tile(
     theme: &Theme,
     activity: bool,
@@ -709,7 +774,7 @@ pub fn conversation_code_theme(theme: &Theme) -> Theme {
     result
 }
 
-pub fn conversation_code_copy_label(theme: &Theme, copied: bool) -> Option<&'static str> {
+fn conversation_code_copy_label(theme: &Theme, copied: bool) -> Option<&'static str> {
     if copied {
         Some("Copied")
     } else if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
