@@ -1171,6 +1171,41 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         })
 }
 
+pub(crate) fn archived_worker_toggle(
+    theme: &Theme,
+    shown: bool,
+    count: usize,
+) -> gpui::Stateful<gpui::Div> {
+    let button = div()
+        .id("team-show-archived")
+        .debug_selector(|| "team-show-archived".into())
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(SharedString::from(format!(
+            "{} archived ({count})",
+            if shown { "Hide" } else { "Show" }
+        )));
+    super::segmented_key(button, theme, shown)
+}
+
+pub(crate) fn archived_worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(6.0))
+        .py(px(3.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_industrial(theme), |el| {
+            el.border_1().border_color(theme.industrial_colors().rule)
+        })
+}
+
 pub(crate) fn item_accordion_header(
     theme: &Theme,
     name: &'static str,

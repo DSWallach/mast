@@ -812,17 +812,7 @@ impl Shell {
         let shown = self.wakes.show_archived.contains(chat_id);
         let toggle_chat = chat_id.to_owned();
         let mut out = vec![
-            div()
-                .id("team-show-archived")
-                .debug_selector(|| "team-show-archived".into())
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .hover(|el| el.text_color(theme.text))
-                .child(SharedString::from(format!(
-                    "{} archived ({count})",
-                    if shown { "Hide" } else { "Show" }
-                )))
+            crate::components::shell_parts::archived_worker_toggle(theme, shown, count)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.wakes.show_archived.remove(&toggle_chat) {
                         this.wakes.show_archived.insert(toggle_chat.clone());
@@ -838,14 +828,7 @@ impl Shell {
                 let restore_id = id.clone();
                 let button_id = format!("team-unarchive-{id}");
                 out.push(
-                    div()
-                        .id(SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(6.0))
-                        .py(px(3.0))
+                    crate::components::shell_parts::archived_worker_row(theme, selector)
                         .child(
                             div()
                                 .flex_1()
