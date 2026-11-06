@@ -1575,6 +1575,19 @@ pub(crate) fn identifier_copy_button(
     super::segmented_key(button, theme, false)
 }
 
+pub(crate) fn identifier_row(theme: &Theme) -> gpui::Div {
+    let size = match theme.ui_style.layout {
+        crate::ui_style::UiLayout::Minimal => 11.0,
+        crate::ui_style::UiLayout::Compact => 10.0,
+        crate::ui_style::UiLayout::Guided => 12.0,
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(size))
+}
+
 pub(crate) fn item_path_segment(
     theme: &Theme,
     index: usize,

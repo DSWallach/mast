@@ -1482,11 +1482,7 @@ impl Shell {
             let id: SharedString = format!("chat-item-id-{key}").into();
             let copy_value = value.clone();
             block = block.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(11.0))
+                crate::components::shell_parts::identifier_row(theme)
                     .child(
                         div()
                             .flex_none()
