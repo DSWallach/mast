@@ -308,6 +308,46 @@ pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
         })
 }
 
+/// Required-action control with a disabled state.
+pub fn outline_action_button(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    enabled: bool,
+    primary: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    let button = div()
+        .id(id)
+        .flex_none()
+        .px(px(6.0 * scale))
+        .py(px(scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .border_1()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .when(enabled && primary, |el| {
+            el.cursor_pointer()
+                .border_color(theme.accent.opacity(0.5))
+                .bg(theme.accent.opacity(0.12))
+                .text_color(theme.accent)
+                .hover(|el| el.bg(theme.accent.opacity(0.22)))
+        })
+        .when(enabled && !primary, |el| {
+            el.cursor_pointer()
+                .border_color(theme.border)
+                .text_color(theme.text_muted)
+                .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        })
+        .when(!enabled, |el| {
+            el.border_color(theme.border).text_color(theme.text_faint)
+        });
+    crate::surface_chrome::segmented_key(button, theme, primary && enabled)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

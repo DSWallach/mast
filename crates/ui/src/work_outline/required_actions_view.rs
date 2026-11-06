@@ -1025,22 +1025,7 @@ impl RequiredActionsList {
         enabled: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        let button = div()
-            .id(id)
-            .flex_none()
-            .px(px(6.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(10.5))
-            .when(enabled, |el| {
-                el.cursor_pointer()
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            })
-            .when(!enabled, |el| el.text_color(theme.text_faint))
-            .child(label);
+        let button = crate::components::outline_action_button(id, label, enabled, false, theme);
         match super::hints::details_button_hint(label) {
             Some((tip, key)) => super::hints::WithHint::hint(button, tip, key),
             None => button,
@@ -1061,26 +1046,8 @@ impl RequiredActionsList {
         let tip: SharedString = unavailable
             .unwrap_or("Send your note to the Chat that asked, then resolve (\u{21a9})")
             .into();
-        div()
-            .id(SharedString::from(id.to_owned()))
+        crate::components::outline_action_button(SharedString::from(id.to_owned()), label, enabled, true, theme)
             .debug_selector(move || selector.clone())
-            .flex_none()
-            .px(px(6.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .border_1()
-            .text_size(crate::typography::ui_rems(10.5))
-            .when(enabled, |el| {
-                el.cursor_pointer()
-                    .border_color(theme.accent.opacity(0.5))
-                    .bg(theme.accent.opacity(0.12))
-                    .text_color(theme.accent)
-                    .hover(|el| el.bg(theme.accent.opacity(0.22)))
-            })
-            .when(!enabled, |el| {
-                el.border_color(theme.border).text_color(theme.text_faint)
-            })
-            .child(label)
             .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
     }
 
