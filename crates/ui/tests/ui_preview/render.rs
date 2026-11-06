@@ -94,7 +94,10 @@ impl Render for Controls {
                         ]
                         .into_iter()
                         .map(|(status, label)| {
-                            div().flex().items_center().gap(px(4.))
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
                                 .child(mast_ui::components::status_dot(t, status))
                                 .child(label)
                         }),
@@ -102,7 +105,8 @@ impl Render for Controls {
             )
             .child("Input")
             .child(
-                mast_ui::components::text_input(t, self.input.clone().into_any_element()).w(px(360.)),
+                mast_ui::components::text_input(t, self.input.clone().into_any_element())
+                    .w(px(360.)),
             )
     }
 }
@@ -233,6 +237,157 @@ pub fn render(
                 screen,
                 label,
                 view,
+            })
+        },
+    )
+}
+
+/// A row-per-component comparison of all independent style/layout pairs.
+struct ComponentMatrix {
+    inputs: Vec<Entity<mast_ui::composer::ComposerInput>>,
+}
+
+impl Render for ComponentMatrix {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use mast_ui::components as c;
+        use mast_ui::ui_style::{UiLayout, UiStyle, UiStyleId};
+        let base = Theme::of(cx).clone();
+        let names = [
+            "Primary",
+            "Secondary",
+            "Danger",
+            "Ghost",
+            "Icon",
+            "Toggle on",
+            "Toggle off",
+            "Chip",
+            "Tab",
+            "Input",
+            "Section header",
+            "Card",
+            "List row",
+            "Selected row",
+            "Menu item",
+            "Status",
+            "Readout",
+            "User bubble",
+            "Agent bubble",
+        ];
+        let mut table = div()
+            .size_full()
+            .bg(base.surface)
+            .text_color(base.text)
+            .flex()
+            .flex_col();
+        let mut header = div()
+            .flex()
+            .h(px(42.))
+            .child(div().w(px(150.)).child("Component"));
+        for &style in UiStyleId::ALL {
+            for &layout in UiLayout::ALL {
+                header = header.child(div().w(px(170.)).child(format!(
+                    "{} / {}",
+                    style.label(),
+                    layout.label()
+                )));
+            }
+        }
+        table = table.child(header);
+        for (row, name) in names.into_iter().enumerate() {
+            let mut line = div()
+                .flex()
+                .h(px(55.))
+                .items_center()
+                .child(div().w(px(150.)).child(name));
+            for (column, (&style, &layout)) in UiStyleId::ALL
+                .iter()
+                .flat_map(|style| UiLayout::ALL.iter().map(move |layout| (style, layout)))
+                .enumerate()
+            {
+                let theme = base.clone().with_ui_style(UiStyle::resolve(style, layout));
+                let id = gpui::SharedString::from(format!("matrix-{row}-{column}"));
+                let element = match row {
+                    0..=3 => c::button(
+                        id,
+                        name,
+                        [
+                            c::ButtonVariant::Primary,
+                            c::ButtonVariant::Secondary,
+                            c::ButtonVariant::Danger,
+                            c::ButtonVariant::Ghost,
+                        ][row],
+                        c::ButtonSize::Md,
+                        &theme,
+                    )
+                    .into_any_element(),
+                    4 => c::icon_button(id, mast_ui::icons::PLUS, "Add", &theme).into_any_element(),
+                    5 | 6 => c::toggle_switch(&theme, row == 5).into_any_element(),
+                    7 => c::badge(&theme, "Draft").into_any_element(),
+                    8 => c::tab(&theme, "Selected", true).into_any_element(),
+                    9 => c::text_input(&theme, self.inputs[column].clone().into_any_element())
+                        .into_any_element(),
+                    10 => c::section_header(&theme, "Section", Some("Helpful guidance"))
+                        .into_any_element(),
+                    11 => c::section_card(&theme)
+                        .mt(px(0.))
+                        .child("Card")
+                        .into_any_element(),
+                    12 | 13 => c::list_row(&theme, row == 13)
+                        .child("Row")
+                        .into_any_element(),
+                    14 => c::menu_row(&theme, true, format!("matrix-menu-{column}"))
+                        .child("Menu")
+                        .into_any_element(),
+                    15 => c::status_dot(&theme, c::Status::Success).into_any_element(),
+                    16 => c::display(&theme).child("MODEL").into_any_element(),
+                    17 => c::user_message_bubble(
+                        &theme,
+                        theme.identity_color(""),
+                        160.,
+                        22.,
+                        false,
+                        div().child("Hello").into_any_element(),
+                    ),
+                    _ => c::agent_message_bubble(
+                        &theme,
+                        true,
+                        Some("Model".into()),
+                        div().child("Reply").into_any_element(),
+                    ),
+                };
+                line = line.child(div().w(px(170.)).child(element));
+            }
+            table = table.child(line);
+        }
+        table
+    }
+}
+
+pub fn render_component_matrix(
+    theme_id: &str,
+    appearance: Appearance,
+    data_dir: PathBuf,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
+    let theme_id = theme_id.to_owned();
+    mast_ui::snapshot::render_to_png(
+        name,
+        size(px(1680.), px(1200.)),
+        UiStyleId::Default,
+        appearance,
+        move |_, cx| {
+            initialize(
+                &data_dir,
+                UiStyleId::Default,
+                UiLayout::Minimal,
+                appearance,
+                &theme_id,
+                cx,
+            );
+            cx.new(|cx| ComponentMatrix {
+                inputs: (0..9)
+                    .map(|_| cx.new(|cx| mast_ui::composer::ComposerInput::new("Type…", cx)))
+                    .collect(),
             })
         },
     )

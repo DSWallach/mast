@@ -32,7 +32,14 @@ fn render_ui_preview() -> anyhow::Result<()> {
         "MAST_PREVIEW_SCREENS",
         &["chat", "details", "walkthrough", "appearance", "controls"],
     );
-    let all_screens = ["chat", "details", "walkthrough", "appearance", "controls"];
+    let all_screens = [
+        "chat",
+        "details",
+        "walkthrough",
+        "appearance",
+        "controls",
+        "components",
+    ];
     anyhow::ensure!(
         !screens.is_empty() && screens.iter().all(|s| all_screens.contains(&s.as_str())),
         "invalid or empty screen selection"
@@ -92,6 +99,26 @@ fn render_ui_preview() -> anyhow::Result<()> {
     .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
     let mut sheets = Vec::new();
     for (screen_index, screen) in screens.iter().enumerate() {
+        if screen == "components" {
+            let variant = registry.variant(&themes[0]).unwrap();
+            let appearance = if variant.appearance == mast_theme::Appearance::Dark {
+                Appearance::Dark
+            } else {
+                Appearance::Light
+            };
+            let path = render::render_component_matrix(
+                &themes[0],
+                appearance,
+                data_dir.path().to_owned(),
+                "preview-component-matrix",
+            )?;
+            let sheet = image::open(path)?.into_rgba8();
+            let path = directory.join("components.png");
+            sheet.save(&path)?;
+            println!("{}", path.display());
+            sheets.push(sheet);
+            continue;
+        }
         let mut sheet = RgbaImage::new(
             cell_width * themes.len() as u32,
             cell_height * (styles.len() * layouts.len()) as u32,

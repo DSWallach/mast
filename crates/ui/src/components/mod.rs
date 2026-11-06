@@ -265,6 +265,11 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
         .gap(px(14.0))
 }
 
+/// A selectable row; selection uses the active theme's semantic role.
+pub fn list_row(theme: &Theme, selected: bool) -> Div {
+    card_row(theme, true).when(selected, |el| el.bg(theme.element_active))
+}
+
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
     let row = div()
         .flex()
