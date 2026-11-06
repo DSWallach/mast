@@ -12,11 +12,16 @@ pub(crate) const CONTROL_GAP: f32 = 4.0;
 pub(crate) const EDGE_INSET: f32 = 8.0;
 
 /// Apply the active look's segmented-key treatment while preserving legacy tabs.
-pub(crate) fn segmented_key<T: gpui::Styled>(element: T, theme: &Theme, active: bool) -> T {
+pub(crate) fn key_ledge(theme: &Theme) -> gpui::Hsla {
+    gpui::rgb(if theme.appearance.is_dark() { 0x1a1b18 } else { 0xaaa9a2 }).into()
+}
+
+pub(crate) fn segmented_key<T: gpui::Styled + gpui::ParentElement>(element: T, theme: &Theme, active: bool) -> T {
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
             .bg(if active { theme.element_active } else { theme.surface_raised })
-            .border_1().border_b_2().border_color(theme.border)
+            .border_1().border_color(theme.border).relative()
+            .child(div().absolute().left_0().right_0().bottom_0().h(px(2.0)).bg(key_ledge(theme)))
     } else {
         element
     }

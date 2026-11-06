@@ -2005,7 +2005,7 @@ impl Render for WorkItemDetails {
                     .on_click(cx.listener(|this, _, _, cx| this.restore(cx))),
             )
         } else {
-            div().child(
+            div().when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.flex().items_start()).child(
                 Self::small_button("work-item-archive", "Archive…", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.request_archive(cx))),
             )

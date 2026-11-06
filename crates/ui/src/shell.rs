@@ -11889,7 +11889,6 @@ fn window_control_button(
         .items_center()
         .justify_center()
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.border_1().border_b_2().border_color(theme.border))
         .cursor_pointer()
         // zeron window-controls.tsx: `transition-colors` — the wash fades.
         .bg(motion::hover_blend(
@@ -11897,6 +11896,7 @@ fn window_control_button(
             theme.glass_hover().opacity(0.0),
             theme.glass_hover(),
         ))
+        .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
@@ -12077,7 +12077,7 @@ fn header_icon_button(
         .items_center()
         .justify_center()
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(theme.surface_raised).border_1().border_b_2().border_color(theme.border))
+        .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
         .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft, |el| {

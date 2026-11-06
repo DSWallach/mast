@@ -8602,7 +8602,7 @@ impl Render for Composer {
                 morph_t
             };
         let text_pt = morph_text_pad(layout_morph_t);
-        let surface_radius = theme.ui_style.tokens.control_radius.unwrap_or(COMPOSER_RADIUS - 4.0 * dock_amount);
+        let surface_radius = theme.ui_style.tokens.panel_radius.unwrap_or(COMPOSER_RADIUS - 4.0 * dock_amount);
         let route_to_single_line =
             self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
