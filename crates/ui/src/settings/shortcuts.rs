@@ -471,8 +471,9 @@ pub fn modifier_send_label(is_macos: bool) -> &'static str {
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 10] = [
+const GROUP_ORDER: [&str; 11] = [
     "Files",
+    "Review",
     "Browser",
     "Panels",
     "Sessions",
@@ -493,6 +494,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::SearchWorkspaceContent
         | ShortcutId::GoToLine
         | ShortcutId::ReplaceFile => "Files",
+        ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode => "Review",
         ShortcutId::BrowserReload => "Browser",
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
@@ -538,6 +540,15 @@ fn description(id: ShortcutId) -> &'static str {
         }
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::QuickOpen => "Open a workspace file by name.",
+        ShortcutId::ReviewNextStep => "Next review step.",
+        ShortcutId::ReviewPreviousStep => "Previous review step.",
+        ShortcutId::ReviewNextStepArrow => "Next review step (arrow).",
+        ShortcutId::ReviewPreviousStepArrow => "Previous review step (arrow).",
+        ShortcutId::ReviewNextHunk => "Next review hunk.",
+        ShortcutId::ReviewPreviousHunk => "Previous review hunk.",
+        ShortcutId::ReviewMarkReviewed => "Mark review hunk viewed.",
+        ShortcutId::ReviewToggleMode => "Toggle review mode.",
+
         ShortcutId::SearchWorkspaceContent => "Search text in workspace files.",
         ShortcutId::GoToLine => "Go to a line in the active file or diff.",
         ShortcutId::ReplaceFile => "Replace text in the active file.",

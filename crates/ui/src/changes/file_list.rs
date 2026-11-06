@@ -590,7 +590,7 @@ impl Changes {
         {
             return;
         }
-        if event.keystroke.key == "v" && !modifiers.shift {
+        if event.keystroke.key == "v" && !modifiers.shift && !self.review_walkthrough {
             let top = self
                 .list
                 .logical_scroll_top()
@@ -627,7 +627,7 @@ impl Changes {
         window.prevent_default();
     }
 
-    fn step_diff(&mut self, forward: bool, files_only: bool, cx: &mut Context<Self>) {
+    pub(super) fn step_diff(&mut self, forward: bool, files_only: bool, cx: &mut Context<Self>) {
         let Some(parsed) = self.parsed.as_ref() else {
             return;
         };

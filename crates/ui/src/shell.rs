@@ -399,6 +399,7 @@ pub fn apply_keymap(
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
+    crate::changes::walkthrough::bind_keys(cx, keymap);
     // gpui-base binds Replace to Cmd+Shift+F in every Input. Remove that
     // binding before installing the user-configured search and replace keys.
     #[cfg(target_os = "macos")]

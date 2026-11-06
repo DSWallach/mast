@@ -937,6 +937,14 @@ pub enum ShortcutId {
     ToggleTerminal,
     OpenMyPrs,
     QuickOpen,
+    ReviewNextStep,
+    ReviewPreviousStep,
+    ReviewNextStepArrow,
+    ReviewPreviousStepArrow,
+    ReviewNextHunk,
+    ReviewPreviousHunk,
+    ReviewMarkReviewed,
+    ReviewToggleMode,
     SearchWorkspaceContent,
     GoToLine,
     ReplaceFile,
@@ -971,7 +979,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 20 + WORK_OUTLINE_SHORTCUTS + 23 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 28 + WORK_OUTLINE_SHORTCUTS + 23 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -981,6 +989,14 @@ impl ShortcutId {
         ShortcutId::ToggleTerminal,
         ShortcutId::OpenMyPrs,
         ShortcutId::QuickOpen,
+        ShortcutId::ReviewNextStep,
+        ShortcutId::ReviewPreviousStep,
+        ShortcutId::ReviewNextStepArrow,
+        ShortcutId::ReviewPreviousStepArrow,
+        ShortcutId::ReviewNextHunk,
+        ShortcutId::ReviewPreviousHunk,
+        ShortcutId::ReviewMarkReviewed,
+        ShortcutId::ReviewToggleMode,
         ShortcutId::SearchWorkspaceContent,
         ShortcutId::GoToLine,
         ShortcutId::ReplaceFile,
@@ -1063,6 +1079,15 @@ impl ShortcutId {
             ShortcutId::GoToLine => "Go to line",
             ShortcutId::SearchWorkspaceContent => "Search in files",
             ShortcutId::QuickOpen => "Quick open",
+            ShortcutId::ReviewNextStep => "Next review step",
+            ShortcutId::ReviewPreviousStep => "Previous review step",
+            ShortcutId::ReviewNextStepArrow => "Next review step (arrow)",
+            ShortcutId::ReviewPreviousStepArrow => "Previous review step (arrow)",
+            ShortcutId::ReviewNextHunk => "Next review hunk",
+            ShortcutId::ReviewPreviousHunk => "Previous review hunk",
+            ShortcutId::ReviewMarkReviewed => "Mark review hunk viewed",
+            ShortcutId::ReviewToggleMode => "Toggle review mode",
+
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New Space",
             ShortcutId::OpenModelPicker => "Open model picker",
@@ -1118,6 +1143,15 @@ impl ShortcutId {
             ShortcutId::GoToLine => "mod-g",
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
+            ShortcutId::ReviewNextStep => "n",
+            ShortcutId::ReviewPreviousStep => "p",
+            ShortcutId::ReviewNextStepArrow => "down",
+            ShortcutId::ReviewPreviousStepArrow => "up",
+            ShortcutId::ReviewNextHunk => "]",
+            ShortcutId::ReviewPreviousHunk => "[",
+            ShortcutId::ReviewMarkReviewed => "v",
+            ShortcutId::ReviewToggleMode => "t",
+
             ShortcutId::NewSession => "mod-n",
             ShortcutId::NewProject => "mod-shift-n",
             ShortcutId::OpenModelPicker => "mod-/",
@@ -1225,6 +1259,15 @@ pub struct KeymapConfig {
     pub go_to_line: String,
     pub search_workspace_content: String,
     pub quick_open: String,
+    pub review_next_step: String,
+    pub review_previous_step: String,
+    pub review_next_step_arrow: String,
+    pub review_previous_step_arrow: String,
+    pub review_next_hunk: String,
+    pub review_previous_hunk: String,
+    pub review_mark_reviewed: String,
+    pub review_toggle_mode: String,
+
     pub new_session: String,
     pub new_project: String,
     pub open_model_picker: String,
@@ -1316,6 +1359,15 @@ impl Default for KeymapConfig {
             go_to_line: ShortcutId::GoToLine.default_combo().into(),
             search_workspace_content: ShortcutId::SearchWorkspaceContent.default_combo().into(),
             quick_open: ShortcutId::QuickOpen.default_combo().into(),
+            review_next_step: ShortcutId::ReviewNextStep.default_combo().into(),
+            review_previous_step: ShortcutId::ReviewPreviousStep.default_combo().into(),
+            review_next_step_arrow: ShortcutId::ReviewNextStepArrow.default_combo().into(),
+            review_previous_step_arrow: ShortcutId::ReviewPreviousStepArrow.default_combo().into(),
+            review_next_hunk: ShortcutId::ReviewNextHunk.default_combo().into(),
+            review_previous_hunk: ShortcutId::ReviewPreviousHunk.default_combo().into(),
+            review_mark_reviewed: ShortcutId::ReviewMarkReviewed.default_combo().into(),
+            review_toggle_mode: ShortcutId::ReviewToggleMode.default_combo().into(),
+
             new_session: ShortcutId::NewSession.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
             open_model_picker: ShortcutId::OpenModelPicker.default_combo().into(),
@@ -1369,6 +1421,15 @@ impl KeymapConfig {
             ShortcutId::GoToLine => &self.go_to_line,
             ShortcutId::SearchWorkspaceContent => &self.search_workspace_content,
             ShortcutId::QuickOpen => &self.quick_open,
+            ShortcutId::ReviewNextStep => &self.review_next_step,
+            ShortcutId::ReviewPreviousStep => &self.review_previous_step,
+            ShortcutId::ReviewNextStepArrow => &self.review_next_step_arrow,
+            ShortcutId::ReviewPreviousStepArrow => &self.review_previous_step_arrow,
+            ShortcutId::ReviewNextHunk => &self.review_next_hunk,
+            ShortcutId::ReviewPreviousHunk => &self.review_previous_hunk,
+            ShortcutId::ReviewMarkReviewed => &self.review_mark_reviewed,
+            ShortcutId::ReviewToggleMode => &self.review_toggle_mode,
+
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NewProject => &self.new_project,
             ShortcutId::OpenModelPicker => &self.open_model_picker,
@@ -1420,6 +1481,15 @@ impl KeymapConfig {
             ShortcutId::GoToLine => self.go_to_line = combo,
             ShortcutId::SearchWorkspaceContent => self.search_workspace_content = combo,
             ShortcutId::QuickOpen => self.quick_open = combo,
+            ShortcutId::ReviewNextStep => self.review_next_step = combo,
+            ShortcutId::ReviewPreviousStep => self.review_previous_step = combo,
+            ShortcutId::ReviewNextStepArrow => self.review_next_step_arrow = combo,
+            ShortcutId::ReviewPreviousStepArrow => self.review_previous_step_arrow = combo,
+            ShortcutId::ReviewNextHunk => self.review_next_hunk = combo,
+            ShortcutId::ReviewPreviousHunk => self.review_previous_hunk = combo,
+            ShortcutId::ReviewMarkReviewed => self.review_mark_reviewed = combo,
+            ShortcutId::ReviewToggleMode => self.review_toggle_mode = combo,
+
             ShortcutId::NewSession => self.new_session = combo,
             ShortcutId::NewProject => self.new_project = combo,
             ShortcutId::OpenModelPicker => self.open_model_picker = combo,
@@ -1590,6 +1660,8 @@ pub fn combo_from_keystroke_on(
 
 /// Outline and side-panel shortcuts cannot be active at the same time.
 pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
+    let review = |id| matches!(id, ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode);
+    if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }
     !matches!(
         (left, right),
         (ShortcutId::Outline(_), ShortcutId::OpenTeamTabFromPanel)
@@ -2000,6 +2072,23 @@ impl UiSettings {
                             if taken {
                                 keymap.insert(field.into(), serde_json::json!(""));
                             }
+                        }
+                        // Review keys are scoped away from the Team panel and
+                        // outline, but must yield to an existing global rebind.
+                        for (id, field) in [
+                            (ShortcutId::ReviewNextStep, "reviewNextStep"),
+                            (ShortcutId::ReviewPreviousStep, "reviewPreviousStep"),
+                            (ShortcutId::ReviewNextStepArrow, "reviewNextStepArrow"),
+                            (ShortcutId::ReviewPreviousStepArrow, "reviewPreviousStepArrow"),
+                            (ShortcutId::ReviewNextHunk, "reviewNextHunk"),
+                            (ShortcutId::ReviewPreviousHunk, "reviewPreviousHunk"),
+                            (ShortcutId::ReviewMarkReviewed, "reviewMarkReviewed"),
+                            (ShortcutId::ReviewToggleMode, "reviewToggleMode"),
+                        ] {
+                            let taken = !keymap.contains_key(field) && keymap.iter().any(|(name, existing)| {
+                                name != "openTeamTabFromPanel" && existing.as_str().is_some_and(|combo| shortcut_combos_conflict(combo, id.default_combo()))
+                            });
+                            if taken { keymap.insert(field.into(), serde_json::json!("")); }
                         }
                     }
                     serde_json::from_value::<UiSettings>(value)
@@ -3716,14 +3805,15 @@ mod tests {
     fn defaults_are_distinct_physical_keys() {
         // Distinct STRINGS is not enough — two defaults could still resolve to
         // the same keystroke through `platform_combo`.
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = Vec::new();
         for id in ShortcutId::ALL {
             // Unbound-by-default commands share the empty string.
             if id.default_combo().is_empty() {
                 continue;
             }
             let bound = platform_combo(id.default_combo());
-            assert!(seen.insert(bound.clone()), "{bound:?} bound twice");
+            assert!(!seen.iter().any(|(other, combo)| shortcut_contexts_overlap(id, *other) && *combo == bound), "{bound:?} bound twice");
+            seen.push((id, bound));
         }
     }
 
@@ -3932,6 +4022,17 @@ mod tests {
         assert_eq!(combo_modifiers("mod-alt-shift-k"), (true, true, true));
         assert_eq!(combo_modifiers("f5"), (false, false, false));
         assert_eq!(combo_modifiers("shift-tab"), (false, false, true));
+    }
+
+    #[test]
+    fn review_defaults_preserve_existing_global_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"n","openTeamTabFromPanel":"t"}}"#).unwrap();
+        let keymap = UiSettings::load(dir.path()).keymap;
+        assert_eq!(keymap.review_next_step, "");
+        assert_eq!(keymap.review_toggle_mode, "t");
+        assert_eq!(keymap.save_file, "n");
+        assert!(!conflicted_shortcuts(&keymap).contains(&ShortcutId::ReviewNextStep));
     }
 
     #[test]

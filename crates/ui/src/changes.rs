@@ -1993,6 +1993,8 @@ pub struct Changes {
     review_status_base: Option<String>,
     review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
+    review_walkthrough: bool,
+    review_tour: bool,
     review_task: Option<Task<()>>,
     review_save_task: Option<Task<()>>,
     review_pending: HashMap<String, mast_proto::DiffReviewState>,
@@ -2226,6 +2228,8 @@ impl Changes {
             review_status_base: None,
             review_closed: false,
             review_state: None,
+            review_walkthrough: false,
+            review_tour: false,
             review_task: None,
             review_save_task: None,
             review_pending: HashMap::new(),
@@ -6873,7 +6877,7 @@ impl Render for Changes {
                                     .flex_row()
                                     .flex_1()
                                     .min_h_0()
-                                    .child(self.render_file_list(&theme, cx))
+                                    .children((!self.review_tour).then(|| self.render_file_list(&theme, cx)))
                                     .child(
                                         div()
                                             .track_focus(&self.diff_focus)
