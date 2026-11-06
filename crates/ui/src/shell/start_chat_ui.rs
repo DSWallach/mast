@@ -27,6 +27,7 @@ use mast_proto::{
 };
 
 use crate::composer::skill_completion::{SkillCompletion, SkillInsertion, SkillSource};
+use crate::components::shell_parts::start_chat_section_label as section_label;
 use crate::pickers::{Pickers, ReturnComposerFocus};
 use crate::work_outline::actions::OperationSlot;
 use crate::work_outline::execution::{self as exec, ValidationHeadline, ValidationState};
@@ -1053,8 +1054,6 @@ fn error_card(
             selector, theme, title, detail,
         ))
 }
-
-use crate::components::shell_parts::start_chat_section_label as section_label;
 
 fn device_name(shell: &Shell, device_id: &str, cx: &App) -> String {
     shell

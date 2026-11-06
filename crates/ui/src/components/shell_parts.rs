@@ -246,7 +246,7 @@ pub(crate) fn sidebar_frame(
                         .mb(px(12.0))
                         .px(px(12.0))
                         .py(px(8.0))
-                        .rounded(px(12.0))
+                        .rounded_full()
                         .border_1()
                         .border_color(theme.border_strong)
                         .text_color(theme.text_muted)

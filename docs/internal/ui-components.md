@@ -1138,6 +1138,15 @@ badge (`shell.rs:7435`), archive action (`shell.rs:7454`), selected fill
 (`shell.rs:7605`), account badge (`shell.rs:7784`) and change-request badge
 (`shell.rs:7810`). Preserve their behavior when consolidating the row.
 
+The shell branch has since moved titlebar controls, sidebar frame and section
+chrome, Area row, chat-header frame and chips, Item/Team tabs, right-surface
+tab frame, activity indicators, account trigger and rail into
+`components/shell_parts.rs`. Area rows now show send-status overrides, account
+and pull-request badges, jump hints and an archive action. The separate Area
+row still needs a complete comparison with the normal row for project, branch,
+remote and other metadata. Remaining inline controls in the shell and its
+submodules are not yet inventoried or migrated; this slice is not complete.
+
 Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
