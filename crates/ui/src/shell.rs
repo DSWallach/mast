@@ -11083,8 +11083,8 @@ impl Shell {
                 .when(!is_active, |el| {
                     el.hover(|s| s.bg(crate::theme::wash(0.06)))
                 })
-                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(if is_active { theme.element_active } else { theme.surface_raised }).border_1().border_b_2().border_color(theme.border))
-                .when(is_active && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(div().size(px(6.0)).rounded_full().bg(theme.accent)))
+                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, is_active))
+                .children(crate::surface_chrome::active_key_dot(&theme, is_active))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.set_right_active(surface, cx);
