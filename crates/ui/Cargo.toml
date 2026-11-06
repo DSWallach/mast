@@ -113,6 +113,7 @@ x11rb = { version = "0.14.0", features = ["image"] }
 ctor = "1"
 mast-sync.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 mimalloc.workspace = true
 tracing-subscriber.workspace = true
