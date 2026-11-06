@@ -18,6 +18,22 @@ pub enum ButtonSize {
     Md,
 }
 
+fn is_area(theme: &Theme) -> bool {
+    theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area
+}
+
+fn is_industrial(theme: &Theme) -> bool {
+    theme.ui_style.controls == crate::ui_style::ControlVariant::Key
+}
+
+fn layout_type_adjustment(theme: &Theme) -> f32 {
+    match theme.ui_style.layout {
+        crate::ui_style::UiLayout::Minimal => 0.0,
+        crate::ui_style::UiLayout::Compact => -1.0,
+        crate::ui_style::UiLayout::Guided => 1.0,
+    }
+}
+
 fn layout_spacing(theme: &Theme) -> f32 {
     match theme.ui_style.layout {
         crate::ui_style::UiLayout::Minimal => 1.0,
@@ -125,16 +141,39 @@ pub fn section_card(theme: &Theme) -> gpui::Div {
         .border_1()
         .border_color(theme.border)
         .bg(theme.card_glass_bg())
+        .when(is_area(theme), |el| {
+            el.bg(theme.identity_color("").opacity(0.08))
+                .border_color(gpui::transparent_black())
+        })
+        .when(is_industrial(theme), |el| {
+            el.bg(theme.industrial_colors().panel)
+                .border_color(theme.industrial_colors().rule)
+        })
         .overflow_hidden()
         .flex()
         .flex_col()
 }
 
+/// A card with an optional Industrial faceplate label.
+pub fn section_card_with_label(theme: &Theme, label: &'static str) -> Div {
+    section_card(theme).when(is_industrial(theme), |el| {
+        el.child(
+            div()
+                .text_size(crate::typography::ui_rems(
+                    10.0 + layout_type_adjustment(theme),
+                ))
+                .font_family(theme.font_mono.clone())
+                .text_color(theme.text_muted)
+                .child(label),
+        )
+    })
+}
+
 pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
     div()
         .flex_none()
-        .px(px(8.0))
-        .py(px(2.0))
+        .px(px(8.0 * layout_spacing(theme)))
+        .py(px(2.0 * layout_spacing(theme)))
         .rounded_full()
         .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
             el.rounded(px(radius))
@@ -145,8 +184,15 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         )
         .border_1()
         .border_color(theme.border)
-        .text_size(crate::typography::ui_rems(10.5))
+        .text_size(crate::typography::ui_rems(
+            10.5 + layout_type_adjustment(theme),
+        ))
         .text_color(theme.text_muted)
+        .when(is_area(theme), |el| {
+            el.bg(theme.identity_color("").opacity(0.12))
+                .border_color(gpui::transparent_black())
+                .text_color(theme.identity_foreground(theme.identity_color("")))
+        })
         .child(label.into())
 }
 
@@ -155,8 +201,8 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
     let emerald_text = theme.success_muted; // emerald-300
     div()
         .flex_none()
-        .px(px(8.0))
-        .py(px(2.0))
+        .px(px(8.0 * layout_spacing(theme)))
+        .py(px(2.0 * layout_spacing(theme)))
         .rounded_full()
         .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
             el.rounded(px(radius))
@@ -166,58 +212,63 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
             |el| el.rounded_full(),
         )
         .bg(emerald.opacity(0.12))
-        .text_size(crate::typography::ui_rems(10.5))
+        .text_size(crate::typography::ui_rems(
+            10.5 + layout_type_adjustment(theme),
+        ))
         .text_color(emerald_text.opacity(0.9))
         .child(label.into())
 }
 
 pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
+    let scale = layout_spacing(theme);
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         return div()
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .px(px(8.0))
-            .h(px(24.0))
-            .rounded(px(4.0))
+            .gap(px(8.0 * scale))
+            .px(px(8.0 * scale))
+            .h(px(24.0 * scale))
+            .rounded(px(4.0 * scale))
             .border_1()
             .border_color(theme.industrial_colors().rule)
             .bg(theme.industrial_colors().key)
-            .text_size(crate::typography::ui_rems(10.0))
+            .text_size(crate::typography::ui_rems(
+                10.0 + layout_type_adjustment(theme),
+            ))
             .text_color(theme.text)
             .child(
                 div()
                     .relative()
-                    .w(px(36.0))
-                    .h(px(12.0))
+                    .w(px(36.0 * scale))
+                    .h(px(12.0 * scale))
                     .border_1()
                     .border_color(theme.industrial_colors().rule)
                     .bg(theme.industrial_colors().pressed)
                     .child(
                         div()
                             .absolute()
-                            .left(px(5.0))
+                            .left(px(5.0 * scale))
                             .bottom(px(-4.0))
-                            .w(px(1.0))
-                            .h(px(3.0))
+                            .w(px(1.0 * scale))
+                            .h(px(3.0 * scale))
                             .bg(theme.industrial_colors().rule),
                     )
                     .child(
                         div()
                             .absolute()
-                            .right(px(5.0))
+                            .right(px(5.0 * scale))
                             .bottom(px(-4.0))
-                            .w(px(1.0))
-                            .h(px(3.0))
+                            .w(px(1.0 * scale))
+                            .h(px(3.0 * scale))
                             .bg(theme.industrial_colors().rule),
                     )
                     .child(
                         div()
                             .absolute()
-                            .top(px(1.0))
-                            .left(px(if on { 25.0 } else { 1.0 }))
-                            .size(px(8.0))
+                            .top(px(1.0 * scale))
+                            .left(px(if on { 25.0 * scale } else { 1.0 * scale }))
+                            .size(px(8.0 * scale))
                             .rounded_full()
                             .border_1()
                             .border_color(theme.industrial_colors().rule)
@@ -225,8 +276,8 @@ pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
                             .when(on, |el| {
                                 el.child(
                                     div()
-                                        .size(px(4.0))
-                                        .m(px(2.0))
+                                        .size(px(4.0 * scale))
+                                        .m(px(2.0 * scale))
                                         .rounded_full()
                                         .bg(theme.accent),
                                 )
@@ -237,17 +288,23 @@ pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
     }
     div()
         .flex_none()
-        .w(px(32.0))
-        .h(px(18.0))
+        .w(px(32.0 * scale))
+        .h(px(18.0 * scale))
         .rounded_full()
-        .bg(if on { theme.text } else { ink(0.15) })
+        .bg(if on && is_area(theme) {
+            theme.identity_color("")
+        } else if on {
+            theme.text
+        } else {
+            ink(0.15)
+        })
         .relative()
         .child(
             div()
                 .absolute()
-                .top(px(2.0))
-                .left(px(if on { 16.0 } else { 2.0 }))
-                .size(px(14.0))
+                .top(px(2.0 * scale))
+                .left(px(if on { 16.0 * scale } else { 2.0 * scale }))
+                .size(px(14.0 * scale))
                 .rounded_full()
                 .bg(if on { theme.on_solid } else { ink(0.7) }),
         )
@@ -255,7 +312,9 @@ pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
 
 pub fn field_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
     div()
-        .text_size(crate::typography::ui_rems(13.0))
+        .text_size(crate::typography::ui_rems(
+            13.0 + layout_type_adjustment(theme),
+        ))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
         .child(label.into())
@@ -275,7 +334,27 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
 
 /// A selectable row; selection uses the active theme's semantic role.
 pub fn list_row(theme: &Theme, selected: bool) -> Div {
-    card_row(theme, true).when(selected, |el| el.bg(theme.element_active))
+    let identity = theme.identity_color("");
+    let colors = theme.industrial_colors();
+    card_row(theme, true)
+        .when(selected && !is_area(theme) && !is_industrial(theme), |el| {
+            el.bg(theme.element_active)
+        })
+        .when(selected && is_area(theme), |el| {
+            el.rounded_full()
+                .bg(identity)
+                .text_color(theme.identity_text(identity))
+                .child(
+                    div()
+                        .size(px(7.0))
+                        .rounded_full()
+                        .bg(theme.identity_text(identity)),
+                )
+        })
+        .when(selected && is_industrial(theme), |el| {
+            el.bg(colors.pressed)
+                .child(div().size(px(7.0)).rounded_full().bg(colors.signal))
+        })
 }
 
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
@@ -283,18 +362,21 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
-        .px(px(8.0))
-        .py(px(6.0))
+        .gap(px(10.0 * layout_spacing(theme)))
+        .px(px(8.0 * layout_spacing(theme)))
+        .py(px(6.0 * layout_spacing(theme)))
         .rounded(px(theme
             .ui_style
             .tokens
             .control_radius
             .unwrap_or(crate::popover::MENU_ITEM_RADIUS)))
-        .when_some(theme.ui_style.tokens.grid, |el, grid| el.py(px(grid)))
+        .when_some(theme.ui_style.tokens.grid, |el, grid| {
+            el.py(px(grid * layout_spacing(theme)))
+        })
         .text_size(crate::typography::ui_rems(
-            theme.ui_style.tokens.body_size.unwrap_or(13.0),
+            theme.ui_style.tokens.body_size.unwrap_or(13.0) + layout_type_adjustment(theme),
         ))
+        .when(is_area(theme), |el| el.rounded_full())
         .cursor_pointer();
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         let fade_key = fade_key.into();
@@ -429,24 +511,32 @@ pub fn icon_key<T: gpui::Styled + gpui::ParentElement + gpui::StatefulInteractiv
 }
 
 pub fn display(theme: &Theme) -> Div {
-    let background = if theme.appearance.is_dark() {
-        theme.bg
-    } else {
-        theme.solid
-    };
-    div()
-        .px(px(8.0))
-        .py(px(3.0))
-        .border_1()
-        .border_color(theme.industrial_colors().rule)
-        .bg(background)
-        .text_color(if theme.appearance.is_dark() {
-            theme.text
-        } else {
-            theme.on_solid
-        })
+    let base = div()
+        .px(px(8.0 * layout_spacing(theme)))
+        .py(px(3.0 * layout_spacing(theme)))
         .font_family(theme.font_mono.clone())
-        .text_size(crate::typography::ui_rems(10.0))
+        .text_size(crate::typography::ui_rems(
+            10.0 + layout_type_adjustment(theme),
+        ));
+    if is_industrial(theme) {
+        let background = if theme.appearance.is_dark() {
+            theme.bg
+        } else {
+            theme.solid
+        };
+        base.border_1()
+            .border_color(theme.industrial_colors().rule)
+            .bg(background)
+            .text_color(if theme.appearance.is_dark() {
+                theme.text
+            } else {
+                theme.on_solid
+            })
+    } else {
+        base.rounded_full()
+            .bg(theme.element_hover)
+            .text_color(theme.text_muted)
+    }
 }
 
 /// Semantic status colour supplied by the active theme.
@@ -458,12 +548,28 @@ pub enum Status {
 }
 
 pub fn status_dot(theme: &Theme, status: Status) -> Div {
-    let color = match status {
-        Status::Success => theme.success,
-        Status::Warning => theme.warning,
-        Status::Danger => theme.danger,
+    let color = if is_area(theme) {
+        theme.identity_color("")
+    } else {
+        match status {
+            Status::Success => theme.success,
+            Status::Warning => theme.warning,
+            Status::Danger => theme.danger,
+        }
     };
-    div().size(px(7.0)).rounded_full().bg(color)
+    if is_industrial(theme) {
+        div()
+            .size(px(11.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.industrial_colors().rule)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(7.0)).rounded_full().bg(color))
+    } else {
+        div().size(px(7.0)).rounded_full().bg(color)
+    }
 }
 
 /// Status dot with the word revealed by the active layout.
@@ -481,7 +587,10 @@ pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div
     let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area;
     let identity = theme.identity_color("");
     let item = div()
-        .when(selected || area, |el| el.px(px(8.0)).py(px(5.0)))
+        .when(selected || area, |el| {
+            el.px(px(8.0 * layout_spacing(theme)))
+                .py(px(5.0 * layout_spacing(theme)))
+        })
         .when(selected && !area, |el| el.bg(theme.surface_raised))
         .when(area, |el| {
             el.rounded_full().font_weight(gpui::FontWeight::SEMIBOLD)
@@ -489,6 +598,14 @@ pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div
         .when(area && selected, |el| {
             el.bg(identity).text_color(theme.identity_text(identity))
         })
+        .when(
+            theme.ui_style.layout != crate::ui_style::UiLayout::Minimal,
+            |el| {
+                el.text_size(crate::typography::ui_rems(
+                    13.0 + layout_type_adjustment(theme),
+                ))
+            },
+        )
         .child(label.into());
     segmented_key(item, theme, selected)
 }
@@ -519,17 +636,17 @@ pub fn user_message_bubble(
             .radius_roles()
             .bubble
             .unwrap_or(Theme::BUBBLE_RADIUS)))
-        .px(px(16.0))
-        .py(px(10.0))
+        .px(px(16.0 * layout_spacing(theme)))
+        .py(px(10.0 * layout_spacing(theme)))
         .when(variant == ConversationVariant::Industrial, |el| {
             el.bg(theme.surface)
-                .py(px(8.0))
+                .py(px(8.0 * layout_spacing(theme)))
                 .border_1()
                 .border_color(theme.border)
         })
         .when(area, |el| el.bg(identity).max_w_full().w_full())
         .text_size(crate::typography::ui_rems(
-            theme.ui_style.type_roles().body.unwrap_or(14.0),
+            theme.ui_style.type_roles().body.unwrap_or(14.0) + layout_type_adjustment(theme),
         ))
         .line_height(crate::typography::ui_rems(line_height))
         .text_color(text)
@@ -586,7 +703,7 @@ pub fn agent_message_bubble(
             })
             .child(
                 div()
-                    .p(px(10.0))
+                    .p(px(10.0 * layout_spacing(theme)))
                     .border_1()
                     .border_color(theme.industrial_colors().rule)
                     .bg(theme.industrial_colors().panel)
@@ -595,7 +712,23 @@ pub fn agent_message_bubble(
             .into_any_element()
     } else if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area {
         div()
+            .relative()
+            .min_w_0()
+            .when(first, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(-18.0))
+                        .top(px(4.0))
+                        .size(px(10.0))
+                        .rounded_full()
+                        .bg(identity),
+                )
+            })
             .font_family("EB Garamond")
+            .text_size(crate::typography::ui_rems(
+                16.0 + layout_type_adjustment(theme),
+            ))
             .text_color(theme.identity_foreground(identity))
             .child(content)
             .into_any_element()
@@ -639,6 +772,9 @@ pub fn icon_button(
         .items_center()
         .gap(px(4.0))
         .size(px(theme.ui_style.tokens.control_size))
+        .when(is_area(theme), |el| {
+            el.rounded_full().bg(theme.identity_color("").opacity(0.12))
+        })
         .text_color(theme.text)
         .child(
             crate::icons::icon(icon)

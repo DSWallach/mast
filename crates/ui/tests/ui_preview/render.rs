@@ -328,7 +328,7 @@ impl Render for ComponentMatrix {
                         .into_any_element(),
                     10 => c::section_header(&theme, "Section", Some("Helpful guidance"))
                         .into_any_element(),
-                    11 => c::section_card(&theme)
+                    11 => c::section_card_with_label(&theme, "PANEL")
                         .mt(px(0.))
                         .child("Card")
                         .into_any_element(),
