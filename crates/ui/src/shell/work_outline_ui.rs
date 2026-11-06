@@ -520,7 +520,7 @@ pub(crate) fn bind_work_outline_navigation(cx: &mut App, keymap: &KeymapConfig) 
 /// The shortcut reference card: Outline keys (Navigate, Edit, Restructure)
 /// beside the Work Outline commands, every binding read from the live
 /// keymap. Read-only; Esc or Close dismisses it.
-fn shortcuts_card(theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) -> AnyElement {
     let keymap = crate::settings::current(cx).keymap;
     let groups = crate::work_outline::hints::shortcut_reference(&keymap);
     let group_el = |group: &crate::work_outline::hints::ShortcutGroup| {
@@ -556,6 +556,9 @@ fn shortcuts_card(theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let (outline_groups, command_groups) = groups.split_at(3);
     popover::dialog_card(theme)
         .w(px(600.0))
+        .id("work-outline-shortcuts-scroll")
+        .max_h(px(viewport_height * 0.7))
+        .overflow_y_scroll()
         .debug_selector(|| "work-outline-shortcuts".into())
         .child(popover::dialog_title(theme, "Outline shortcuts"))
         .child(
@@ -1252,7 +1255,7 @@ impl Shell {
                 cx,
             ),
             WorkOutlineModal::HandOff(dialog) => super::hand_off_ui::hand_off_card(dialog, &theme, cx),
-            WorkOutlineModal::Shortcuts => shortcuts_card(&theme, cx),
+            WorkOutlineModal::Shortcuts => shortcuts_card(&theme, f32::from(viewport.height), cx),
             WorkOutlineModal::Confirm(dialog) => {
                 let accept = if dialog.destructive {
                     popover::btn_danger(&theme, &dialog.confirm_label)

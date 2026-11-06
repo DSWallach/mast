@@ -6035,7 +6035,7 @@ impl Overview {
             div()
                 .id("outline-shortcuts")
                 .debug_selector(|| "outline-shortcuts".into())
-                .aria_label("Shortcuts")
+                .aria_label("Keyboard shortcuts")
                 .flex()
                 .items_center()
                 .px(px(6.0))
@@ -6046,8 +6046,9 @@ impl Overview {
                 .text_color(theme.text_muted)
                 .hover(|el| el.text_color(theme.text))
                 .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
+                .child("?")
                 .hint(
-                    "Shortcuts",
+                    "Keyboard shortcuts",
                     HintKey::Outline(crate::shell::work_outline_ui::OutlineNavKey::ShowShortcuts),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
