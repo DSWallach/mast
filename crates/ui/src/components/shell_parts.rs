@@ -1,7 +1,41 @@
 //! Components used by shell chrome.
 
 use crate::{icons::icon, motion, theme::Theme};
-use gpui::{AnyElement, App, IntoElement, MouseButton, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, IntoElement, MouseButton, SharedString, Window, div, prelude::*, px};
+
+pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
+    div()
+        .h(px(if super::is_area(theme) {
+            0.0
+        } else {
+            theme.ui_style.tokens.rule_width.unwrap_or(1.0)
+        }))
+        .bg(if theme.ui_style.tokens.rule_width.is_some() {
+            theme.border
+        } else {
+            theme.border.opacity(0.6)
+        })
+}
+
+pub(crate) fn sidebar_section_label(theme: &Theme, label: SharedString) -> gpui::Div {
+    let emphasized = super::is_industrial(theme) || super::is_area(theme);
+    let label = if emphasized {
+        SharedString::from(crate::popover::tracked_upper(&label))
+    } else {
+        label
+    };
+    div()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.tokens.label_size.unwrap_or(12.0),
+        ))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if emphasized {
+            theme.text_muted
+        } else {
+            theme.text_muted.opacity(0.5)
+        })
+        .child(label)
+}
 
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).

@@ -2062,14 +2062,9 @@ fn promote_local_device_group<T>(
     }
 }
 
-/// Shared quiet rule for sidebar groups and palette sections.
-pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
-    div().h(px(if theme.ui_style.id == crate::ui_style::UiStyleId::Area { 0.0 } else { theme.ui_style.tokens.rule_width.unwrap_or(1.0) })).bg(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { theme.border.opacity(0.6) })
-}
+pub(super) use crate::components::shell_parts::sidebar_separator;
 
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
-    let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key || theme.ui_style.id == crate::ui_style::UiStyleId::Area;
-    let label = if key { SharedString::from(popover::tracked_upper(&label)) } else { label };
     div()
         .flex()
         .flex_row()
@@ -2081,11 +2076,7 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
         .child(super::sidebar_faded_label(
             "sidebar-disclosure-label".into(),
             false,
-            div()
-                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.label_size.unwrap_or(12.0)))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(if key { theme.text_muted } else { theme.text_muted.opacity(0.5) })
-                .child(label),
+            crate::components::shell_parts::sidebar_section_label(theme, label),
         ))
         .child(div().flex_1())
         .child(chevron)
