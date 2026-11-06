@@ -98,7 +98,7 @@ The full list is in [docs/guide/keyboard.md](docs/guide/keyboard.md).
 
 ## Docs
 
-Guides:
+Guides (see the [guide index](docs/guide/README.md)):
 
 - [Getting started](docs/guide/getting-started.md)
 - [What changes when you update](docs/guide/updating-to-mast.md)
@@ -106,6 +106,10 @@ Guides:
 - [Orchestrating with coordinator and worker chats](docs/guide/orchestrating.md)
 - [Plans and artifacts](docs/guide/plans-and-artifacts.md)
 - [GitHub and Linear](docs/guide/github-and-linear.md)
+- [Review a change](docs/guide/review.md)
+- [Respond to Needs you](docs/guide/needs-you.md)
+- [Blueprints and child templates](docs/guide/templates.md)
+- [Friction and menu bar](docs/guide/friction-and-status.md)
 - [Accounts](docs/guide/accounts.md)
 - [Keyboard](docs/guide/keyboard.md)
 

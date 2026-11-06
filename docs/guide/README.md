@@ -1,0 +1,14 @@
+# Guides
+
+- [Getting started](getting-started.md)
+- [Work Outline](work-outline.md)
+- [Orchestrating and hand-off](orchestrating.md)
+- [Review a change](review.md)
+- [Needs you](needs-you.md)
+- [Blueprints and child templates](templates.md)
+- [Friction and menu bar](friction-and-status.md)
+- [Plans and artifacts](plans-and-artifacts.md)
+- [GitHub and Linear](github-and-linear.md)
+- [Accounts](accounts.md)
+- [Keyboard](keyboard.md)
+- [Updating](updating-to-mast.md)
