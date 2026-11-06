@@ -90,6 +90,9 @@ impl Harness for HeldHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // Publish the prompt only after the completion receiver exists: tests
+        // use its appearance as the signal that the turn can be finished.
+        let mut finish = self.finish.subscribe();
         self.prompts.lock().unwrap().push(request.prompt.clone());
         self.requests.lock().unwrap().push(request.clone());
         if self.asks {
@@ -104,7 +107,6 @@ impl Harness for HeldHarness {
                 multi_select: false,
             }]);
         }
-        let mut finish = self.finish.subscribe();
         let mut steering = controls.steering;
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::Mock,
@@ -646,7 +648,7 @@ async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
 
     harness.finish.send(()).unwrap();
     wait_for(
-        || user_messages(&core).iter().any(|m| m == "first queued"),
+        || prompts.lock().unwrap().iter().any(|p| p == "first queued"),
         "first queued turn",
     )
     .await;

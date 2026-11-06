@@ -299,8 +299,10 @@ case "$turnline" in
     has "$thread_line" "$want" ||
       { fail_turn "$tid" "thread param missing: $want"; exit 0; }
   done
+  # JSON object key order changes when another crate enables serde_json's
+  # preserve_order feature in the full workspace build.
   for want in '"approvalPolicy":"on-request"' \
-    '"sandboxPolicy":{"networkAccess":true,"type":"workspaceWrite"}'; do
+    '"networkAccess":true' '"type":"workspaceWrite"'; do
     has "$turnline" "$want" ||
       { fail_turn "$tid" "turn param missing: $want"; exit 0; }
   done
