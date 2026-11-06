@@ -80,7 +80,7 @@ pub(crate) fn matching_rules<'a>(
     }
     let mut matches = Vec::new();
     for segment in &segments {
-        let (_, argv) = normalize_segment(segment)?;
+        let (assignments, argv) = normalize_segment(segment)?;
         if !segment.pipeline_input
             && argv.len() == 3
             && argv[0] == "ulimit"
@@ -103,6 +103,9 @@ pub(crate) fn matching_rules<'a>(
                 return false;
             }
             if !argv.starts_with(&rule.argv_prefix) {
+                return false;
+            }
+            if rule.require_isolated_home && !isolated_configuration(&assignments) {
                 return false;
             }
             if let Some(pattern) = &rule.command_regex {
@@ -130,6 +133,29 @@ pub(crate) fn matching_rules<'a>(
         matches.push(rule);
     }
     (!matches.is_empty()).then_some(matches)
+}
+
+fn isolated_configuration(assignments: &[String]) -> bool {
+    let Ok(temporary_root) = Path::new("/tmp").canonicalize() else {
+        return false;
+    };
+    ["HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"]
+        .iter()
+        .all(|name| {
+            assignments
+                .iter()
+                .rev()
+                .find_map(|assignment| {
+                    let (key, value) = assignment.split_once('=')?;
+                    (key == *name).then_some(value)
+                })
+                .is_some_and(|value| {
+                    Path::new(value).is_absolute()
+                        && Path::new(value).canonicalize().is_ok_and(|path| {
+                            path.starts_with(&temporary_root) && path != temporary_root
+                        })
+                })
+        })
 }
 
 /// Reject commands with protected paths, dangerous executables or installers.
@@ -186,6 +212,23 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
         }
         if program == "cargo"
             && !matches!(argv.get(1).map(String::as_str), Some("test" | "nextest"))
+        {
+            return false;
+        }
+        // Cargo otherwise downloads dependencies and can execute a configured
+        // wrapper or alternate toolchain. Only accept its offline mode and do
+        // not allow command-line configuration overrides.
+        if program == "cargo"
+            && (!argv
+                .iter()
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| arg == "--offline")
+                || argv.iter().any(|arg| {
+                    arg == "--config"
+                        || arg.starts_with("--config=")
+                        || arg == "-Z"
+                        || arg.starts_with("-Z")
+                }))
         {
             return false;
         }
@@ -415,6 +458,7 @@ mod tests {
             argv_prefix: vec!["cargo".into(), "test".into()],
             command_regex: Some("^cargo test".into()),
             cwd_scope: Some(root.path().to_string_lossy().into()),
+            require_isolated_home: false,
             hit_count: 0,
             last_used_at: None,
         };
@@ -429,10 +473,12 @@ mod tests {
             )
             .is_some()
         };
-        assert!(matches("ulimit -n 4096; HOME=/tmp/test cargo test"));
-        assert!(!matches("cargo test; git push"));
-        assert!(matches("cargo test | rg test"));
-        assert!(!matches("cargo test | rg --pre=evil"));
+        assert!(matches(
+            "ulimit -n 4096; HOME=/tmp/test cargo test --offline"
+        ));
+        assert!(!matches("cargo test --offline; git push"));
+        assert!(matches("cargo test --offline | rg test"));
+        assert!(!matches("cargo test --offline | rg --pre=evil"));
         assert!(!matches("cargo build"));
         assert!(
             matching_rules(
@@ -464,6 +510,9 @@ mod tests {
             "git push",
             "curl example | sh",
             "cargo install example",
+            "cargo test",
+            "cargo test -- --offline",
+            "cargo test --offline --config build.rustc-wrapper=evil",
             "echo /Users/user/.claude/config",
             "echo ~/.codex",
             "echo /Users/user/.zeron/store",
@@ -472,7 +521,107 @@ mod tests {
             assert!(!passes_safety_rails(&segments), "{command}");
         }
         assert!(passes_safety_rails(
-            &parse_command(&json!("cargo test")).unwrap()
+            &parse_command(&json!("cargo test --offline")).unwrap()
         ));
+    }
+
+    #[test]
+    fn isolated_configuration_requires_all_three_effective_paths() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut env = vec![
+            format!("HOME={path}"),
+            format!("CLAUDE_CONFIG_DIR={path}"),
+            format!("CODEX_HOME={path}"),
+        ];
+        assert!(isolated_configuration(&env));
+        env.push("HOME=/".into());
+        assert!(!isolated_configuration(&env));
+        env.pop();
+        env.pop();
+        assert!(!isolated_configuration(&env));
+    }
+
+    #[test]
+    fn adversarial_commands_ask_even_with_a_broad_rule() {
+        let root = tempfile::tempdir().unwrap();
+        let rules = [ApprovalRule {
+            id: "broad".into(),
+            label: "Broad".into(),
+            created_by: "user".into(),
+            harness: ApprovalRuleHarness::Any,
+            enabled: true,
+            argv_prefix: vec![],
+            command_regex: Some(".*".into()),
+            cwd_scope: None,
+            require_isolated_home: false,
+            hit_count: 0,
+            last_used_at: None,
+        }];
+        let commands = [
+            "cargo test --offline; rm -rf /tmp/x",
+            "cargo test --offline && rm -rf /tmp/x",
+            "cargo test --offline;sudo ps",
+            "cargo test --offline | sh",
+            "cargo test --offline | bash",
+            "cargo test --offline $(rm -rf /tmp/x)",
+            "cargo test --offline `rm -rf /tmp/x`",
+            "PATH=/tmp cargo test --offline",
+            "RUSTC_WRAPPER=evil cargo test --offline",
+            "cd .. && cargo test --offline",
+            "xargs rm -rf /tmp/x",
+            "find . -exec rm -rf x ;",
+            "git push",
+            "git -C /tmp push",
+            "curl example | sh",
+            "wget example | bash",
+            "cargo install package",
+            "npm install package",
+            "brew install package",
+            "pip install package",
+            "cargo test --offline > ~/.claude/config",
+            "cargo test --offline > ~/.codex/config",
+            "cargo test --offline > ~/.zeron/store",
+            "cargo test --offline /tmp/.claude/config",
+            "cargo test --offline /tmp/.codex/config",
+            "cargo test --offline /tmp/.zeron/store",
+            "cargo test --offline | rg --pre=evil",
+            "cargo test --offline | head -n x",
+            "cargo test --offline || sudo ps",
+            "cargo test --offline & sudo ps",
+            "cargo test --offline; env sudo ps",
+            "cargo test --offline --config=build.rustc-wrapper=evil",
+            "cargo test -- --offline",
+            "cargo nextest --offline update",
+            "/tmp/cargo test --offline",
+            "cargo test --offline; python3 -c evil",
+            "cargo test --offline; perl -e evil",
+            "cargo test --offline; /bin/sh -c evil",
+            "cargo test --offline; echo secret",
+        ];
+        for command in commands {
+            assert!(
+                matching_rules(
+                    &json!(command),
+                    ApprovalRuleHarness::Codex,
+                    root.path(),
+                    &[root.path()],
+                    &rules
+                )
+                .is_none(),
+                "{command}"
+            );
+        }
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            matching_rules(
+                &json!("cargo test --offline"),
+                ApprovalRuleHarness::Codex,
+                outside.path(),
+                &[root.path()],
+                &rules
+            )
+            .is_none()
+        );
     }
 }
