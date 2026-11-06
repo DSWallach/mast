@@ -263,6 +263,27 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn chat_menu_only_offers_review_for_resolved_target(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, directory.path());
+        shell.update(cx, |shell, cx| {
+            shell.chat_menu.open(ChatMenuState { chat_id: "worker".into(), position: gpui::point(px(20.0), px(20.0)), page: ChatMenuPage::Root, closeable: false });
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-menu-review-work").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.branch_review_targets.insert("worker".into(), mast_proto::ReviewTarget::Branch {
+                repo: Some("acme/repo".into()), checkout_path: Some("/repo".into()), branch: Some("feature".into()),
+                base_ref: Some("main".into()), base_sha: Some("base".into()), head_sha: "head".into(),
+            });
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-menu-review-work").is_some());
+    }
+
     const T1: &str = "2026-10-20T10:00:00Z";
     const T2: &str = "2026-10-21T10:00:00Z";
     const T3: &str = "2026-10-22T10:00:00Z";

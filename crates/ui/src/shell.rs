@@ -9376,6 +9376,7 @@ impl Shell {
                     .when(branch_review_available, |menu| menu.child(
                         popover::menu_row(&theme, false, format!("chat-menu-review-work-{chat_id}"))
                             .id("chat-menu-review-work")
+                            .debug_selector(|| "chat-menu-review-work".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
                                 this.open_branch_review_for_chat(branch_review_id.clone(), cx);
