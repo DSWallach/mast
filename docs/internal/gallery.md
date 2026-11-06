@@ -16,8 +16,8 @@ fixture stubs: their real views are coupled to shell state and RPC-backed review
 loading. Their controls do not implement the real views' behavior. The icon button, tabs, status dots, sidebar rows and outline rows are
 illustrative fixtures rather than the actual production controls.
 
-The temporary style list reflects the three styles on the integration branch;
-`gallery_styles()` must return `UiStyleId::ALL` when the shared registry lands.
+The style list comes from the shared registry;
+`gallery_styles()` returns `UiStyleId::ALL`, so new looks appear automatically.
 Side-by-side comparison is deferred: Mast's style is a process-global value, so
 it needs a scoped style override to render multiple styles at once.
 

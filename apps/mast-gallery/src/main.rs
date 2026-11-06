@@ -34,12 +34,7 @@ const STORIES: [(Story, &str); 5] = [
 ];
 
 fn gallery_styles() -> &'static [ui_style::UiStyleId] {
-    // TODO: Return UiStyleId::ALL when the shared registry lands.
-    &[
-        ui_style::UiStyleId::Minimal,
-        ui_style::UiStyleId::Dense,
-        ui_style::UiStyleId::Guided,
-    ]
+    ui_style::UiStyleId::ALL
 }
 
 fn switch_style(id: ui_style::UiStyleId, window: &mut Window, cx: &mut App) {

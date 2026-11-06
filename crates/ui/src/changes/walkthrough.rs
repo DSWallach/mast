@@ -1277,7 +1277,7 @@ pub(crate) fn snapshot_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     cx.new(|cx| Walkthrough {
         review, files: Arc::new(Vec::new()), coverage: None,
         viewed: BTreeSet::new(), seen: HashSet::new(), target_selected: true,
-        selected: 0, note_expanded: false, tour: true, stale_head: None,
+        selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: true, stale_head: None,
         focus: cx.focus_handle(), changes: None, _changes_observer: None,
         step_input: None, _step_input_events: None, step_panel: None,
         step_task: None, step_cancelled: None,
