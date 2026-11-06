@@ -448,6 +448,7 @@ impl Changes {
             .rounded_md()
             .bg(theme.surface_raised)
             .text_color(theme.text)
+            .text_size(crate::typography::ui_rems(12.0))
             .child("Explain")
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
         match &self.explanation_panel {
@@ -474,7 +475,8 @@ impl Changes {
                     .id("explanation-answer-panel")
                     .debug_selector(|| "explanation-answer-panel".into())
                     .w(px(320.0))
-                    .p_3()
+                    .p_2()
+                    .text_size(crate::typography::ui_rems(12.0))
                     .flex()
                     .flex_col()
                     .gap_2()

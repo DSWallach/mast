@@ -353,6 +353,7 @@ pub(crate) struct Walkthrough {
     seen: HashSet<String>,
     target_selected: bool,
     selected: usize,
+    note_expanded: bool,
     tour: bool,
     stale_head: Option<String>,
     focus: FocusHandle,
@@ -532,6 +533,7 @@ impl Walkthrough {
             seen: HashSet::new(),
             target_selected: false,
             selected: 0,
+            note_expanded: false,
             tour: true,
             stale_head: None,
             focus: cx.focus_handle(),
@@ -556,6 +558,7 @@ impl Walkthrough {
         }
         if self.selected != index {
             self.cancel_step_question();
+            self.note_expanded = false;
         }
         self.selected = index;
         let coverage = self.coverage().clone();
@@ -710,6 +713,7 @@ impl Render for Walkthrough {
                     .px_2()
                     .py_1()
                     .flex()
+                    .items_center()
                     .gap_1()
                     .cursor_pointer()
                     .when(selected, |row| row.bg(theme.element_active))
@@ -732,16 +736,32 @@ impl Render for Walkthrough {
                                 " "
                             }),
                     )
-                    .child(format!(
-                        "{}. {}{}",
-                        index + 1,
-                        step.title,
-                        if !self.files.is_empty() && !coverage.complete[index] {
-                            " · Outdated"
-                        } else {
-                            ""
-                        }
-                    )),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(format!(
+                                "{}. {}{}",
+                                index + 1,
+                                step.title,
+                                if !self.files.is_empty() && !coverage.complete[index] {
+                                    " · Outdated"
+                                } else {
+                                    ""
+                                }
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_color(match step.risk {
+                                mast_proto::ReviewRisk::High => theme.danger,
+                                mast_proto::ReviewRisk::Med => theme.warning,
+                                _ => theme.text_muted,
+                            })
+                            .child("•"),
+                    ),
             );
         }
         let mut uncovered = div()
@@ -777,33 +797,108 @@ impl Render for Walkthrough {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .p_3()
-                .bg(theme.surface_card)
+                .text_size(crate::typography::ui_rems(12.0))
                 .when(theme.ui_style.behavior.help_cards, |el| {
-                    el.child(format!("Step {} of {}", self.selected + 1, self.review.steps.len()))
-                        .child(div().flex().gap_2()
-                            .child(div().id("review-previous-step").cursor_pointer().child("Previous")
-                                .on_click(cx.listener(|this, _, _, cx| this.move_step(false, cx))))
-                            .child(div().id("review-next-step").cursor_pointer().child("Next")
-                                .on_click(cx.listener(|this, _, _, cx| this.move_step(true, cx)))))
+                    el.child(format!(
+                        "Step {} of {}",
+                        self.selected + 1,
+                        self.review.steps.len()
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("review-previous-step")
+                                    .cursor_pointer()
+                                    .child("Previous")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.move_step(false, cx)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("review-next-step")
+                                    .cursor_pointer()
+                                    .child("Next")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.move_step(true, cx)),
+                                    ),
+                            ),
+                    )
                 })
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .child(step.title.clone()),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(step.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("review-risk")
+                                .px_2()
+                                .rounded_md()
+                                .bg(theme.surface_raised)
+                                .text_color(theme.text_muted)
+                                .child(format!("{:?}", step.risk)),
+                        ),
                 )
                 .child(
                     div()
-                        .id("review-risk")
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme.surface_raised)
-                        .child(format!("Risk: {:?}", step.risk)),
+                        .id("review-note-body")
+                        .debug_selector(|| "review-note-body".into())
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .when(!self.note_expanded, |el| {
+                            el.max_h(px(64.0)).overflow_hidden()
+                        })
+                        .child(step.what.clone())
+                        .child(
+                            div()
+                                .text_color(theme.text_muted)
+                                .child(format!("Why: {}", step.why)),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.text_muted)
+                                .child(step.risk_note.clone()),
+                        ),
                 )
-                .child(format!("What: {}", step.what))
-                .child(format!("Why: {}", step.why))
-                .child(step.risk_note.clone())
+                .child(
+                    div()
+                        .id("review-note-more")
+                        .debug_selector(|| "review-note-more".into())
+                        .cursor_pointer()
+                        .text_color(theme.text_muted)
+                        .child(if self.note_expanded { "Less" } else { "More" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.note_expanded = !this.note_expanded;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(step.tags.iter().map(|tag| {
+                            div()
+                                .px_2()
+                                .rounded_md()
+                                .bg(theme.surface_raised)
+                                .text_color(theme.text_muted)
+                                .child(tag.clone())
+                        })),
+                )
                 .when_some(self.step_input.clone(), |el, input| {
                     el.child(
                         div()
@@ -842,8 +937,6 @@ impl Render for Walkthrough {
                     let mut reply = div()
                         .id("review-step-reply")
                         .debug_selector(|| "review-step-reply".into())
-                        .p_2()
-                        .bg(theme.surface_raised)
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -912,11 +1005,17 @@ impl Render for Walkthrough {
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_3()
+            .gap_2()
+            .p_2()
+            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text)
             .bg(theme.bg)
-            .children(crate::ui_style::help_card("review-walkthrough", "Follow each step to understand the change, then mark it reviewed.", &theme, cx))
+            .children(crate::ui_style::help_card(
+                "review-walkthrough",
+                "Follow each step to understand the change, then mark it reviewed.",
+                &theme,
+                cx,
+            ))
             .when(!self.target_selected && self.changes.is_some(), |view| {
                 view.child(
                     div()
@@ -940,20 +1039,36 @@ impl Render for Walkthrough {
             .when_some(controls, |view, controls| {
                 view.child(crate::surface_chrome::toolbar(&theme).child(controls))
             })
-            .when(theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline, |view| {
-                let keymap = crate::settings::current(cx).keymap;
-                view.child(div().flex().gap(px(6.0)).children([
-                    (crate::settings::ShortcutId::ReviewPreviousStep, "Previous"),
-                    (crate::settings::ShortcutId::ReviewNextStep, "Next"),
-                    (crate::settings::ShortcutId::ReviewMarkReviewed, "Reviewed"),
-                ].into_iter().filter_map(|(id, label)| {
-                    crate::work_outline::hints::shortcut_combo(&keymap, id).map(|combo| {
-                        div().flex().items_center().gap(px(3.0))
-                            .child(crate::work_outline::hints::kbd_chip(&theme, &combo))
-                            .child(label)
-                    })
-                })))
-            })
+            .when(
+                theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline,
+                |view| {
+                    let keymap = crate::settings::current(cx).keymap;
+                    view.child(
+                        div().flex().gap(px(6.0)).children(
+                            [
+                                (crate::settings::ShortcutId::ReviewPreviousStep, "Previous"),
+                                (crate::settings::ShortcutId::ReviewNextStep, "Next"),
+                                (crate::settings::ShortcutId::ReviewMarkReviewed, "Reviewed"),
+                            ]
+                            .into_iter()
+                            .filter_map(|(id, label)| {
+                                crate::work_outline::hints::shortcut_combo(&keymap, id).map(
+                                    |combo| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(3.0))
+                                            .child(crate::work_outline::hints::kbd_chip(
+                                                &theme, &combo,
+                                            ))
+                                            .child(label)
+                                    },
+                                )
+                            }),
+                        ),
+                    )
+                },
+            )
             .child(
                 div()
                     .id("review-progress")
@@ -980,7 +1095,7 @@ impl Render for Walkthrough {
                         row.child(
                             div()
                                 .id("review-navigation")
-                                .w(px(160.))
+                                .w(px(180.))
                                 .min_h_0()
                                 .overflow_y_scroll()
                                 .flex()
@@ -1003,7 +1118,9 @@ impl Render for Walkthrough {
                                 row.child(
                                     div()
                                         .id("review-notes")
-                                        .w(px(200.))
+                                        .w(px(240.))
+                                        .min_w(px(200.))
+                                        .max_w(px(280.))
                                         .min_h_0()
                                         .overflow_y_scroll()
                                         .children(note),
@@ -1146,6 +1263,7 @@ mod tests {
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,
+            note_expanded: false,
             tour: true,
             stale_head: None,
             focus: cx.focus_handle(),
@@ -1160,6 +1278,12 @@ mod tests {
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("review-progress").is_some());
         assert!(vcx.debug_bounds("review-note").is_some());
+        let more = vcx.debug_bounds("review-note-more").unwrap().center();
+        vcx.simulate_click(more, gpui::Modifiers::default());
+        assert!(view.read_with(vcx, |view, _| view.note_expanded));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.simulate_click(more, gpui::Modifiers::default());
+        assert!(!view.read_with(vcx, |view, _| view.note_expanded));
         assert!(vcx.debug_bounds("review-uncovered").is_some());
         assert!(vcx.debug_bounds("review-stale").is_none());
         view.update(vcx, |view, cx| {
@@ -1256,6 +1380,7 @@ mod tests {
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,
+            note_expanded: false,
             tour: true,
             stale_head: None,
             focus: cx.focus_handle(),
