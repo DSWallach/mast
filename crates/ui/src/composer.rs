@@ -8797,6 +8797,13 @@ impl Render for Composer {
                 .absolute()
                 .inset_0(),
             );
+        // Area exposes the existing harness/model/account picker as a raised
+        // character tab, keeping the same accessible control and menu.
+        let (model_picker, area_picker) = if area {
+            (None, Some(model_picker))
+        } else {
+            (Some(model_picker), None)
+        };
         let body = if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
@@ -8852,7 +8859,7 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(attach)
-                                .child(model_picker),
+                                .children(model_picker),
                         )
                         .children(send_hint)
                         .child(send_button),
@@ -8911,7 +8918,7 @@ impl Render for Composer {
                                 .max_w(px(surface_width * 0.45))
                                 .relative()
                                 .top(px(-cluster_dy))
-                                .child(model_picker),
+                                .children(model_picker),
                         )
                         .child(
                             div()
@@ -8955,6 +8962,12 @@ impl Render for Composer {
             .id("composer-surface")
             .debug_selector(|| "composer-surface".into())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
+            .when_some(area_picker, |surface, picker| {
+                surface.child(div().absolute().left(px(16.0)).top(px(-25.0))
+                    .rounded_t(px(12.0)).px(px(8.0)).h(px(25.0))
+                    .flex().items_center().bg(identity).text_color(theme.identity_text(identity))
+                    .child(picker))
+            })
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background
