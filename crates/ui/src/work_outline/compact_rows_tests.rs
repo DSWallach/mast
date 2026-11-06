@@ -389,6 +389,15 @@ fn cmd_i_in_a_text_field_does_nothing_outline_related(cx: &mut gpui::TestAppCont
 }
 
 #[gpui::test]
+fn waiting_item_shows_a_row_chip(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = crate::work_outline::store::fixture_snapshot("s1");
+    snapshot.items.iter_mut().find(|item| item.id == UI).unwrap().waiting_until = Some(chrono::Utc::now().timestamp_millis() + 86_400_000);
+    let (_overview, _outline, _calls, _events, vcx) = compact_overview(cx, dir.path(), snapshot);
+    assert!(row_bounds(vcx, "work-item-waiting-chip".into()).is_some());
+}
+
+#[gpui::test]
 fn status_glyph_click_opens_details_and_the_row_still_opens_the_chat(
     cx: &mut gpui::TestAppContext,
 ) {

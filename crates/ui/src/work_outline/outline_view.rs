@@ -3637,6 +3637,15 @@ fn item_body(
                 .child(SharedString::from(item.title.clone())),
         )
         .children(compact_chat)
+        .when_some(item.waiting_until, |el, until| {
+            let due = until <= chrono::Utc::now().timestamp_millis();
+            let date = chrono::DateTime::from_timestamp_millis(until)
+                .map(|date| date.with_timezone(&chrono::Local).format("%b %-d").to_string())
+                .unwrap_or_default();
+            el.child(div().debug_selector(|| "work-item-waiting-chip".into())
+                .flex_none().text_size(crate::typography::ui_rems(9.5)).text_color(theme.text_muted)
+                .child(SharedString::from(if due { format!("due · {date}") } else { format!("waiting · {date}") })))
+        })
         .when_some(
             chips::attention_indicator(
                 format!("outline-attention-{key}"),

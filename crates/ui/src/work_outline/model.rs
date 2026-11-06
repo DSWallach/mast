@@ -80,6 +80,7 @@ pub(crate) struct OutlineChat {
     pub space_id: Option<String>,
     pub parent_chat_id: Option<String>,
     pub title: String,
+    pub waiting_until: Option<i64>,
     pub status: ChatIndicator,
     pub archived: bool,
     pub stale: bool,
@@ -676,6 +677,7 @@ fn item_node<'s>(
                 item.title.clone()
             },
             status: item.status,
+            waiting_until: item.waiting_until,
             effective_status: item.effective_status,
             unresolved_actions: item.rollup.unresolved_user_action_count,
             chat_count: item
