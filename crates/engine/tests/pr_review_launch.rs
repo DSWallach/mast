@@ -217,6 +217,50 @@ async fn rig() -> Rig {
     rig_with("flagship", WorktreesDirEnv::Fixed(None)).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn branch_review_launch_is_idempotent_and_binds_checkout() {
+    let rig = rig().await;
+    let head = git(&rig.flagship, &["rev-parse", "refs/remotes/origin/feature-x"]);
+    let p = mast_proto::StartBranchReviewParams {
+        space_id: SPACE.into(), work_item_id: None,
+        target: mast_proto::ReviewTarget::Branch {
+            repo: Some("acme/flagship".into()), checkout_path: Some(rig.flagship.to_string_lossy().into_owned()),
+            branch: Some(BRANCH.into()), base_ref: Some("main".into()), base_sha: None, head_sha: head,
+        },
+        config: params("config", 7, PrReviewAction::CodeReview).config,
+        operation_id: "branch-review-test".into(), target_device_id: None,
+    };
+    let reply = rig.client.start_branch_review(&p).await.unwrap();
+    assert!(reply.prompt.contains("review_publish"));
+    assert!(reply.prompt.contains("baseRef"));
+    assert_eq!(rig.client.start_branch_review(&p).await.unwrap(), reply);
+    let targets = rig.core.workspace.chat_diff_targets(&reply.chat_id).unwrap().unwrap();
+    assert_eq!(targets.selected.as_deref(), Some(rig.flagship.to_str().unwrap()));
+    let mut changed = p.clone();
+    if let mast_proto::ReviewTarget::Branch { branch, .. } = &mut changed.target {
+        *branch = Some("different".into());
+    }
+    assert!(rig.client.start_branch_review(&changed).await.is_err());
+    assert!(gh_calls(&rig).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pr_state_can_inherit_branch_hunks() {
+    let rig = rig().await;
+    let mut state = mast_proto::DiffReviewState {
+        target: "branch:acme/flagship#feature-x".into(),
+        head_sha: Some("head".into()),
+        ..Default::default()
+    };
+    state.viewed_hunks.insert("a".repeat(64));
+    rig.core.workspace.put_diff_review_state(&state).unwrap();
+    let reply = rig.client.call(methods::GET_DIFF_REVIEW_STATE, json!({
+        "target": "pr:acme/flagship#7", "branchTarget": state.target
+    })).await.unwrap();
+    assert_eq!(reply["state"]["viewedHunks"], json!(["a".repeat(64)]));
+    assert!(gh_calls(&rig).is_empty());
+}
+
 fn write_view(dir: &Path, number: u64, branch: &str, cross: bool, title: &str) {
     std::fs::write(
         dir.join(format!("view-{number}.json")),

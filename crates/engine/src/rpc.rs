@@ -2111,7 +2111,7 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // Validation plus an optional `git worktree add` on the owner.
         methods::CREATE_CHAT_FOR_WORK_ITEM => Duration::from_secs(120),
         // `gh pr view`, a fetch, and `gh pr checkout` / `git worktree add`.
-        methods::START_PR_REVIEW => Duration::from_secs(180),
+        methods::START_PR_REVIEW | methods::START_BRANCH_REVIEW => Duration::from_secs(180),
         _ => Duration::from_secs(30),
     }
 }
@@ -2220,6 +2220,7 @@ fn forwardable(method: &str) -> bool {
             | methods::CREATE_CHAT_FOR_WORK_ITEM
             // A PR review start checks out and creates on the Space's owner.
             | methods::START_PR_REVIEW
+            | methods::START_BRANCH_REVIEW
             // Planning artifacts: content lives on the owning device.
             | methods::ARTIFACT_CONTENT
             | methods::ARTIFACT_REGISTER
@@ -3917,6 +3918,23 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::StartPrReviewParams = parse_params(params)?;
                 RpcReply::value(&self.start_pr_review(p).await?)
             }
+            methods::START_BRANCH_REVIEW => {
+                let mut p: mast_proto::StartBranchReviewParams = parse_params(params)?;
+                let space = self.workspace.space(&p.space_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::Failed("Space not found".into()))?;
+                if space.device_id != self.doc_host.device_id() {
+                    if p.target_device_id.is_some() {
+                        return Err(RpcError::Failed("Space lives on another device".into()));
+                    }
+                    p.target_device_id = Some(space.device_id.clone());
+                    let params = serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    return self.forward(&space.device_id, methods::START_BRANCH_REVIEW, params).await;
+                }
+                let reply = self.pr_review.start_branch(&p).await
+                    .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                RpcReply::value(&reply)
+            }
             methods::REVIEW_REQUESTED_PRS => {
                 let items = self.pr_ticket_cache()?.review_requested_prs();
                 RpcReply::value(&items)
@@ -4140,10 +4158,23 @@ impl RpcService for EngineRpc {
                 // reviewed. Only initialize an absent PR row; subsequent reads
                 // must not resurrect marks the reviewer explicitly cleared.
                 if state.is_none() && target.starts_with("pr:") {
-                    if let Some(branch) = params.get("branchTarget").and_then(serde_json::Value::as_str)
+                    let cached = target.strip_prefix("pr:")
+                        .and_then(mast_proto::PullRequestRef::parse_external_id)
+                        .and_then(|pr| self.pr_review_sync.cached_status(&pr));
+                    if cached.as_ref().is_some_and(|status| status.state.is_finished()) {
+                        return RpcReply::value(&mast_proto::DiffReviewStateReply { state: None });
+                    }
+                    let branch = params.get("branchTarget").and_then(serde_json::Value::as_str)
                         .filter(|branch| branch.starts_with("branch:"))
-                    {
-                        state = self.workspace.inherit_diff_review_state(target, branch)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            let pr = target.strip_prefix("pr:").and_then(mast_proto::PullRequestRef::parse_external_id)?;
+                            let status = cached.as_ref()?;
+                            let branch = status.head_ref_name.as_deref()?;
+                            Some(format!("branch:{}/{}#{branch}", pr.owner.to_lowercase(), pr.repo.to_lowercase()))
+                        });
+                    if let Some(branch) = branch {
+                        state = self.workspace.inherit_diff_review_state(target, &branch)
                             .map_err(|error| RpcError::Failed(error.to_string()))?;
                     }
                 }

@@ -71,7 +71,13 @@ impl ReviewTarget {
                 let repository = repo
                     .as_deref()
                     .filter(|s| !s.is_empty())
-                    .map(str::to_lowercase)
+                    .map(|repo| {
+                        if repo.starts_with('/') {
+                            repo.to_owned()
+                        } else {
+                            repo.to_lowercase()
+                        }
+                    })
                     .or_else(|| checkout_path.clone())
                     .unwrap_or_default();
                 format!("branch:{repository}#{name}")

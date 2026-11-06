@@ -685,6 +685,11 @@ impl PrReviewSyncService {
             .map(|(_, detail)| detail.clone())
     }
 
+    /// Read a fresh PR summary without starting a network request.
+    pub fn cached_status(&self, pr: &PullRequestRef) -> Option<PullRequestStatusSummary> {
+        self.cached_detail(pr).map(|detail| detail.summary)
+    }
+
     // ── RPCs ───────────────────────────────────────────────────────────────
 
     /// `PrStatus`.

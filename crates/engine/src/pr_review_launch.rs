@@ -238,6 +238,10 @@ fn resolve_repo(spaces: &[Space], slug: &str) -> Option<RepoMatch> {
     found.into_iter().next().map(|(_, _, m)| m)
 }
 
+pub(crate) fn checkout_for_repo(space: &Space, slug: &str) -> Option<PathBuf> {
+    resolve_repo(std::slice::from_ref(space), &slug.to_lowercase()).map(|found| found.repo_dir)
+}
+
 // ── gh ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -739,6 +743,188 @@ impl PrReviewLauncher {
         self
     }
 
+    /// Start a review of already committed work without checking out refs.
+    pub async fn start_branch(
+        &self,
+        p: &mast_proto::StartBranchReviewParams,
+    ) -> Result<mast_proto::StartBranchReviewReply, PrReviewError> {
+        check_operation_id(&p.operation_id)?;
+        let _gate = self.gate.lock().await;
+        let space = self
+            .candidate_spaces(Some(&p.space_id))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid("Space not found"))?;
+        let (checkout, head, base, branch) = match &p.target {
+            mast_proto::ReviewTarget::Branch {
+                checkout_path,
+                repo,
+                head_sha,
+                base_sha,
+                base_ref,
+                branch,
+                ..
+            } => {
+                let base = base_sha
+                    .as_deref()
+                    .or(base_ref.as_deref())
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                    .ok_or_else(|| invalid("branch target needs baseRef or baseSha"))?;
+                if !(head_sha.len() == 40 || head_sha.len() == 64)
+                    || !head_sha.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err(invalid("branch target needs a full headSha"));
+                }
+                let path = checkout_path
+                    .clone()
+                    .or_else(|| {
+                        repo.as_deref()
+                            .and_then(|slug| checkout_for_repo(&space, slug))
+                            .map(|path| path.to_string_lossy().into_owned())
+                    })
+                    .ok_or_else(|| {
+                        invalid("branch target needs a checkoutPath or a resolvable repo")
+                    })?;
+                (path, head_sha.clone(), base.to_owned(), branch.clone())
+            }
+            _ => return Err(invalid("a branch target is required")),
+        };
+        if let Some(item) = &p.work_item_id {
+            if self.workspace.work_item_space(item).as_deref() != Some(space.id.as_str()) {
+                return Err(invalid("work item is not in the selected Space"));
+            }
+        }
+        let mut inputs = p.clone();
+        inputs.target_device_id = None;
+        let hash = mast_doc::registry::work_outline::inputs_hash(&inputs);
+        let operation = derive_id(&p.operation_id, "branch-review:operation");
+        self.claim_inputs(&operation, &hash)?;
+        let chat_id = derive_id(&p.operation_id, "branch-review:chat");
+        let message_id = derive_id(&p.operation_id, "branch-review:message");
+        let command_id = derive_id(&p.operation_id, "branch-review:command");
+        if self
+            .workspace
+            .registry_row_state(mast_doc::KIND_CHATS, &chat_id)
+            == RowState::Tombstoned
+        {
+            return Err(invalid("The review Chat was deleted; start a new review"));
+        }
+        let path = PathBuf::from(&checkout);
+        let check = tokio::task::spawn_blocking(move || {
+            git(
+                &path,
+                &["rev-parse", "--verify", &format!("{head}^{{commit}}")],
+            )?;
+            git(
+                &path,
+                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+            )?;
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|e| invalid(e.to_string()))?;
+        check.map_err(|e| git_failed("Could not resolve review range", e))?;
+        let mut target = p.target.clone();
+        if let mast_proto::ReviewTarget::Branch {
+            repo,
+            checkout_path,
+            ..
+        } = &mut target
+        {
+            *checkout_path = Some(checkout.clone());
+            if repo.as_deref().is_none_or(str::is_empty) {
+                let path = Path::new(&checkout);
+                *repo = git(path, &["remote", "get-url", "origin"])
+                    .ok()
+                    .and_then(|url| github_slug(&url))
+                    .or_else(|| {
+                        git(
+                            path,
+                            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                        )
+                        .ok()
+                    });
+            }
+        }
+        let engine = |e: crate::EngineError| invalid(e.to_string());
+        let mut config = p.config.clone().unwrap_or_else(default_config);
+        config.fill_default_model();
+        if self.workspace.chat(&chat_id).map_err(engine)?.is_none() {
+            self.workspace
+                .create_chat_with_parent(
+                    &chat_id,
+                    Some(&space.id),
+                    None,
+                    Some(config.clone()),
+                    Some(space.path.clone()),
+                    None,
+                )
+                .map_err(engine)?;
+            self.workspace
+                .rename_chat(
+                    &chat_id,
+                    &format!("Review {}", branch.as_deref().unwrap_or("committed work")),
+                )
+                .map_err(engine)?;
+        }
+        let targets = self
+            .diff_targets
+            .as_ref()
+            .ok_or_else(|| invalid("diff targets unavailable"))?;
+        targets
+            .bind(
+                &chat_id,
+                &checkout,
+                mast_proto::ChatDiffTargetSource::Manual,
+                None,
+            )
+            .map_err(|e| invalid(format!("Could not bind checkout: {e}")))?;
+        if let Some(item) = &p.work_item_id {
+            self.ensure_assignment(&chat_id, item, &operation)?;
+        }
+        let target_json = serde_json::to_string(&target).map_err(|e| invalid(e.to_string()))?;
+        let prompt = format!(
+            "Review the committed changes in {checkout} for bugs, risks, and missing tests. Compare the merge base with the target head, not local uncommitted changes. Publish a walkthrough using review_publish with target {target_json}; keep your chat message to five lines. Do not modify the branch or post to GitHub unless asked."
+        );
+        let request = RunRequest {
+            prompt: prompt.clone(),
+            harness: Some(config.harness),
+            model: config.model.clone(),
+            reasoning: config.reasoning,
+            model_options: config.model_options.clone(),
+            cwd: space.path.clone(),
+            sandbox: config.sandbox,
+            auto_approve: config.auto_approve,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            instructions: None,
+        };
+        let (_, landed) = self
+            .doc_host
+            .message_command_state(&chat_id, &message_id)
+            .map_err(engine)?;
+        if !landed {
+            self.doc_host
+                .queue_command_with_id(
+                    &chat_id,
+                    &command_id,
+                    SessionCommandPayload::Run {
+                        request,
+                        message_id,
+                    },
+                )
+                .map_err(engine)?;
+        }
+        Ok(mast_proto::StartBranchReviewReply {
+            chat_id,
+            space_id: space.id,
+            checkout_path: checkout,
+            target,
+            prompt,
+        })
+    }
+
     fn reply_path(&self, operation_id: &str) -> PathBuf {
         self.workspace
             .store_root()
@@ -1023,14 +1209,15 @@ impl PrReviewLauncher {
             )
             .map_err(engine)?;
         if matches!(p.action, PrReviewAction::CodeReview)
-            && let Some(targets) = &self.diff_targets {
-                let base = head.base_ref_name.as_deref().unwrap_or("main");
-                if let Err(error) = targets.bind_launched_pr(
-                    &chat_id, &found.repo_dir, p.number, &url, &branch, base,
-                ) {
-                    tracing::warn!(%error, %chat_id, "could not bind review PR diff target");
-                }
+            && let Some(targets) = &self.diff_targets
+        {
+            let base = head.base_ref_name.as_deref().unwrap_or("main");
+            if let Err(error) =
+                targets.bind_launched_pr(&chat_id, &found.repo_dir, p.number, &url, &branch, base)
+            {
+                tracing::warn!(%error, %chat_id, "could not bind review PR diff target");
             }
+        }
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, op)?;
         }
@@ -1268,7 +1455,14 @@ mod tests {
             "/code-review url — someone else's PR; review it as a reviewer. Its branch `branch` is checked out at location; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Don't post anything to GitHub unless I ask."
         );
         assert_eq!(
-            render_prompt(&legacy, PrReviewAction::CodeReview, "url", "branch", "location", true),
+            render_prompt(
+                &legacy,
+                PrReviewAction::CodeReview,
+                "url",
+                "branch",
+                "location",
+                true
+            ),
             "/code-review url — my own PR; review it as its author, before or while I wait for reviewers: look for bugs, missing tests, risky changes and unclear diffs. Its branch `branch` is checked out at location; review the PR's commits against its base, not local changes. Publish the walkthrough with review_publish and keep your chat message to five lines. Fix clear problems on the PR branch only if I ask, and don't post review comments or approve on GitHub."
         );
         assert!(

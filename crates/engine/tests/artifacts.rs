@@ -314,10 +314,29 @@ async fn branch_review_publish_validates_range_anchors() {
     let read = tool(&rig, &rig.token, "review_get", json!({})).await.unwrap();
     assert_eq!(read["artifactId"], reply["artifactId"]);
     assert_eq!(read["review"]["target"]["branch"], "feature");
+    let selected = tool(&rig, &rig.token, "review_get", json!({"target": target})).await.unwrap();
+    assert_eq!(selected["artifactId"], reply["artifactId"]);
+    let mut other_target = target.clone();
+    other_target["branch"] = json!("other");
+    assert!(tool(&rig, &rig.token, "review_get", json!({"target": other_target})).await.unwrap()["artifactId"].is_null());
+    let path = PathBuf::from(reply["storedPath"].as_str().unwrap());
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy["highlights"][0]["anchor"]["hunkHash"] = json!("legacy-patch-hash");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let content: mast_proto::ArtifactContentReply = serde_json::from_value(
+        rig.client.call(methods::ARTIFACT_CONTENT, json!({"artifactId": reply["artifactId"]})).await.unwrap()
+    ).unwrap();
+    let normalized: Value = serde_json::from_str(&content.content).unwrap();
+    assert_ne!(normalized["highlights"][0]["anchor"]["hunkHash"], "legacy-patch-hash");
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["highlights"][0]["anchor"]["hunkHash"], "legacy-patch-hash");
     let mut invalid = review.clone();
     invalid["highlights"][0]["anchor"]["file"] = json!("missing");
     let error = tool(&rig, &rig.token, "review_publish", json!({"target": target, "review": invalid})).await.unwrap_err();
     assert!(error.contains("Valid hunks per file") && error.contains("README.md"), "{error}");
+    git(&rig.worktree, &["remote", "add", "origin", "https://github.com/owner/repo.git"]);
+    let mut repo_only = target.clone();
+    repo_only.as_object_mut().unwrap().remove("checkoutPath");
+    tool(&rig, &rig.token, "review_publish", json!({"target": repo_only, "review": review})).await.unwrap();
 }
 
 /// `<profile store>/artifacts/<id>/<hash>` somewhere under the data dir.

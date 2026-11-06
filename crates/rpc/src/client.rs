@@ -90,6 +90,18 @@ impl Drop for RpcSubscription {
 }
 
 impl RpcClient {
+    /// Start a review chat for a committed branch target.
+    pub async fn start_branch_review(
+        &self,
+        params: &mast_proto::StartBranchReviewParams,
+    ) -> Result<mast_proto::StartBranchReviewReply, RpcError> {
+        let params = serde_json::to_value(params).map_err(|e| RpcError::Failed(e.to_string()))?;
+        let reply = self
+            .call(crate::methods::START_BRANCH_REVIEW, params)
+            .await?;
+        serde_json::from_value(reply)
+            .map_err(|e| RpcError::Failed(format!("invalid StartBranchReview reply: {e}")))
+    }
     /// Wrap an existing duplex: `out` carries client frames, `inbound` server frames.
     pub fn new(out: mpsc::Sender<String>, mut inbound: mpsc::Receiver<String>) -> Self {
         let shared = Arc::new(Shared {
