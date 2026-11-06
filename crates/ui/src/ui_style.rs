@@ -9,6 +9,7 @@ pub enum UiStyleId {
     Minimal,
     Dense,
     Guided,
+    Industrial,
 }
 
 impl<'de> Deserialize<'de> for UiStyleId {
@@ -16,6 +17,7 @@ impl<'de> Deserialize<'de> for UiStyleId {
         Ok(match String::deserialize(deserializer)?.as_str() {
             "dense" => Self::Dense,
             "guided" => Self::Guided,
+            "industrial" => Self::Industrial,
             _ => Self::Minimal,
         })
     }
@@ -209,11 +211,36 @@ impl UiStyle {
             walkthrough_rail: false,
         },
     };
+    pub const INDUSTRIAL: Self = Self {
+        id: UiStyleId::Industrial,
+        tokens: StyleTokens {
+            sidebar_row_compact_h: 32.0,
+            control_size: 32.0,
+            control_radius: Some(4.0),
+            panel_radius: Some(0.0),
+            chip_radius: Some(4.0),
+            rule_width: Some(1.0),
+            ..Self::MINIMAL.tokens
+        },
+        surface: SurfaceModel::Opaque,
+        controls: ControlVariant::Key,
+        status_indicator: StatusIndicator::Dot,
+        font_preference: FontPreference::Geist,
+        paired_theme: Some(PairedTheme {
+            light: "industrial-light",
+            dark: "industrial-dark",
+        }),
+        behavior: StyleBehavior {
+            motion: Motion::Instant,
+            ..Self::MINIMAL.behavior
+        },
+    };
     pub const fn of(id: UiStyleId) -> Self {
         match id {
             UiStyleId::Minimal => Self::MINIMAL,
             UiStyleId::Dense => Self::DENSE,
             UiStyleId::Guided => Self::GUIDED,
+            UiStyleId::Industrial => Self::INDUSTRIAL,
         }
     }
 }

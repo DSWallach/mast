@@ -3013,6 +3013,12 @@ impl Render for AppearancePage {
                 "More labels and guidance",
                 6.0,
             ),
+            (
+                crate::ui_style::UiStyleId::Industrial,
+                "Industrial",
+                "Instrument panel",
+                8.0,
+            ),
         ]
         .into_iter()
         .map(|(id, label, description, gap)| {

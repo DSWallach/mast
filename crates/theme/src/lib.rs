@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 19);
+        assert_eq!(registry.families.len(), 20);
         assert!(registry.variant("mast-light").is_some());
         assert!(registry.variant("mast-dark").is_some());
         // Saved selections from before the rename still resolve.
@@ -854,8 +854,8 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 30);
-        assert_eq!(variants * VisualFixture::ALL.len(), 300);
+        assert_eq!(variants, 32);
+        assert_eq!(variants * VisualFixture::ALL.len(), 320);
     }
 }
 
