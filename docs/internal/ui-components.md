@@ -1130,3 +1130,32 @@ not a complete inventory of every inline element.
   tool-patch header, `:7877` detail body, `:8015` more-lines row, `:8087`
   tool header, `:8443` activity rail and `:8543` tool chip. These references
   are from `d68928981` and need individual review as migration continues.
+
+#### Remaining conversation call sites at `78e1a10a8`
+
+These are grouped by semantic surface; line numbers identify the owning render
+function or its first inline element, rather than every child `div`.
+
+- User content: source header and compact relay `transcript.rs:6202`; attachment
+  strip `:5747`; expanded body and disclosure `:5477`, `:5616`; inline mention
+  text and underlays `:7430`; generated image and visualization cards `:5677`,
+  `:7520`; metadata lane `:6550`.
+- Tools and thought: group disclosure and tree `transcript.rs:6784`; expanded
+  invocation, output and thought body `:7810`; patch file header `:7744`;
+  truncation row `:7938`; chip content `:8010`, `:8246`; connector and reveal
+  geometry `:8320`; tool and subagent rows `:8437`, `:8483`.
+- Composer: skill chip row `composer.rs:4937`; comments badge `:5271`;
+  attachment and appshot strips `:5299`, `:5391`; mention and slash menus
+  `:5895`, `:6281`, `:6403`, `:6450`; editable input `:3854`, `:6033`;
+  question wizard controls `:7865`; composer and footer assembly `:8109`;
+  completion rows `composer/skill_completion.rs:638` and reset prompt
+  `composer/instruction_reset.rs:643`. `composer_dock.rs:323` owns the custom
+  docking geometry rather than a separate visible control.
+- Markdown: answer controls and question cards `markdown/render.rs:565`, `:596`,
+  `:674`; blocks, inline formatting and tables `:945`, `:1220`, `:1381`;
+  code source and selection `:2536`, `:2558`; link preview card
+  `markdown/link_destination.rs:26`.
+- The production slice has no direct style or layout variant comparisons at
+  this revision. `markdown/render.rs:2906` is an Area-specific test setup.
+  Theme-only and semantic state branches remain; a component wrapper does not
+  by itself migrate all of the child elements listed above.
