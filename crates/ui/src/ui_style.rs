@@ -418,7 +418,7 @@ impl UiStyle {
     pub const fn resolve(id: UiStyleId, layout: UiLayout) -> Self {
         let mut style = Self::of(id);
         let layout_style = match layout {
-            UiLayout::Minimal => return style,
+            UiLayout::Minimal => Self::MINIMAL,
             UiLayout::Compact => Self::DENSE,
             UiLayout::Guided => Self::GUIDED,
         };
@@ -600,6 +600,12 @@ mod tests {
                 let resolved = UiStyle::resolve(id, layout);
                 assert_eq!(resolved.id, id);
                 assert_eq!(resolved.layout, layout);
+                let layout_metrics = UiStyle::resolve(UiStyleId::Default, layout).tokens;
+                assert_eq!(resolved.tokens.control_size, layout_metrics.control_size);
+                assert_eq!(
+                    resolved.tokens.sidebar_row_compact_h,
+                    layout_metrics.sidebar_row_compact_h
+                );
                 assert_eq!(resolved.controls, look.controls);
                 assert_eq!(resolved.conversation, look.conversation);
                 assert_eq!(resolved.tokens.panel_radius, look.tokens.panel_radius);
