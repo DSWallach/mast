@@ -2428,6 +2428,65 @@ pub(crate) fn outline_revision_line(
         .into_any_element()
 }
 
+/// Container and overflow notice for an instruction revision diff.
+pub fn outline_revision_frame(selector: &'static str, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.into())
+        .w_full()
+        .flex()
+        .flex_col()
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border)
+        .overflow_hidden()
+}
+pub fn outline_revision_overflow(hidden: usize, theme: &Theme) -> Div {
+    div()
+        .px(px(12.0))
+        .py(px(2.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("{hidden} more lines not shown")))
+}
+
+/// Entry-level summary in an instruction revision comparison.
+pub fn outline_revision_summary(
+    selector: String,
+    label: String,
+    rows: Vec<(Option<mast_proto::TextDiffKind>, String)>,
+    theme: &Theme,
+) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_col()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .child(outline_list_heading(label, theme))
+        .children(rows.into_iter().map(|(kind, text)| {
+            let color = match kind {
+                Some(mast_proto::TextDiffKind::Added) => theme.diff_add,
+                Some(mast_proto::TextDiffKind::Removed) => theme.diff_del,
+                _ => theme.text,
+            };
+            div()
+                .pl(px(8.0))
+                .text_size(crate::typography::ui_rems(
+                    11.5 + super::layout_type_adjustment(theme),
+                ))
+                .text_color(color)
+                .child(SharedString::from(text))
+        }))
+}
+pub fn outline_revision_comparison(theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "instruction-comparison".into())
+        .flex()
+        .flex_col()
+        .gap(px(10.0 * super::layout_spacing(theme)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

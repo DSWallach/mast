@@ -6,7 +6,7 @@
 //! numbers, a `+`/`−` marker, the code font and size — plus the entry-level
 //! summary (changed / added / removed / reordered), which leads because entry
 //! numbers in the rendered envelope shift when entries are inserted.
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, SharedString, div, prelude::*};
 use mast_proto::{InstructionRevisionComparison, TextDiffKind, TextDiffLine};
 
 use crate::theme::Theme;
@@ -97,15 +97,7 @@ pub(crate) fn render_text_diff(
 ) -> AnyElement {
     let presented = present(lines);
     let hidden = presented.len().saturating_sub(MAX_PRESENTED_LINES);
-    div()
-        .debug_selector(move || selector.into())
-        .w_full()
-        .flex()
-        .flex_col()
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden()
+    crate::components::outline_revision_frame(selector, theme)
         .children(
             presented
                 .iter()
@@ -114,47 +106,9 @@ pub(crate) fn render_text_diff(
         )
         .when(hidden > 0, |el| {
             el.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!("{hidden} more lines not shown"))),
+                crate::components::outline_revision_overflow(hidden, theme),
             )
         })
-        .into_any_element()
-}
-
-fn summary_group(
-    selector: String,
-    label: String,
-    rows: Vec<(Option<TextDiffKind>, String)>,
-    theme: &Theme,
-) -> AnyElement {
-    div()
-        .debug_selector(move || selector.clone())
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .child(SharedString::from(label)),
-        )
-        .children(rows.into_iter().map(|(kind, text)| {
-            let color = match kind {
-                Some(TextDiffKind::Added) => theme.diff_add,
-                Some(TextDiffKind::Removed) => theme.diff_del,
-                _ => theme.text,
-            };
-            div()
-                .pl(px(8.0))
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(color)
-                .child(SharedString::from(text))
-        }))
         .into_any_element()
 }
 
@@ -163,23 +117,16 @@ pub(crate) fn render_comparison(
     comparison: &InstructionRevisionComparison,
     theme: &Theme,
 ) -> AnyElement {
-    let mut root = div()
-        .debug_selector(|| "instruction-comparison".into())
-        .flex()
-        .flex_col()
-        .gap(px(10.0));
+    let mut root = crate::components::outline_revision_comparison(theme);
     if comparison.identical {
         return root
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child("No differences"),
+                crate::components::outline_execution_line("No differences".into(), 12.0, theme.text_muted, theme),
             )
             .into_any_element();
     }
     if !comparison.changed.is_empty() {
-        root = root.child(summary_group(
+        root = root.child(crate::components::outline_revision_summary(
             "instruction-comparison-changed".into(),
             format!("Changed ({})", comparison.changed.len()),
             comparison
@@ -196,7 +143,7 @@ pub(crate) fn render_comparison(
         ));
     }
     if !comparison.added.is_empty() {
-        root = root.child(summary_group(
+        root = root.child(crate::components::outline_revision_summary(
             "instruction-comparison-added".into(),
             format!("Added ({})", comparison.added.len()),
             comparison
@@ -213,7 +160,7 @@ pub(crate) fn render_comparison(
         ));
     }
     if !comparison.removed.is_empty() {
-        root = root.child(summary_group(
+        root = root.child(crate::components::outline_revision_summary(
             "instruction-comparison-removed".into(),
             format!("Removed ({})", comparison.removed.len()),
             comparison
