@@ -1116,6 +1116,45 @@ pub fn outline_blueprint_line(depth: usize, text: String, dim: bool, theme: &The
         .child(SharedString::from(text))
 }
 
+/// Inline word diff for an instruction proposal.
+pub(crate) fn outline_proposal_diff(
+    runs: &[(crate::work_outline::proposal_diff::DiffKind, String)],
+    selector: String,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    let (text, ranges) = crate::work_outline::proposal_diff::diff_layout(runs);
+    let added = gpui::HighlightStyle {
+        background_color: Some(theme.diff_add.opacity(0.22)),
+        ..Default::default()
+    };
+    let removed = gpui::HighlightStyle {
+        color: Some(theme.diff_del),
+        strikethrough: Some(gpui::StrikethroughStyle {
+            thickness: px(1.0),
+            color: Some(theme.diff_del),
+        }),
+        ..Default::default()
+    };
+    let highlights = ranges.into_iter().map(|(range, kind)| {
+        (
+            range,
+            if kind == crate::work_outline::proposal_diff::DiffKind::Added {
+                added
+            } else {
+                removed
+            },
+        )
+    });
+    div()
+        .debug_selector(move || selector.clone())
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .child(gpui::StyledText::new(text).with_highlights(highlights))
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

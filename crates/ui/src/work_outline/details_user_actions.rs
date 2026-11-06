@@ -738,38 +738,6 @@ impl WorkItemDetails {
     }
 
     /// An inline diff: added words tinted, removed words struck through.
-    fn diff_text(runs: &[(DiffKind, String)], selector: String, theme: &Theme) -> AnyElement {
-        let (text, ranges) = proposal_diff::diff_layout(runs);
-        let added = gpui::HighlightStyle {
-            background_color: Some(theme.diff_add.opacity(0.22)),
-            ..Default::default()
-        };
-        let removed = gpui::HighlightStyle {
-            color: Some(theme.diff_del),
-            strikethrough: Some(gpui::StrikethroughStyle {
-                thickness: px(1.0),
-                color: Some(theme.diff_del),
-            }),
-            ..Default::default()
-        };
-        let highlights = ranges.into_iter().map(|(range, kind)| {
-            (
-                range,
-                if kind == DiffKind::Added {
-                    added
-                } else {
-                    removed
-                },
-            )
-        });
-        div()
-            .debug_selector(move || selector.clone())
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text)
-            .child(gpui::StyledText::new(text).with_highlights(highlights))
-            .into_any_element()
-    }
-
     fn rationale_line(
         proposal: &WorkItemInstructionProposalView,
         theme: &Theme,
@@ -813,7 +781,7 @@ impl WorkItemDetails {
         };
         match standing {
             Standing::Current => {
-                body = body.child(Self::diff_text(
+                body = body.child(crate::components::outline_proposal_diff(
                     &proposed(&base),
                     format!("work-item-proposal-diff-{id}"),
                     theme,
@@ -846,7 +814,7 @@ impl WorkItemDetails {
                 if let Some(now) = now {
                     body = body
                         .child(label("Now (changes since)"))
-                        .child(Self::diff_text(
+                        .child(crate::components::outline_proposal_diff(
                             &proposal_diff::word_diff(&base, now),
                             format!("work-item-proposal-now-{id}"),
                             theme,
@@ -858,7 +826,7 @@ impl WorkItemDetails {
                     } else {
                         "Proposed (against when proposed)"
                     }))
-                    .child(Self::diff_text(
+                    .child(crate::components::outline_proposal_diff(
                         &proposed(&base),
                         format!("work-item-proposal-diff-{id}"),
                         theme,
