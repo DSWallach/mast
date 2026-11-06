@@ -370,6 +370,7 @@ pub(crate) fn area_sidebar_chat_row(
     searching: bool,
     account: Option<String>,
     change_request: Option<mast_proto::ChangeRequestSummary>,
+    jump_label: Option<SharedString>,
     preview: bool,
     hovered: bool,
     archived: bool,
@@ -457,6 +458,7 @@ pub(crate) fn area_sidebar_chat_row(
             .gap(px(8.0))
             .rounded_full()
             .text_color(foreground)
+            .when(archived && !selected && !hovered, |el| el.opacity(0.4))
             .when(selected, |el| el.bg(identity))
             .when(!selected, |el| {
                 el.hover(|style| style.bg(theme.element_hover))
@@ -474,6 +476,7 @@ pub(crate) fn area_sidebar_chat_row(
                     .debug_selector(move || account_selector.clone())
             }))
             .children(badge)
+            .children(jump_label.map(|label| super::badge(theme, label)))
             .child(corner),
     )
 }
@@ -1348,6 +1351,7 @@ mod tests {
                 true,
                 false,
                 Some("Work".into()),
+                None,
                 None,
                 false,
                 true,
