@@ -359,6 +359,22 @@ pub struct UserInputQuestion {
     /// Whether answers may include text outside the listed options.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_custom: bool,
+    /// Provider-supplied command approval details, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_approval: Option<CommandApproval>,
+}
+
+/// Preserve the provider's command representation without splitting shell text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandApproval {
+    pub command: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_permissions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -761,6 +777,7 @@ mod input_answer_tests {
     #[test]
     fn custom_answers_require_explicit_permission() {
         let mut question = UserInputQuestion {
+            command_approval: None,
             id: "approval".into(), header: "Approval".into(), question: "Allow?".into(),
             options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,
         };

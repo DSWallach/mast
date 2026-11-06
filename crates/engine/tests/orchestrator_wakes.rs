@@ -1136,6 +1136,7 @@ async fn awaiting_input_and_failed_tool_calls_wake_the_parent() {
             input: mast_proto::AwaitingInput {
                 request_id: "request-1".into(),
                 questions: vec![mast_proto::UserInputQuestion {
+                    command_approval: None,
                     allow_custom: false,
                     id: "q1".into(),
                     header: "Approval".into(),

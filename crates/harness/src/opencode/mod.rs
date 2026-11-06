@@ -2677,6 +2677,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             };
             let permission_input = Arc::clone(request_input);
             let question = UserInputQuestion {
+                command_approval: None,
                 allow_custom: false,
                 id: format!("permission:{id}"),
                 header: "Permission".into(),
@@ -3214,6 +3215,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
                     Some(UserInputQuestion {
+                        command_approval: None,
                         allow_custom: false,
                         id: format!("q{ix}"),
                         header: q

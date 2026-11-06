@@ -20,6 +20,7 @@ pub struct MockHarness {
 fn question_script() -> Vec<UserInputQuestion> {
     vec![
         UserInputQuestion {
+            command_approval: None,
             allow_custom: false,
             id: "q-sync".into(),
             header: "Question".into(),
@@ -32,6 +33,7 @@ fn question_script() -> Vec<UserInputQuestion> {
             multi_select: false,
         },
         UserInputQuestion {
+            command_approval: None,
             allow_custom: false,
             id: "q-gates".into(),
             header: "Question".into(),
