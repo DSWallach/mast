@@ -8045,29 +8045,11 @@ fn chip_header_row(
         } else {
             CHIP_HEADER_HEIGHT
         }, TOOL_LABEL_SIZE, TOOL_LABEL_LINE_HEIGHT)
-        .when(!activity, |row| {
-            row.child(
-                // Subagent icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
-                // icon size-3).
-                div()
-                    .size(px(18.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.08))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::icons::icon(if tool.is_thought {
-                            crate::icons::CHAT_ROUND_LINE
-                        } else {
-                            tool_icon_path(&tool.call)
-                        })
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
-                    ),
-            )
-        })
+        .children(crate::components::conversation_tool_icon_tile(theme, activity, if tool.is_thought {
+            crate::icons::CHAT_ROUND_LINE
+        } else {
+            tool_icon_path(&tool.call)
+        }))
         .child(
             div()
                 .flex_none()

@@ -4,6 +4,28 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_tool_icon_tile(
+    theme: &Theme,
+    activity: bool,
+    icon: &'static str,
+) -> Option<Div> {
+    (!activity).then(|| {
+        div()
+            .size(px(18.0))
+            .flex_none()
+            .rounded(px(5.0))
+            .bg(crate::theme::ink(0.08))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                crate::icons::icon(icon)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
+    })
+}
+
 pub fn conversation_tool_header(
     activity: bool,
     height: f32,
