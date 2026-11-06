@@ -7342,7 +7342,9 @@ impl Shell {
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let glyph = if working {
+            let glyph = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+                crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
+            } else if working {
                 loaders::mini_mono_spinner(
                     format!("{row_id}-working"),
                     2.0,
@@ -7357,9 +7359,9 @@ impl Shell {
                     .text_color(status_color)
                     .into_any_element()
             } else {
-                crate::status_style::indicator(
+                crate::status_style::indicator_for_theme(
                     if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                    theme.appearance,
+                    &theme,
                 ).into_any_element()
             };
             div()
@@ -7461,7 +7463,9 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == mast_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+                        crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
+                    } else if status == mast_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -7477,9 +7481,9 @@ impl Shell {
                         )
                         .into_any_element()
                     } else {
-                        crate::status_style::indicator(
+                        crate::status_style::indicator_for_theme(
                             if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                            theme.appearance,
+                            &theme,
                         ).into_any_element()
                     };
                     div()

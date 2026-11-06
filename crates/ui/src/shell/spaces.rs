@@ -2189,7 +2189,7 @@ pub(super) struct RenameSpaceDialog {
 
 /// Dot color for a chat's display status (tab dots + Sessions rows).
 pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
-    crate::status_style::status_style(status.into(), theme.appearance).color
+    crate::status_style::dot_color(status.into(), theme)
 }
 
 // Handle-based rail host for the spaces dropdown: its list is a plain

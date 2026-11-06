@@ -1055,7 +1055,7 @@ impl FilesSurface {
                 }
             }))
             .child(
-                crate::surface_chrome::input()
+                crate::surface_chrome::input(theme)
                     .id("files-search")
                     .debug_selector(|| "files-search".into())
                     .overflow_hidden()

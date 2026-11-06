@@ -1088,13 +1088,14 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
 /// `searchInput`: `w-full rounded-lg bg-white/[0.04] px-2.5 py-1.5
 /// text-[13px]` + `mb-1`, borderless — full width inside the card's own
 /// p-1, only a 4px bottom margin).
-pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
+pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
     div()
         .mb(px(4.0))
         .px(px(10.0))
         .py(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .bg(ink(0.04))
+        .when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_1().border_color(theme.border))
         .text_size(crate::typography::ui_rems(13.0))
         .child(input)
 }

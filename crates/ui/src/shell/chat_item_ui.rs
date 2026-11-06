@@ -728,7 +728,7 @@ impl Shell {
                 el.child(
                     div()
                         .debug_selector(|| "right-surface-item-dot".into())
-                        .child(crate::status_style::indicator(crate::status_style::Status::Waiting, theme.appearance)),
+                        .child(crate::status_style::indicator_for_theme(crate::status_style::Status::Waiting, &theme)),
                 )
             })
             .into_any_element()

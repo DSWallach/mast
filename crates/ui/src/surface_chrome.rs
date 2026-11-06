@@ -12,14 +12,15 @@ pub(crate) const CONTROL_GAP: f32 = 4.0;
 pub(crate) const EDGE_INSET: f32 = 8.0;
 
 /// Shared field treatment for the file search and browser address controls.
-pub(crate) fn input() -> Div {
+pub(crate) fn input(theme: &Theme) -> Div {
     div()
         .h(px(CONTROL_SIZE))
         .min_w_0()
         .flex_1()
         .px(px(8.0))
-        .rounded(px(CONTROL_RADIUS))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(CONTROL_RADIUS)))
         .bg(crate::theme::ink(0.035))
+        .when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_1().border_color(theme.border))
         .flex()
         .items_center()
         .gap(px(6.0))
