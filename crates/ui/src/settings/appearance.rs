@@ -3125,9 +3125,9 @@ impl Render for AppearancePage {
                 }))
         })
         .collect::<Vec<_>>();
-        let mut settings_rows = theme_rows;
+        let mut settings_rows = Vec::new();
         settings_rows.push(
-            widgets::card_row(&theme, false)
+            widgets::card_row(&theme, true)
                 .child(widgets::row_tile(&theme, icons::LIST))
                 .child(
                     div()
@@ -3516,8 +3516,11 @@ impl Render for AppearancePage {
                                     .flex_col()
                                     .gap(px(12.0))
                                     .child(widgets::field_label(&theme, "Style"))
-                                    .child(widgets::option_card_row().children(style_cards)),
+                                    .child(widgets::option_card_row().children(style_cards))
+                                    .child(widgets::meta_line(&theme, vec![div().child("Style and theme combine independently.").into_any_element()])),
                             )
+                            .child(div().mt(px(24.0)).child(widgets::field_label(&theme, "Theme")))
+                            .child(widgets::section_card(&theme).children(theme_rows))
                             .child(widgets::section_card(&theme).children(settings_rows))
                             .child(font_section)
                             .when_some(library_warning, |page, warning| {
@@ -3539,6 +3542,14 @@ impl Render for AppearancePage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn industrial_variants_are_available_in_theme_menus() {
+        let registry = ThemeRegistry::builtin();
+        for (appearance, id) in [(mast_theme::Appearance::Light, "industrial-light"), (mast_theme::Appearance::Dark, "industrial-dark")] {
+            assert!(registry.variants_for(appearance).any(|variant| variant.id == id));
+        }
+    }
 
     #[test]
     fn every_mode_gets_a_card() {
