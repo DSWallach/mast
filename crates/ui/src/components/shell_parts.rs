@@ -1062,6 +1062,89 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         })
 }
 
+pub(crate) fn item_accordion_header(
+    theme: &Theme,
+    name: &'static str,
+    label: &'static str,
+    summary: String,
+    warn: bool,
+    open: bool,
+    icon_path: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    let toggle = format!("chat-item-{name}-toggle");
+    div()
+        .id(SharedString::from(toggle.clone()))
+        .debug_selector(move || toggle.clone())
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .cursor_pointer()
+        .rounded(px(4.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_industrial(theme), |el| {
+            el.border_1().border_color(theme.industrial_colors().rule)
+        })
+        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+        .child(
+            icon(if open {
+                crate::icons::ALT_ARROW_DOWN
+            } else {
+                crate::icons::ALT_ARROW_RIGHT
+            })
+            .size(px(10.0))
+            .text_color(theme.text_muted),
+        )
+        .child(section_label(
+            theme,
+            icon_path,
+            label,
+            format!("chat-item-{name}-icon"),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(if warn {
+                    theme.warning
+                } else {
+                    theme.text_muted
+                })
+                .child(SharedString::from(summary)),
+        )
+}
+
+pub(crate) fn panel_text(theme: &Theme, value: String, muted: bool) -> gpui::Div {
+    div()
+        .min_w_0()
+        .text_size(crate::typography::ui_rems(if muted { 11.0 } else { 12.0 }))
+        .text_color(if muted { theme.text_muted } else { theme.text })
+        .child(SharedString::from(value))
+}
+
+pub(crate) fn panel_link(
+    theme: &Theme,
+    id: String,
+    color: gpui::Hsla,
+    underline: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(4.0))
+        .rounded(px(3.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(color)
+        .when(underline, |el| el.underline())
+        .hover(|el| el.bg(theme.element_hover))
+}
+
 pub(crate) fn spaces_filter(theme: &Theme, open: bool) -> gpui::Stateful<gpui::Div> {
     let frame = div()
         .id("spaces-filter")

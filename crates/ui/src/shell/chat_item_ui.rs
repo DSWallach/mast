@@ -723,52 +723,13 @@ impl Shell {
     ) -> AnyElement {
         let open = self.item_tab_open.contains(name);
         let selector = format!("chat-item-{name}");
-        let icon_selector = format!("chat-item-{name}-icon");
-        let toggle = format!("chat-item-{name}-toggle");
         div()
             .debug_selector(move || selector.clone())
             .flex()
             .flex_col()
             .gap(px(4.0))
             .child(
-                div()
-                    .id(SharedString::from(toggle.clone()))
-                    .debug_selector(move || toggle.clone())
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_pointer()
-                    .rounded(px(4.0))
-                    .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
-                    .child(
-                        crate::icons::icon(if open {
-                            crate::icons::ALT_ARROW_DOWN
-                        } else {
-                            crate::icons::ALT_ARROW_RIGHT
-                        })
-                        .size(px(10.0))
-                        .text_color(theme.text_muted),
-                    )
-                    .child(section_label(
-                        theme,
-                        section_icon(name),
-                        label,
-                        icon_selector,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(if warn {
-                                theme.warning
-                            } else {
-                                theme.text_muted
-                            })
-                            .child(SharedString::from(summary)),
-                    )
+                crate::components::shell_parts::item_accordion_header(theme, name, label, summary, warn, open, section_icon(name))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.item_tab_open.remove(name) {
                             this.item_tab_open.insert(name);
@@ -788,34 +749,9 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let text = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text)
-                .child(SharedString::from(value))
-        };
-        let muted = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(value))
-        };
-        let link = |id: String, color: gpui::Hsla, underline: bool| {
-            let selector = id.clone();
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(color)
-                .when(underline, |el| el.underline())
-                .hover(|el| el.bg(theme.element_hover))
-        };
+        let text = |value: String| crate::components::shell_parts::panel_text(theme, value, false);
+        let muted = |value: String| crate::components::shell_parts::panel_text(theme, value, true);
+        let link = |id: String, color: gpui::Hsla, underline: bool| crate::components::shell_parts::panel_link(theme, id, color, underline);
         let mut col = div().flex().flex_col().gap(px(10.0));
         let review_chat = self.branch_review_target(&facts.chat_id).map(|_| facts.chat_id.clone()).or_else(|| {
             let item = facts.item.as_ref()?;
