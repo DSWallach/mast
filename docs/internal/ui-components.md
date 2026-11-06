@@ -1098,6 +1098,29 @@ foundation owner before concurrent screen migrations begin.
 | Linear and Team | `linear/`, `team/`, `team.rs` |
 | Menus and remaining surfaces | `popover.rs`, `pickers.rs`, `app_menus.rs`, `menu_bar.rs`, other paths not owned above |
 
+### Shell and sidebar audit (in progress)
+
+Locations refer to `d68928981`. This is a starting index, not a complete
+inventory of inline controls; the remaining shell submodules and every inline
+control still need manual review before the audit is complete.
+
+| Surface | Candidate locations |
+| --- | --- |
+| Titlebar, window controls and navigation | `shell.rs:6491`, `shell.rs:6609`, `shell.rs:6773`, `shell.rs:6892`, `shell.rs:11928`, `shell.rs:11992`, `shell.rs:12038`, `shell.rs:12083` |
+| Sidebar and chat rows | `shell.rs:7098`, `shell.rs:7263`, `shell.rs:7899`, `shell.rs:8000`, `shell.rs:8049`; `shell/spaces.rs:2066`, `shell/spaces.rs:2070`, `shell/spaces.rs:4330`, `shell/spaces.rs:4856`, `shell/spaces.rs:4931`, `shell/spaces.rs:5011` |
+| Chat header and side panel | `shell/chat_item_ui.rs:66`, `shell/chat_item_ui.rs:245`, `shell/chat_item_ui.rs:338`, `shell/chat_item_ui.rs:401`, `shell/chat_item_ui.rs:469`, `shell/chat_item_ui.rs:651`, `shell/chat_item_ui.rs:704`, `shell/chat_item_ui.rs:754` |
+| Tabs and header buttons | `shell.rs:10960`, `shell.rs:12112`, `shell/tabs.rs:226`, `shell/tabs.rs:575` |
+| Team and running controls | `shell/team_ui.rs:83`, `shell/team_ui.rs:148`, `shell/team_ui.rs:276`, `shell/team_ui.rs:306`, `shell/team_ui.rs:729`; `shell/running_ui.rs:540`, `shell/running_ui.rs:575`, `shell/running_ui.rs:1035`, `shell/running_ui.rs:1197`, `shell/running_ui.rs:1207` |
+| Other controls requiring review | `shell/start_chat_ui.rs:1057`, `shell/start_chat_ui.rs:1080`, `shell/wake_ui.rs:174`, `shell/actions_ui.rs:1060`, `shell/workspace_search.rs:845`, `rail.rs:419` |
+
+Known production style/layout branches: `shell.rs:7118`, `7119`, `7120`,
+`7299`, `7377`, `7387`, `7416`, `7423`, `7508`, `7549`, `7550`, `7602`,
+`7605`, `7841`, `8462`, `10192`, `12754`, `12764`, `12765`, `12833`,
+`12873`, `12874`; `shell/chat_item_ui.rs:295`, `501`, `504`, `520`, `632`,
+`673`; `shell/spaces.rs:2067`, `2071`; `shell/team_ui.rs:326`;
+`shell/running_ui.rs:1043`. Further review must include indirect style and
+layout decisions and inline literals, not just these textual matches.
+
 Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
