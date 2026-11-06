@@ -1040,6 +1040,17 @@ unknown ids instead of denying.
   - `review-explain` (4c-2): select diff lines (unified/split, drag or shift-click) or press `e` → Explain; the
     question goes to the matching review chat, else the owning chat (queued if busy), and the reply shows inline
     with Open in chat. "Ask about this step" in the walkthrough. A live agent round trip is untested.
+- **2026-11-06 afternoon:** `walkthrough-polish` (walkthrough side text 12/13/11 px, clamped notes), `ui-gallery`
+  (`cargo run -p mast-gallery`: isolated fixtures, styles from `UiStyleId::ALL`, keys 1–9 and L/D; Mikey launches it,
+  agents never do; sidebar/outline/walkthrough stories are stubs), `looks-industrial` (Industrial look: paired
+  light/dark themes with restore, opaque ruled panels, Braun key controls, inset composer, mono counts, #FE4B25
+  signal accent; UiStyle grew radius/rule/surface/control-variant/status/font/theme-pair tokens) and
+  `spike-ui-snapshots` (macOS offscreen Metal `mast_ui::snapshot::render_to_png`, 24 baselines, image-compare diffs;
+  docs/internal/ui-snapshots.md). Snapshot tests need a run outside the Codex sandbox, which means an approval per
+  run; the coordinator can run them directly and Read the PNGs to review UI. Mikey disliked Dense/Guided ("not
+  drastic"). The next look is **Area** (area.tech case studies); ask Mikey for reference screenshots. Release run 58:
+  UI 2555/0, but Codex approval harness tests and engine message_queue tests flake only in the full cross-crate run
+  (pass alone). Fix in progress: item ffa6f957, branch `fix-release-flakes`.
 - Release runs 50–55 passed (last: nextest 2405/2405, UI 2542/0). Run 54 failed two load-sensitive tests
   (`message_queue::queued_text_waits_for_a_steerable_turn_even_with_legacy_policy`,
   `executable::tests::stderr_versions_are_read_and_build_metadata_does_not_break_ties`) while worker builds ran
