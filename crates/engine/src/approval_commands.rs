@@ -141,6 +141,18 @@ pub fn matching_rule_labels(command: &str, harness: ApprovalRuleHarness, cwd: &P
         .map(|matches| matches.into_iter().map(|rule| rule.label.clone()).collect())
 }
 
+/// Prefill a disabled argument-prefix rule for a single safely parsed command.
+pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<ApprovalRule> {
+    let segments = parse_command(command)?;
+    if segments.len() != 1 || !passes_safety_rails(&segments) { return None; }
+    let (_, argv_prefix) = normalize_segment(&segments[0])?;
+    Some(ApprovalRule {
+        id, label: "Command approval".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: false, argv_prefix, command_regex: None, cwd_scope: None, require_isolated_home: false,
+        hit_count: 0, last_used_at: None,
+    })
+}
+
 fn isolated_configuration(assignments: &[String]) -> bool {
     let Ok(temporary_root) = Path::new("/tmp").canonicalize() else {
         return false;
@@ -668,5 +680,13 @@ mod tests {
             &format!("HOME={path} CLAUDE_CONFIG_DIR={path} CODEX_HOME={path} cargo test --offline"),
             &rules
         ));
+    }
+
+    #[test]
+    fn prefill_is_disabled_and_preserves_quoted_arguments() {
+        let rule = prefill_rule_from_command(&json!("pgrep 'worker process'"), "id".into()).unwrap();
+        assert!(!rule.enabled);
+        assert_eq!(rule.argv_prefix, ["pgrep", "worker process"]);
+        assert!(prefill_rule_from_command(&json!("ps; rm -rf x"), "id".into()).is_none());
     }
 }

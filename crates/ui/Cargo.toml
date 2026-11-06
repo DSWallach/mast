@@ -47,6 +47,7 @@ name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
 [dependencies]
+shell-words = "1.1"
 url = "2"
 mast-proto.workspace = true
 similar.workspace = true

@@ -244,6 +244,16 @@ fn approval_command_test_uses_engine_matcher(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn approval_command_prefills_disabled_rule(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, _, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+    let draft = details.update(vcx, |details, cx| details.prefill_approval_command_for_test("pgrep 'worker process'", cx)).unwrap();
+    assert!(!draft.enabled);
+    assert_eq!(draft.argv_prefix, ["pgrep", "worker process"]);
+}
+
+#[gpui::test]
 fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = sync_snapshot(None);

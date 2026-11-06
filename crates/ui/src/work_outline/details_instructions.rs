@@ -1002,7 +1002,7 @@ impl WorkItemDetails {
 
     pub(crate) fn edit_approval_rule(&mut self, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
         self.approval_label_input.update(cx, |input, cx| input.set_text(rule.label.clone(), cx));
-        self.approval_prefix_input.update(cx, |input, cx| input.set_text(rule.argv_prefix.join(" "), cx));
+        self.approval_prefix_input.update(cx, |input, cx| input.set_text(shell_words::join(&rule.argv_prefix), cx));
         self.approval_regex_input.update(cx, |input, cx| input.set_text(rule.command_regex.clone().unwrap_or_default(), cx));
         self.approval_cwd_input.update(cx, |input, cx| input.set_text(rule.cwd_scope.clone().unwrap_or_default(), cx));
         self.approval_rule_draft = Some(rule);
@@ -1021,7 +1021,12 @@ impl WorkItemDetails {
     pub(crate) fn save_approval_rule(&mut self, cx: &mut Context<Self>) {
         let Some(mut rule) = self.approval_rule_draft.clone() else { return; };
         rule.label = self.approval_label_input.read(cx).text().trim().to_owned();
-        rule.argv_prefix = self.approval_prefix_input.read(cx).text().split_whitespace().map(str::to_owned).collect();
+        let Ok(prefix) = shell_words::split(self.approval_prefix_input.read(cx).text()) else {
+            self.error = Some("The command prefix has an unclosed quote or escape.".into());
+            cx.notify();
+            return;
+        };
+        rule.argv_prefix = prefix;
         let regex = self.approval_regex_input.read(cx).text().trim().to_owned();
         rule.command_regex = (!regex.is_empty()).then_some(regex);
         let cwd = self.approval_cwd_input.read(cx).text().trim().to_owned();
@@ -1047,6 +1052,24 @@ impl WorkItemDetails {
             None => "Would ask for approval".into(),
         });
         cx.notify();
+    }
+
+    fn prefill_approval_command(&mut self, cx: &mut Context<Self>) {
+        let command = self.approval_test_input.read(cx).text().to_owned();
+        let id = super::super::actions::new_operation_id();
+        if let Some(rule) = mast_engine::approval_commands::prefill_rule_from_command(&serde_json::Value::String(command), id) {
+            self.edit_approval_rule(rule, cx);
+        } else {
+            self.approval_test_result = Some("This command cannot be safely prefilled; enter a rule manually.".into());
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prefill_approval_command_for_test(&mut self, command: &str, cx: &mut Context<Self>) -> Option<mast_proto::work_outline::ApprovalRule> {
+        self.approval_test_input.update(cx, |input, cx| input.set_text(command.to_owned(), cx));
+        self.prefill_approval_command(cx);
+        self.approval_rule_draft.clone()
     }
 
     #[cfg(test)]
@@ -1083,7 +1106,7 @@ impl WorkItemDetails {
                     .on_click(cx.listener(move |this, _, _, cx| this.edit_approval_rule(edit_rule.clone(), cx)))));
         }
         if let Some(draft) = &self.approval_rule_draft {
-            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix (space-separated)", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input)] {
+            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input)] {
                 section = section.child(div().text_color(theme.text_muted).child(label)).child(Self::input_frame(input, theme));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
@@ -1104,7 +1127,8 @@ impl WorkItemDetails {
         }
         section = section.child(div().text_color(theme.text_muted).child("Test as Codex in the Space root"))
             .child(Self::input_frame(&self.approval_test_input, theme))
-            .child(Self::small_button("approval-rule-test", "Test command", theme).on_click(cx.listener(|this, _, _, cx| this.test_approval_command(cx))));
+            .child(Self::small_button("approval-rule-test", "Test command", theme).on_click(cx.listener(|this, _, _, cx| this.test_approval_command(cx))))
+            .child(Self::small_button("approval-rule-prefill", "Create rule from command…", theme).on_click(cx.listener(|this, _, _, cx| this.prefill_approval_command(cx))));
         if let Some(result) = &self.approval_test_result {
             section = section.child(div().debug_selector(|| "approval-rule-test-result".into()).text_color(theme.text_muted).child(SharedString::from(result.clone())));
         }
