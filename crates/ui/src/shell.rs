@@ -11095,23 +11095,7 @@ impl Shell {
             } else {
                 accessible_name.to_string()
             };
-            let chip = div()
-                .id(("right-surface-tab", ix))
-                .debug_selector(|| format!("right-surface-tab-{ix}"))
-                .group(group.clone())
-                .h(px(24.0))
-                .w(px(CHIP_W))
-                .flex_none()
-                .pl(px(4.0))
-                .pr(px(8.0))
-                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(3.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label(accessible_label)
+            let chip = crate::components::shell_parts::right_surface_tab(ix, group.clone(), CHIP_W, accessible_label, is_active, &theme)
                 .when_some(detail, |chip, detail| {
                     chip.tooltip(move |_, cx| {
                         cx.new(|_| SurfaceTabTooltip {
@@ -11132,12 +11116,6 @@ impl Shell {
                 .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                     window.prevent_default()
                 })
-                .when(is_active, |el| el.bg(crate::theme::wash(0.10)))
-                .when(!is_active, |el| {
-                    el.hover(|s| s.bg(crate::theme::wash(0.06)))
-                })
-                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, is_active))
-                .children(crate::surface_chrome::active_key_dot(&theme, is_active))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.set_right_active(surface, cx);

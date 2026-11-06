@@ -94,6 +94,38 @@ pub(crate) fn chat_header_chip_icon_color(
     }
 }
 
+pub(crate) fn right_surface_tab(
+    index: usize,
+    group: SharedString,
+    width: f32,
+    accessible_label: String,
+    active: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("right-surface-tab", index))
+        .debug_selector(move || format!("right-surface-tab-{index}"))
+        .group(group)
+        .h(px(24.0))
+        .w(px(width))
+        .flex_none()
+        .pl(px(4.0))
+        .pr(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(3.0))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(accessible_label)
+        .when(active, |el| el.bg(crate::theme::wash(0.10)))
+        .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
+        .when(true, |el| super::segmented_key(el, theme, active))
+        .children(crate::surface_chrome::active_key_dot(theme, active))
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(
