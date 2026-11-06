@@ -212,6 +212,23 @@ fn checkout_matches_pr(
 impl Changes {
     fn review_identity(&self, cx: &App) -> Option<(String, Option<String>)> {
         if let Some(owner) = &self.owner {
+            if let Some(target @ mast_proto::ReviewTarget::Branch { checkout_path: Some(path), branch, head_sha, .. }) = &self.walkthrough_target
+                && owner.cwd.as_deref() == Some(path.as_str())
+            {
+                let selected = self.state.read(cx).selected_execution_member(&owner.chat_id);
+                let head = owner.range.as_ref().and_then(|range| range.head_sha.clone()).or_else(|| {
+                    selected.as_ref().filter(|member| member.checkout_path == *path).and_then(|member| member.head_sha.clone())
+                });
+                let matches = match &owner.range {
+                    Some(range) => self.scope == DiffScope::Range && branch.as_deref().map_or_else(
+                        || head.as_deref().is_some_and(|head| head.eq_ignore_ascii_case(head_sha)),
+                        |branch| range.head_branch == branch),
+                    None => self.scope == DiffScope::Branch && branch.as_deref().map_or_else(
+                        || head.as_deref().is_some_and(|head| head.eq_ignore_ascii_case(head_sha)),
+                        |branch| owner.branch.as_deref() == Some(branch)),
+                };
+                if matches { return Some((target.state_key(), head)); }
+            }
             if let Some(range) = &owner.range {
                 if let Some(pr) = range
                     .pr_url
@@ -767,6 +784,36 @@ impl Changes {
 #[cfg(test)]
 mod mark_tests {
     use super::*;
+
+    #[gpui::test]
+    fn branch_review_uses_target_key_only_for_matching_checkout_and_branch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            let changes = cx.new(|cx| {
+                let owner = ChangesTarget { chat_id: "chat".into(), device_id: "device".into(), cwd: Some("/repo".into()), checkout_id: None, branch: Some("feature".into()), unconfirmed: None, exact_checkout: false, range: None };
+                let mut changes = Changes::with_owner(state, Some(owner), cx);
+                changes.scope = DiffScope::Branch;
+                changes.walkthrough_target = Some(mast_proto::ReviewTarget::Branch { repo: Some("O/R".into()), checkout_path: Some("/repo".into()), branch: Some("feature".into()), base_ref: None, base_sha: None, head_sha: "abc".into() });
+                changes
+            });
+            changes.update(cx, |changes, cx| {
+                assert_eq!(changes.review_identity(cx).unwrap().0, "branch:o/r#feature");
+                changes.owner.as_mut().unwrap().branch = Some("other".into());
+                assert_eq!(changes.review_identity(cx).unwrap().0, "diff:device:/repo");
+                if let Some(mast_proto::ReviewTarget::Branch { branch, .. }) = &mut changes.walkthrough_target { *branch = None; }
+                changes.scope = DiffScope::Range;
+                changes.owner.as_mut().unwrap().range = Some(crate::work_outline::execution::RefRange {
+                    label: "ref".into(), head_branch: "other".into(), head_ref: "refs/heads/other".into(),
+                    head_sha: Some("abc".into()), pr_url: None, base_branch: "main".into(), base_ref: "refs/heads/main".into(),
+                });
+                assert_eq!(changes.review_identity(cx).unwrap().0, "branch:o/r#abc");
+                changes.owner.as_mut().unwrap().range.as_mut().unwrap().head_sha = Some("different".into());
+                assert_eq!(changes.review_identity(cx).unwrap().0, "ref:device:/repo:refs/heads/other");
+            });
+        });
+    }
 
     #[gpui::test]
     fn worktree_and_pr_branch_have_distinct_review_targets(cx: &mut gpui::TestAppContext) {

@@ -8,7 +8,7 @@ use gpui::{
     div, prelude::*, px,
 };
 use mast_proto::{
-    ArtifactContentEncoding, ArtifactContentParams, ArtifactView, ReviewSidecar, ReviewStep,
+    ArtifactContentEncoding, ArtifactContentParams, ArtifactView, ReviewStep, ReviewTarget,
 };
 
 use crate::theme::Theme;
@@ -76,7 +76,7 @@ pub(crate) struct ReviewHost {
     state: Entity<crate::state::AppState>,
     shell: gpui::WeakEntity<crate::shell::Shell>,
     chat_id: String,
-    pr: Option<mast_proto::ReviewPullRequest>,
+    target: Option<ReviewTarget>,
     _state_observer: Subscription,
     _shell_observer: Option<Subscription>,
     _load: Task<()>,
@@ -120,13 +120,17 @@ impl ReviewHost {
                     if reply.encoding != ArtifactContentEncoding::Utf8 {
                         return Err("Review content is not UTF-8".to_string());
                     }
-                    serde_json::from_str::<ReviewSidecar>(&reply.content)
+                    serde_json::from_str::<ReviewDocument>(&reply.content)
                         .map_err(|error| format!("Invalid review: {error}"))
                 });
-                match review {
-                    Ok(sidecar) => {
-                        this.pr = Some(sidecar.pr.clone());
-                        this.view = Some(cx.new(|cx| Walkthrough::new(sidecar.into(), changes, cx)))
+                match review.and_then(ReviewDocument::into_review) {
+                    Ok((target, review)) => {
+                        this.target = Some(target.clone());
+                        changes.update(cx, |changes, cx| {
+                            changes.walkthrough_target = Some(target);
+                            changes.ensure_review_state(cx);
+                        });
+                        this.view = Some(cx.new(|cx| Walkthrough::new(review, changes, cx)))
                     }
                     Err(error) => this.error = Some(error),
                 }
@@ -139,7 +143,7 @@ impl ReviewHost {
             state,
             shell,
             chat_id,
-            pr: None,
+            target: None,
             _state_observer: state_observer,
             _shell_observer: shell_observer,
             _load: load,
@@ -149,16 +153,30 @@ impl ReviewHost {
 
 impl Render for ReviewHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let (Some(view), Some(pr)) = (&self.view, &self.pr) {
-            let cached = self
-                .shell
-                .upgrade()
-                .and_then(|shell| shell.read(cx).cached_review_head(&self.chat_id, pr));
-            let stale = if let Some(head) = cached {
+        if let (Some(view), Some(target)) = (&self.view, &self.target) {
+            let pr = match target {
+                ReviewTarget::PullRequest {
+                    repo,
+                    number,
+                    head_sha,
+                    base_sha,
+                } => Some(mast_proto::ReviewPullRequest {
+                    repo: repo.clone(),
+                    number: *number,
+                    head_sha: head_sha.clone(),
+                    base_sha: base_sha.clone(),
+                }),
+                ReviewTarget::Branch { .. } => None,
+            };
+            let cached = self.shell.upgrade().and_then(|shell| {
+                pr.as_ref()
+                    .and_then(|pr| shell.read(cx).cached_review_head(&self.chat_id, pr))
+            });
+            let stale = if let (Some(head), Some(pr)) = (cached, pr.as_ref()) {
                 (!head.eq_ignore_ascii_case(&pr.head_sha)).then_some(head)
-            } else {
+            } else if let Some(pr) = pr {
                 let card = crate::artifacts::model::ReviewCard {
-                    pr: pr.clone(),
+                    pr,
                     summary: String::new(),
                     highlights: Vec::new(),
                 };
@@ -167,6 +185,33 @@ impl Render for ReviewHost {
                     self.state.read(cx).chat_ref_targets(&self.chat_id),
                 )
                 .map(str::to_owned)
+            } else if let ReviewTarget::Branch {
+                checkout_path: Some(path),
+                branch: Some(branch),
+                head_sha,
+                ..
+            } = target
+            {
+                let state = self.state.read(cx);
+                let head = state
+                    .chat_ref_targets(&self.chat_id)
+                    .iter()
+                    .find(|ref_target| {
+                        ref_target.path == *path && ref_target.head_branch == *branch
+                    })
+                    .and_then(|ref_target| ref_target.head_sha.clone())
+                    .or_else(|| {
+                        state
+                            .selected_execution_member(&self.chat_id)
+                            .filter(|member| {
+                                member.checkout_path == *path
+                                    && member.branch.as_deref() == Some(branch)
+                            })
+                            .and_then(|member| member.head_sha)
+                    });
+                head.filter(|head| !head.eq_ignore_ascii_case(head_sha))
+            } else {
+                None
             };
             view.update(cx, |view, cx| {
                 if view.stale_head != stale {
@@ -196,15 +241,21 @@ pub(super) struct TourHunk {
     pub identity: String,
 }
 
-/// Temporary range adapter. Replace this with sidecar identity lookup when
-/// publishers stamp the same changed-line identity as the Changes view.
-fn step_covers_hunk(step: &ReviewStep, file: &FileDiff, hunk: usize) -> bool {
+/// Legacy sidecars predate shared identities and used a different hash.
+fn step_covers_hunk(step: &ReviewStep, file: &FileDiff, hunk: usize, legacy: bool) -> bool {
     if step.file != file.path {
         return false;
     }
     let Some(hunk) = file.hunks.get(hunk) else {
         return false;
     };
+    if !legacy {
+        let identity = hunk_identity(&file.path, hunk);
+        return step
+            .hunks
+            .iter()
+            .any(|anchor| anchor.hunk_hash.as_deref() == Some(identity.as_str()));
+    }
     let mut lines = hunk.lines.iter().filter_map(|line| line.new_no);
     let Some(first) = lines.next() else {
         return false;
@@ -225,7 +276,7 @@ pub(super) struct TourCoverage {
 }
 
 impl TourCoverage {
-    pub fn new(steps: &[ReviewStep], files: &[FileDiff]) -> Self {
+    pub fn new(steps: &[ReviewStep], files: &[FileDiff], legacy: bool) -> Self {
         let mut covered = HashSet::new();
         let complete = steps
             .iter()
@@ -236,7 +287,7 @@ impl TourCoverage {
                         single.hunks = vec![range.clone()];
                         files.iter().any(|file| {
                             (0..file.hunks.len())
-                                .any(|index| step_covers_hunk(&single, file, index))
+                                .any(|index| step_covers_hunk(&single, file, index, legacy))
                         })
                     })
             })
@@ -252,7 +303,7 @@ impl TourCoverage {
                             .iter()
                             .enumerate()
                             .filter_map(move |(hunk_index, hunk)| {
-                                step_covers_hunk(step, file, hunk_index).then(|| TourHunk {
+                                step_covers_hunk(step, file, hunk_index, legacy).then(|| TourHunk {
                                     file: file_index,
                                     hunk: hunk_index,
                                     identity: hunk_identity(&file.path, hunk),
@@ -309,6 +360,7 @@ pub(crate) struct Walkthrough {
     coverage: Option<TourCoverage>,
     viewed: BTreeSet<String>,
     seen: HashSet<String>,
+    target_selected: bool,
     selected: usize,
     tour: bool,
     stale_head: Option<String>,
@@ -321,14 +373,46 @@ pub(crate) struct Walkthrough {
 struct TourReview {
     steps: Vec<ReviewStep>,
     head: String,
+    target_key: String,
+    legacy_hashes: bool,
 }
 
-impl From<ReviewSidecar> for TourReview {
-    fn from(sidecar: ReviewSidecar) -> Self {
-        Self {
-            steps: sidecar.steps,
-            head: sidecar.pr.head_sha,
-        }
+#[derive(serde::Deserialize)]
+struct ReviewDocument {
+    target: Option<ReviewTarget>,
+    pr: Option<serde_json::Value>,
+    steps: Vec<ReviewStep>,
+}
+
+impl ReviewDocument {
+    fn into_review(self) -> Result<(ReviewTarget, TourReview), String> {
+        let legacy = self.target.is_none();
+        let target = match self.target {
+            Some(target) => target,
+            None => {
+                let mut pr = self.pr.ok_or("Review has no target")?;
+                pr.as_object_mut()
+                    .ok_or("Invalid legacy review target")?
+                    .insert("kind".into(), "pr".into());
+                serde_json::from_value(pr)
+                    .map_err(|error| format!("Invalid legacy review target: {error}"))?
+            }
+        };
+        let head = match &target {
+            ReviewTarget::PullRequest { head_sha, .. } | ReviewTarget::Branch { head_sha, .. } => {
+                head_sha.clone()
+            }
+        };
+        let target_key = target.state_key();
+        Ok((
+            target,
+            TourReview {
+                steps: self.steps,
+                head,
+                target_key,
+                legacy_hashes: legacy,
+            },
+        ))
     }
 }
 
@@ -345,6 +429,7 @@ impl Walkthrough {
             coverage: None,
             viewed: BTreeSet::new(),
             seen: HashSet::new(),
+            target_selected: false,
             selected: 0,
             tour: true,
             stale_head: None,
@@ -355,8 +440,9 @@ impl Walkthrough {
     }
 
     fn coverage(&mut self) -> &TourCoverage {
-        self.coverage
-            .get_or_insert_with(|| TourCoverage::new(&self.review.steps, &self.files))
+        self.coverage.get_or_insert_with(|| {
+            TourCoverage::new(&self.review.steps, &self.files, self.review.legacy_hashes)
+        })
     }
 
     fn select_step(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -400,6 +486,9 @@ impl Walkthrough {
     }
 
     fn mark_current_hunk(&mut self, cx: &mut Context<Self>) {
+        if self.tour && !self.target_selected {
+            return;
+        }
         if let Some(changes) = &self.changes {
             changes.update(cx, |changes, cx| {
                 let top = changes
@@ -430,6 +519,9 @@ impl Walkthrough {
     }
 
     fn mark_step(&mut self, cx: &mut Context<Self>) {
+        if !self.target_selected {
+            return;
+        }
         let coverage = self.coverage().clone();
         let Some(hunks) = coverage.steps.get(self.selected) else {
             return;
@@ -474,12 +566,19 @@ impl Render for Walkthrough {
                 self.files = Arc::new(Vec::new());
                 self.coverage = None;
             }
+            self.target_selected =
+                changes.review_target.as_deref() == Some(self.review.target_key.as_str());
             self.viewed = changes
                 .review_state
                 .as_ref()
+                .filter(|state| self.target_selected && state.target == self.review.target_key)
                 .map(|state| state.viewed_hunks.clone())
                 .unwrap_or_default();
-            self.seen = changes.seen_hunks.clone();
+            self.seen = if self.target_selected {
+                changes.seen_hunks.clone()
+            } else {
+                HashSet::new()
+            };
         }
         let coverage = self.coverage().clone();
         let progress = format!(
@@ -605,6 +704,13 @@ impl Render for Walkthrough {
             .p_3()
             .text_color(theme.text)
             .bg(theme.bg)
+            .when(!self.target_selected && self.changes.is_some(), |view| {
+                view.child(
+                    div()
+                        .text_color(theme.text_muted)
+                        .child("Select the review target in Changes to track progress."),
+                )
+            })
             .when_some(self.stale_head.clone(), |view, head| {
                 let before: String = self.review.head.chars().take(7).collect();
                 let after: String = head.chars().take(7).collect();
@@ -685,6 +791,18 @@ impl Render for Walkthrough {
 mod tests {
     use super::*;
     use crate::changes::parse_patch;
+    use mast_proto::ReviewSidecar;
+
+    impl From<ReviewSidecar> for TourReview {
+        fn from(sidecar: ReviewSidecar) -> Self {
+            Self {
+                steps: sidecar.steps,
+                head: sidecar.pr.head_sha,
+                target_key: "pr:o/r#1".into(),
+                legacy_hashes: true,
+            }
+        }
+    }
 
     fn fixture() -> (ReviewSidecar, Vec<FileDiff>) {
         let review = serde_json::from_str(
@@ -706,7 +824,7 @@ mod tests {
     #[test]
     fn coverage_and_progress_use_manual_hunk_marks() {
         let (review, files) = fixture();
-        let coverage = TourCoverage::new(&review.steps, &files);
+        let coverage = TourCoverage::new(&review.steps, &files, true);
         assert_eq!(coverage.steps[0].len(), 1);
         assert_eq!(coverage.uncovered.len(), 1);
         let mut viewed = BTreeSet::new();
@@ -717,6 +835,34 @@ mod tests {
     }
 
     #[test]
+    fn shared_hash_survives_moved_lines_and_rejects_changed_hunks() {
+        let (mut review, files) = fixture();
+        review.steps[0].hunks[0].hunk_hash = Some(hunk_identity("a.rs", &files[0].hunks[0]));
+        let moved = parse_patch(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -50 +50 @@\n-old\n+new\n",
+        );
+        let changed = parse_patch(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+different\n",
+        );
+        assert_eq!(
+            TourCoverage::new(&review.steps, &moved, false).steps[0].len(),
+            1
+        );
+        let coverage = TourCoverage::new(&review.steps, &changed, false);
+        assert!(coverage.steps[0].is_empty());
+        assert_eq!(coverage.uncovered.len(), 1);
+    }
+
+    #[test]
+    fn branch_document_needs_no_placeholder_pr() {
+        let document: ReviewDocument = serde_json::from_str(r#"{"target":{"kind":"branch","checkoutPath":"/repo","branch":"feature","headSha":"abc"},"steps":[]}"#).unwrap();
+        let (target, review) = document.into_review().unwrap();
+        assert!(matches!(target, ReviewTarget::Branch { .. }));
+        assert_eq!(review.head, "abc");
+        assert!(!review.legacy_hashes);
+    }
+
+    #[test]
     fn missing_anchor_cannot_count_as_reviewed() {
         let (mut review, files) = fixture();
         review.steps[0].hunks.push(mast_proto::ReviewHunk {
@@ -724,7 +870,7 @@ mod tests {
             new_end: 51,
             hunk_hash: None,
         });
-        let coverage = TourCoverage::new(&review.steps, &files);
+        let coverage = TourCoverage::new(&review.steps, &files, true);
         let viewed = coverage.steps[0]
             .iter()
             .map(|hunk| hunk.identity.clone())
@@ -766,6 +912,7 @@ mod tests {
             coverage: None,
             viewed: BTreeSet::new(),
             seen: HashSet::new(),
+            target_selected: true,
             selected: 0,
             tour: true,
             stale_head: None,
@@ -805,6 +952,7 @@ mod tests {
             coverage: None,
             viewed: BTreeSet::new(),
             seen: HashSet::new(),
+            target_selected: true,
             selected: 0,
             tour: true,
             stale_head: None,
