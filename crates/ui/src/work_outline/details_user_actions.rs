@@ -1154,6 +1154,7 @@ impl WorkItemDetails {
                             },
                             theme,
                         )
+                        .when(true, |el| crate::surface_chrome::confirm_key(el, theme))
                         .debug_selector(|| "work-item-proposal-approve".into())
                         .on_click(cx.listener(|this, _, _, cx| this.approve_proposal(cx))),
                     )

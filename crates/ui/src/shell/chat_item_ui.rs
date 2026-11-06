@@ -479,6 +479,7 @@ impl Shell {
                     tooltip: String,
                     url: Option<String>| {
             let tooltip: SharedString = tooltip.into();
+            let is_model = key == "model";
             let id: SharedString = format!("chat-header-chip-{key}").into();
             let selector = id.to_string();
             let icon_selector = format!("{selector}-icon");
@@ -500,6 +501,13 @@ impl Shell {
                 .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface_raised))
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(text)
+                .when(is_model && theme.ui_style.controls == crate::ui_style::ControlVariant::Key && tone == ChipTone::Plain, |chip| {
+                    let dark = theme.appearance.is_dark();
+                    chip.rounded(px(0.0)).bg(if dark { theme.bg } else { theme.solid })
+                        .border_color(theme.industrial_colors().rule)
+                        .font_family(theme.font_mono.clone())
+                        .text_color(if dark { theme.text } else { theme.on_solid })
+                })
                 .when(clickable, |chip| {
                     chip.cursor_pointer()
                         .hover(|chip| chip.bg(theme.element_hover))
@@ -509,7 +517,9 @@ impl Shell {
                         .debug_selector(move || icon_selector.clone())
                         .flex_none()
                         .child(crate::icons::icon(icon_path).size(px(11.0)).text_color(
-                            if tone == ChipTone::Link {
+                            if is_model && theme.ui_style.controls == crate::ui_style::ControlVariant::Key && tone == ChipTone::Plain {
+                                if theme.appearance.is_dark() { theme.text } else { theme.on_solid }
+                            } else if tone == ChipTone::Link {
                                 theme.accent
                             } else {
                                 text

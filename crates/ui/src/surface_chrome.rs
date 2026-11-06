@@ -53,6 +53,13 @@ pub(crate) fn grille(theme: &Theme) -> Div {
     }))
 }
 
+pub(crate) fn confirm_key<T: gpui::Styled>(element: T, theme: &Theme) -> T {
+    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+        let fg = if crate::theme::contrast_ratio(theme.text, theme.success) >= crate::theme::contrast_ratio(theme.bg, theme.success) { theme.text } else { theme.bg };
+        element.bg(theme.success).text_color(fg).border_1().border_color(theme.industrial_colors().rule)
+    } else { element }
+}
+
 pub(crate) fn active_key_dot(theme: &Theme, active: bool) -> Option<Div> {
     (active && theme.ui_style.controls == crate::ui_style::ControlVariant::Key)
         .then(|| div().size(px(6.0)).rounded_full().bg(theme.industrial_colors().signal))
