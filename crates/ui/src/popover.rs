@@ -842,10 +842,14 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .gap(px(10.0))
         .px(px(8.0))
         .py(px(6.0))
-        .rounded(px(MENU_ITEM_RADIUS))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(MENU_ITEM_RADIUS)))
+        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.py(px(8.0)))
         .text_size(crate::typography::ui_rems(13.0))
         .cursor_pointer();
-    if active {
+    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+        row.bg(if active { theme.element_active } else { theme.surface })
+            .text_color(theme.text)
+    } else if active {
         row.bg(crate::theme::card_selected_bg())
             .text_color(theme.text)
     } else {

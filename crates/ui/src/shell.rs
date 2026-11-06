@@ -7095,7 +7095,8 @@ impl Shell {
         out
     }
 
-    fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx);
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
@@ -7114,6 +7115,7 @@ impl Shell {
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
+            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_r_1().border_color(theme.border))
             .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
             .into_any_element()
     }
@@ -11049,7 +11051,7 @@ impl Shell {
                 .flex_none()
                 .pl(px(4.0))
                 .pr(px(8.0))
-                .rounded(px(6.0))
+                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -11081,6 +11083,7 @@ impl Shell {
                 .when(!is_active, |el| {
                     el.hover(|s| s.bg(crate::theme::wash(0.06)))
                 })
+                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(if is_active { theme.element_active } else { theme.surface_raised }).border_1().border_b_2().border_color(theme.border))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.set_right_active(surface, cx);
