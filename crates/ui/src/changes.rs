@@ -4407,7 +4407,8 @@ impl Changes {
                     .relative()
                     .when(selected, |el| el.bg(theme.element_active))
                     .child(row)
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        window.focus(&this.diff_focus, cx);
                         this.select_explanation_line(&select_path, source_side, line_no, event.modifiers.shift, cx);
                     }))
                     .when(hovered, |el| {
@@ -4498,7 +4499,8 @@ impl Changes {
                 let left = cell(left, true)
                     .map(|cell| cell.id(("split-old", ix))
                         .when(left_number.is_some_and(|number| self.explanation_line_selected(&path, SourceSide::Old, number)), |el| el.bg(theme.element_active))
-                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            window.focus(&this.diff_focus, cx);
                             if let Some(number) = left_number { this.select_explanation_line(&left_path, SourceSide::Old, number, event.modifiers.shift, cx); }
                         }))
                         .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
@@ -4515,7 +4517,8 @@ impl Changes {
                         let select_path = path.clone();
                         cell.id(("split-new", ix))
                             .when(self.explanation_line_selected(&path, SourceSide::New, line_no), |el| el.bg(theme.element_active))
-                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                window.focus(&this.diff_focus, cx);
                                 this.select_explanation_line(&select_path, SourceSide::New, line_no, event.modifiers.shift, cx);
                             }))
                             .when(self.hovering(&path, anchor), |el| {

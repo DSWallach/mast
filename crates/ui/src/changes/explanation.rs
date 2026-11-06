@@ -12,6 +12,81 @@ pub(super) struct SentQuestion {
     pub queued: bool,
 }
 
+/// Resolve a matching review from sidecar contents, rather than assuming that
+/// an artifact on the same item necessarily describes the displayed target.
+pub(super) fn review_chat_for_target<T: 'static>(
+    state: gpui::Entity<crate::state::AppState>,
+    space_id: &str,
+    target_key: &str,
+    head_sha: Option<&str>,
+    cx: &mut Context<T>,
+) -> gpui::Task<Result<Option<String>, String>> {
+    let state = state.read(cx);
+    let Some(snapshot) = state.artifacts().snapshot(space_id) else {
+        return gpui::Task::ready(Err("Review artifacts are still loading".into()));
+    };
+    let local_device = state.local_device_id.as_deref();
+    let actions = state.artifact_actions();
+    let mut artifacts: Vec<_> = snapshot
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact.kind == mast_proto::ArtifactKind::Review && artifact.chat_id.is_some()
+        })
+        .collect();
+    artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.updated_at));
+    let calls: Vec<_> = artifacts
+        .into_iter()
+        .map(|artifact| {
+            let device = (local_device != Some(artifact.device_id.as_str()))
+                .then(|| artifact.device_id.clone());
+            let call = actions.content(mast_proto::ArtifactContentParams {
+                artifact_id: artifact.id.clone(),
+                revision: None,
+                companion: None,
+                target_device_id: device,
+            });
+            (artifact.chat_id.clone().unwrap(), call)
+        })
+        .collect();
+    let target_key = target_key.to_owned();
+    let head_sha = head_sha.map(str::to_owned);
+    cx.spawn(async move |_, _| {
+        for (chat_id, call) in calls {
+            let reply = call.await.map_err(|error| error.text())?;
+            if reply.encoding != mast_proto::ArtifactContentEncoding::Utf8 {
+                return Err("Review content is not UTF-8".into());
+            }
+            let document: serde_json::Value = serde_json::from_str(&reply.content)
+                .map_err(|error| format!("Invalid review: {error}"))?;
+            let target =
+                if let Some(target) = document.get("target").filter(|value| !value.is_null()) {
+                    target.clone()
+                } else {
+                    let mut pr = document.get("pr").cloned().ok_or("Review has no target")?;
+                    pr.as_object_mut()
+                        .ok_or("Invalid legacy review target")?
+                        .insert("kind".into(), "pr".into());
+                    pr
+                };
+            let target: mast_proto::ReviewTarget = serde_json::from_value(target)
+                .map_err(|error| format!("Invalid review target: {error}"))?;
+            let target_head = match &target {
+                mast_proto::ReviewTarget::PullRequest { head_sha, .. }
+                | mast_proto::ReviewTarget::Branch { head_sha, .. } => head_sha,
+            };
+            if target.state_key() == target_key
+                && head_sha
+                    .as_ref()
+                    .is_none_or(|head| head.eq_ignore_ascii_case(target_head))
+            {
+                return Ok(Some(chat_id));
+            }
+        }
+        Ok(None)
+    })
+}
+
 pub(super) fn send_question<T: 'static>(
     state: gpui::Entity<crate::state::AppState>,
     chat_id: String,
