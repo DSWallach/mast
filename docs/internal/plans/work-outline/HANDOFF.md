@@ -1016,19 +1016,27 @@ merge is unresolved, and never prune `target/debug` while one is running. Instal
 below). Answer Codex approvals with the real question id (get_chat → pendingInput); the installed build now errors on
 unknown ids instead of denying.
 
-**Running (overnight 2026-11-06, Mikey asleep; release in batches, install, never restart Mast):**
-- Ready to merge: `template-proposals-button`.
-- Building: 4c-1 `review-this-work` (5ee440aa), 4c-2 `review-explain` (13355503), `overview-toolbar-cleanup`
-  (73cfb86a: drop List mode, restore top PR button, shortcuts button icon plus a scrollable popover, Hide stale/Show
-  archived into ⋯, remove Key).
-- Design/audit (no code, Required Actions for the morning): workflow pack (25090468), coworker readiness re-audit
-  (8cbf7377, lists "safe overnight" fixes to dispatch), UI styles (85726f6d, Sonnet).
-- Queued when slots free: bug c5dd5988 (multi-question ask drops answers), feature e4f25617 ("waiting until
-  <date>"), UI styles implementation on branch `ui-styles`. Mikey asked for it built tonight anyway; the setting
-  defaults to "minimal", so it rolls back by reverting.
-
-**Next up:** PR review phase 4c (item 035cd13b, pending): select a change → quick explanation (Mikey asked for
-this), ask about this step, and a "Review this work" button on worker chats/items calling `start_branch_review`.
+**Overnight 2026-11-06 (Mikey asleep; released in batches, installed, Mast NOT restarted):**
+- Installed (needs Mikey's restart to take effect):
+  - `template-proposals-button`: "Review proposed instructions" shows child-template proposals inline.
+  - `overview-toolbar-cleanup`: List mode hidden, with saved List migrated to Outline (legacy List code is still
+    there); Overview PR button restored (it vanished in d7a30adde with the retired sidebar); shortcuts button icon
+    plus a capped, scrollable popover; Hide stale/Show archived in ⋯; Key removed.
+  - `multi-question-ask`: Claude AskUserQuestion accepts typed "Other" answers. Codex approvals stay strict. The
+    option-only rejection in friction 8e01dbe1 wasn't reproduced separately.
+  - `waiting-until`: `waitingUntil` + reason on items, auto-continue skips them, one due notice (starts nothing),
+    MCP mutation, item control and row chip. Once Mikey restarts, set phase 0 item 9516dd7c to wait until 11-12.
+  - `coworker-docs`: guides for the walkthrough, Needs-you, hand-off, templates, friction and the menu bar;
+    first-run and accounts wording; the DMG hand-off; dev reports moved to docs/internal. Docs only.
+- Release runs 50–52 passed (last one: nextest 2404/2404, UI 2511/0).
+- Still building: 4c-1 `review-this-work` (5ee440aa), 4c-2 `review-explain` (13355503), UI styles slice 1
+  `ui-styles` (c120915e; default "minimal" = identity, Dense opt-in; rolls back by reverting).
+- For Mikey's morning review (Required Actions): workflow pack (mast-artifact:771f405aaf35fc7192f309027ced0a95),
+  coworker readiness (mast-artifact:0497fc4075db3cd988c9c69f8e08d6de; decisions: clean-Mac tester, ad-hoc vs
+  notarised DMG, delete the stale `archive/ios` + `audit-*` origin branches), UI styles
+  (mast-artifact:350fe811d51a2309281fbac0be7f6981, questions A–H).
+- Load: five concurrent builders plus a release run pushed load to ~98 on 18 cores. Keep it to about 3 builders plus
+  1 release run.
 
 **Observing (minimal-talk phase 0, approved 2026-11-05):** item 9516dd7c, worker chat 4ccb0a0d (archived).
 Baseline for the warehouse dashboard, with Basedash, Kit Line and StockLot as comparisons, is in the observation log
