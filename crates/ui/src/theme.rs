@@ -804,13 +804,20 @@ impl Theme {
         let hash = chat_id.bytes().fold(14695981039346656037_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
         });
-        let indices = [4, 1, 5, 3, 2, 6];
-        flatten(self.terminal.ansi[indices[(hash % 6) as usize]], self.bg)
+        let indices = [4, 3, 5, 2, 1, 6];
+        let colors: Vec<_> = indices.into_iter().map(|index| flatten(self.terminal.ansi[index], self.bg))
+            .filter(|color| {
+                let distance = (color.h - self.danger.h).abs();
+                color.s < 0.15 || self.danger.s < 0.15 || distance.min(1.0 - distance) > 0.08
+            }).collect();
+        if colors.is_empty() { return self.accent; }
+        let index = if chat_id.is_empty() || chat_id == "harness:ClaudeCode" { 0 } else if chat_id == "harness:Codex" { 1 % colors.len() } else { (hash as usize).wrapping_add(1) % colors.len() };
+        colors[index]
     }
 
     /// Select a theme text role with the strongest contrast on an identity fill.
     pub fn identity_text(&self, fill: Hsla) -> Hsla {
-        [self.text, self.on_solid, self.on_accent]
+        [self.text, self.solid, self.on_solid, self.on_accent]
             .into_iter()
             .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
             .unwrap_or(self.text)

@@ -509,7 +509,7 @@ impl ThemeVariant {
     /// identity independent of the selected presentation style.
     pub fn identity_palette(&self) -> [Color; 6] {
         let ansi = self.terminal.ansi;
-        [ansi[4], ansi[1], ansi[5], ansi[3], ansi[2], ansi[6]]
+        [ansi[4], ansi[3], ansi[5], ansi[2], ansi[1], ansi[6]]
     }
 
     pub fn accent_for(&self, selection: AccentSelection) -> AccentRoles {
@@ -871,9 +871,9 @@ mod tests {
             let variant = registry.variant(id).unwrap();
             let palette = variant.identity_palette();
             assert_eq!(palette[0], "#3F69CC".parse().unwrap());
-            assert_eq!(palette[1], "#FE4B25".parse().unwrap());
-            assert_eq!(palette[3], "#DFBE1B".parse().unwrap());
-            assert_eq!(palette[4], "#38D059".parse().unwrap());
+            assert_eq!(palette[1], "#DFBE1B".parse().unwrap());
+            assert_eq!(palette[3], "#38D059".parse().unwrap());
+            assert_eq!(palette[4], "#FE4B25".parse().unwrap());
         }
     }
 
