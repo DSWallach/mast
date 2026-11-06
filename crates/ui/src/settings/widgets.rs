@@ -435,6 +435,8 @@ pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
                     .border_1()
                     .border_color(theme.industrial_colors().rule)
                     .bg(theme.industrial_colors().pressed)
+                    .child(div().absolute().left(px(5.0)).top_0().w(px(1.0)).h(px(3.0)).bg(theme.industrial_colors().rule))
+                    .child(div().absolute().right(px(5.0)).top_0().w(px(1.0)).h(px(3.0)).bg(theme.industrial_colors().rule))
                     .child(
                         div()
                             .absolute()

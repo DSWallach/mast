@@ -1107,6 +1107,9 @@ impl Render for Walkthrough {
             .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text)
             .bg(theme.bg)
+            .when(self.files.is_empty() && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
+                crate::surface_chrome::grille(&theme)
+            ))
             .children(crate::ui_style::help_card(
                 "review-walkthrough",
                 "Follow each step to understand the change, then mark it reviewed.",
