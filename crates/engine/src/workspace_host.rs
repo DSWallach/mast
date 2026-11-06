@@ -1045,6 +1045,19 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_friction_status(space_id, fingerprint, status, item_id, promoted_at))?)
     }
 
+    pub fn dismiss_friction(&self, space_id: &str, fingerprint: &str, reason: &str) -> Result<mast_proto::FrictionReport, EngineError> {
+        Ok(self.mutate(|doc| -> Result<_, mast_doc::DocError> {
+            let report = doc.set_friction_status(space_id, fingerprint, mast_proto::FrictionStatus::Dismissed, None, None)?;
+            let hlc = doc.mint_hlc();
+            doc.write_ops(vec![mast_doc::registry::RowOp {
+                kind: mast_doc::registry::friction::KIND_FRICTION_REPORTS.into(),
+                id: report.id.clone(), op: mast_doc::registry::OpKind::Update,
+                set: Some(BTreeMap::from([("dismissalReason".into(), serde_json::json!(reason))])), hlc, clocks: None,
+            }])?;
+            Ok(report)
+        })?)
+    }
+
     pub fn record_friction(&self, report: mast_proto::FrictionReport) -> Result<mast_proto::FrictionReport, EngineError> {
         Ok(self.mutate(|doc| doc.record_friction(report))?)
     }

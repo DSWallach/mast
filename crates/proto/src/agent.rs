@@ -913,6 +913,7 @@ pub mod agent_tools {
         pub const BIND_CHAT_WORKTREE: &str = "bind_chat_worktree";
         pub const REPORT_FRICTION: &str = "report_friction";
         pub const LIST_FRICTION: &str = "list_friction";
+        pub const DISMISS_FRICTION: &str = "dismiss_friction";
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.
@@ -1232,6 +1233,12 @@ pub mod agent_tools {
             example: r#"{"status":"open","limit":20}"#,
         },
         ToolUsage {
+            tool: tools::DISMISS_FRICTION,
+            required: &[p("id", "friction report id"), p("reason", "reason for dismissal")],
+            optional: &[],
+            example: r#"{"id":"report-id","reason":"Fixed in branch example"}"#,
+        },
+        ToolUsage {
             tool: tools::BIND_CHAT_WORKTREE,
             required: &[p("path", "absolute top-level path of the worktree")],
             optional: &[KEY_DERIVED],
@@ -1354,6 +1361,7 @@ pub mod agent_tools {
             || tool == tools::BIND_CHAT_WORKTREE
             || tool == tools::REPORT_FRICTION
             || tool == tools::LIST_FRICTION
+            || tool == tools::DISMISS_FRICTION
             || tool == tools::HAND_OFF_ORCHESTRATOR
     }
 
@@ -1574,7 +1582,7 @@ pub mod agent_tools {
         fn every_engine_tool_has_usage_with_its_required_and_optional_parameters() {
             let mut names: Vec<&str> = tools::WORK_OUTLINE.to_vec();
             names.extend(tools::ARTIFACTS);
-            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
+            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
             for name in names {
                 let usage = usage_text(name).unwrap_or_else(|| panic!("no usage for {name}"));
                 assert!(usage.contains(&format!("Usage of {name}:")), "{usage}");

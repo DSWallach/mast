@@ -1367,7 +1367,7 @@ async fn required_actions_raised_wake_once_and_dedupe() {
 
     let raised = snapshot(serde_json::json!([
         request("r0", "w1", "old", "open"),
-        request("r1", "w1", "Ready to merge: parser-fix", "open"),
+        request("r123456789abcdef", "w1", "Ready to merge: parser-fix", "open"),
         request("r2", "stranger", "not mine", "open"),
     ]));
     rig.wakes.ingest_snapshot(&raised).await;
@@ -1379,7 +1379,7 @@ async fn required_actions_raised_wake_once_and_dedupe() {
         "one event; strangers and repeats are dropped"
     );
     assert!(held[0].summary.contains("Ready to merge: parser-fix"));
-    assert!(held[0].summary.contains("request r1"));
+    assert!(held[0].summary.contains("request r123456789abcdef"));
 
     rig.advance(WAKE_WINDOW_MS);
     rig.wakes.evaluate(ORCH, false).await;
@@ -1392,7 +1392,7 @@ async fn required_actions_raised_wake_once_and_dedupe() {
 
     // Re-raised after delivery: the same action is not news again.
     let resolved = snapshot(serde_json::json!([request(
-        "r1",
+        "r123456789abcdef",
         "w1",
         "Ready to merge: parser-fix",
         "resolved"

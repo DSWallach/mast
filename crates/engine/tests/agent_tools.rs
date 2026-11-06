@@ -2799,7 +2799,7 @@ async fn answering_with_the_users_own_message_delivers_it_and_resolves_as_theirs
         &a.rig,
         &a.orchestrator,
         ANSWER,
-        answer_args(&a.request, "u-1", "ans-1"),
+        answer_args(&a.request[..8], "u-1", "ans-1"),
     )
     .await
     .unwrap();
@@ -2835,7 +2835,7 @@ async fn answering_with_the_users_own_message_delivers_it_and_resolves_as_theirs
         &a.rig,
         &a.orchestrator,
         ANSWER,
-        answer_args(&a.request, "u-1", "ans-1"),
+        answer_args(&a.request[..8], "u-1", "ans-1"),
     )
     .await
     .unwrap();
@@ -3247,7 +3247,7 @@ async fn an_admin_changes_anything_in_its_space_but_nothing_outside_it() {
 
     grant(&rig, CHAT, Some(3600), false).await;
     let done = admin(&rig, &token, json!({ "idempotencyKey": "k1", "steps": [
-        { "op": "rename", "itemId": b, "title": "Beta 2" },
+        { "op": "rename", "itemId": &b[..8], "title": "Beta 2" },
         { "op": "status", "itemId": child, "status": "active" },
         { "op": "move", "itemId": child, "parentId": a },
         { "op": "create", "parentId": a, "title": "New", "ref": "n" },
@@ -3321,7 +3321,7 @@ async fn an_admin_resolves_requests_and_accepts_proposals_with_its_own_attributi
 
     grant(&rig, CHAT, Some(3600), false).await;
     let done = admin(&rig, admin_lease.token(), json!({ "idempotencyKey": "k", "steps": [
-        { "op": "resolve_request", "requestId": request_id, "note": "Postgres" },
+        { "op": "resolve_request", "requestId": &request_id[..8], "note": "Postgres" },
         { "op": "proposal_accept", "proposalId": proposal_id },
     ]})).await.unwrap();
     assert_eq!(done["applied"], 2, "{done}");
@@ -3933,3 +3933,61 @@ async fn friction_captures_errored_turn() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prefixes_and_truncated_request_fields_are_accepted() {
+    let rig = rig().await;
+    let item = create_item(&rig, "prefix-item", "Prefix item", None).await;
+    let outsider = create_item(&rig, "outside-item", "Outside", None).await;
+    assign_chat(&rig, "prefix-assignment", CHAT, &item).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "prefix-run", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    let created = tool(&rig, token, "work_outline_create_user_action_request", json!({
+        "request": "Review", "dedupeKey": "prefix-test",
+        "facts": [{"label": "é".repeat(41), "value": "🙂".repeat(121)}],
+        "links": [{"label": "L".repeat(41), "target": {"type":"url", "url":"https://example.com"}}]
+    })).await.unwrap();
+    assert_eq!(created["warnings"].as_array().unwrap().len(), 3);
+    let id = created["userActionRequestId"].as_str().unwrap();
+    let fetched = tool(&rig, token, "get_user_action_request", json!({"requestId": &id[..8]})).await.unwrap();
+    assert_eq!(fetched["request"]["facts"][0]["value"].as_str().unwrap().chars().count(), 120);
+    assert!(fetched["request"]["facts"][0]["value"].as_str().unwrap().ends_with('…'));
+    assert!(fetched["request"]["links"][0]["label"].as_str().unwrap().ends_with('…'));
+    let missing = tool(&rig, token, "get_user_action_request", json!({"requestId":"0000000000000000"})).await.unwrap_err();
+    assert!(missing.contains("open requests in your scope") && missing.contains(id), "{missing}");
+    let denied = tool(&rig, token, "work_outline_set_status", json!({"workItemId": &outsider[..8], "status":"active"})).await.unwrap_err();
+    assert!(denied.contains(&item) && denied.contains(&outsider) && denied.contains("allowed subtree"), "{denied}");
+    tool(&rig, token, "work_outline_resolve_user_action_request", json!({"userActionRequestId": &id[..8]})).await.unwrap();
+    let completed = tool(&rig, token, "work_outline_set_status", json!({"workItemId": &item[..8], "status":"completed"})).await.unwrap();
+    assert_eq!(completed["workItemId"], item);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_dismissal_requires_orchestrator_and_records_reason() {
+    let rig = rig().await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "dismiss-run", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    let report = tool(&rig, token, "report_friction", json!({"kind":"bug","summary":"dismiss test","whatHappened":"failed"})).await.unwrap();
+    let id = report["report"]["id"].as_str().unwrap();
+    let args = json!({"id":id, "reason":"Fixed in branch example"});
+    let denied = tool(&rig, token, "dismiss_friction", args.clone()).await.unwrap_err();
+    assert!(denied.contains("unauthorized"), "{denied}");
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"dismiss-child", "spaceId":SPACE, "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    let result = tool(&rig, token, "dismiss_friction", args).await.unwrap();
+    assert_eq!(result["report"]["status"], "dismissed");
+    let list = tool(&rig, token, "list_friction", json!({"status":"dismissed"})).await.unwrap();
+    assert_eq!(list["reports"][0]["dismissalReason"], "Fixed in branch example");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_orchestrator_can_dismiss_friction() {
+    let rig = rig().await;
+    let project = project_rig(&rig).await;
+    assign_chat(&rig, "dismiss-project-orch", CHAT, &project.project).await;
+    assign_chat(&rig, "dismiss-project-worker", OTHER_CHAT, &project.ticket).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "project-dismiss-run", SPACE, &rig.core.device_id);
+    let row = tool(&rig, lease.token(), "report_friction", json!({"kind":"bug","summary":"project worker","whatHappened":"failed"})).await.unwrap();
+    let id = row["report"]["id"].as_str().unwrap();
+    let result = tool(&rig, lease.token(), "dismiss_friction", json!({"id":id,"reason":"Fixed in branch"})).await.unwrap();
+    assert_eq!(result["report"]["status"], "dismissed");
+}
