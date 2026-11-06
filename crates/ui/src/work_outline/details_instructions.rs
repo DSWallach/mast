@@ -641,11 +641,8 @@ impl WorkItemDetails {
         }
         if let Some(error) = self.instructions_error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-instructions-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_detail_text(error, 11.0, theme.warning, theme)
+                    .debug_selector(|| "work-item-instructions-error".into()),
             );
         }
         section.into_any_element()
@@ -679,33 +676,18 @@ impl WorkItemDetails {
         }
         let over = !effective.within_budget;
         section = section.child(
-            div()
-                .debug_selector(|| "work-item-effective-budget".into())
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(if over { theme.danger } else { theme.text_faint })
-                .child(SharedString::from(format!(
-                    "{} / {} characters \u{b7} {} / {} entries",
-                    effective.rendered_chars,
-                    effective.budget.max_chars,
-                    effective.entry_count,
-                    effective.budget.max_entries
-                ))),
+            crate::components::outline_detail_text(format!("{} / {} characters · {} / {} entries", effective.rendered_chars, effective.budget.max_chars, effective.entry_count, effective.budget.max_entries), 10.5, if over { theme.danger } else { theme.text_faint }, theme)
+                .debug_selector(|| "work-item-effective-budget".into()),
         );
         if let Some(error) = effective.budget_error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-effective-budget-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.danger)
-                    .child(SharedString::from(error)),
+                crate::components::outline_detail_text(error, 11.0, theme.danger, theme)
+                    .debug_selector(|| "work-item-effective-budget-error".into()),
             );
         }
         if effective.entries.is_empty() {
             section = section.child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .child("No instructions apply"),
+                crate::components::outline_detail_text("No instructions apply".into(), 11.5, theme.text_faint, theme),
             );
         }
         for (ix, entry) in effective.entries.iter().enumerate() {
@@ -718,28 +700,12 @@ impl WorkItemDetails {
             section = section.child(
                 crate::components::outline_effective_entry(ix, theme)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .child(
-                                div()
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from(format!("{}.", ix + 1))),
-                            )
+                        crate::components::outline_effective_header(ix, theme)
                             .child(
                                 crate::components::outline_effective_marker(ix, local, theme),
                             )
                             .child(
-                                div()
-                                    .id(("work-item-effective-source", ix))
-                                    .min_w_0()
-                                    .truncate()
-                                    .cursor_pointer()
-                                    .text_color(theme.text_muted)
-                                    .hover(|el| el.text_color(theme.text))
-                                    .child(SharedString::from(entry.scope_title.clone()))
+                                crate::components::outline_effective_source(ix, entry.scope_title.clone(), theme)
                                     .when(!local, |el| {
                                         el.on_click(cx.listener(move |_, _, _, cx| {
                                             cx.emit(DetailsEvent::OpenItem {
@@ -761,23 +727,14 @@ impl WorkItemDetails {
             .and_then(|id| snapshot.item(id))
         {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-effective-boundary".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!(
-                        "Parent instructions stop at \u{201C}{}\u{201D}",
-                        boundary.title
-                    ))),
+                crate::components::outline_detail_text(format!("Parent instructions stop at “{}”", boundary.title), 10.5, theme.text_faint, theme)
+                    .debug_selector(|| "work-item-effective-boundary".into()),
             );
         }
         section
             .child(
-                div()
-                    .debug_selector(|| "work-item-effective-precedence".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(effective.precedence_rule.clone())),
+                crate::components::outline_detail_text(effective.precedence_rule.clone(), 10.5, theme.text_faint, theme)
+                    .debug_selector(|| "work-item-effective-precedence".into()),
             )
             .into_any_element()
     }

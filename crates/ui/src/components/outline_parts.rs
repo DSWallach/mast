@@ -2802,6 +2802,39 @@ pub fn outline_artifact_menu_entry(id: &str, label: &'static str, theme: &Theme)
         .child(label)
 }
 
+/// Status or explanatory text in item details.
+pub fn outline_detail_text(text: String, size: f32, color: gpui::Hsla, theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            size + super::layout_type_adjustment(theme),
+        ))
+        .text_color(color)
+        .child(SharedString::from(text))
+}
+
+/// Metadata row above an effective instruction.
+pub fn outline_effective_header(index: usize, theme: &Theme) -> Div {
+    outline_detail_row(theme)
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .child(
+            div()
+                .text_color(theme.text_faint)
+                .child(SharedString::from(format!("{}.", index + 1))),
+        )
+}
+pub fn outline_effective_source(index: usize, title: String, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(("work-item-effective-source", index))
+        .min_w_0()
+        .truncate()
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text))
+        .child(SharedString::from(title))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
