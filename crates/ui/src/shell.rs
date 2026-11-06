@@ -13873,7 +13873,7 @@ mod tests {
         let wide = vcx.debug_bounds("guided-wide").unwrap();
         let narrow = vcx.debug_bounds("guided-narrow").unwrap();
         assert!(wide.size.width > narrow.size.width);
-        assert_eq!(narrow.size.width, px(32.0));
+        assert_eq!(narrow.size.width, px(34.0));
     }
 
     #[test]

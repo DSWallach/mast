@@ -258,11 +258,11 @@ impl UiStyle {
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
-            labels: LabelMode::Primary,
+            labels: LabelMode::IconOnly,
             reveal: Reveal::Always,
-            hints: HintMode::Inline,
+            hints: HintMode::Tooltip,
             motion: Motion::Instant,
-            status_words: true,
+            status_words: false,
             help_cards: false,
             status_bar: true,
             outline_columns: true,
@@ -273,11 +273,11 @@ impl UiStyle {
         id: UiStyleId::Default,
         layout: UiLayout::Guided,
         tokens: StyleTokens {
-            type_scale: 1.0,
+            type_scale: 1.0625,
             sidebar_row_compact_h: 29.0,
             sidebar_row_extra_h: 4.0,
             outline_row_delta: 6.0,
-            control_size: 32.0,
+            control_size: 34.0,
             control_icon_size: 16.0,
             control_radius: None,
             panel_radius: None,
@@ -571,7 +571,7 @@ mod tests {
                     resolved.behavior.labels,
                     match layout {
                         UiLayout::Minimal => LabelMode::IconOnly,
-                        UiLayout::Compact => LabelMode::Primary,
+                        UiLayout::Compact => LabelMode::IconOnly,
                         UiLayout::Guided => LabelMode::All,
                     }
                 );
@@ -868,7 +868,7 @@ mod tests {
                 style.tokens.sidebar_row_extra_h,
                 style.tokens.outline_row_delta
             ),
-            (32.0, 4.0, 6.0)
+            (34.0, 4.0, 6.0)
         );
         assert_eq!(style.behavior.labels, LabelMode::All);
         assert!(style.behavior.help_cards);
