@@ -2,7 +2,7 @@
 use gpui::{div, prelude::*, px, size};
 use mast_ui::{
     theme::{Appearance, Theme},
-    ui_style::{self, UiStyleId},
+    ui_style::{self, UiLayout, UiStyleId},
 };
 use std::path::Path;
 
@@ -28,19 +28,20 @@ impl Render for MenuRow {
 fn render_style_rows_offscreen() -> anyhow::Result<()> {
     let baselines = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
     std::fs::create_dir_all(&baselines)?;
-    for (style_name, style) in [
-        ("minimal", UiStyleId::Minimal),
-        ("dense", UiStyleId::Dense),
-        ("guided", UiStyleId::Guided),
+    for (style_name, layout) in [
+        ("minimal", UiLayout::Minimal),
+        ("dense", UiLayout::Compact),
+        ("guided", UiLayout::Guided),
     ] {
         for (appearance_name, appearance) in
             [("dark", Appearance::Dark), ("light", Appearance::Light)]
         {
             let name = format!("menu-row-{style_name}-{appearance_name}");
-            let path = mast_ui::snapshot::render_to_png(
+            let path = mast_ui::snapshot::render_to_png_with_layout(
                 &name,
                 size(px(240.), px(60.)),
-                style,
+                UiStyleId::Default,
+                layout,
                 appearance,
                 |_, cx| cx.new(|_| MenuRow),
             )?;
@@ -67,20 +68,21 @@ fn render_chat_shell_offscreen() -> anyhow::Result<()> {
     let _guard = runtime.enter();
     let directory = tempfile::tempdir()?;
     let baselines = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
-    for (style_name, style) in [
-        ("minimal", UiStyleId::Minimal),
-        ("dense", UiStyleId::Dense),
-        ("guided", UiStyleId::Guided),
+    for (style_name, layout) in [
+        ("minimal", UiLayout::Minimal),
+        ("dense", UiLayout::Compact),
+        ("guided", UiLayout::Guided),
     ] {
         for (appearance_name, appearance) in
             [("dark", Appearance::Dark), ("light", Appearance::Light)]
         {
             let name = format!("chat-shell-{style_name}-{appearance_name}");
             let data_dir = directory.path().to_path_buf();
-            let path = mast_ui::snapshot::render_to_png(
+            let path = mast_ui::snapshot::render_to_png_with_layout(
                 &name,
                 size(px(1100.), px(800.)),
-                style,
+                UiStyleId::Default,
+                layout,
                 appearance,
                 move |_, cx| {
                     use mast_ui::{composer, history, settings, state, terminal, typography};
@@ -164,19 +166,20 @@ fn render_chat_shell_offscreen() -> anyhow::Result<()> {
 #[ignore = "requires macOS Metal and access to macOS services"]
 fn render_walkthrough_offscreen() -> anyhow::Result<()> {
     let baselines = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
-    for (style_name, style) in [
-        ("minimal", UiStyleId::Minimal),
-        ("dense", UiStyleId::Dense),
-        ("guided", UiStyleId::Guided),
+    for (style_name, layout) in [
+        ("minimal", UiLayout::Minimal),
+        ("dense", UiLayout::Compact),
+        ("guided", UiLayout::Guided),
     ] {
         for (appearance_name, appearance) in
             [("dark", Appearance::Dark), ("light", Appearance::Light)]
         {
             let name = format!("walkthrough-{style_name}-{appearance_name}");
-            let path = mast_ui::snapshot::render_to_png(
+            let path = mast_ui::snapshot::render_to_png_with_layout(
                 &name,
                 size(px(640.), px(800.)),
-                style,
+                UiStyleId::Default,
+                layout,
                 appearance,
                 |_, cx| mast_ui::snapshot::walkthrough_fixture(cx),
             )?;
@@ -204,20 +207,21 @@ fn render_outline_offscreen() -> anyhow::Result<()> {
     let _guard = runtime.enter();
     let directory = tempfile::tempdir()?;
     let baselines = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
-    for (style_name, style) in [
-        ("minimal", UiStyleId::Minimal),
-        ("dense", UiStyleId::Dense),
-        ("guided", UiStyleId::Guided),
+    for (style_name, layout) in [
+        ("minimal", UiLayout::Minimal),
+        ("dense", UiLayout::Compact),
+        ("guided", UiLayout::Guided),
     ] {
         for (appearance_name, appearance) in
             [("dark", Appearance::Dark), ("light", Appearance::Light)]
         {
             let name = format!("outline-{style_name}-{appearance_name}");
             let data_dir = directory.path().to_path_buf();
-            let path = mast_ui::snapshot::render_to_png(
+            let path = mast_ui::snapshot::render_to_png_with_layout(
                 &name,
                 size(px(1100.), px(800.)),
-                style,
+                UiStyleId::Default,
+                layout,
                 appearance,
                 move |_, cx| {
                     let settings = mast_ui::settings::UiSettings::default();
@@ -310,7 +314,7 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
         ("industrial-light", UiStyleId::Industrial, Appearance::Light, "industrial-light"),
         ("industrial-dark", UiStyleId::Industrial, Appearance::Dark, "industrial-dark"),
         ("industrial-github-dark", UiStyleId::Industrial, Appearance::Dark, "github-dark"),
-        ("minimal-industrial-light", UiStyleId::Minimal, Appearance::Light, "industrial-light"),
+        ("minimal-industrial-light", UiStyleId::Default, Appearance::Light, "industrial-light"),
         ("area-default", UiStyleId::Area, Appearance::Light, "mast-light"),
         ("area-light", UiStyleId::Area, Appearance::Light, "area-light"),
         ("area-dark", UiStyleId::Area, Appearance::Dark, "area-dark"),

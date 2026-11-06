@@ -311,7 +311,7 @@ impl WorkItemDetails {
                 ))
                 .when(open.is_none(), |row| {
                     row.child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-review-template",
                             "Review changes\u{2026}",
                             theme,
@@ -352,21 +352,21 @@ impl WorkItemDetails {
                 .flex()
                 .gap(px(6.0))
                 .child(
-                    Self::small_button("work-item-review-accept-all", "Accept all", theme)
+                    crate::work_outline::hints::details_button("work-item-review-accept-all", "Accept all", theme)
                         .debug_selector(|| "work-item-review-accept-all".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.run_template_review(ReviewRun::All, cx)
                         })),
                 )
                 .child(
-                    Self::small_button("work-item-review-mark-reviewed", "Mark reviewed", theme)
+                    crate::work_outline::hints::details_button("work-item-review-mark-reviewed", "Mark reviewed", theme)
                         .debug_selector(|| "work-item-review-mark-reviewed".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.run_template_review(ReviewRun::MarkReviewed, cx)
                         })),
                 )
                 .child(
-                    Self::small_button("work-item-review-close", "Close", theme)
+                    crate::work_outline::hints::details_button("work-item-review-close", "Close", theme)
                         .on_click(cx.listener(|this, _, _, cx| this.close_template_review(cx))),
                 )
                 .into_any_element(),
@@ -426,14 +426,14 @@ impl WorkItemDetails {
             let skip = format!("work-item-review-skip-{ix}");
             line = line
                 .child(
-                    Self::small_button(("work-item-review-accept", ix), "Accept", theme)
+                    crate::work_outline::hints::details_button(("work-item-review-accept", ix), "Accept", theme)
                         .debug_selector(move || accept.clone())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.run_template_review(ReviewRun::One(ix), cx)
                         })),
                 )
                 .child(
-                    Self::small_button(("work-item-review-skip", ix), "Skip", theme)
+                    crate::work_outline::hints::details_button(("work-item-review-skip", ix), "Skip", theme)
                         .debug_selector(move || skip.clone())
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.skip_template_change(ix, cx)),

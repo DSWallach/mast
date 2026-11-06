@@ -6336,23 +6336,10 @@ impl Transcript {
                         bubble_theme.code_wash = bubble_theme.text;
                         bubble_theme.code_text = identity;
                     }
-                    let bubble = div()
-                        .min_w_0().max_w(px(self.content_width * 0.8))
-                        .bg(crate::theme::user_bubble_bg())
-                        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(Theme::BUBBLE_RADIUS)))
-                        .px(px(16.0)).py(px(10.0))
-                        .when(matches!(conversation, crate::ui_style::ConversationVariant::Industrial), |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
-                        .when(matches!(conversation, crate::ui_style::ConversationVariant::Area), |el| el.bg(identity).max_w_full().w_full())
-                        .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(14.0)))
-                        .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT)).text_color(bubble_theme.text)
-                        .when(pending, |el| el.opacity(0.65))
-                        .child(self.render_user_body(&row.id, ix, text, mentions, false, &bubble_theme, window, cx));
-                    let bubble = match conversation {
-                        crate::ui_style::ConversationVariant::Industrial => div().min_w_0().max_w(px(self.content_width * 0.8)).flex().flex_col().items_end().gap(px(4.0))
-                            .child(div().text_size(crate::typography::ui_rems(9.0)).text_color(theme.text_muted).child("YOU"))
-                            .child(bubble).into_any_element(),
-                        crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Area => bubble.into_any_element(),
-                    };
+                    let content = self.render_user_body(&row.id, ix, text, mentions, false, &bubble_theme, window, cx);
+                    let bubble = crate::components::user_message_bubble(
+                        &theme, identity, self.content_width, USER_LINE_HEIGHT, pending, content,
+                    );
                     column = column.child(div().w_full().flex().justify_end().child(bubble));
                 }
                 column.into_any_element()
@@ -6394,7 +6381,7 @@ impl Transcript {
                         .and_then(|o| o.as_deref())
                         .map(|document| document.lines.as_slice()),
                 );
-                area_assistant_marker(content, area && *block_ix == 0, identity)
+                content
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
                 let mut theme = theme.clone();
@@ -6486,7 +6473,7 @@ impl Transcript {
                 if veil.is_some_and(|v| v.borrow().is_fading()) {
                     motion::pulse_lease(cx.entity_id(), cx);
                 }
-                area_assistant_marker(el, area && *block_ix == 0, identity)
+                el
             }
             RowKind::ToolGroup {
                 tools,
@@ -6570,14 +6557,10 @@ impl Transcript {
         };
 
         let is_first_entry_row = ix == 0 || self.rows.get(ix - 1).is_some_and(|previous| previous.entry_id != row.entry_id);
-        let inner = if matches!(conversation, crate::ui_style::ConversationVariant::Industrial)
-            && matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
+        let inner = if matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
             let model = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).and_then(|config| config.model.clone());
-            div().flex().flex_col().gap(px(4.0))
-                .when(is_first_entry_row, |el| el.child(div().flex().items_center().gap(px(8.0))
-                    .child(div().text_size(crate::typography::ui_rems(9.0)).text_color(theme.text_muted).child("AGENT"))
-                    .when_some(model, |el, model| el.child(crate::surface_chrome::display(&theme).child(model)))))
-                .child(div().p(px(10.0)).border_1().border_color(theme.industrial_colors().rule).bg(theme.industrial_colors().panel).child(inner)).into_any_element()
+            let first_block = matches!(&row.kind, RowKind::Markdown { block_ix, .. } | RowKind::LiveMarkdown { block_ix, .. } if *block_ix == 0);
+            crate::components::agent_message_bubble(&theme, identity, is_first_entry_row, first_block, model, inner)
         } else { inner };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -7504,14 +7487,6 @@ impl Transcript {
 /// run when there are none), with the same selection machinery as rendered
 /// markdown — the element registers into the frame's document-ordered
 /// registry, so drags select, span into adjacent rows, and Cmd+C copies.
-fn area_assistant_marker(content: AnyElement, show: bool, identity: gpui::Hsla) -> AnyElement {
-    if !show { return content; }
-    div().relative().min_w_0()
-        .child(div().absolute().left(px(-18.0)).top(px(4.0)).size(px(10.0)).rounded_full().bg(identity))
-        .child(content)
-        .into_any_element()
-}
-
 fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,

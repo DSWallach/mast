@@ -5,7 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --themes|--screens|--styles)
+        --themes|--screens|--styles|--layouts)
             option=$1
             if [ "$#" -lt 2 ] || [ -z "$2" ]; then
                 echo "Missing value for $option" >&2
@@ -15,11 +15,12 @@ while [ "$#" -gt 0 ]; do
                 --themes) MAST_PREVIEW_THEMES=$2; export MAST_PREVIEW_THEMES ;;
                 --screens) MAST_PREVIEW_SCREENS=$2; export MAST_PREVIEW_SCREENS ;;
                 --styles) MAST_PREVIEW_STYLES=$2; export MAST_PREVIEW_STYLES ;;
+                --layouts) MAST_PREVIEW_LAYOUTS=$2; export MAST_PREVIEW_LAYOUTS ;;
             esac
             shift 2
             ;;
         -h|--help)
-            echo 'Usage: scripts/ui-preview.sh [--themes a,b] [--screens chat,details,...] [--styles minimal,...]'
+            echo 'Usage: scripts/ui-preview.sh [--themes a,b] [--screens chat,details,...] [--styles default,...] [--layouts minimal,...]'
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;

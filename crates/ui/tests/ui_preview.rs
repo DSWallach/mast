@@ -9,7 +9,10 @@ mod render;
 #[ignore = "requires macOS Metal and access to macOS services"]
 fn render_ui_preview() -> anyhow::Result<()> {
     use image::{RgbaImage, imageops};
-    use mast_ui::{theme::Appearance, ui_style::UiStyleId};
+    use mast_ui::{
+        theme::Appearance,
+        ui_style::{UiLayout, UiStyleId},
+    };
     use std::path::PathBuf;
 
     fn selection(variable: &str, defaults: &[&str]) -> Vec<String> {
@@ -29,7 +32,14 @@ fn render_ui_preview() -> anyhow::Result<()> {
         "MAST_PREVIEW_SCREENS",
         &["chat", "details", "walkthrough", "appearance", "controls"],
     );
-    let all_screens = ["chat", "details", "walkthrough", "appearance", "controls"];
+    let all_screens = [
+        "chat",
+        "details",
+        "walkthrough",
+        "appearance",
+        "controls",
+        "components",
+    ];
     anyhow::ensure!(
         !screens.is_empty() && screens.iter().all(|s| all_screens.contains(&s.as_str())),
         "invalid or empty screen selection"
@@ -43,6 +53,16 @@ fn render_ui_preview() -> anyhow::Result<()> {
     anyhow::ensure!(
         !styles.is_empty() && styles.iter().all(|s| style_names.contains(s)),
         "invalid or empty style selection"
+    );
+    let layout_names: Vec<String> = UiLayout::ALL
+        .iter()
+        .map(|layout| layout.label().to_ascii_lowercase())
+        .collect();
+    let layout_defaults: Vec<&str> = layout_names.iter().map(String::as_str).collect();
+    let layouts = selection("MAST_PREVIEW_LAYOUTS", &layout_defaults);
+    anyhow::ensure!(
+        !layouts.is_empty() && layouts.iter().all(|layout| layout_names.contains(layout)),
+        "invalid or empty layout selection"
     );
     let mut themes = vec!["mast-light".to_string(), "mast-dark".to_string()];
     for theme in selection("MAST_PREVIEW_THEMES", &[]) {
@@ -66,16 +86,44 @@ fn render_ui_preview() -> anyhow::Result<()> {
     let _guard = runtime.enter();
     let screen_refs: Vec<&str> = screens.iter().map(String::as_str).collect();
     let style_refs: Vec<&str> = styles.iter().map(String::as_str).collect();
+    let layout_refs: Vec<&str> = layouts.iter().map(String::as_str).collect();
     let theme_refs: Vec<&str> = themes.iter().map(String::as_str).collect();
-    let cells = matrix::matrix(&screen_refs, &style_refs, &theme_refs);
-    let (cell_width, cell_height) =
-        matrix::cell_size(1440, 900, themes.len() as u32, styles.len() as u32, 4096)
-            .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
+    let cells = matrix::matrix(&screen_refs, &style_refs, &layout_refs, &theme_refs);
+    let (cell_width, cell_height) = matrix::cell_size(
+        1440,
+        900,
+        themes.len() as u32,
+        (styles.len() * layouts.len()) as u32,
+        4096,
+    )
+    .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
     let mut sheets = Vec::new();
     for (screen_index, screen) in screens.iter().enumerate() {
+        if screen == "components" {
+            for (theme_index, theme) in themes.iter().enumerate() {
+                let variant = registry.variant(theme).unwrap();
+                let appearance = if variant.appearance == mast_theme::Appearance::Dark {
+                    Appearance::Dark
+                } else {
+                    Appearance::Light
+                };
+                let path = render::render_component_matrix(
+                    theme,
+                    appearance,
+                    data_dir.path().to_owned(),
+                    &format!("preview-component-matrix-{theme_index}"),
+                )?;
+                let sheet = image::open(path)?.into_rgba8();
+                let path = directory.join(format!("components-{theme}.png"));
+                sheet.save(&path)?;
+                println!("{}", path.display());
+                sheets.push(sheet);
+            }
+            continue;
+        }
         let mut sheet = RgbaImage::new(
             cell_width * themes.len() as u32,
-            cell_height * styles.len() as u32,
+            cell_height * (styles.len() * layouts.len()) as u32,
         );
         for (index, cell) in cells
             .iter()
@@ -83,6 +131,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
             .enumerate()
         {
             let style = UiStyleId::ALL[style_names.iter().position(|s| s == cell.style).unwrap()];
+            let layout = UiLayout::ALL[layout_names.iter().position(|s| s == cell.layout).unwrap()];
             let variant = registry.variant(cell.theme).unwrap();
             let appearance = match variant.appearance {
                 mast_theme::Appearance::Light => Appearance::Light,
@@ -91,6 +140,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
             let path = render::render(
                 cell.screen,
                 style,
+                layout,
                 cell.theme,
                 appearance,
                 cell.label.clone(),
@@ -135,5 +185,35 @@ fn render_ui_preview() -> anyhow::Result<()> {
     let path = directory.join("index.png");
     index.save(&path)?;
     println!("{}", path.display());
+    Ok(())
+}
+
+/// Compare Minimal-only contact sheets while excluding the preview's label bar.
+#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[test]
+#[ignore = "requires MAST_BASELINE_PREVIEW and MAST_CURRENT_PREVIEW paths"]
+fn compare_minimal_preview() -> anyhow::Result<()> {
+    let baseline = std::path::PathBuf::from(std::env::var("MAST_BASELINE_PREVIEW")?);
+    let current = std::path::PathBuf::from(std::env::var("MAST_CURRENT_PREVIEW")?);
+    for screen in ["controls", "details"] {
+        let expected = image::open(baseline.join(format!("{screen}.png")))?.into_rgba8();
+        let actual = image::open(current.join(format!("{screen}.png")))?.into_rgba8();
+        anyhow::ensure!(
+            expected.dimensions() == actual.dimensions(),
+            "{screen} dimensions differ"
+        );
+        let (width, height) = expected.dimensions();
+        let expected = image::imageops::crop_imm(&expected, 0, 30, width, height - 30).to_image();
+        let actual = image::imageops::crop_imm(&actual, 0, 30, width, height - 30).to_image();
+        let diff = image_compare::rgba_hybrid_compare(&expected, &actual)?;
+        println!("{screen} similarity: {}", diff.score);
+        diff.image
+            .to_color_map()
+            .save(current.join(format!("{screen}-diff.png")))?;
+        anyhow::ensure!(
+            diff.score >= 0.999,
+            "{screen} differs from Minimal baseline"
+        );
+    }
     Ok(())
 }

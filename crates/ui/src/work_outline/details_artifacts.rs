@@ -493,7 +493,7 @@ impl WorkItemDetails {
         let register_input = self.artifacts.register_input.clone();
         section = section.child(
             div().flex().items_center().gap(px(6.0)).child(
-                Self::small_button(
+                crate::work_outline::hints::details_button(
                     "work-item-artifacts-register",
                     "Register existing file…",
                     theme,

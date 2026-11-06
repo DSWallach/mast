@@ -7374,7 +7374,7 @@ impl Shell {
         } else {
             match status {
                 mast_proto::ChatIndicator::Working => Some("Working"),
-                mast_proto::ChatIndicator::AwaitingInput => Some(if theme.ui_style.id == crate::ui_style::UiStyleId::Guided { "Needs you" } else { "Input" }),
+                mast_proto::ChatIndicator::AwaitingInput => Some(if theme.ui_style.layout == crate::ui_style::UiLayout::Guided { "Needs you" } else { "Input" }),
                 mast_proto::ChatIndicator::Errored => Some("Failed"),
                 mast_proto::ChatIndicator::Completed => Some("Done"),
                 mast_proto::ChatIndicator::Idle => None,
@@ -7413,14 +7413,14 @@ impl Shell {
                     move || format!("chat-status-{id}")
                 })
                 .size(px(13.0))
-                .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| el.w_auto().gap(px(4.0)))
+                .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| el.w_auto().gap(px(4.0)))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
                 .aria_label(status_label.unwrap_or("Idle"))
                 .child(glyph)
-                .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| el.child(div().text_size(crate::typography::ui_rems(10.0)).text_color(status_color).child(status_label.unwrap_or("Idle"))))
+                .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| el.child(div().text_size(crate::typography::ui_rems(10.0)).text_color(status_color).child(status_label.unwrap_or("Idle"))))
                 .into_any_element()
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
@@ -13873,7 +13873,7 @@ mod tests {
         let wide = vcx.debug_bounds("guided-wide").unwrap();
         let narrow = vcx.debug_bounds("guided-narrow").unwrap();
         assert!(wide.size.width > narrow.size.width);
-        assert_eq!(narrow.size.width, px(32.0));
+        assert_eq!(narrow.size.width, px(34.0));
     }
 
     #[test]

@@ -835,48 +835,7 @@ fn modal_with(
 /// listener — `fade_key` must be unique app-wide and stable across frames
 /// (the id string is a good choice).
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
-    let row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(8.0))
-        .py(px(6.0))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(MENU_ITEM_RADIUS)))
-        .when_some(theme.ui_style.tokens.grid, |el, grid| el.py(px(grid)))
-        .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(13.0)))
-        .cursor_pointer();
-    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-        let fade_key = fade_key.into();
-        let mut row = row.bg(if active { theme.element_active } else { motion::hover_blend(&fade_key, theme.surface, theme.element_hover) })
-            .text_color(theme.text)
-            .children(crate::surface_chrome::active_key_dot(theme, active));
-        if !active {
-            row.interactivity().on_hover(motion::hover_listener(fade_key));
-        }
-        row
-    } else if active {
-        row.bg(crate::theme::card_selected_bg())
-            .text_color(theme.text)
-    } else {
-        let fade_key = fade_key.into();
-        let mut row = row
-            .text_color(motion::hover_blend(
-                &fade_key,
-                theme.text.opacity(0.9),
-                theme.text,
-            ))
-            .bg(motion::hover_blend(
-                &fade_key,
-                crate::theme::wash(0.0),
-                crate::theme::card_selected_bg(),
-            ));
-        // Imperative form — the caller's `.id(...)` makes the element stateful
-        // (hover listeners need element state, `.on_hover` needs `Stateful`).
-        row.interactivity()
-            .on_hover(motion::hover_listener(fade_key));
-        row
-    }
+    crate::components::menu_row(theme, active, fade_key)
 }
 
 /// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
@@ -1100,15 +1059,7 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
 /// text-[13px]` + `mb-1`, borderless — full width inside the card's own
 /// p-1, only a 4px bottom margin).
 pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
-    div()
-        .mb(px(4.0))
-        .px(px(10.0))
-        .py(px(6.0))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
-        .bg(ink(0.04))
-        .when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_1().border_color(theme.border))
-        .text_size(crate::typography::ui_rems(13.0))
-        .child(input)
+    crate::components::search_input_frame(theme, input)
 }
 
 /// A bordered trailing menu section (zeron picker action groups /
@@ -1167,17 +1118,7 @@ pub fn dialog_body(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
 /// Dialog text-field frame: `rounded-lg border border-white/[0.08]
 /// bg-white/[0.04] px-3 py-2 text-[14px]`.
 pub fn dialog_field(theme: &Theme, input: AnyElement) -> gpui::Div {
-    div()
-        .w_full()
-        .px(px(12.0))
-        .py(px(8.0))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
-        .border_1()
-        .border_color(hairline(0.08))
-        .bg(ink(0.04))
-        .when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_color(theme.border))
-        .text_size(crate::typography::ui_rems(14.0))
-        .child(input)
+    crate::components::dialog_field(theme, input)
 }
 
 /// Ghost button (`btnGhost`): quiet text, hover wash fading over

@@ -422,7 +422,7 @@ impl WorkItemDetails {
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-instruction-save",
                             if saving { "Saving\u{2026}" } else { "Save" },
                             theme,
@@ -431,7 +431,7 @@ impl WorkItemDetails {
                         .on_click(cx.listener(|this, _, _, cx| this.save_instruction(cx))),
                     )
                     .child(
-                        Self::small_button("work-item-instruction-cancel", "Cancel", theme)
+                        crate::work_outline::hints::details_button("work-item-instruction-cancel", "Cancel", theme)
                             .debug_selector(|| "work-item-instruction-cancel".into())
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_instruction(cx))),
                     ),
@@ -570,7 +570,7 @@ impl WorkItemDetails {
                                         .gap(px(4.0))
                                         .when(ix > 0, |el| {
                                             el.child(
-                                                Self::small_button(
+                                                crate::work_outline::hints::details_button(
                                                     ("work-item-instruction-up", ix),
                                                     "\u{2191}",
                                                     theme,
@@ -582,7 +582,7 @@ impl WorkItemDetails {
                                         })
                                         .when(ix < last, |el| {
                                             el.child(
-                                                Self::small_button(
+                                                crate::work_outline::hints::details_button(
                                                     ("work-item-instruction-down", ix),
                                                     "\u{2193}",
                                                     theme,
@@ -598,7 +598,7 @@ impl WorkItemDetails {
                                         })
                                         .when(!from_template, |el| {
                                             el.child(
-                                                Self::small_button(
+                                                crate::work_outline::hints::details_button(
                                                     ("work-item-instruction-edit", ix),
                                                     "Edit",
                                                     theme,
@@ -618,7 +618,7 @@ impl WorkItemDetails {
                                             )
                                         })
                                         .child(
-                                            Self::small_button(
+                                            crate::work_outline::hints::details_button(
                                                 ("work-item-instruction-archive", ix),
                                                 if from_template { "Mute" } else { "Remove" },
                                                 theme,
@@ -734,7 +734,7 @@ impl WorkItemDetails {
         } else {
             section = section.child(
                 div().child(
-                    Self::small_button("work-item-instruction-add", "Add instruction", theme)
+                    crate::work_outline::hints::details_button("work-item-instruction-add", "Add instruction", theme)
                         .debug_selector(|| "work-item-instruction-add".into())
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.begin_instruction_draft(None, window, cx)
@@ -979,12 +979,12 @@ impl WorkItemDetails {
             }
             section
                 .child(
-                    Self::small_button("pr-prompts-save", "Save", theme)
+                    crate::work_outline::hints::details_button("pr-prompts-save", "Save", theme)
                         .debug_selector(|| "pr-prompts-save".into())
                         .on_click(cx.listener(|this, _, _, cx| this.save_pr_prompts(cx))),
                 )
                 .child(
-                    Self::small_button("pr-prompts-cancel", "Cancel", theme).on_click(cx.listener(
+                    crate::work_outline::hints::details_button("pr-prompts-cancel", "Cancel", theme).on_click(cx.listener(
                         |this, _, _, cx| {
                             this.pr_prompts_editing = false;
                             cx.notify();
@@ -993,7 +993,7 @@ impl WorkItemDetails {
                 )
         } else {
             section.child(
-                Self::small_button("pr-prompts-edit", "Edit prompts", theme)
+                crate::work_outline::hints::details_button("pr-prompts-edit", "Edit prompts", theme)
                     .debug_selector(|| "pr-prompts-edit".into())
                     .on_click(cx.listener(|this, _, _, cx| this.edit_pr_prompts(cx))),
             )

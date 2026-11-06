@@ -31,6 +31,9 @@ mod chat_work_context;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
+pub mod components;
+#[cfg(test)]
+mod component_lint;
 mod composer_dock;
 mod context_usage;
 mod diff_targets;
@@ -205,7 +208,7 @@ pub fn run_app(config: UiConfig) {
             .in_scope(|| typography::register_fonts(cx));
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
-        ui_style::init(ui_settings.ui_style, cx);
+        ui_style::init_with_layout(ui_settings.ui_style, ui_settings.ui_layout, cx);
         typography::init(
             ui_settings.ui_font_family.clone(),
             ui_settings.ui_font_size,

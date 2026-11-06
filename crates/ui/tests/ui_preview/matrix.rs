@@ -4,21 +4,30 @@
 pub struct Cell<'a> {
     pub screen: &'a str,
     pub style: &'a str,
+    pub layout: &'a str,
     pub theme: &'a str,
     pub label: String,
 }
 
-pub fn matrix<'a>(screens: &[&'a str], styles: &[&'a str], themes: &[&'a str]) -> Vec<Cell<'a>> {
+pub fn matrix<'a>(
+    screens: &[&'a str],
+    styles: &[&'a str],
+    layouts: &[&'a str],
+    themes: &[&'a str],
+) -> Vec<Cell<'a>> {
     let mut cells = Vec::new();
     for &screen in screens {
         for &style in styles {
-            for &theme in themes {
-                cells.push(Cell {
-                    screen,
-                    style,
-                    theme,
-                    label: format!("{style} · {theme}"),
-                });
+            for &layout in layouts {
+                for &theme in themes {
+                    cells.push(Cell {
+                        screen,
+                        style,
+                        layout,
+                        theme,
+                        label: format!("{style} · {layout} · {theme}"),
+                    });
+                }
             }
         }
     }
@@ -65,17 +74,23 @@ mod tests {
     fn matrix_orders_screens_then_style_rows_then_theme_columns() {
         let cells = matrix(
             &["chat", "details"],
-            &["minimal", "industrial"],
+            &["default", "industrial"],
+            &["minimal", "compact"],
             &["light", "dark"],
         );
-        assert_eq!(cells.len(), 8);
-        assert_eq!(cells[0].label, "minimal · light");
+        assert_eq!(cells.len(), 16);
+        assert_eq!(cells[0].label, "default · minimal · light");
         assert_eq!(
-            (cells[3].screen, cells[3].style, cells[3].theme),
-            ("chat", "industrial", "dark")
+            (
+                cells[3].screen,
+                cells[3].style,
+                cells[3].layout,
+                cells[3].theme
+            ),
+            ("chat", "default", "compact", "dark")
         );
-        assert_eq!(cells[4].screen, "details");
-        assert!(matrix(&["chat"], &[], &["dark"]).is_empty());
+        assert_eq!(cells[8].screen, "details");
+        assert!(matrix(&["chat"], &[], &["minimal"], &["dark"]).is_empty());
     }
 
     #[test]
