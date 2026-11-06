@@ -2,7 +2,7 @@
 use super::*;
 
 impl Shell {
-    pub(super) fn existing_branch_review(
+    pub(crate) fn existing_branch_review(
         &self,
         worker_id: &str,
         target: &mast_proto::ReviewTarget,
@@ -45,7 +45,7 @@ impl Shell {
             })
             .map(|chat| chat.id.clone())
     }
-    pub(super) fn load_branch_review_target(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn load_branch_review_target(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.branch_review_targets.remove(&chat_id);
         let engine = self.state.read(cx).engine().cloned();
         let task = self
@@ -98,7 +98,7 @@ impl Shell {
         .detach();
     }
 
-    pub(super) fn open_branch_review_for_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_branch_review_for_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let Some(target) = self.branch_review_targets.get(&chat_id).cloned() else {
             return;
         };
@@ -125,5 +125,9 @@ impl Shell {
             self.set_sidebar_error(error);
             cx.notify();
         }
+    }
+
+    pub(crate) fn branch_review_target(&self, chat_id: &str) -> Option<&mast_proto::ReviewTarget> {
+        self.branch_review_targets.get(chat_id)
     }
 }

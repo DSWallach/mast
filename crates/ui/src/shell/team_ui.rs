@@ -327,6 +327,7 @@ impl Shell {
             crate::status_style::indicator(worker.state.into(), theme.appearance).into_any_element()
         };
         let open_id = id.clone();
+        let menu_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
         let stalled = self.state.read(cx).session_for(&id).and_then(|session| {
             if session.status == mast_proto::SessionStatus::AwaitingInput {
@@ -351,6 +352,13 @@ impl Shell {
             .border_color(theme.border)
             .cursor_pointer()
             .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
+                    .find(|chat| chat.id == menu_id).and_then(|chat| chat.cwd.as_deref()));
+                this.chat_menu.open(ChatMenuState { chat_id: menu_id.clone(), position: event.position, page: ChatMenuPage::Root, closeable });
+                this.load_branch_review_target(menu_id.clone(), cx);
+                cx.notify();
+            }))
             .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
             .child(
                 div()
