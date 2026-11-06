@@ -357,19 +357,9 @@ impl WorkItemDetails {
         }
         let shell = Some(self.shell.clone());
         let refresh_identifier = issue.as_ref().map(|r| r.external_id.clone());
-        let mut section = div().flex().flex_col().gap(px(4.0)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child("Linear"),
-                )
+        let mut section = crate::components::outline_detail_section(theme).child(
+            crate::components::outline_detail_row(theme)
+                .child(crate::components::outline_detail_heading("Linear", theme))
                 .child(
                     crate::work_outline::hints::details_button(
                         "work-item-linear-refresh",
@@ -410,19 +400,10 @@ impl WorkItemDetails {
             );
             let id = reference.id.clone();
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(chip)
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(title)),
+                        crate::components::outline_detail_row_text(title, theme),
                     )
                     .child(
                         crate::work_outline::hints::details_button("work-item-linear-unlink", "Unlink", theme)
@@ -470,10 +451,7 @@ impl WorkItemDetails {
                 theme,
             );
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(chip)
                     .children(fix)
                     .child(div().flex_1())

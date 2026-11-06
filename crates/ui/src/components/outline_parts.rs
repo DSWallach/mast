@@ -1193,6 +1193,47 @@ pub fn outline_section_action_heading(label: &'static str, theme: &Theme) -> Div
         .child(label)
 }
 
+/// Vertical stack of item detail content.
+pub fn outline_detail_section(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+}
+
+/// Horizontal row of item detail content.
+pub fn outline_detail_row(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+}
+
+/// Section label that fills the available row width.
+pub fn outline_detail_heading(label: &'static str, theme: &Theme) -> Div {
+    div()
+        .flex_1()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(label)
+}
+
+/// Truncated primary detail in a row.
+pub fn outline_detail_row_text(text: String, theme: &Theme) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            11.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
