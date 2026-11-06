@@ -9,6 +9,7 @@ publish.workspace = true
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [features]
+snapshot = ["gpui/test-support", "gpui_platform/test-support"]
 startup-bench = ["mast-engine/startup-bench", "mast-rpc/startup-bench"]
 project-palette-fixture = []
 
@@ -110,6 +111,7 @@ url = "2"
 x11rb = { version = "0.14.0", features = ["image"] }
 
 [dev-dependencies]
+image-compare = "0.5"
 ctor = "1"
 mast-sync.workspace = true
 gpui = { workspace = true, features = ["test-support"] }

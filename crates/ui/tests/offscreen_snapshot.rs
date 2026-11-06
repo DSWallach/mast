@@ -1,29 +1,37 @@
-#![cfg(target_os = "macos")]
-use gpui::{div, prelude::*, px, size, HeadlessAppContext};
-use mast_ui::ui_style::{self, UiStyle, UiStyleId};
-use std::sync::Arc;
+#![cfg(all(target_os = "macos", feature = "snapshot"))]
+use gpui::{div, prelude::*, px, size};
+use mast_ui::{theme::{Appearance, Theme}, ui_style::{self, UiStyleId}};
+use std::path::Path;
 
-struct StyleRow(UiStyleId);
-impl Render for StyleRow {
-    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        let style = UiStyle::of(self.0);
-        div().size_full().bg(gpui::rgb(0x16181b)).child(
-            ui_style::reveal_on_hover(div().id("action").h(px(style.tokens.control_size)).w(px(100.)).bg(gpui::rgb(0x4384a3)).child("Action"), "row", style, false)
+struct MenuRow;
+impl Render for MenuRow {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div().size_full().bg(theme.surface).child(
+            mast_ui::popover::menu_row(theme, true, "snapshot-row")
+                .h(px(theme.ui_style.tokens.sidebar_row_compact_h))
+                .child("Work outline")
+                .child(ui_style::reveal_on_hover(div().id("action").child("Edit"), "row", theme.ui_style, false)),
         )
     }
 }
-
 #[test]
-#[ignore = "requires Metal"]
-fn render_style_rows_offscreen() {
-    let native = gpui_platform::current_platform(true);
-    let mut cx = HeadlessAppContext::with_platform(native.text_system(), Arc::new(()), gpui_platform::current_headless_renderer);
-    for (name, style) in [("minimal", UiStyleId::Minimal), ("dense", UiStyleId::Dense)] {
-        let window = cx.open_window(size(px(200.), px(60.)), |_, cx| cx.new(|_| StyleRow(style))).unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
-        let image = cx.capture_screenshot(window.into()).unwrap();
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target-clean/snapshots");
-        std::fs::create_dir_all(&output).unwrap();
-        image.save(output.join(format!("{name}.png"))).unwrap();
+#[ignore = "requires macOS Metal and access to macOS services"]
+fn render_style_rows_offscreen() -> anyhow::Result<()> {
+    let baselines = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    std::fs::create_dir_all(&baselines)?;
+    for (style_name, style) in [("minimal", UiStyleId::Minimal), ("dense", UiStyleId::Dense), ("guided", UiStyleId::Guided)] {
+        for (appearance_name, appearance) in [("dark", Appearance::Dark), ("light", Appearance::Light)] {
+            let name = format!("menu-row-{style_name}-{appearance_name}");
+            let path = mast_ui::snapshot::render_to_png(&name, size(px(240.), px(60.)), style, appearance, |_, cx| cx.new(|_| MenuRow))?;
+            let baseline = baselines.join(format!("{name}.png"));
+            if std::env::var_os("MAST_UPDATE_SNAPSHOTS").is_some() { std::fs::copy(&path, &baseline)?; }
+            let actual = image::open(&path)?.into_rgba8();
+            let expected = image::open(&baseline)?.into_rgba8();
+            let diff = image_compare::rgba_hybrid_compare(&expected, &actual)?;
+            diff.image.to_color_map().save(path.with_file_name(format!("{name}.diff.png")))?;
+            assert!(diff.score >= 0.9999, "{name} similarity: {}", diff.score);
+        }
     }
+    Ok(())
 }
