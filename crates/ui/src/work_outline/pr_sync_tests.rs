@@ -195,6 +195,55 @@ fn destination_picker_sets_and_clears_the_setting(cx: &mut gpui::TestAppContext)
 }
 
 #[gpui::test]
+fn approval_suggestion_enables_from_space_settings(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    open_details(&overview, vcx, "");
+    draw(vcx);
+    assert!(vcx.debug_bounds("space-approval-rules").is_some());
+    let rule = &mast_proto::work_outline::suggested_approval_rules("s1")[0];
+    press(vcx, format!("approval-rule-{}", rule.id));
+    let changes = mutations(&calls, "setApprovalRule");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["rule"]["id"], rule.id);
+    assert_eq!(changes[0]["rule"]["enabled"], true);
+}
+
+#[gpui::test]
+fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+    let mut rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();
+    rule.argv_prefix = vec!["cargo".into(), "test".into()];
+    details.update(vcx, |details, cx| details.edit_approval_rule(rule.clone(), cx));
+    draw(vcx);
+    details.update(vcx, |details, cx| details.save_approval_rule(cx));
+    vcx.run_until_parked();
+    let changes = mutations(&calls, "setApprovalRule");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["cargo", "test"]));
+    assert_eq!(changes[0]["rule"]["requireIsolatedHome"], true);
+}
+
+#[gpui::test]
+fn approval_command_test_uses_engine_matcher(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut rule = mast_proto::work_outline::suggested_approval_rules("s1")[2].clone();
+    rule.enabled = true;
+    snapshot.space_settings.approval_rules.push(rule);
+    let (overview, _, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    state.update(vcx, |state, _| state.spaces[0].path = dir.path().to_string_lossy().into_owned());
+    let details = open_details(&overview, vcx, "");
+    let allowed = details.update(vcx, |details, cx| details.test_approval_command_for_test("ps -ax", cx));
+    assert_eq!(allowed.as_deref(), Some("Would allow: Process inspection"));
+    let blocked = details.update(vcx, |details, cx| details.test_approval_command_for_test("ps -ax | sh", cx));
+    assert_eq!(blocked.as_deref(), Some("Would ask for approval"));
+}
+
+#[gpui::test]
 fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = sync_snapshot(None);

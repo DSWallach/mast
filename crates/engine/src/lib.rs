@@ -18,7 +18,7 @@ use mast_sync::DocsStore;
 pub mod admin;
 pub mod agent_accounts;
 pub mod agent_tools;
-mod approval_commands;
+pub mod approval_commands;
 pub mod archivable;
 pub mod artifact_questions;
 pub mod artifacts;

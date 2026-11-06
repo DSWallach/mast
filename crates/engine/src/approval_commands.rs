@@ -135,6 +135,12 @@ pub(crate) fn matching_rules<'a>(
     (!matches.is_empty()).then_some(matches)
 }
 
+/// Preview the same fail-closed decision used by the engine.
+pub fn matching_rule_labels(command: &str, harness: ApprovalRuleHarness, cwd: &Path, permitted_roots: &[&Path], rules: &[ApprovalRule]) -> Option<Vec<String>> {
+    matching_rules(&Value::String(command.to_owned()), harness, cwd, permitted_roots, rules)
+        .map(|matches| matches.into_iter().map(|rule| rule.label.clone()).collect())
+}
+
 fn isolated_configuration(assignments: &[String]) -> bool {
     let Ok(temporary_root) = Path::new("/tmp").canonicalize() else {
         return false;
