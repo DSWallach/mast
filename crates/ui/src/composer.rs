@@ -8193,7 +8193,8 @@ impl Render for Composer {
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
         let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
-        let identity = theme.identity_color(self.state.read(cx).selected_chat.as_deref().unwrap_or(""));
+        let identity_key = self.pickers.read(cx).effective_harness(cx).map(|harness| format!("harness:{harness:?}")).unwrap_or_default();
+        let identity = theme.identity_color(&identity_key);
         let identity_text = area.then(|| theme.identity_text(identity));
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
@@ -8809,6 +8810,30 @@ impl Render for Composer {
         } else {
             (Some(model_picker), None)
         };
+        let area_tabs = area.then(|| {
+            let selected = self.pickers.read(cx).effective_harness(cx);
+            let harnesses = self.pickers.read(cx).area_harnesses(cx);
+            let tabs = harnesses.into_iter().map(|harness| {
+                let (path, _) = crate::pickers::harness_brand_icon(harness);
+                let selected = selected == Some(harness);
+                let tab_identity = theme.identity_color(&format!("harness:{harness:?}"));
+                div().id(SharedString::from(format!("area-harness-{harness:?}")))
+                    .size(px(28.0)).rounded_t(px(14.0)).flex().items_center().justify_center()
+                    .bg(tab_identity)
+                    .text_color(theme.identity_text(tab_identity))
+                    .when(!selected, |el| el.opacity(0.75))
+                    .cursor_pointer().child(crate::icons::icon(path).size(px(16.0)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
+                        pickers.pick_harness(harness, cx);
+                        pickers.open_model_menu(window, cx);
+                    })))
+            }).collect::<Vec<_>>();
+            div().absolute().left(px(16.0)).right(px(16.0)).top(px(-28.0)).h(px(28.0)).flex().items_end()
+                .children(tabs).child(div().flex_1())
+                .child(div().id("area-add-harness").size(px(28.0)).rounded_full().flex().items_center().justify_center()
+                    .text_color(theme.text_muted).cursor_pointer().child("+")
+                    .on_click(cx.listener(|this, _, window, cx| this.pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx)))))
+        });
         let body = if area {
             div().flex().flex_col()
                 .child(pill.h(px(pill_height)).overflow_hidden().flex().flex_col()
@@ -8817,7 +8842,8 @@ impl Render for Composer {
                 .child(div().h(px(40.0)).w_full().relative().flex().items_center().justify_center()
                     .child(div().absolute().left_0().top(px(6.0)).flex().items_center().gap(px(2.0))
                         .text_color(theme.text_muted).child(attach).child("Attach"))
-                    .child(send_button))
+                    .child(send_button)
+                    .child(div().absolute().right_0().top(px(4.0)).max_w(px(surface_width * 0.35)).children(area_picker)))
         } else if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
@@ -8976,12 +9002,7 @@ impl Render for Composer {
             .id("composer-surface")
             .debug_selector(|| "composer-surface".into())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
-            .when_some(area_picker, |surface, picker| {
-                surface.child(div().absolute().left(px(16.0)).top(px(-25.0))
-                    .rounded_t(px(12.0)).px(px(8.0)).h(px(25.0))
-                    .flex().items_center().bg(identity).text_color(theme.identity_text(identity))
-                    .child(div().rounded(px(8.0)).bg(theme.surface).px(px(4.0)).child(picker)))
-            })
+            .children(area_tabs)
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background

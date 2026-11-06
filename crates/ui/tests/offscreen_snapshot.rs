@@ -360,7 +360,7 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
                     state.update(cx, |state, cx| {
                     state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
                         {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
-                        {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I will inspect the layout and report the changes."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
+                        {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I will inspect the layout and report the changes."},{"id":"tool","kind":"tool","call":{"kind":"exec","command":"cargo test"},"resolved":true,"output":"Tests passed"}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
                     ])).unwrap() }, cx).unwrap();
                 });
                     let boot = mast_ui::EngineBootConfig {

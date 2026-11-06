@@ -1140,7 +1140,7 @@ impl Pickers {
     }
 
     /// Effective harness: picked, or the chat's config, or the first listed.
-    fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
+    pub(crate) fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
         if let Some(harness) = self.config.harness {
             return Some(harness);
         }
@@ -1521,6 +1521,12 @@ impl Pickers {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             self.toggle(PickerKind::HarnessModel, window, cx);
         }
+    }
+
+    pub(crate) fn area_harnesses(&self, cx: &App) -> Vec<HarnessId> {
+        let mut ids: Vec<_> = self.harnesses.ready().map(|list| offered_harnesses(list).into_iter().map(|item| item.id).collect()).unwrap_or_default();
+        if let Some(selected) = self.effective_harness(cx) && !ids.contains(&selected) { ids.insert(0, selected); }
+        ids
     }
 
     fn toggle(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -2074,7 +2080,7 @@ impl Pickers {
         cx.notify();
     }
 
-    fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+    pub(crate) fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         if self.harness_locked(cx) {
             return;
         }
