@@ -847,9 +847,14 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(13.0)))
         .cursor_pointer();
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-        row.bg(if active { theme.element_active } else { theme.surface })
+        let fade_key = fade_key.into();
+        let mut row = row.bg(if active { theme.element_active } else { motion::hover_blend(&fade_key, theme.surface, theme.element_hover) })
             .text_color(theme.text)
-            .children(crate::surface_chrome::active_key_dot(theme, active))
+            .children(crate::surface_chrome::active_key_dot(theme, active));
+        if !active {
+            row.interactivity().on_hover(motion::hover_listener(fade_key));
+        }
+        row
     } else if active {
         row.bg(crate::theme::card_selected_bg())
             .text_color(theme.text)
