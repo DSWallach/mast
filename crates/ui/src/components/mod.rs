@@ -3,7 +3,7 @@
 
 mod outline_parts;
 pub use outline_parts::*;
-pub(crate) use outline_parts::outline_proposal_diff;
+pub(crate) use outline_parts::{outline_proposal_diff, outline_revision_line};
 
 use crate::motion;
 use crate::theme::{Theme, hairline, ink};

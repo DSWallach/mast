@@ -89,92 +89,6 @@ pub(crate) fn present(lines: &[TextDiffLine]) -> Vec<PresentedLine> {
     out
 }
 
-fn code_size(theme: &Theme) -> f32 {
-    crate::typography::clamp_font_size(theme.code_font_size * 0.92)
-}
-
-fn line_row(line: &PresentedLine, theme: &Theme) -> AnyElement {
-    let size = code_size(theme);
-    let height = (size * 1.55).round();
-    let PresentedLine::Line {
-        kind,
-        old_no,
-        new_no,
-        text,
-    } = line
-    else {
-        let PresentedLine::Folded(count) = line else {
-            unreachable!()
-        };
-        return div()
-            .h(px(height))
-            .pl(px(12.0))
-            .flex()
-            .items_center()
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_faint)
-            .child(SharedString::from(format!(
-                "\u{22ef} {count} unchanged line{}",
-                if *count == 1 { "" } else { "s" }
-            )))
-            .into_any_element();
-    };
-    let (marker, color) = match kind {
-        TextDiffKind::Added => ("+", Some(theme.diff_add)),
-        TextDiffKind::Removed => ("\u{2212}", Some(theme.diff_del)),
-        TextDiffKind::Same => ("\u{b7}", None),
-    };
-    let gutter = |no: Option<u32>| {
-        div()
-            .w(px(26.0))
-            .flex_none()
-            .flex()
-            .justify_end()
-            .pr(px(6.0))
-            .text_color(color.map_or(theme.text_faint.opacity(0.8), |c| c.opacity(0.9)))
-            .child(SharedString::from(
-                no.map(|n| n.to_string()).unwrap_or_default(),
-            ))
-    };
-    div()
-        .min_h(px(height))
-        .w_full()
-        .flex()
-        .items_start()
-        .font_family(theme.font_mono.clone())
-        .text_size(px(size))
-        .line_height(px(height))
-        .when_some(color, |el, color| {
-            let mut wash = color;
-            wash.a = 0.055;
-            el.bg(wash)
-        })
-        .child(
-            div()
-                .w(px(2.0))
-                .h(px(height))
-                .flex_none()
-                .when_some(color, |el, color| el.bg(color.opacity(0.55))),
-        )
-        .child(gutter(*old_no))
-        .child(gutter(*new_no))
-        .child(
-            div()
-                .w(px(12.0))
-                .flex_none()
-                .text_color(color.unwrap_or(theme.text_faint.opacity(0.5)))
-                .child(marker),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_color(theme.text.opacity(0.92))
-                .child(SharedString::from(text.clone())),
-        )
-        .into_any_element()
-}
-
 /// The stacked line diff (capped at [`MAX_PRESENTED_LINES`]).
 pub(crate) fn render_text_diff(
     selector: &'static str,
@@ -196,7 +110,7 @@ pub(crate) fn render_text_diff(
             presented
                 .iter()
                 .take(MAX_PRESENTED_LINES)
-                .map(|line| line_row(line, theme)),
+                .map(|line| crate::components::outline_revision_line(line, theme)),
         )
         .when(hidden > 0, |el| {
             el.child(
