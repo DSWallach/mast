@@ -54,6 +54,8 @@ struct GatedHarness {
     release: Arc<Notify>,
     questions: Arc<Mutex<Vec<mast_proto::UserInputQuestion>>>,
     events: Arc<Mutex<Vec<AgentEvent>>>,
+    fake_codex: bool,
+    answers: Arc<Mutex<Vec<Vec<mast_proto::UserInputAnswer>>>>,
 }
 
 impl GatedHarness {
@@ -85,7 +87,7 @@ impl GatedHarness {
 #[async_trait]
 impl Harness for GatedHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        if self.fake_codex { HarnessId::Codex } else { HarnessId::Mock }
     }
     fn display_name(&self) -> &str {
         "Gated"
@@ -132,7 +134,8 @@ impl Harness for GatedHarness {
         let questions = self.questions.lock().unwrap().clone();
         if !questions.is_empty() {
             let answer = (controls.request_input)(questions);
-            tokio::spawn(async move { let _ = answer.await; });
+            let answers = self.answers.clone();
+            tokio::spawn(async move { if let Ok(answer) = answer.await { answers.lock().unwrap().push(answer); } });
         }
         self.spawns.lock().unwrap().push(Spawn::WithTools {
             prompt: request.prompt.clone(),
@@ -154,11 +157,15 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_for(false).await
+}
+
+async fn rig_for(fake_codex: bool) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let space_path = root.join("project");
     std::fs::create_dir_all(&space_path).unwrap();
-    let harness = GatedHarness::default();
+    let harness = GatedHarness { fake_codex, ..Default::default() };
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness.clone()));
     let core = EngineCore::assemble(
@@ -3903,6 +3910,39 @@ async fn friction_captures_approval_and_answer() {
     let rows = rig.core.workspace.friction_reports(SPACE);
     assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(false));
     assert_eq!(rows[0].occurrences, 1);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_rule_answers_fake_codex_without_worker_wake() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let rule = ApprovalRule {
+        id: "rule-1".into(), label: "Tests".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: vec!["cargo".into(), "test".into()],
+        command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "approval-rule".into(),
+    }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    rig.core.sessions.set_auto_capture_friction(false);
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    let mut command = run_command("test", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut command { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, command).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "automatic answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(signals.try_recv().is_err());
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].summary.contains("Auto-approved by rule rule-1"));
+    assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(true));
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
 }

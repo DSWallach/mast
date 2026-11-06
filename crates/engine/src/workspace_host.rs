@@ -1049,6 +1049,13 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.record_friction(report))?)
     }
 
+    /// Persist an audit record before an irreversible response is sent.
+    pub fn record_friction_durable(&self, report: mast_proto::FrictionReport) -> Result<mast_proto::FrictionReport, EngineError> {
+        let row = self.record_friction(report)?;
+        self.inner.persist_snapshot()?;
+        Ok(row)
+    }
+
     pub fn import_friction(&self, report: mast_proto::FrictionReport, import_id: &str) -> Result<(mast_proto::FrictionReport, bool), EngineError> {
         Ok(self.mutate(|doc| doc.import_friction(report, import_id))?)
     }

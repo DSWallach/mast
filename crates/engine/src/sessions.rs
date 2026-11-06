@@ -1047,6 +1047,13 @@ impl SessionsEngine {
                 let (tx, rx) = oneshot::channel();
                 let request_id = new_id();
                 lock(&pending).insert(request_id.clone(), (questions.clone(), tx));
+                if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
+                    let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
+                    let engine = SessionsEngine { inner: inner.clone() };
+                    if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
+                        return rx;
+                    }
+                }
                 let mut captured = Vec::new();
                 for question in &questions {
                     if let Some(approval) = friction_approval(question) {
@@ -1237,7 +1244,17 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> Result<bool, EngineError> {
+        self.resolve_input(chat_id, request_id, answers, true)
+    }
+
+    fn resolve_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
         mut answers: Vec<UserInputAnswer>,
+        publish_resolution: bool,
     ) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
@@ -1261,9 +1278,11 @@ impl SessionsEngine {
                 }
             }
         let _ = resolver.send(answers);
-        let _ = engine_tx.send(AgentEvent::InputResolved {
-            request_id: request_id.to_string(),
-        });
+        if publish_resolution {
+            let _ = engine_tx.send(AgentEvent::InputResolved {
+                request_id: request_id.to_string(),
+            });
+        }
         Ok(true)
     }
 
@@ -1803,7 +1822,11 @@ impl Inner {
     }
 
     fn capture_friction(&self, chat_id: &str, kind: mast_proto::FrictionKind, summary: &str, detail: &str, approval: Option<mast_proto::FrictionApproval>) -> Option<String> {
-        if !self.auto_capture_friction.load(Ordering::Relaxed) { return None; }
+        self.capture_friction_with_policy(chat_id, kind, summary, detail, approval, false)
+    }
+
+    fn capture_friction_with_policy(&self, chat_id: &str, kind: mast_proto::FrictionKind, summary: &str, detail: &str, approval: Option<mast_proto::FrictionApproval>, durable: bool) -> Option<String> {
+        if !durable && !self.auto_capture_friction.load(Ordering::Relaxed) { return None; }
         let ws = self.workspace()?;
         let chat = ws.chat(chat_id).ok()??;
         let space_id = chat.space_id.clone().filter(|s| !s.is_empty())?;
@@ -1817,7 +1840,30 @@ impl Inner {
             provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto, file_name: None },
             fingerprint: String::new(), occurrences: 0, last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
         };
-        match ws.record_friction(report) { Ok(row) => Some(row.id), Err(err) => { tracing::warn!(error = %err, "automatic friction capture failed"); None } }
+        let result = if durable { ws.record_friction_durable(report) } else { ws.record_friction(report) };
+        match result { Ok(row) => Some(row.id), Err(err) => { tracing::warn!(error = %err, "automatic friction capture failed"); None } }
+    }
+
+    fn auto_approve_command(&self, chat_id: &str, question: &UserInputQuestion) -> bool {
+        use mast_proto::work_outline::ApprovalRuleHarness;
+        if question.header != "Approve command" || question.options != ["Yes", "No"] { return false; }
+        let Some(details) = &question.command_approval else { return false; };
+        let Some(cwd) = details.cwd.as_deref() else { return false; };
+        let Some(ws) = self.workspace() else { return false; };
+        let Ok(Some(chat)) = ws.chat(chat_id) else { return false; };
+        let Some(space_id) = chat.space_id else { return false; };
+        let Ok(Some(space)) = ws.space(&space_id) else { return false; };
+        if space.device_id != self.device_id { return false; }
+        let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id);
+        if harness != Some(HarnessId::Codex) { return false; }
+        let inputs = ws.work_outline_inputs(&space_id);
+        let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
+        let root = std::path::Path::new(&space.path);
+        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &snapshot.space_settings.approval_rules) else { return false; };
+        let labels = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>().join(", ");
+        let Some(mut approval) = friction_approval(question) else { return false; };
+        approval.answer = Some(true);
+        self.capture_friction_with_policy(chat_id, mast_proto::FrictionKind::Permission, &format!("Auto-approved by rule {labels}"), &question.question, Some(approval), true).is_some()
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.
