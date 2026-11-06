@@ -2,7 +2,49 @@
 
 use super::{Changes, DiffLine, FileDiff, LineKind, SourceSide};
 use gpui::Context;
+use mast_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use mast_proto::ReviewStep;
+
+/// Find the response belonging to a sent message, never to an earlier turn.
+/// The caller supplies the chat's turn state because individual assistant
+/// messages can complete while the agent is still working.
+pub(super) fn completed_reply(
+    entries: &[SessionMessageEntry],
+    message_id: &str,
+    busy: bool,
+) -> Option<String> {
+    if busy {
+        return None;
+    }
+    let sent = entries
+        .iter()
+        .position(|entry| entry.id == message_id && entry.role == MessageRole::User)?;
+    let mut text = None;
+    for entry in &entries[sent + 1..] {
+        if entry.role == MessageRole::User {
+            break;
+        }
+        if entry.role == MessageRole::Assistant {
+            if entry.status == Some(MessageStatus::Streaming) {
+                return None;
+            }
+            let parts = entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } if !text.trim().is_empty() => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !parts.is_empty() {
+                text = Some(parts.join("\n"));
+            }
+        }
+    }
+    text
+}
 
 /// A selection belongs to one file and one side, even in a split diff.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +172,35 @@ pub(super) fn step_question(step: &ReviewStep, question: &str) -> String {
 mod tests {
     use super::*;
     use mast_proto::{ReviewHunk, ReviewRisk};
+
+    #[test]
+    fn reply_is_correlated_to_the_sent_message_and_waits_for_the_turn() {
+        let entry = |id: &str, role, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: "text".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "local".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        let entries = vec![
+            entry("previous", MessageRole::Assistant, "old"),
+            entry("sent", MessageRole::User, "question"),
+            entry("answer", MessageRole::Assistant, "answer"),
+            entry("next", MessageRole::User, "next question"),
+            entry("later", MessageRole::Assistant, "wrong"),
+        ];
+        assert_eq!(
+            completed_reply(&entries, "sent", false).as_deref(),
+            Some("answer")
+        );
+        assert_eq!(completed_reply(&entries, "sent", true), None);
+        assert_eq!(completed_reply(&entries, "missing", false), None);
+    }
 
     #[test]
     fn selection_respects_file_side_and_reverse_ranges() {
