@@ -2007,6 +2007,7 @@ pub struct Changes {
     review_error: Option<String>,
     seen_candidates: HashMap<String, review_state::SeenCandidate>,
     seen_hunks: std::collections::HashSet<String>,
+    explanation_selection: Option<explanation::DiffSelection>,
     seen_task: Option<Task<()>>,
     seen_last_render: std::time::Instant,
     seen_scroll_epoch: u64,
@@ -2246,6 +2247,7 @@ impl Changes {
             review_error: None,
             seen_candidates: HashMap::new(),
             seen_hunks: std::collections::HashSet::new(),
+            explanation_selection: None,
             seen_task: None,
             seen_last_render: std::time::Instant::now(),
             seen_scroll_epoch: 0,
@@ -2409,6 +2411,7 @@ impl Changes {
         self.sync_scope_with_owner();
         self.diffs.clear();
         self.parsed = None;
+        self.explanation_selection = None;
         self.rows.clear();
         self.row_ranges.clear();
         self.section_headers.clear();
@@ -4391,21 +4394,31 @@ impl Changes {
                     return row;
                 };
                 let path = file_diff.path.clone();
+                let source_side = match side { CommentSide::Old => SourceSide::Old, CommentSide::New => SourceSide::New };
                 let hovered = self.hovering(&path, (side, line_no));
                 let move_path = path.clone();
                 let leave_path = path.clone();
+                let select_path = path.clone();
+                let selected = self.explanation_line_selected(&path, source_side, line_no);
                 div()
                     .id(("diff-line", ix))
                     .w_full()
                     .relative()
+                    .when(selected, |el| el.bg(theme.element_active))
                     .child(row)
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        this.select_explanation_line(&select_path, source_side, line_no, event.modifiers.shift, cx);
+                    }))
                     .when(hovered, |el| {
                         el.child(positioned_adder(
                             comment_adder_left(side, gutter_px),
                             render_comment_adder(&path, side, line_no, &theme, cx),
                         ))
                     })
-                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                        if event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == move_path && s.side == source_side) {
+                            this.select_explanation_line(&move_path, source_side, line_no, true, cx);
+                        }
                         this.set_hover(&move_path, Some((side, line_no)), cx);
                     }))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -4478,21 +4491,42 @@ impl Changes {
                 // Cards for old-side notes still render (they are pushed by
                 // the row, not the column), so switching layouts never hides
                 // one that is already staged.
+                let left_number = left.and_then(|line| line.old_no);
+                let left_path = path.clone();
+                let left_move_path = path.clone();
                 let left = cell(left, true)
-                    .map(IntoElement::into_any_element)
+                    .map(|cell| cell.id(("split-old", ix))
+                        .when(left_number.is_some_and(|number| self.explanation_line_selected(&path, SourceSide::Old, number)), |el| el.bg(theme.element_active))
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            if let Some(number) = left_number { this.select_explanation_line(&left_path, SourceSide::Old, number, event.modifiers.shift, cx); }
+                        }))
+                        .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                            if let Some(number) = left_number && event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == left_move_path.as_ref() && s.side == SourceSide::Old) {
+                                this.select_explanation_line(&left_move_path, SourceSide::Old, number, true, cx);
+                            }
+                        }))
+                        .into_any_element())
                     .unwrap_or_else(|| split_filler().into_any_element());
                 let right = match (cell(right, false), right.and_then(line_anchor)) {
                     (Some(cell), Some(anchor)) => {
                         let (side, line_no) = anchor;
                         let (move_path, leave_path) = (path.clone(), path.clone());
+                        let select_path = path.clone();
                         cell.id(("split-new", ix))
+                            .when(self.explanation_line_selected(&path, SourceSide::New, line_no), |el| el.bg(theme.element_active))
+                            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                this.select_explanation_line(&select_path, SourceSide::New, line_no, event.modifiers.shift, cx);
+                            }))
                             .when(self.hovering(&path, anchor), |el| {
                                 el.relative().child(positioned_adder(
                                     split_adder_left(gutter_px),
                                     render_comment_adder(&path, side, line_no, &theme, cx),
                                 ))
                             })
-                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                                if event.dragging() && this.explanation_selection.as_ref().is_some_and(|s| s.path == move_path.as_ref() && s.side == SourceSide::New) {
+                                    this.select_explanation_line(&move_path, SourceSide::New, line_no, true, cx);
+                                }
                                 this.set_hover(&move_path, Some(anchor), cx);
                             }))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -6968,6 +7002,26 @@ mod tests {
     use chrono::Utc;
 
     mod ref_targets;
+
+    #[gpui::test]
+    fn explanation_selection_extends_only_within_file_and_side(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window.update(cx, |changes, _, cx| {
+            changes.select_explanation_line("a", SourceSide::New, 5, false, cx);
+            changes.select_explanation_line("a", SourceSide::New, 3, true, cx);
+            assert!(changes.explanation_line_selected("a", SourceSide::New, 4));
+            changes.select_explanation_line("a", SourceSide::Old, 8, true, cx);
+            assert!(!changes.explanation_line_selected("a", SourceSide::New, 4));
+            assert!(changes.explanation_line_selected("a", SourceSide::Old, 8));
+        }).unwrap();
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(

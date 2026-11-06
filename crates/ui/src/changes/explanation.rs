@@ -1,6 +1,7 @@
 //! Context carried by questions about a diff or a walkthrough step.
 
-use super::{DiffLine, FileDiff, LineKind, SourceSide};
+use super::{Changes, DiffLine, FileDiff, LineKind, SourceSide};
+use gpui::Context;
 use mast_proto::ReviewStep;
 
 /// A selection belongs to one file and one side, even in a split diff.
@@ -13,6 +14,12 @@ pub(super) struct DiffSelection {
 }
 
 impl DiffSelection {
+    fn contains(&self, path: &str, side: SourceSide, line: u32) -> bool {
+        self.path == path
+            && self.side == side
+            && (self.anchor.min(self.extent)..=self.anchor.max(self.extent)).contains(&line)
+    }
+
     pub fn lines<'a>(&self, file: &'a FileDiff) -> Vec<&'a DiffLine> {
         if file.path != self.path {
             return Vec::new();
@@ -30,6 +37,44 @@ impl DiffSelection {
                 number.is_some_and(|number| (first..=last).contains(&number))
             })
             .collect()
+    }
+}
+
+impl Changes {
+    pub(super) fn select_explanation_line(
+        &mut self,
+        path: &str,
+        side: SourceSide,
+        line: u32,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(selection) = self
+            .explanation_selection
+            .as_mut()
+            .filter(|selection| extend && selection.path == path && selection.side == side)
+        {
+            selection.extent = line;
+        } else {
+            self.explanation_selection = Some(DiffSelection {
+                path: path.to_owned(),
+                side,
+                anchor: line,
+                extent: line,
+            });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn explanation_line_selected(
+        &self,
+        path: &str,
+        side: SourceSide,
+        line: u32,
+    ) -> bool {
+        self.explanation_selection
+            .as_ref()
+            .is_some_and(|selection| selection.contains(path, side, line))
     }
 }
 
