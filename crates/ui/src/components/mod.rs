@@ -618,13 +618,24 @@ pub fn status_indicator(theme: &Theme, status: Status, label: &'static str) -> D
         .when(theme.ui_style.behavior.status_words, |el| el.child(label))
 }
 
+fn tab_horizontal_inset(style: crate::ui_style::UiStyle) -> f32 {
+    if style.id == crate::ui_style::UiStyleId::Default
+        && style.layout == crate::ui_style::UiLayout::Minimal
+    {
+        8.0
+    } else {
+        12.0 * style.spacing_scale().small / crate::surface_chrome::CONTROL_GAP
+    }
+}
+
 /// A single selectable segment. The caller owns selection and activation.
 pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div {
     let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area;
     let identity = theme.identity_color("");
+    let horizontal_inset = tab_horizontal_inset(theme.ui_style);
     let item = div()
         .when(selected || area, |el| {
-            el.px(px(12.0 * layout_spacing(theme)))
+            el.px(px(horizontal_inset))
                 .py(px(5.0 * layout_spacing(theme)))
         })
         .when(selected && !area, |el| el.bg(theme.surface_raised))
@@ -846,6 +857,20 @@ pub fn section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_inset_preserves_default_minimal_and_scales_all_other_combinations() {
+        use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
+        for (style, expected) in [
+            (UiStyleId::Default, [8.0, 9.0, 15.0]),
+            (UiStyleId::Industrial, [12.0, 9.0, 15.0]),
+            (UiStyleId::Area, [12.0, 9.0, 15.0]),
+        ] {
+            for (&layout, inset) in UiLayout::ALL.iter().zip(expected) {
+                assert_eq!(tab_horizontal_inset(UiStyle::resolve(style, layout)), inset);
+            }
+        }
+    }
 
     #[test]
     fn dark_theme_component_foregrounds_contrast() {
