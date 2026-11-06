@@ -4,6 +4,32 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_input_text_color(theme: &Theme, identity: Hsla) -> Option<Hsla> {
+    (theme.ui_style.conversation == ConversationVariant::Area)
+        .then(|| theme.identity_text(identity))
+}
+
+pub fn conversation_wizard_surface<T: gpui::Styled + gpui::prelude::FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    fallback_radius: f32,
+) -> T {
+    element
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(fallback_radius)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.input_glass_bg())
+        .when(
+            !theme.is_frost()
+                && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
+            |el| el.shadow_lg(),
+        )
+}
+
 pub fn conversation_model_picker(
     theme: &Theme,
     width: f32,

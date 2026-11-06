@@ -7976,17 +7976,12 @@ impl Composer {
                 })
         });
 
-        div()
+        crate::components::conversation_wizard_surface(div()
             .id("question-panel")
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
-            }))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(COMPOSER_RADIUS)))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.input_glass_bg())
-            .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg())
+            })), &theme, COMPOSER_RADIUS)
             .flex()
             .flex_col()
             .child(
@@ -8151,7 +8146,7 @@ impl Render for Composer {
         let area = matches!(theme.ui_style.conversation, crate::ui_style::ConversationVariant::Area);
         let identity_key = self.pickers.read(cx).effective_harness(cx).map(|harness| format!("harness:{harness:?}")).unwrap_or_default();
         let identity = theme.identity_color(&identity_key);
-        let identity_text = area.then(|| theme.identity_text(identity));
+        let identity_text = crate::components::conversation_input_text_color(&theme, identity);
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
