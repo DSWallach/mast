@@ -274,6 +274,16 @@ fn image_comparison_detects_visible_changes() -> anyhow::Result<()> {
     Ok(())
 }
 
+struct MatrixOutline<V: Render + 'static> {
+    outline: gpui::Entity<V>,
+}
+
+impl<V: Render + 'static> Render for MatrixOutline<V> {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div().size_full().bg(Theme::of(cx).surface).child(self.outline.clone())
+    }
+}
+
 #[test]
 #[ignore = "requires macOS Metal and access to macOS services"]
 fn render_style_theme_matrix() -> anyhow::Result<()> {
@@ -358,7 +368,8 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
             mast_ui::composer::init(cx, settings.composer_send_behavior);
             mast_ui::terminal::panel::init(cx);
             Theme::install_selection(appearance, variant, Default::default(), Default::default(), cx);
-            mast_ui::snapshot::outline_fixture(data_dir, cx)
+            let outline = mast_ui::snapshot::outline_fixture(data_dir, cx);
+            cx.new(|_| MatrixOutline { outline })
         })?;
     }
     Ok(())
