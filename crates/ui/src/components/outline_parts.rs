@@ -583,6 +583,23 @@ pub fn outline_filter_row(
         .child(format!("{}  {}", if checked { "✓" } else { "　" }, label))
 }
 
+/// Compact metadata chip used on outline rows.
+pub fn outline_metadata_chip(label: String, theme: &Theme) -> Div {
+    let scale = super::layout_spacing(theme);
+    div()
+        .flex_none()
+        .px(px(5.0 * scale))
+        .py(px(scale))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(
+            9.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .child(SharedString::from(label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
