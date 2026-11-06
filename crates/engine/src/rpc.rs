@@ -4158,9 +4158,16 @@ impl RpcService for EngineRpc {
                 // reviewed. Only initialize an absent PR row; subsequent reads
                 // must not resurrect marks the reviewer explicitly cleared.
                 if state.is_none() && target.starts_with("pr:") {
-                    let cached = target.strip_prefix("pr:")
-                        .and_then(mast_proto::PullRequestRef::parse_external_id)
-                        .and_then(|pr| self.pr_review_sync.cached_status(&pr));
+                    let pr = target.strip_prefix("pr:")
+                        .and_then(mast_proto::PullRequestRef::parse_external_id);
+                    let mut cached = pr.as_ref().and_then(|pr| self.pr_review_sync.cached_status(pr));
+                    if cached.is_none() && params.get("branchTarget").is_none()
+                        && let Some(pr) = &pr
+                    {
+                        cached = self.pr_review_sync.status(&mast_proto::PrStatusParams {
+                            owner: pr.owner.clone(), repo: pr.repo.clone(), number: pr.number, force_refresh: false,
+                        }).await.ok();
+                    }
                     if cached.as_ref().is_some_and(|status| status.state.is_finished()) {
                         return RpcReply::value(&mast_proto::DiffReviewStateReply { state: None });
                     }

@@ -1254,6 +1254,19 @@ async fn a_ticket_item_linking_a_requested_pr_is_not_adopted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pr_review_state_inherits_branch_with_a_cold_status_cache() {
+    let rig = rig().await;
+    rig.view("acme/ui", 9, "Fix", View { state: "OPEN", reviews: vec![], requested: vec![] });
+    let mut branch = mast_proto::DiffReviewState {
+        target: "branch:acme/ui#feature-x".into(), head_sha: Some("abc".into()), ..Default::default()
+    };
+    branch.viewed_hunks.insert("a".repeat(64));
+    rig.core.workspace.put_diff_review_state(&branch).unwrap();
+    let result = rig.call(methods::GET_DIFF_REVIEW_STATE, json!({"target": "pr:acme/ui#9"})).await.unwrap();
+    assert_eq!(result["state"]["viewedHunks"], json!(["a".repeat(64)]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn diff_review_rpc_clears_closed_pr_and_rejects_stale_marks() {
     let rig = rig().await;
     rig.view(
