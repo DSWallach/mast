@@ -1121,6 +1121,23 @@ Known production style/layout branches: `shell.rs:7118`, `7119`, `7120`,
 `shell/running_ui.rs:1043`. Further review must include indirect style and
 layout decisions and inline literals, not just these textual matches.
 
+The titlebar's sidebar toggle and new-conversation action use
+`window_control_button` (`shell.rs:11928`); back and forward use
+`nav_history_button` (`shell.rs:12083`). Rename, expand, files and changes
+use `header_icon_button` (`shell.rs:12112`, `shell/tabs.rs:393`, `426`,
+`446`, `517`). Windows and Linux captions have separate button builders at
+`shell.rs:11992` and `12038`. The title and target text are built inline at
+`shell/tabs.rs:474` and `535`. The sidebar has an Area-only wordmark and
+new-conversation button at `shell.rs:7122` and `7123`; settings navigation
+rows and Back are inline at `shell.rs:7180` and `7234`.
+
+Area chat rows take an early return at `shell.rs:7299`; this omits the normal
+status, account and change-request elements built later in the function.
+The normal row contains status glyph/word (`shell.rs:7387`, `7508`), jump
+badge (`shell.rs:7435`), archive action (`shell.rs:7454`), selected fill
+(`shell.rs:7605`), account badge (`shell.rs:7784`) and change-request badge
+(`shell.rs:7810`). Preserve their behavior when consolidating the row.
+
 Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
