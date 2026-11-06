@@ -143,6 +143,40 @@ pub(crate) fn activity_indicator(
     }
 }
 
+pub(crate) fn chat_header_frame(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("full-chat-header-metadata-wrap")
+        .debug_selector(|| "chat-header".into())
+        .relative()
+        .flex_none()
+        .mt(px(Theme::TITLEBAR_HEIGHT))
+        .px(px(12.0))
+        .py(px(4.0))
+        .border_b_1()
+        .border_color(theme.border.opacity(0.7))
+        .bg(theme.surface.opacity(0.94))
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface).border_color(theme.border).px(px(16.0)),
+        )
+}
+
+pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let menu = div()
+        .id("chat-header-menu")
+        .debug_selector(|| "chat-header-menu".into())
+        .cursor_pointer()
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.identity_color("").opacity(0.12))
+        })
+        .child(
+            icon(crate::icons::MORE_HORIZONTAL)
+                .size(px(16.0))
+                .text_color(theme.text_muted),
+        );
+    super::icon_key(menu, theme, false)
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(

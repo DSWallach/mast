@@ -281,18 +281,7 @@ impl Shell {
             CHAT_HEADER_TITLE_ROW_CLEARANCE
         };
         Some(
-            div()
-                .id("full-chat-header-metadata-wrap")
-                .debug_selector(|| "chat-header".into())
-                .relative()
-                .flex_none()
-                .mt(px(Theme::TITLEBAR_HEIGHT))
-                .px(px(12.0))
-                .py(px(4.0))
-                .border_b_1()
-                .border_color(theme.border.opacity(0.7))
-                .bg(theme.surface.opacity(0.94))
-                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_color(theme.border).px(px(16.0)))
+            crate::components::shell_parts::chat_header_frame(theme)
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     this.chat_item_header_hover(*hovered, cx)
                 }))
@@ -318,16 +307,14 @@ impl Shell {
                         )
                         .children(admin_badge)
                         .children(badges)
-                        .child(div().id("chat-header-menu").debug_selector(|| "chat-header-menu".into())
-                            .cursor_pointer()
+                        .child(crate::components::shell_parts::chat_header_menu(theme)
                             .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                 let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
                                     .find(|chat| chat.id == menu_chat_id).and_then(|chat| chat.cwd.as_deref()));
                                 this.chat_menu.open(ChatMenuState { chat_id: menu_chat_id.clone(), position: event.position, page: ChatMenuPage::Root, closeable });
                                 this.load_branch_review_target(menu_chat_id.clone(), cx);
                                 cx.notify();
-                            }))
-                            .child(icon(icons::MORE_HORIZONTAL).size(px(16.0)).text_color(theme.text_muted))),
+                            }))),
                 )
                 .child(chips)
                 .children(card)
