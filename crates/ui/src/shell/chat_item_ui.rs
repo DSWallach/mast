@@ -1548,7 +1548,6 @@ impl Shell {
             let Some(value) = value else { continue };
             let copied = self.copied_chat_identity.as_deref() == Some(key);
             let id: SharedString = format!("chat-item-id-{key}").into();
-            let selector = id.to_string();
             let copy_value = value.clone();
             block = block.child(
                 div()
@@ -1572,16 +1571,7 @@ impl Shell {
                             .child(SharedString::from(value)),
                     )
                     .child(
-                        div()
-                            .id(id)
-                            .debug_selector(move || selector.clone())
-                            .flex_none()
-                            .px(px(4.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .text_color(theme.accent)
-                            .hover(|el| el.bg(theme.element_hover))
-                            .child(if copied { "Copied" } else { "Copy" })
+                        crate::components::shell_parts::identifier_copy_button(theme, id, copied)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.copy_identifier(key, copy_value.clone(), cx)
                             })),
@@ -1606,20 +1596,11 @@ impl Shell {
                 row = row.child(div().text_color(theme.text_faint).child("\u{203a}"));
             }
             row = row.child(
-                div()
-                    .id(("chat-item-path-segment", ix))
-                    .debug_selector(move || format!("chat-item-path-segment-{ix}"))
-                    .rounded(px(3.0))
-                    .px(px(2.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text)
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(SharedString::from(if title.trim().is_empty() {
+                crate::components::shell_parts::item_path_segment(theme, ix, if title.trim().is_empty() {
                         "Untitled".to_owned()
                     } else {
                         title.clone()
-                    }))
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reveal_work_item_in_outline(&space_id, &item_id, window, cx)
                     })),

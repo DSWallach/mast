@@ -1481,6 +1481,47 @@ pub(crate) fn panel_link(
         .hover(|el| el.bg(theme.element_hover))
 }
 
+pub(crate) fn identifier_copy_button(
+    theme: &Theme,
+    id: SharedString,
+    copied: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = id.to_string();
+    let button = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(4.0))
+        .rounded(px(3.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .cursor_pointer()
+        .text_color(theme.accent)
+        .hover(|el| el.bg(theme.element_hover))
+        .child(if copied { "Copied" } else { "Copy" });
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn item_path_segment(
+    theme: &Theme,
+    index: usize,
+    title: String,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("chat-item-path-segment", index))
+        .debug_selector(move || format!("chat-item-path-segment-{index}"))
+        .rounded(px(3.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .px(px(2.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .hover(|el| el.bg(theme.element_hover))
+        .child(SharedString::from(title))
+}
+
 pub(crate) fn panel_reference_row(theme: &Theme, id: String) -> gpui::Stateful<gpui::Div> {
     let selector = id.clone();
     div()
