@@ -2110,6 +2110,9 @@ impl Overview {
             self.show_archived = prefs.show_archived;
             self.active_groups = prefs.groups;
             self.rows_dirty = true;
+            if !flags.contains(VIEW_OUTLINE_FLAG) {
+                self.view_prefs_changed(cx);
+            }
         }
     }
 
@@ -7673,7 +7676,7 @@ mod logic_tests {
                 ..Default::default()
             },
         );
-        assert_eq!(flags, BTreeSet::from(["groupBy:ticket".to_string()]));
+        assert_eq!(flags, BTreeSet::from(["groupBy:ticket".to_string(), VIEW_OUTLINE_FLAG.to_string()]));
     }
 
     /// A saved `groupBy` written while Category and Origin grouping existed
@@ -8810,6 +8813,7 @@ mod logic_tests {
                 cx,
             );
             overview.active_groups = vec![GroupDimension::Repo];
+            overview.view_mode = OverviewMode::List;
             overview
         });
         let draw = |vcx: &mut gpui::VisualTestContext| {
@@ -9621,6 +9625,7 @@ mod logic_tests {
     fn list_rows_show_the_work_item_path_and_attention(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, _state, vcx) = outline_overview(cx, dir.path());
+        overview.update(vcx, |o, cx| o.set_mode_for_test(OverviewMode::List, cx));
         draw(vcx);
         let rows = overview.update(vcx, |o, cx| o.rows(cx));
         let auth = rows.iter().find(|r| r.chat.id == CHAT_AUTH).unwrap();
@@ -9677,6 +9682,7 @@ mod logic_tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, _state, vcx) = outline_overview(cx, dir.path());
+        overview.update(vcx, |o, cx| o.set_mode_for_test(OverviewMode::List, cx));
         let marks = |vcx: &mut gpui::VisualTestContext, prefix: &str| {
             [CHAT_API, CHAT_AUTH, CHAT_UI, CHAT_LOOSE_A]
                 .into_iter()
@@ -9701,6 +9707,7 @@ mod logic_tests {
     fn drift_marks_flag_only_drifted_chats(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, state, vcx) = outline_overview(cx, dir.path());
+        overview.update(vcx, |o, cx| o.set_mode_for_test(OverviewMode::List, cx));
         let drifted = instruction_fixture::snapshot("s1");
         let mut current = drifted.clone();
         for chat_state in &mut current.chat_instruction_states {
