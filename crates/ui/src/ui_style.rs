@@ -194,6 +194,56 @@ pub fn set_style(id: UiStyleId, window: &mut gpui::Window, cx: &mut gpui::App) -
     true
 }
 
+/// A device-local, dismissible explanation shown in the Guided style.
+pub fn help_card(
+    id: &'static str,
+    message: &'static str,
+    theme: &crate::theme::Theme,
+    cx: &gpui::App,
+) -> Option<gpui::AnyElement> {
+    use gpui::{div, prelude::*, px};
+    if !theme.ui_style.behavior.help_cards
+        || crate::settings::current(cx)
+            .dismissed_help_cards
+            .iter()
+            .any(|card| card == id)
+    {
+        return None;
+    }
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .p(px(8.0))
+            .rounded(px(6.0))
+            .bg(theme.surface_raised)
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .child(div().flex_1().min_w_0().child(message))
+            .child(
+                div()
+                    .id(gpui::SharedString::from(format!("dismiss-help-{id}")))
+                    .flex_none()
+                    .cursor_pointer()
+                    .child("Dismiss")
+                    .on_click(move |_, _, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Immediate,
+                            cx,
+                            |settings| {
+                                if !settings.dismissed_help_cards.iter().any(|card| card == id) {
+                                    settings.dismissed_help_cards.push(id.to_owned());
+                                }
+                            },
+                        );
+                        cx.refresh_windows();
+                    }),
+            )
+            .into_any_element(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

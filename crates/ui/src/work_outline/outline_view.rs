@@ -4216,6 +4216,7 @@ impl Render for OutlineView {
                         .child(SharedString::from(notice)),
                 )
             })
+            .children(crate::ui_style::help_card("outline", "Group work items and chats here to share context and instructions.", &theme, cx))
             .when_some(space_root_entry, |el, entry| el.child(entry))
             .when_some(picker, |el, picker| el.child(picker))
             // With only Chats in the tree, the first-use line sits above them.

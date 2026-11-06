@@ -8389,6 +8389,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
+            .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
