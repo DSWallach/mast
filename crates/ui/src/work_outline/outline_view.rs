@@ -3288,25 +3288,7 @@ impl OutlineView {
         let selector = format!("outline-proposals-{key}");
         let space_id = space_id.to_owned();
         let item_id = item_id.to_owned();
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .px(px(3.0))
-            .rounded(px(3.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(10.0))
-            .text_color(theme.text_muted)
-            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            .child(
-                crate::icons::icon(crate::icons::DOCUMENT)
-                    .size(px(10.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(SharedString::from(format!("{count} proposed")))
+        crate::components::outline_proposal_button(SharedString::from(selector), count, theme)
             .hint(tip, HintKey::None)
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
