@@ -8101,6 +8101,7 @@ impl Composer {
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
         let guided = theme.ui_style.id == crate::ui_style::UiStyleId::Guided;
+        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
         let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
         // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
@@ -8109,6 +8110,7 @@ impl Composer {
                 .id("composer-stop")
                 .size(px(28.0))
                 .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
+                .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
                 .flex_none()
                 .rounded_full()
                 .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
@@ -8122,6 +8124,7 @@ impl Composer {
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(if key { theme.on_accent } else { theme.bg }))
                 .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
+                .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -8131,6 +8134,7 @@ impl Composer {
                     .id("composer-send")
                     .size(px(28.0))
                     .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
+                    .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
                     .flex_none()
                     .rounded_full()
                     .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
@@ -8151,6 +8155,7 @@ impl Composer {
                             .text_color(if key { theme.on_accent } else { theme.bg }),
                     )
                     .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
+                    .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
                     .into_any_element()
             }
         }
@@ -8804,7 +8809,16 @@ impl Render for Composer {
         } else {
             (Some(model_picker), None)
         };
-        let body = if expanded {
+        let body = if area {
+            div().flex().flex_col()
+                .child(pill.h(px(pill_height)).overflow_hidden().flex().flex_col()
+                    .children(comments_chip).children(skill_chips).children(appshot_strip).children(strip)
+                    .child(div().flex_1().min_h_0().overflow_hidden().px(px(16.0)).pt(px(text_pt)).child(self.render_input_with_completion())))
+                .child(div().h(px(40.0)).w_full().relative().flex().items_center().justify_center()
+                    .child(div().absolute().left_0().top(px(6.0)).flex().items_center().gap(px(2.0))
+                        .text_color(theme.text_muted).child(attach).child("Attach"))
+                    .child(send_button))
+        } else if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
             // stationary bottom — constant screen-y through the morph, with
