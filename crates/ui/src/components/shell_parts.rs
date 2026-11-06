@@ -923,6 +923,40 @@ pub(crate) fn panel_tab(
         )
 }
 
+pub(crate) fn titlebar_title(theme: &Theme, title: SharedString, on_canvas: bool) -> gpui::Div {
+    div()
+        .debug_selector(|| "titlebar-title".into())
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if on_canvas {
+            theme.text_muted.opacity(0.7)
+        } else {
+            theme.text.opacity(0.85)
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .when(super::is_area(theme), |el| {
+            el.font_weight(gpui::FontWeight::SEMIBOLD)
+        })
+        .child(title)
+}
+
+pub(crate) fn titlebar_target(theme: &Theme, target: SharedString) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex_shrink(1.0)
+        .truncate()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted.opacity(0.5))
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(target)
+}
+
 pub(crate) fn panel_chip(
     theme: &Theme,
     id: String,

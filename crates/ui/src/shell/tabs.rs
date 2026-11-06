@@ -493,20 +493,7 @@ impl Shell {
                                 )
                             },
                         )
-                        .child(
-                            div()
-                                .debug_selector(|| "titlebar-title".into())
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on_canvas {
-                                    theme.text_muted.opacity(0.7)
-                                } else {
-                                    theme.text.opacity(0.85)
-                                })
-                                .child(title),
-                        ),
+                        .child(crate::components::shell_parts::titlebar_title(&theme, title, on_canvas)),
                 )
                 // Keep the action OUTSIDE the clipped title/target text.
                 // Putting a 20px icon inside that overflow-hidden flex group
@@ -540,13 +527,7 @@ impl Shell {
                 })
                 .when_some(target, |el, target| {
                     el.child(
-                        div()
-                            .min_w_0()
-                            .flex_shrink(1.0)
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted.opacity(0.5))
-                            .child(target),
+                        crate::components::shell_parts::titlebar_target(&theme, target),
                     )
                 })
             })
