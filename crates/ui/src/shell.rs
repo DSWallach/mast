@@ -8609,34 +8609,7 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "?".into())
             .into();
-        let mut trigger = div()
-            .id("user-menu")
-            .debug_selector(|| "user-menu".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("Account menu: {user_line}"))
-            .relative()
-            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE + 8.0))
-            .flex_none()
-            .rounded_full()
-            .p(px(4.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            // user-menu.tsx trigger: hover `bg-white/[0.04]`, open state
-            // (`data-[state=open]`) the slightly stronger `bg-white/[0.06]`;
-            // the hover wash fades over `transition-colors`.
-            .bg(if open {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "user-menu-trigger",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover().opacity(0.8),
-                )
-            })
-            .on_hover(motion::hover_listener("user-menu-trigger"))
+        let mut trigger = crate::components::shell_parts::account_menu_trigger(theme, &user_line, initial, open, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
@@ -8651,23 +8624,7 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(
-                // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
-                div()
-                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(9.0))
-                    .line_height(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(div().w_full().text_center().child(initial)),
-            );
+;
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
             let menu = popover::popover_card(theme)

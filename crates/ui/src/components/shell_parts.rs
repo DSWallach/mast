@@ -1061,6 +1061,62 @@ pub(crate) fn spaces_filter(theme: &Theme, open: bool) -> gpui::Stateful<gpui::D
     super::segmented_key(frame, theme, open)
 }
 
+pub(crate) fn account_menu_trigger(
+    theme: &Theme,
+    user_line: &str,
+    initial: SharedString,
+    open: bool,
+    icon_size: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let avatar = div()
+        .size(px(icon_size))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.text)
+        .when(super::is_area(theme), |el| {
+            el.bg(theme.identity_color(user_line))
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .font_family(theme.font_mono.clone())
+        .text_size(px(9.0))
+        .line_height(px(icon_size))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.bg)
+        .when(super::is_area(theme), |el| {
+            el.text_color(theme.identity_text(theme.identity_color(user_line)))
+        })
+        .child(div().w_full().text_center().child(initial));
+    let trigger = div()
+        .id("user-menu")
+        .debug_selector(|| "user-menu".into())
+        .role(gpui::Role::Button)
+        .aria_label(format!("Account menu: {user_line}"))
+        .relative()
+        .size(px(icon_size + 8.0))
+        .flex_none()
+        .rounded_full()
+        .p(px(4.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(if open {
+            theme.glass_hover()
+        } else {
+            motion::hover_blend(
+                "user-menu-trigger",
+                theme.glass_hover().opacity(0.0),
+                theme.glass_hover().opacity(0.8),
+            )
+        })
+        .on_hover(motion::hover_listener("user-menu-trigger"))
+        .child(avatar);
+    super::icon_key(trigger, theme, false)
+}
+
 /// A Windows-owned caption target using the same system glyphs and native
 /// non-client hit-test areas as GPUI/Zed's platform titlebar.
 pub(crate) fn windows_caption_button(
@@ -1331,6 +1387,7 @@ mod tests {
 
     struct AreaRow {
         archived: Arc<AtomicBool>,
+        hovered: bool,
     }
 
     impl Render for AreaRow {
@@ -1354,7 +1411,7 @@ mod tests {
                 None,
                 None,
                 false,
-                true,
+                self.hovered,
                 false,
                 move |_, _, _| {
                     archived.store(true, Ordering::SeqCst);
@@ -1368,7 +1425,10 @@ mod tests {
     fn area_row_archive_action_is_clickable(cx: &mut TestAppContext) {
         let archived = Arc::new(AtomicBool::new(false));
         let recorded = archived.clone();
-        let (_, cx) = cx.add_window_view(move |_, _| AreaRow { archived: recorded });
+        let (_, cx) = cx.add_window_view(move |_, _| AreaRow {
+            archived: recorded,
+            hovered: true,
+        });
         cx.run_until_parked();
         assert!(cx.debug_bounds("chat-account-test").is_some());
         let corner = cx
@@ -1378,5 +1438,16 @@ mod tests {
         cx.simulate_mouse_down(corner, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(corner, MouseButton::Left, gpui::Modifiers::default());
         assert!(archived.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    fn area_row_shows_status_and_account(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(move |_, _| AreaRow {
+            archived: Arc::new(AtomicBool::new(false)),
+            hovered: false,
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-account-test").is_some());
+        assert!(cx.debug_bounds("chat-status-test").is_some());
     }
 }
