@@ -1329,6 +1329,7 @@ impl Render for WorkItemDetails {
             .border_l_1()
             .border_color(theme.border)
             .bg(theme.surface)
+            .children(crate::ui_style::help_card("item-details", "Use item details to manage instructions, references, and work status.", &theme, cx))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key != "escape" {
                     return;

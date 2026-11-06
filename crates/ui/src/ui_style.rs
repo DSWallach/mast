@@ -224,6 +224,7 @@ pub fn help_card(
             .child(
                 div()
                     .id(gpui::SharedString::from(format!("dismiss-help-{id}")))
+                .debug_selector(move || format!("dismiss-help-{id}"))
                     .flex_none()
                     .cursor_pointer()
                     .child("Dismiss")
@@ -247,6 +248,27 @@ pub fn help_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn help_card_dismissal_persists(cx: &mut gpui::TestAppContext) {
+        use gpui::{div, prelude::*, Context, Render, Window};
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+                let theme = crate::theme::Theme::default().with_ui_style(UiStyle::GUIDED);
+                div().children(help_card("test-card", "Help", &theme, cx))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (_, vcx) = cx.add_window_view(|_, _| Host);
+        vcx.update(|_, cx| crate::settings::init(Default::default(), directory.path(), cx));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let bounds = vcx.debug_bounds("dismiss-help-test-card").unwrap();
+        vcx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("dismiss-help-test-card").is_none());
+        assert_eq!(crate::settings::UiSettings::load(directory.path()).dismissed_help_cards, ["test-card"]);
+    }
     #[test]
     fn minimal_preserves_existing_metrics() {
         let t = UiStyle::MINIMAL.tokens;

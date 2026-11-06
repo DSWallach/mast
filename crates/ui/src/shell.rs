@@ -13753,6 +13753,26 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn guided_header_labels_collapse_when_space_is_limited(cx: &mut gpui::TestAppContext) {
+        struct StyleHost;
+        impl gpui::Render for StyleHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::default().with_ui_style(crate::ui_style::UiStyle::GUIDED);
+                div().flex().children([(true, "guided-wide"), (false, "guided-narrow")].into_iter().map(|(fits, id)| {
+                    header_icon_button(id, icons::PEN, "Rename", fits, &theme, |_, _, _| {})
+                        .debug_selector(move || id.into())
+                }))
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| StyleHost);
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let wide = vcx.debug_bounds("guided-wide").unwrap();
+        let narrow = vcx.debug_bounds("guided-narrow").unwrap();
+        assert!(wide.size.width > narrow.size.width);
+        assert_eq!(narrow.size.width, px(32.0));
+    }
+
     #[test]
     fn sidebar_style_metrics_preserve_minimal_and_keep_rows_positive() {
         let minimal = crate::ui_style::UiStyle::MINIMAL.tokens;
