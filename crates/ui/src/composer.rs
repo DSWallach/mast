@@ -8115,6 +8115,7 @@ impl Composer {
                 .rounded_full()
                 .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                 .bg(theme.text)
+                .when(area, |el| el.bg(theme.text_muted))
                 .when(key, |el| el.rounded_full().bg(theme.accent).border_b_2().border_color(theme.industrial_colors().key_ledge))
                 .flex()
                 .items_center()
@@ -8122,9 +8123,9 @@ impl Composer {
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(if key { theme.on_accent } else { theme.bg }))
+                .child(div().size(px(11.0)).rounded(px(3.0)).bg(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }))
                 .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
-                .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
+                .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child("Stop")))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -8139,6 +8140,7 @@ impl Composer {
                     .rounded_full()
                     .when_some(theme.ui_style.tokens.control_radius, |el, radius| el.rounded(px(radius)))
                     .bg(theme.text)
+                    .when(area, |el| el.bg(theme.text_muted))
                     .when(key, |el| el.rounded_full().bg(theme.accent).border_b_2().border_color(theme.industrial_colors().key_ledge))
                     .flex()
                     .items_center()
@@ -8152,10 +8154,10 @@ impl Composer {
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
-                            .text_color(if key { theme.on_accent } else { theme.bg }),
+                            .text_color(if area { theme.identity_text(theme.text_muted) } else if key { theme.on_accent } else { theme.bg }),
                     )
                     .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
-                    .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
+                    .when(area, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.identity_text(theme.text_muted)).child(if mode == SendButtonMode::Queue { "QUEUE" } else { "SEND" })))
                     .into_any_element()
             }
         }
