@@ -149,6 +149,34 @@ impl UiStyle {
     }
 }
 
+struct UiStyleState(UiStyleId);
+impl gpui::Global for UiStyleState {}
+
+pub fn init(id: UiStyleId, cx: &mut gpui::App) {
+    cx.set_global(UiStyleState(id));
+}
+
+pub fn current(cx: &gpui::App) -> UiStyle {
+    UiStyle::of(
+        cx.try_global::<UiStyleState>()
+            .map(|state| state.0)
+            .unwrap_or_default(),
+    )
+}
+
+pub fn set_style(id: UiStyleId, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
+    if current(cx).id == id {
+        return false;
+    }
+    cx.set_global(UiStyleState(id));
+    window.set_rem_size(gpui::px(crate::typography::effective_rem_px(cx)));
+    crate::typography::reinstall_theme(cx);
+    crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+        settings.ui_style = id
+    });
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +193,25 @@ mod tests {
                 t.control_icon_size
             ),
             (1.0, 29.0, 0.0, 0.0, 28.0, 16.0)
+        );
+    }
+    #[test]
+    fn settings_default_unknown_and_dense() {
+        use crate::settings::UiSettings;
+        assert_eq!(UiSettings::default().ui_style, UiStyleId::Minimal);
+        for json in ["{}", r#"{"uiStyle":"bogus"}"#] {
+            assert_eq!(
+                serde_json::from_str::<UiSettings>(json).unwrap().ui_style,
+                UiStyleId::Minimal
+            );
+        }
+        let mut settings = UiSettings::default();
+        settings.ui_style = UiStyleId::Dense;
+        assert_eq!(
+            serde_json::from_str::<UiSettings>(&serde_json::to_string(&settings).unwrap())
+                .unwrap()
+                .ui_style,
+            UiStyleId::Dense
         );
     }
     #[test]

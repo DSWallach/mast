@@ -2986,6 +2986,7 @@ mod tests {
             git_history_author_display: GitHistoryAuthorDisplay::Name,
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
+            ui_style: crate::ui_style::UiStyleId::Dense,
             theme_selection: mast_theme::ThemeSelection {
                 light: "catppuccin-latte".into(),
                 dark: "catppuccin-mocha".into(),

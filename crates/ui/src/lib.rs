@@ -202,6 +202,7 @@ pub fn run_app(config: UiConfig) {
             .in_scope(|| typography::register_fonts(cx));
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
+        ui_style::init(ui_settings.ui_style, cx);
         typography::init(
             ui_settings.ui_font_family.clone(),
             ui_settings.ui_font_size,
@@ -504,7 +505,7 @@ fn open_main_window(
                 ..Default::default()
             },
             move |window, cx| {
-                window.set_rem_size(px(typography::font_size(cx).pixels()));
+                window.set_rem_size(px(typography::effective_rem_px(cx)));
                 // React to the user flipping macOS between light and dark. Detached:
                 // the subscription lives as long as the window does, and the window
                 // owns nothing that would drop it early.

@@ -595,6 +595,7 @@ fn git_graph_tone(mut color: Hsla) -> Hsla {
 /// The app theme. Two concrete instances — [`Theme::dark`] and [`Theme::light`].
 #[derive(Debug, Clone)]
 pub struct Theme {
+    pub ui_style: crate::ui_style::UiStyle,
     /// Which appearance these tokens were built for.
     pub appearance: Appearance,
     /// Stable id of the resolved theme variant.
@@ -1128,6 +1129,7 @@ impl Theme {
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
             font_terminal: "Geist Mono".into(),
+            ui_style: crate::ui_style::UiStyle::MINIMAL,
             code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
@@ -1227,6 +1229,7 @@ impl Theme {
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
             font_terminal: "Geist Mono".into(),
+            ui_style: crate::ui_style::UiStyle::MINIMAL,
             code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
@@ -1258,6 +1261,11 @@ impl Theme {
 
     fn with_font_terminal(mut self, family: SharedString) -> Self {
         self.font_terminal = family;
+        self
+    }
+
+    pub fn with_ui_style(mut self, style: crate::ui_style::UiStyle) -> Self {
+        self.ui_style = style;
         self
     }
 
@@ -1411,7 +1419,8 @@ impl Theme {
             .with_font_mono(crate::typography::code_effective_family_name(cx))
             .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
             .with_code_font_size(crate::typography::code_font_size(cx))
-            .with_terminal_font_size(crate::typography::terminal_font_size(cx));
+            .with_terminal_font_size(crate::typography::terminal_font_size(cx))
+            .with_ui_style(crate::ui_style::current(cx));
         sync_gpui_base_scrollbar(&next, cx);
         cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
@@ -1473,7 +1482,8 @@ impl Theme {
                 .with_font_mono(crate::typography::code_effective_family_name(cx))
                 .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
                 .with_code_font_size(crate::typography::code_font_size(cx))
-                .with_terminal_font_size(crate::typography::terminal_font_size(cx));
+                .with_terminal_font_size(crate::typography::terminal_font_size(cx))
+                .with_ui_style(crate::ui_style::current(cx));
         let changed = cx.try_global::<Theme>().is_some_and(|theme| {
             theme.variant_id != next.variant_id
                 || theme.accent_selection != next.accent_selection

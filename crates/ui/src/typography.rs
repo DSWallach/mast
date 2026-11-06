@@ -611,7 +611,7 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
 
 /// Rebuild the [`crate::theme::Theme`] so it picks up the new families and
 /// sizes it carries, then repaint.
-fn reinstall_theme(cx: &mut App) {
+pub(crate) fn reinstall_theme(cx: &mut App) {
     crate::theme::bump_style_generation();
     let appearance = crate::theme::current_appearance();
     let themes = crate::appearance::themes(cx);
@@ -729,6 +729,10 @@ fn set_category_font_size(size: f32, category: Category, cx: &mut App) -> bool {
     true
 }
 
+pub fn effective_rem_px(cx: &App) -> f32 {
+    font_size(cx).pixels() * crate::ui_style::current(cx).tokens.type_scale
+}
+
 /// Apply a supported UI size to the current window and persist it.
 pub fn set_font_size(size: UiFontSize, window: &mut Window, cx: &mut App) -> bool {
     let size = size.normalized();
@@ -742,7 +746,7 @@ pub fn set_font_size(size: UiFontSize, window: &mut Window, cx: &mut App) -> boo
     let state = cx.global_mut::<TypographyState>();
     state.size = size;
     state.generation = state.generation.wrapping_add(1);
-    window.set_rem_size(px(size.pixels()));
+    window.set_rem_size(px(effective_rem_px(cx)));
     crate::theme::bump_style_generation();
     cx.refresh_windows();
     settings::update(SavePolicy::Immediate, cx, |settings| {
