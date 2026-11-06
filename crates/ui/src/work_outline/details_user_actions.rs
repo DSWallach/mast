@@ -690,7 +690,7 @@ impl WorkItemDetails {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut column = div().flex().flex_col().gap(px(4.0));
+        let mut column = crate::components::outline_detail_section(theme);
         if let Some(instruction_id) = group.instruction_id.as_deref() {
             let current = snapshot
                 .instructions
@@ -936,7 +936,7 @@ impl WorkItemDetails {
                             space_id: space_id.clone(), item_id: item_id.clone(),
                         }))))))
                 .child(body)
-                .child(div().flex().gap(px(6.0))
+                .child(crate::components::outline_action_row(theme)
                     .when(rule.is_some(), |buttons| buttons.child(crate::work_outline::hints::details_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
                         .debug_selector({ let selector = format!("template-apply-{id}"); move || selector.clone() })
                         .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&template_id, false, cx)))))
@@ -961,7 +961,7 @@ impl WorkItemDetails {
                     (true, false) => "Apply anyway",
                     (false, false) => "Accept",
                 };
-                let mut buttons = div().flex().gap(px(6.0));
+                let mut buttons = crate::components::outline_action_row(theme);
                 if !archived {
                     buttons = buttons.child(
                         crate::work_outline::hints::details_button(

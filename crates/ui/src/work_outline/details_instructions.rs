@@ -1022,7 +1022,7 @@ impl WorkItemDetails {
                 .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
                 .unwrap_or_else(|| "Never used".into());
             let label = SharedString::from(format!("{} · {} uses · {}", rule.label, rule.hit_count, last_used));
-            section = section.child(div().flex().items_center().gap(px(6.0))
+            section = section.child(crate::components::outline_detail_row(theme)
                 .child(div().flex_1().min_w_0().truncate().text_color(theme.text_muted).child(label))
                 .child(approval_rule_button(button_id, if rule.enabled { "On" } else { "Off" }, theme)
                     .debug_selector(move || selector.to_string())

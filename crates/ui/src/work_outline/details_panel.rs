@@ -802,7 +802,7 @@ impl WorkItemDetails {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let is_project = item.is_project;
-        let mut section = div().flex().flex_col().gap(px(4.0)).child(
+        let mut section = crate::components::outline_detail_section(theme).child(
             div()
                 .flex()
                 .items_center()
@@ -1500,7 +1500,7 @@ impl Render for WorkItemDetails {
 
         // Description (collapsed until opened).
         let description_open = self.description_open || self.editing_description;
-        let mut description = div().flex().flex_col().gap(px(4.0)).child(
+        let mut description = crate::components::outline_detail_section(&theme).child(
             crate::components::outline_section_header(
                 "work-item-description-toggle",
                 "Description".into(),
@@ -1914,12 +1914,12 @@ impl Render for WorkItemDetails {
                             .map(|reason| format!(" · {reason}")).unwrap_or_default();
                         el.child(div().text_color(theme.text_muted).child(SharedString::from(format!("{date}{reason}"))))
                     })
-                    .child(div().flex().gap(px(6.0))
+                    .child(crate::components::outline_action_row(&theme)
                         .child(crate::work_outline::hints::details_button("waiting-tomorrow", "Tomorrow", &theme).debug_selector(|| "waiting-tomorrow".into()).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 86_400_000), cx))))
                         .child(crate::work_outline::hints::details_button("waiting-week", "1 week", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 604_800_000), cx))))
                         .child(crate::work_outline::hints::details_button("waiting-clear", "Clear", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(None, cx))))
                     )
-                    .child(div().flex().gap(px(6.0)).child(crate::components::outline_input_frame(&self.waiting_input, &theme))
+                    .child(crate::components::outline_action_row(&theme).child(crate::components::outline_input_frame(&self.waiting_input, &theme))
                         .child(crate::work_outline::hints::details_button("waiting-custom", "Set date", &theme).on_click(cx.listener(|this, _, _, cx| this.save_waiting_date(cx)))))
                 )
                 .child(required_actions)
