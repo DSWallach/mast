@@ -395,7 +395,7 @@ impl WorkItemDetails {
         let (required_actions, required_actions_events) =
             Self::new_required_actions(&state, &space_id, &item_id, cx);
         required_actions.update(cx, |list, _| list.shell = Some(shell.clone()));
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             required_actions_events,
             cx.subscribe(&reason_input, |this: &mut Self, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Submitted) {
@@ -433,6 +433,9 @@ impl WorkItemDetails {
                 }
             }),
         ];
+        if let Some(shell_entity) = shell.upgrade() {
+            subscriptions.push(cx.observe(&shell_entity, |_, _, cx| cx.notify()));
+        }
         Self {
             state,
             shell,
@@ -1538,6 +1541,14 @@ impl Render for WorkItemDetails {
                         format!("{glyph} {label}")
                     }))
             });
+        let branch_review = self.shell.upgrade().and_then(|shell| {
+            let shell = shell.read(cx);
+            item.chat_ids.iter().find_map(|chat_id| {
+                let target = shell.branch_review_target(chat_id)?;
+                let exists = shell.existing_branch_review(chat_id, target, cx).is_some();
+                Some((chat_id.clone(), exists))
+            })
+        });
         let status_row = div()
             .flex()
             .items_center()
@@ -1562,6 +1573,13 @@ impl Render for WorkItemDetails {
                 )
             })
             .child(div().flex_1())
+            .when_some(branch_review, |el, (chat_id, exists)| {
+                el.child(Self::small_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
+                    .debug_selector(|| "work-item-review-work".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.shell.update(cx, |shell, cx| shell.open_branch_review_for_chat(chat_id.clone(), cx)).ok();
+                    })))
+            })
             .when(item.archived_at.is_none(), |el| {
                 let space_id = self.space_id.clone();
                 let item_id = item.id.clone();

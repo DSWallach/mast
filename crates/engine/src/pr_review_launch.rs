@@ -696,6 +696,7 @@ pub struct PrReviewLauncher {
     tools: PrReviewTools,
     viewer: Option<ViewerLogin>,
     diff_targets: Option<crate::diff_targets::DiffTargets>,
+    sessions: Option<crate::sessions::SessionsEngine>,
     gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -707,6 +708,7 @@ impl PrReviewLauncher {
             tools,
             viewer: None,
             diff_targets: None,
+            sessions: None,
             gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -714,6 +716,11 @@ impl PrReviewLauncher {
     /// Use the shared diff-target service so the launcher can register its PR.
     pub fn with_diff_targets(mut self, targets: crate::diff_targets::DiffTargets) -> Self {
         self.diff_targets = Some(targets);
+        self
+    }
+
+    pub fn with_sessions(mut self, sessions: crate::sessions::SessionsEngine) -> Self {
+        self.sessions = Some(sessions);
         self
     }
 
@@ -870,6 +877,10 @@ impl PrReviewLauncher {
                     &format!("Review {}", branch.as_deref().unwrap_or("committed work")),
                 )
                 .map_err(engine)?;
+        }
+        if let Some(account_id) = p.account_id.as_deref() {
+            self.sessions.as_ref().ok_or_else(|| invalid("Account selection is unavailable"))?
+                .pin_chat_account(&chat_id, config.harness, account_id).map_err(engine)?;
         }
         let targets = self
             .diff_targets

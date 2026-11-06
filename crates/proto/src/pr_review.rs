@@ -13,6 +13,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::ChatConfig;
 
+/// Resolve a committed branch's local review range without fetching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveBranchReviewBaseParams {
+    pub checkout_path: String,
+    pub branch: String,
+    pub space_id: String,
+    pub worker_chat_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveBranchReviewBaseReply {
+    pub base_ref: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub ahead_count: u64,
+    pub review_range_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_chat_id: Option<String>,
+}
+
 /// Start a review of a committed branch range in an existing checkout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +45,8 @@ pub struct StartBranchReviewParams {
     pub target: crate::ReviewTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<ChatConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     pub operation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device_id: Option<String>,

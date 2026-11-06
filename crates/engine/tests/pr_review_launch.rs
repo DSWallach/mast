@@ -228,12 +228,19 @@ async fn branch_review_launch_is_idempotent_and_binds_checkout() {
             branch: Some(BRANCH.into()), base_ref: Some("main".into()), base_sha: None, head_sha: head,
         },
         config: params("config", 7, PrReviewAction::CodeReview).config,
-        operation_id: "branch-review-test".into(), target_device_id: None,
+        operation_id: "branch-review-test".into(), target_device_id: None, account_id: None,
     };
     let reply = rig.client.start_branch_review(&p).await.unwrap();
     assert!(reply.prompt.contains("review_publish"));
     assert!(reply.prompt.contains("baseRef"));
     assert_eq!(rig.client.start_branch_review(&p).await.unwrap(), reply);
+    git(&rig.flagship, &["branch", BRANCH, "refs/remotes/origin/feature-x"]);
+    let resolved = rig.client.call(methods::RESOLVE_BRANCH_REVIEW_BASE, json!({
+        "checkoutPath": rig.flagship.to_string_lossy(), "branch": BRANCH,
+        "spaceId": SPACE, "workerChatId": "worker"
+    })).await.unwrap();
+    assert_eq!(resolved["aheadCount"], 1);
+    assert_eq!(resolved["existingChatId"], reply.chat_id);
     let targets = rig.core.workspace.chat_diff_targets(&reply.chat_id).unwrap().unwrap();
     let selected = targets.ref_targets.iter().find(|target| Some(&target.id) == targets.selected_ref.as_ref()).unwrap();
     assert_eq!(selected.path, rig.flagship.to_str().unwrap());

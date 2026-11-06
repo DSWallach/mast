@@ -188,6 +188,103 @@ mod tests {
         })
     }
 
+    #[gpui::test]
+    fn branch_review_dialog_waits_for_start_and_sends_range(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, directory.path());
+        let calls: Calls = Arc::default();
+        let sink = calls.clone();
+        let target = mast_proto::ReviewTarget::Branch {
+            repo: Some("acme/repo".into()), checkout_path: Some("/repo/worktree".into()),
+            branch: Some("feature".into()), base_ref: Some("main".into()),
+            base_sha: Some("base".into()), head_sha: "head".into(),
+        };
+        let reply_target = target.clone();
+        shell.update(cx, |shell, cx| {
+            let pickers = shell.composer.read(cx).pickers().clone();
+            pickers.update(cx, |pickers, cx| {
+                let harnesses = serde_json::from_value(serde_json::json!([
+                    {"id":"codex", "name":"Codex", "supportsSteering":true, "steeringMode":"step-boundary", "reasoningLevels":[]}
+                ])).unwrap();
+                let models = serde_json::from_value(serde_json::json!([
+                    {"id":"test-model", "label":"Test model", "reasoningLevels":[]}
+                ])).unwrap();
+                pickers.seed_catalog_for_tests(harnesses, vec![(mast_proto::HarnessId::Codex, models)], cx);
+                pickers.defaults_mut_for_tests().remember_model(mast_proto::HarnessId::Codex, "test-model".into(), "Test model".into());
+            });
+            shell.branch_review_script = Some(Arc::new(move |params| {
+                sink.lock().unwrap().push(params.clone());
+                Ok(serde_json::json!({"chatId":"review", "spaceId":"space", "checkoutPath":"/repo/worktree", "target":reply_target, "prompt":"review"}))
+            }));
+            shell.open_start_chat_for_branch_review("space".into(), Some("item".into()), target, cx).unwrap();
+        });
+        draw(cx);
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(cx.debug_bounds("start-chat-branch").is_some());
+        click(cx, "start-chat-start");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["spaceId"], "space");
+        assert_eq!(calls[0]["workItemId"], "item");
+        assert_eq!(calls[0]["target"]["headSha"], "head");
+        assert_eq!(calls[0]["target"]["baseSha"], "base");
+        assert!(calls[0]["config"].is_object());
+    }
+
+    #[gpui::test]
+    fn branch_review_opens_existing_review_without_launching(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx));
+        let (shell, cx) = test_shell(cx, directory.path());
+        let target = mast_proto::ReviewTarget::Branch {
+            repo: Some("acme/repo".into()), checkout_path: Some("/repo/worktree".into()),
+            branch: Some("feature".into()), base_ref: Some("main".into()),
+            base_sha: Some("base".into()), head_sha: "head".into(),
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats = ["worker", "review"].iter().map(|id| {
+                    serde_json::from_value(serde_json::json!({"id":id, "deviceId":"d", "spaceId":"space", "title":"Renamed", "archived":false, "createdAt":"2026-01-01T00:00:00Z"})).unwrap()
+                }).collect();
+                state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                    chat_id: "review".into(), targets: vec![], ref_targets: vec![mast_proto::ChatRefTargetView {
+                        id: "review-123".into(), kind: mast_proto::RefDiffKind::Branch, label: "feature".into(),
+                        path: "/repo/worktree".into(), checkout_id: "checkout".into(), repo_name: "repo".into(),
+                        head_branch: "feature".into(), head_ref: "head".into(), base_branch: "base".into(),
+                        base_ref: "base".into(), head_sha: Some("head".into()), pr_number: None, pr_url: None, selected: true,
+                    }],
+                }]);
+            });
+            shell.branch_review_targets.insert("worker".into(), target.clone());
+            shell.branch_review_range_ids.insert("worker".into(), "review-123".into());
+            assert_eq!(shell.existing_branch_review("worker", &target, cx).as_deref(), Some("review"));
+            shell.open_branch_review_for_chat("worker".into(), cx);
+            assert!(shell.work_outline_modal.is_none());
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("review"));
+        });
+    }
+
+    #[gpui::test]
+    fn chat_menu_only_offers_review_for_resolved_target(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, directory.path());
+        shell.update(cx, |shell, cx| {
+            shell.chat_menu.open(ChatMenuState { chat_id: "worker".into(), position: gpui::point(px(20.0), px(20.0)), page: ChatMenuPage::Root, closeable: false });
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-menu-review-work").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.branch_review_targets.insert("worker".into(), mast_proto::ReviewTarget::Branch {
+                repo: Some("acme/repo".into()), checkout_path: Some("/repo".into()), branch: Some("feature".into()),
+                base_ref: Some("main".into()), base_sha: Some("base".into()), head_sha: "head".into(),
+            });
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-menu-review-work").is_some());
+    }
+
     const T1: &str = "2026-10-20T10:00:00Z";
     const T2: &str = "2026-10-21T10:00:00Z";
     const T3: &str = "2026-10-22T10:00:00Z";

@@ -78,6 +78,7 @@ mod outside_file_ui;
 #[cfg(test)]
 mod perf_tests;
 mod pr_review_ui;
+mod branch_review_ui;
 mod review_ui;
 mod project_icon;
 mod required_actions_ui;
@@ -1723,6 +1724,13 @@ pub struct Shell {
     pr_review_chats_page: Option<Entity<crate::chat_type_view::ChatTypeView>>,
     /// `StartPrReview` operation ids (one per PR + action + agent).
     pr_review_ops: crate::pr_review_launch::PrReviewOperations,
+    branch_review_ops: crate::branch_review_launch::BranchReviewOperations,
+    branch_review_targets: std::collections::HashMap<String, mast_proto::ReviewTarget>,
+    branch_review_range_ids: std::collections::HashMap<String, String>,
+    branch_review_loads: std::collections::HashMap<String, uuid::Uuid>,
+    branch_review_chats: std::collections::HashMap<String, String>,
+    #[cfg(test)]
+    branch_review_script: Option<pr_review_ui::PrReviewScript>,
     /// Tests: answer `StartPrReview` here instead of the engine.
     #[cfg(test)]
     pr_review_script: Option<pr_review_ui::PrReviewScript>,
@@ -2247,6 +2255,13 @@ impl Shell {
             pr_review_chats_page: None,
             review_hosts: Default::default(),
             pr_review_ops: Default::default(),
+            branch_review_ops: Default::default(),
+            branch_review_targets: Default::default(),
+            branch_review_range_ids: Default::default(),
+            branch_review_loads: Default::default(),
+            branch_review_chats: Default::default(),
+            #[cfg(test)]
+            branch_review_script: None,
             #[cfg(test)]
             pr_review_script: None,
             #[cfg(test)]
@@ -7630,6 +7645,7 @@ impl Shell {
                             page: ChatMenuPage::Root,
                             closeable,
                         });
+                        this.load_branch_review_target(menu_id.clone(), cx);
                         cx.notify();
                     }),
                 )
@@ -9341,6 +9357,10 @@ impl Shell {
             let admin_id = chat_id.clone();
             let revoke_id = chat_id.clone();
             let hand_off_id = chat_id.clone();
+            let branch_review_id = chat_id.clone();
+            let branch_review_available = self.branch_review_targets.contains_key(&chat_id);
+            let branch_review_exists = self.branch_review_targets.get(&chat_id)
+                .and_then(|target| self.existing_branch_review(&chat_id, target, cx)).is_some();
             let has_workers = self.has_hand_off_workers(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
@@ -9354,6 +9374,16 @@ impl Shell {
                 .flex_col();
             let menu = match menu_state.page {
                 ChatMenuPage::Root => menu
+                    .when(branch_review_available, |menu| menu.child(
+                        popover::menu_row(&theme, false, format!("chat-menu-review-work-{chat_id}"))
+                            .id("chat-menu-review-work")
+                            .debug_selector(|| "chat-menu-review-work".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.open_branch_review_for_chat(branch_review_id.clone(), cx);
+                            }))
+                            .child(SharedString::from(if branch_review_exists { "Open review" } else { "Review this work…" }))
+                    ))
                     .when(has_workers, |menu| menu.child(
                         popover::menu_row(&theme, false, format!("chat-menu-hand-off-{chat_id}"))
                             .id("chat-menu-hand-off")

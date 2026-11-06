@@ -893,6 +893,7 @@ impl EngineRpc {
             crate::pr_review_launch::PrReviewTools::default(),
         )
         .with_viewer(Self::viewer_of(&pr_review_sync))
+        .with_sessions(sessions.clone())
         .with_diff_targets(diff_targets.clone());
         // Engine assembly replaces this with the shared service
         // (`with_artifacts`), so the UI's render registration and agent
@@ -2179,6 +2180,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
+            | methods::RESOLVE_BRANCH_REVIEW_BASE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
             // Terminals live on the chat's host device.
             | methods::OPEN_TERMINAL
@@ -4333,6 +4335,23 @@ impl RpcService for EngineRpc {
             // working tree against merge-base(baseRef, HEAD); `turn` diffs the
             // turn-start tree snapshot against the current tree; anything else
             // is the plain working-tree capture.
+            methods::RESOLVE_BRANCH_REVIEW_BASE => {
+                let p: mast_proto::ResolveBranchReviewBaseParams = parse_params(params)?;
+                let identity = self.repos.checkout_identity(std::path::Path::new(&p.checkout_path))
+                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let mut reply = crate::diff_sync::resolve_branch_review_base(&identity.root, &p.branch, self.doc_host.device_id())
+                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let legacy_id = reply.review_range_id.strip_prefix("review-").unwrap_or(&reply.review_range_id);
+                for row in self.workspace.all_chat_diff_targets().map_err(|e| RpcError::Failed(e.to_string()))? {
+                    if row.chat_id == p.worker_chat_id || !row.ref_targets.iter().any(|target| target.id == reply.review_range_id || target.id == legacy_id) { continue; }
+                    let chat = self.workspace.chat(&row.chat_id).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    if chat.is_some_and(|chat| !chat.archived && chat.space_id.as_deref() == Some(&p.space_id)) {
+                        reply.existing_chat_id = Some(row.chat_id);
+                        break;
+                    }
+                }
+                RpcReply::value(&reply)
+            }
             methods::GET_CHECKOUT_DIFF => {
                 // Keep the scoped-diff future off the dispatcher's stack. The
                 // per-commit path adds another nested git-capture future.

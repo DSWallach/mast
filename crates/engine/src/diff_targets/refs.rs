@@ -260,7 +260,7 @@ impl DiffTargets {
         let facts = checkout_facts(&checkout.path)
             .ok_or_else(|| DiffTargetError::NoCheckout("Review checkout is unavailable.".into()))?;
         let repo_id = repository_id(&self.device_id, &facts.common_dir);
-        let id = mast_proto::derive_id(&format!("{repo_id}\0{branch}"), "review-range");
+        let id = format!("review-{}", mast_proto::derive_id(&format!("{repo_id}\0{branch}"), "review-range"));
         let target = StoredRefDiffTarget {
             id: id.clone(), kind: RefDiffKind::Branch, path: path_string(&checkout.path), repo_id,
             head_branch: branch.to_owned(), head_ref: head.to_owned(),
