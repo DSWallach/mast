@@ -323,13 +323,7 @@ impl Shell {
             .map(|at| mast_proto::view::format_time_ago(at, now))
             .unwrap_or_default();
         let status = crate::status_style::status_style(worker.state.into(), theme.appearance);
-        let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-            crate::status_style::indicator_for_theme(worker.state.into(), &theme).into_any_element()
-        } else if worker.state == WorkerState::Working {
-            crate::loaders::mini_mono_spinner(format!("{prefix}-status-{id}"), 1.5, status.color, cx.entity_id(), cx).into_any_element()
-        } else {
-            crate::status_style::indicator_for_theme(worker.state.into(), &theme).into_any_element()
-        };
+        let indicator = crate::components::shell_parts::activity_indicator(worker.state.into(), format!("{prefix}-status-{id}"), theme, cx.entity_id(), cx);
         let open_id = id.clone();
         let menu_id = id.clone();
         let unseen = self.unseen_for_worker(&id);

@@ -1040,14 +1040,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let status = crate::status_style::Status::from(row.state);
-        let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-            crate::status_style::indicator_for_theme(status, &theme).into_any_element()
-        } else if status == crate::status_style::Status::Working {
-            let color = crate::status_style::status_style(status, theme.appearance).color;
-            crate::loaders::mini_mono_spinner(format!("running-status-{}", row.chat_id), 1.5, color, cx.entity_id(), cx).into_any_element()
-        } else {
-            crate::status_style::indicator_for_theme(status, &theme).into_any_element()
-        };
+        let indicator = crate::components::shell_parts::activity_indicator(status, format!("running-status-{}", row.chat_id), theme, cx.entity_id(), cx);
         let meta = [
             row.item_path.clone(),
             row.account.clone(),

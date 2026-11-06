@@ -126,6 +126,23 @@ pub(crate) fn right_surface_tab(
         .children(crate::surface_chrome::active_key_dot(theme, active))
 }
 
+pub(crate) fn activity_indicator(
+    status: crate::status_style::Status,
+    key: String,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut App,
+) -> AnyElement {
+    if theme.ui_style.status_indicator != crate::ui_style::StatusIndicator::Dot
+        && status == crate::status_style::Status::Working
+    {
+        let color = crate::status_style::status_style(status, theme.appearance).color;
+        crate::loaders::mini_mono_spinner(key, 1.5, color, view, cx).into_any_element()
+    } else {
+        crate::status_style::indicator_for_theme(status, theme).into_any_element()
+    }
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(
