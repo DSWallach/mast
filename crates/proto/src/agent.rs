@@ -1563,7 +1563,8 @@ pub mod agent_tools {
                 "invalid arguments: missing field `status`",
             );
             assert!(text.starts_with("invalid arguments: missing field `status`\nUsage of"));
-            assert!(text.contains("optional: workItemId (defaults to your chat's item), idempotencyKey (derived when omitted)"));
+            assert!(text.contains("waitingUntil (Unix milliseconds or null; requires idempotencyKey)"));
+            assert!(text.contains("workItemId (defaults to your chat's item)"));
             assert!(text.contains(r#"example: {"status": "completed"}"#));
             // Not appended twice, and unknown tools pass through.
             assert_eq!(with_usage(tools::SET_STATUS, &text), text);
