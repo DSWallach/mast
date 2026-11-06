@@ -2771,6 +2771,37 @@ pub fn outline_linear_sync_marker(id: String, theme: &Theme) -> Stateful<Div> {
         .child("Synced from Linear")
 }
 
+/// Inline artifact menu and its actions.
+pub fn outline_artifact_menu(theme: &Theme) -> Div {
+    div()
+        .ml(px(18.0))
+        .p(px(3.0 * super::layout_spacing(theme)))
+        .flex()
+        .flex_col()
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(5.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+}
+pub fn outline_artifact_menu_entry(id: &str, label: &'static str, theme: &Theme) -> Stateful<Div> {
+    let selector = format!("work-item-artifact-menu-{id}");
+    let button = div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .px(px(6.0 * super::layout_spacing(theme)))
+        .py(px(2.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(3.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .hover(|el| el.bg(theme.element_hover));
+    crate::surface_chrome::segmented_key(button, theme, false)
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

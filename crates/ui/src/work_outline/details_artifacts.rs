@@ -329,11 +329,8 @@ impl WorkItemDetails {
         if matches!(load, crate::artifacts::ArtifactsLoad::Unsupported) {
             return section
                 .child(
-                    div()
-                        .debug_selector(|| "work-item-artifacts-unsupported".into())
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child(crate::artifacts::store::UNSUPPORTED_TEXT),
+                    crate::components::outline_execution_line(crate::artifacts::store::UNSUPPORTED_TEXT.into(), 11.0, theme.text_faint, theme)
+                        .debug_selector(|| "work-item-artifacts-unsupported".into()),
                 )
                 .into_any_element();
         }
@@ -478,11 +475,8 @@ impl WorkItemDetails {
         }
         if let Some(status) = self.artifacts.status.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-artifacts-status".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(status)),
+                crate::components::outline_execution_line(status, 10.5, theme.text_faint, theme)
+                    .debug_selector(|| "work-item-artifacts-status".into()),
             );
         }
         section.into_any_element()
@@ -496,35 +490,14 @@ impl WorkItemDetails {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let entry = |id: &str, label: &'static str| {
-            let selector = format!("work-item-artifact-menu-{id}");
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .px(px(6.0))
-                .py(px(2.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text)
-                .hover(|el| el.bg(theme.element_hover))
-                .child(label)
-        };
+        let entry = |id: &str, label| crate::components::outline_artifact_menu_entry(id, label, theme);
         let (pin_id, promote_id, reveal_id, copy_id) = (
             artifact_id.to_owned(),
             artifact_id.to_owned(),
             artifact_id.to_owned(),
             artifact_id.to_owned(),
         );
-        div()
-            .ml(px(18.0))
-            .p(px(3.0))
-            .flex()
-            .flex_col()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
+        crate::components::outline_artifact_menu(theme)
             .child(
                 entry("pin", if pinned { "Unpin plan" } else { "Pin as plan" }).on_click(
                     cx.listener(move |this, _, _, cx| {
