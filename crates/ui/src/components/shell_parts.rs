@@ -1138,6 +1138,29 @@ pub(crate) fn sidebar_row_frame(
         .bg(motion::hover_blend(fade_key, rest_bg, hover_bg))
 }
 
+pub(crate) fn sidebar_context_text(
+    theme: &Theme,
+    color: gpui::Hsla,
+    content: AnyElement,
+) -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.tokens.secondary_size.unwrap_or(11.0),
+        ))
+        .line_height(px(14.0))
+        .text_color(color)
+        .child(content)
+}
+
+pub(crate) fn sidebar_title_text(theme: &Theme, content: AnyElement) -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.tokens.body_size.unwrap_or(13.0),
+        ))
+        .line_height(px(17.0))
+        .child(content)
+}
+
 pub(crate) fn sidebar_grille(theme: &Theme) -> Option<gpui::Div> {
     super::is_industrial(theme).then(|| {
         div()

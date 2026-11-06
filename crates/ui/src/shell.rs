@@ -7474,11 +7474,7 @@ impl Shell {
                         .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .line_height(px(14.0))
-                                .text_color(subline)
-                                .child(popover::search_highlight(space_name, search_query, theme)),
+                            crate::components::shell_parts::sidebar_context_text(theme, subline, popover::search_highlight(space_name, search_query, theme)),
                         ))
                         .child(div().text_color(subline).children(corner.take())),
                 )
@@ -7519,10 +7515,7 @@ impl Shell {
                     .child(sidebar_faded_label(
                         format!("chat-title-{content_id}").into(),
                         true,
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .line_height(px(17.0))
-                            .child(popover::search_highlight(title, search_query, theme)),
+                        crate::components::shell_parts::sidebar_title_text(theme, popover::search_highlight(title, search_query, theme)),
                     ))
                     .when_some(self.state.read(cx).chat_account_badge(&id), |el, label| {
                         el.child(
@@ -7600,11 +7593,7 @@ impl Shell {
                             .child(sidebar_faded_label(
                                 format!("chat-branch-{content_id}").into(),
                                 false,
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .line_height(px(14.0))
-                                    .text_color(subline)
-                                    .child(popover::search_highlight(branch, search_query, theme)),
+                                crate::components::shell_parts::sidebar_context_text(theme, subline, popover::search_highlight(branch, search_query, theme)),
                             ))
                         })
                         // Stable invisible spring keeps the optional PR badge
