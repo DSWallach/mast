@@ -177,13 +177,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tracked = focus.clone();
-        div()
-            .id(id)
-            .debug_selector(move || id.into())
+        let theme = Theme::of(cx).clone();
+        crate::components::shell_parts::panel_root(&theme, id)
             .track_focus(&focus)
-            .size_full()
-            .overflow_y_scroll()
-            .p(px(14.0))
             .key_context("TeamPanel")
             .on_action(
                 cx.listener(move |this, _: &OpenTeamTabFromPanel, window, cx| {

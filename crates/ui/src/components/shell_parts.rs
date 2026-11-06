@@ -1177,6 +1177,23 @@ pub(crate) fn panel_tab(
         )
 }
 
+pub(crate) fn panel_root(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+    let padding = match theme.ui_style.layout {
+        crate::ui_style::UiLayout::Minimal => 14.0,
+        crate::ui_style::UiLayout::Compact => 10.0,
+        crate::ui_style::UiLayout::Guided => 16.0,
+    };
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .size_full()
+        .overflow_y_scroll()
+        .p(px(padding))
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.industrial_colors().panel)
+        })
+}
+
 pub(crate) fn titlebar_title(theme: &Theme, title: SharedString, on_canvas: bool) -> gpui::Div {
     div()
         .debug_selector(|| "titlebar-title".into())
