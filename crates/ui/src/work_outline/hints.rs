@@ -20,6 +20,15 @@ use crate::settings::{KeymapConfig, ShortcutId, platform_combo};
 use crate::shell::work_outline_ui::{OUTLINE_NAVIGATION_KEYS, OutlineKeyGroup, OutlineNavKey};
 use crate::theme::Theme;
 
+/// Apply the details surface's shortcut hint to the shared secondary button.
+pub(crate) fn details_button(id: impl Into<gpui::ElementId>, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let button = crate::components::button(id, label, crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme);
+    match details_button_hint(label) {
+        Some((tip, key)) => WithHint::hint(button, tip, key),
+        None => button,
+    }
+}
+
 /// The app's tooltip delay (the same 350 ms the composer, queue, history and
 /// sidebar tooltips use).
 pub(crate) const TOOLTIP_DELAY: Duration = Duration::from_millis(350);

@@ -281,24 +281,24 @@ impl WorkItemDetails {
         if prompt.existing.is_some() {
             buttons = buttons
                 .child(
-                    Self::small_button("work-item-template-update", "Update blueprint", theme)
+                    crate::work_outline::hints::details_button("work-item-template-update", "Update blueprint", theme)
                         .debug_selector(|| "work-item-template-update".into())
                         .on_click(cx.listener(|this, _, _, cx| this.save_template(false, cx))),
                 )
                 .child(
-                    Self::small_button("work-item-template-new-copy", "Save as new", theme)
+                    crate::work_outline::hints::details_button("work-item-template-new-copy", "Save as new", theme)
                         .debug_selector(|| "work-item-template-new-copy".into())
                         .on_click(cx.listener(|this, _, _, cx| this.save_template(true, cx))),
                 );
         } else {
             buttons = buttons.child(
-                Self::small_button("work-item-template-save", "Save", theme)
+                crate::work_outline::hints::details_button("work-item-template-save", "Save", theme)
                     .debug_selector(|| "work-item-template-save".into())
                     .on_click(cx.listener(|this, _, _, cx| this.save_template(true, cx))),
             );
         }
         buttons = buttons.child(
-            Self::small_button("work-item-template-cancel", "Cancel", theme)
+            crate::work_outline::hints::details_button("work-item-template-cancel", "Cancel", theme)
                 .on_click(cx.listener(|this, _, _, cx| this.cancel_save_template(cx))),
         );
         out.push(buttons.into_any_element());
@@ -376,7 +376,7 @@ impl WorkItemDetails {
                             })),
                     )
                     .child(
-                        Self::small_button(("space-template-new", ix), "New from blueprint\u{2026}", theme)
+                        crate::work_outline::hints::details_button(("space-template-new", ix), "New from blueprint\u{2026}", theme)
                             .debug_selector(move || new_selector.clone())
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(DetailsEvent::NewFromTemplate {
@@ -386,7 +386,7 @@ impl WorkItemDetails {
                             })),
                     )
                     .child(
-                        Self::small_button(("space-template-delete", ix), "Delete", theme)
+                        crate::work_outline::hints::details_button(("space-template-delete", ix), "Delete", theme)
                             .debug_selector(move || delete_selector.clone())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.request_delete_template(&delete, cx)

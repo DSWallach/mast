@@ -1004,14 +1004,14 @@ impl WorkItemDetails {
                         }))))))
                 .child(body)
                 .child(div().flex().gap(px(6.0))
-                    .when(rule.is_some(), |buttons| buttons.child(Self::small_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
+                    .when(rule.is_some(), |buttons| buttons.child(crate::work_outline::hints::details_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
                         .debug_selector({ let selector = format!("template-apply-{id}"); move || selector.clone() })
                         .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&template_id, false, cx)))))
                     .when(rule.is_some(), |buttons| buttons
-                    .child(Self::small_button(SharedString::from(format!("project-apply-{id}")), "This project only", theme)
+                    .child(crate::work_outline::hints::details_button(SharedString::from(format!("project-apply-{id}")), "This project only", theme)
                         .debug_selector({ let selector = format!("project-apply-{id}"); move || selector.clone() })
                         .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&project_id, true, cx)))))
-                    .child(Self::small_button(SharedString::from(format!("template-dismiss-{id}")), "Dismiss", theme)
+                    .child(crate::work_outline::hints::details_button(SharedString::from(format!("template-dismiss-{id}")), "Dismiss", theme)
                         .on_click(cx.listener(move |this, _, _, cx| this.dismiss_proposal(&dismiss_id, cx)))))
                 .into_any_element();
         }
@@ -1031,7 +1031,7 @@ impl WorkItemDetails {
                 let mut buttons = div().flex().gap(px(6.0));
                 if !archived {
                     buttons = buttons.child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             SharedString::from(format!("work-item-proposal-accept-{id}")),
                             accept_label,
                             theme,
@@ -1046,7 +1046,7 @@ impl WorkItemDetails {
                     );
                     if proposal.action == ProposalAction::Edit {
                         buttons = buttons.child(
-                            Self::small_button(
+                            crate::work_outline::hints::details_button(
                                 SharedString::from(format!("work-item-proposal-review-{id}")),
                                 "Edit then accept",
                                 theme,
@@ -1064,7 +1064,7 @@ impl WorkItemDetails {
                     }
                 }
                 buttons = buttons.child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         SharedString::from(format!("work-item-proposal-dismiss-{id}")),
                         "Dismiss",
                         theme,
@@ -1092,7 +1092,7 @@ impl WorkItemDetails {
                 .children(Self::rationale_line(proposal, theme))
                 .child(
                     div().child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             SharedString::from(format!("work-item-proposal-review-{id}")),
                             "Review",
                             theme,
@@ -1145,7 +1145,7 @@ impl WorkItemDetails {
                 .gap(px(6.0))
                 .when(!rejecting, |el| {
                     el.child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-proposal-approve",
                             match (busy, is_modification) {
                                 (true, _) => "Approving\u{2026}",
@@ -1160,7 +1160,7 @@ impl WorkItemDetails {
                     )
                 })
                 .child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         "work-item-proposal-reject",
                         if rejecting {
                             "Reject"
@@ -1173,7 +1173,7 @@ impl WorkItemDetails {
                     .on_click(cx.listener(|this, _, _, cx| this.reject_proposal(cx))),
                 )
                 .child(
-                    Self::small_button("work-item-proposal-cancel", "Cancel", theme)
+                    crate::work_outline::hints::details_button("work-item-proposal-cancel", "Cancel", theme)
                         .debug_selector(|| "work-item-proposal-cancel".into())
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_proposal_review(cx))),
                 ),

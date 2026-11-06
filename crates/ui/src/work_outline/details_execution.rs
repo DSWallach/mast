@@ -855,7 +855,7 @@ impl WorkItemDetails {
                     .gap(px(6.0))
                     .when(!archived, |el| {
                         el.child(
-                            Self::small_button("work-item-execution-edit", "Edit", theme)
+                            crate::work_outline::hints::details_button("work-item-execution-edit", "Edit", theme)
                                 .debug_selector(|| "work-item-execution-edit".into())
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.begin_execution_draft(window, cx)
@@ -863,7 +863,7 @@ impl WorkItemDetails {
                         )
                     })
                     .child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-execution-validate",
                             if validating {
                                 "Validating\u{2026}"
@@ -877,7 +877,7 @@ impl WorkItemDetails {
                     )
                     .when(exec::owns_row(snapshot, &scope), |el| {
                         el.child(
-                            Self::small_button(
+                            crate::work_outline::hints::details_button(
                                 "work-item-execution-reset",
                                 if saving {
                                     "Resetting\u{2026}"
@@ -959,7 +959,7 @@ impl WorkItemDetails {
                             .child(SharedString::from(binding.repo_path.clone())),
                     )
                     .child(
-                        Self::small_button(("work-item-execution-remove", ix), "Remove", theme)
+                        crate::work_outline::hints::details_button(("work-item-execution-remove", ix), "Remove", theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_execution_binding(ix, cx)
                             })),
@@ -1104,7 +1104,7 @@ impl WorkItemDetails {
                             .child(Self::input_frame(&self.execution_root_input, theme)),
                     )
                     .child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-execution-choose-root",
                             "Choose\u{2026}",
                             theme,
@@ -1119,7 +1119,7 @@ impl WorkItemDetails {
             .children(bindings)
             .child(
                 div().child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         "work-item-execution-add-repo",
                         if describing {
                             "Reading repository\u{2026}"
@@ -1139,7 +1139,7 @@ impl WorkItemDetails {
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-execution-save",
                             if saving { "Saving\u{2026}" } else { "Save" },
                             theme,
@@ -1148,12 +1148,12 @@ impl WorkItemDetails {
                         .on_click(cx.listener(|this, _, _, cx| this.save_execution(cx))),
                     )
                     .child(
-                        Self::small_button("work-item-execution-cancel", "Cancel", theme)
+                        crate::work_outline::hints::details_button("work-item-execution-cancel", "Cancel", theme)
                             .debug_selector(|| "work-item-execution-cancel".into())
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_execution(cx))),
                     )
                     .child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-execution-validate",
                             if validating {
                                 "Validating\u{2026}"

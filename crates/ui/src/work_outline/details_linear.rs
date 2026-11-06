@@ -371,7 +371,7 @@ impl WorkItemDetails {
                         .child("Linear"),
                 )
                 .child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         "work-item-linear-refresh",
                         if self.linear.refreshing {
                             "Refreshing\u{2026}"
@@ -425,7 +425,7 @@ impl WorkItemDetails {
                             .child(SharedString::from(title)),
                     )
                     .child(
-                        Self::small_button("work-item-linear-unlink", "Unlink", theme)
+                        crate::work_outline::hints::details_button("work-item-linear-unlink", "Unlink", theme)
                             .debug_selector(|| "work-item-linear-unlink".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.unlink_linear(id.clone(), cx)
@@ -478,7 +478,7 @@ impl WorkItemDetails {
                     .children(fix)
                     .child(div().flex_1())
                     .child(
-                        Self::small_button("work-item-linear-unlink-project", "Unlink", theme)
+                        crate::work_outline::hints::details_button("work-item-linear-unlink-project", "Unlink", theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.unlink_linear(id.clone(), cx)
                             })),
@@ -555,12 +555,12 @@ impl WorkItemDetails {
                         .child("Linear link saved as a plain link. Enable Linear for this Space?"),
                 )
                 .child(
-                    Self::small_button("work-item-linear-hint-enable", "Enable", theme)
+                    crate::work_outline::hints::details_button("work-item-linear-hint-enable", "Enable", theme)
                         .debug_selector(|| "work-item-linear-hint-enable".into())
                         .on_click(cx.listener(|this, _, _, cx| this.set_linear_enabled(true, cx))),
                 )
                 .child(
-                    Self::small_button("work-item-linear-hint-dismiss", "Dismiss", theme)
+                    crate::work_outline::hints::details_button("work-item-linear-hint-dismiss", "Dismiss", theme)
                         .debug_selector(|| "work-item-linear-hint-dismiss".into())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.linear.paste_hint = false;
@@ -643,7 +643,7 @@ impl WorkItemDetails {
                             .child("No Linear API key on this device."),
                     )
                     .child(
-                        Self::small_button("space-linear-connect", "Connect Linear\u{2026}", theme)
+                        crate::work_outline::hints::details_button("space-linear-connect", "Connect Linear\u{2026}", theme)
                             .debug_selector(|| "space-linear-connect".into())
                             .on_click(cx.listener(|this, _, _, cx| this.open_linear_settings(cx))),
                     ),

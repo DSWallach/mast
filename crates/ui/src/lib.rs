@@ -31,6 +31,9 @@ mod chat_work_context;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
+pub mod components;
+#[cfg(test)]
+mod component_lint;
 mod composer_dock;
 mod context_usage;
 mod diff_targets;

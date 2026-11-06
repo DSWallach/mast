@@ -524,7 +524,7 @@ impl WorkItemDetails {
         let editing = self.container_template.editor.is_some();
         if !editing {
             header = header.child(
-                Self::small_button(
+                crate::work_outline::hints::details_button(
                     "work-item-container-template-edit",
                     if state.has_rules { "Edit" } else { "Set up child template\u{2026}" },
                     theme,
@@ -535,7 +535,7 @@ impl WorkItemDetails {
             if state.can_apply_all() {
                 let id = item.id.clone();
                 header = header.child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         "work-item-container-template-apply-all",
                         "Apply to all children\u{2026}",
                         theme,
@@ -556,7 +556,7 @@ impl WorkItemDetails {
             .collect::<Vec<_>>();
         if !proposals.is_empty() {
             section = section.child(
-                Self::small_button("work-item-template-proposals", if self.template_proposals_open { "Hide proposed instructions" } else { "Review proposed instructions" }, theme)
+                crate::work_outline::hints::details_button("work-item-template-proposals", if self.template_proposals_open { "Hide proposed instructions" } else { "Review proposed instructions" }, theme)
                     .debug_selector(|| "work-item-template-proposals".into())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.template_proposals_open = !this.template_proposals_open;
@@ -598,7 +598,7 @@ impl WorkItemDetails {
                             .child("Doesn\u{2019}t follow the child template"),
                     )
                     .child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-template-apply",
                             "Apply child template\u{2026}",
                             theme,
@@ -622,13 +622,13 @@ impl WorkItemDetails {
                 );
             }
             let mut buttons = div().flex().gap(px(6.0)).child(
-                Self::small_button("work-item-container-template-save", "Save", theme)
+                crate::work_outline::hints::details_button("work-item-container-template-save", "Save", theme)
                     .debug_selector(|| "work-item-container-template-save".into())
                     .on_click(cx.listener(|this, _, _, cx| this.save_container_template(cx))),
             );
             if state.has_rules {
                 buttons = buttons.child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         "work-item-container-template-off",
                         "Turn off",
                         theme,
@@ -638,7 +638,7 @@ impl WorkItemDetails {
                 );
             }
             section = section.child(buttons.child(
-                Self::small_button("work-item-container-template-cancel", "Cancel", theme)
+                crate::work_outline::hints::details_button("work-item-container-template-cancel", "Cancel", theme)
                     .on_click(cx.listener(|this, _, _, cx| this.close_container_template(cx))),
             ));
         }
@@ -677,7 +677,7 @@ impl WorkItemDetails {
         };
         let project = node.is_project;
         head = head.child(
-            Self::small_button(
+            crate::work_outline::hints::details_button(
                 ("work-item-ct-project", key),
                 if project { "\u{2713} Project" } else { "Project" },
                 theme,
@@ -690,7 +690,7 @@ impl WorkItemDetails {
             let destination = node.is_worker_destination;
             head = head
                 .child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         ("work-item-ct-destination", key),
                         if destination {
                             "\u{2713} Worker destination"
@@ -707,21 +707,21 @@ impl WorkItemDetails {
                     })),
                 )
                 .child(
-                    Self::small_button(("work-item-ct-up", key), "\u{2191}", theme).on_click(
+                    crate::work_outline::hints::details_button(("work-item-ct-up", key), "\u{2191}", theme).on_click(
                         cx.listener(move |this, _, _, cx| {
                             this.edit_template(|editor| { let _ = editor.move_node(node_key, true); }, cx)
                         }),
                     ),
                 )
                 .child(
-                    Self::small_button(("work-item-ct-down", key), "\u{2193}", theme).on_click(
+                    crate::work_outline::hints::details_button(("work-item-ct-down", key), "\u{2193}", theme).on_click(
                         cx.listener(move |this, _, _, cx| {
                             this.edit_template(|editor| { let _ = editor.move_node(node_key, false); }, cx)
                         }),
                     ),
                 )
                 .child(
-                    Self::small_button(("work-item-ct-remove", key), "Remove", theme).on_click(
+                    crate::work_outline::hints::details_button(("work-item-ct-remove", key), "Remove", theme).on_click(
                         cx.listener(move |this, _, _, cx| {
                             this.edit_template(|editor| { let _ = editor.remove_node(node_key); }, cx)
                         }),
@@ -751,7 +751,7 @@ impl WorkItemDetails {
                     .gap(px(4.0))
                     .child(div().flex_1().min_w_0().child(Self::input_frame(input, theme)))
                     .child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             ("work-item-ct-instruction-remove", instruction.key as usize),
                             "Remove",
                             theme,
@@ -770,7 +770,7 @@ impl WorkItemDetails {
                 .flex()
                 .gap(px(4.0))
                 .child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         ("work-item-ct-add-instruction", key),
                         "Add instruction",
                         theme,
@@ -780,7 +780,7 @@ impl WorkItemDetails {
                     })),
                 )
                 .child(
-                    Self::small_button(("work-item-ct-add-child", key), "Add item", theme)
+                    crate::work_outline::hints::details_button(("work-item-ct-add-child", key), "Add item", theme)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.edit_template(|editor| { let _ = editor.add_child(node_key); }, cx)
                         })),

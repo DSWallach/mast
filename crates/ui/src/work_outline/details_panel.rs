@@ -796,7 +796,7 @@ impl WorkItemDetails {
                         .child("Project"),
                 )
                 .child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         "work-item-project-toggle",
                         if is_project {
                             "Not a project"
@@ -810,7 +810,7 @@ impl WorkItemDetails {
                 )
                 .when(!is_project, |row| {
                     row.child(
-                        Self::small_button(
+                        crate::work_outline::hints::details_button(
                             "work-item-convert-project",
                             "Convert to project\u{2026}",
                             theme,
@@ -820,7 +820,7 @@ impl WorkItemDetails {
                     )
                 })
                 .child(
-                    Self::small_button(
+                    crate::work_outline::hints::details_button(
                         "work-item-save-template",
                         "Save as blueprint\u{2026}",
                         theme,
@@ -1241,33 +1241,6 @@ impl WorkItemDetails {
             .when_some(count, |el, count| el.child(div().font_family(theme.font_mono.clone()).child(SharedString::from(count))))
     }
 
-    /// A compact details button. Its hover tooltip (label + live binding)
-    /// comes from [`super::hints::details_button_hint`], keyed by the label.
-    fn small_button(
-        id: impl Into<gpui::ElementId>,
-        label: &'static str,
-        theme: &Theme,
-    ) -> gpui::Stateful<gpui::Div> {
-        let button = div()
-            .id(id)
-            .flex_none()
-            .px(px(6.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
-            .when(true, |el| crate::surface_chrome::segmented_key(el, theme, false))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_muted)
-            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            .child(label);
-        match super::hints::details_button_hint(label) {
-            Some((tip, key)) => super::hints::WithHint::hint(button, tip, key),
-            None => button,
-        }
-    }
-
     /// Point the editors' skill lists at this item's resolved execution root
     /// (the Space root's on the Space-root variant), whatever Chat the
     /// composer shows (instructions are harness-agnostic). Cheap when
@@ -1601,7 +1574,7 @@ impl Render for WorkItemDetails {
             .when_some(attention, |el, attention| el.child(attention))
             .when_some(self.pinned_plan_id(&item.id, cx), |el, plan_id| {
                 el.child(
-                    Self::small_button("work-item-open-plan", "Open plan", &theme)
+                    crate::work_outline::hints::details_button("work-item-open-plan", "Open plan", &theme)
                         .debug_selector(|| "work-item-open-plan".into())
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_artifact(plan_id.clone(), window, cx)
@@ -1610,7 +1583,7 @@ impl Render for WorkItemDetails {
             })
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
-                el.child(Self::small_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
+                el.child(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
                     .debug_selector(|| "work-item-review-work".into())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.shell.update(cx, |shell, cx| shell.open_branch_review_for_chat(chat_id.clone(), cx)).ok();
@@ -1620,7 +1593,7 @@ impl Render for WorkItemDetails {
                 let space_id = self.space_id.clone();
                 let item_id = item.id.clone();
                 el.child(
-                    Self::small_button("work-item-start-chat", "Start Chat", &theme)
+                    crate::work_outline::hints::details_button("work-item-start-chat", "Start Chat", &theme)
                         .debug_selector(|| "work-item-start-chat".into())
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(DetailsEvent::StartChat {
@@ -1657,13 +1630,13 @@ impl Render for WorkItemDetails {
                             .flex()
                             .gap(px(6.0))
                             .child(
-                                Self::small_button("work-item-description-save", "Save", &theme)
+                                crate::work_outline::hints::details_button("work-item-description-save", "Save", &theme)
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.save_description(cx)),
                                     ),
                             )
                             .child(
-                                Self::small_button(
+                                crate::work_outline::hints::details_button(
                                     "work-item-description-cancel",
                                     "Cancel",
                                     &theme,
@@ -1761,7 +1734,7 @@ impl Render for WorkItemDetails {
                         })),
                 )
                 .child(
-                    Self::small_button(("work-item-chat-remove", ix), "Disassociate", &theme)
+                    crate::work_outline::hints::details_button(("work-item-chat-remove", ix), "Disassociate", &theme)
                         .debug_selector(move || format!("work-item-chat-remove-{ix}"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.disassociate(remove_id.clone(), cx)
@@ -1839,7 +1812,7 @@ impl Render for WorkItemDetails {
                             ))),
                     )
                     .child(
-                        Self::small_button("work-item-associate-toggle", "Associate…", &theme)
+                        crate::work_outline::hints::details_button("work-item-associate-toggle", "Associate…", &theme)
                             .debug_selector(|| "work-item-associate-toggle".into())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.associate_open = !this.associate_open;
@@ -1959,7 +1932,7 @@ impl Render for WorkItemDetails {
                                 })),
                         )
                         .child(
-                            Self::small_button(
+                            crate::work_outline::hints::details_button(
                                 ("work-item-reference-remove", ix),
                                 "Remove",
                                 &theme,
@@ -1989,11 +1962,11 @@ impl Render for WorkItemDetails {
                             .flex()
                             .gap(px(6.0))
                             .child(
-                                Self::small_button("work-item-reference-save", "Add", &theme)
+                                crate::work_outline::hints::details_button("work-item-reference-save", "Add", &theme)
                                     .on_click(cx.listener(|this, _, _, cx| this.add_reference(cx))),
                             )
                             .child(
-                                Self::small_button("work-item-reference-cancel", "Cancel", &theme)
+                                crate::work_outline::hints::details_button("work-item-reference-cancel", "Cancel", &theme)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.adding_reference = false;
                                         cx.notify();
@@ -2003,7 +1976,7 @@ impl Render for WorkItemDetails {
             } else {
                 refs_section = refs_section.child(
                     div().child(
-                        Self::small_button("work-item-reference-add", "Add reference", &theme)
+                        crate::work_outline::hints::details_button("work-item-reference-add", "Add reference", &theme)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.adding_reference = true;
                                 this.reference_input
@@ -2027,12 +2000,12 @@ impl Render for WorkItemDetails {
         // Archive / restore.
         let footer = if item.archived_at.is_some() {
             div().child(
-                Self::small_button("work-item-restore", "Restore", &theme)
+                crate::work_outline::hints::details_button("work-item-restore", "Restore", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.restore(cx))),
             )
         } else {
             div().when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.flex().items_start()).child(
-                Self::small_button("work-item-archive", "Archive…", &theme)
+                crate::work_outline::hints::details_button("work-item-archive", "Archive…", &theme)
                     .on_click(cx.listener(|this, _, _, cx| this.request_archive(cx))),
             )
         };
@@ -2067,12 +2040,12 @@ impl Render for WorkItemDetails {
                         el.child(div().text_color(theme.text_muted).child(SharedString::from(format!("{date}{reason}"))))
                     })
                     .child(div().flex().gap(px(6.0))
-                        .child(Self::small_button("waiting-tomorrow", "Tomorrow", &theme).debug_selector(|| "waiting-tomorrow".into()).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 86_400_000), cx))))
-                        .child(Self::small_button("waiting-week", "1 week", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 604_800_000), cx))))
-                        .child(Self::small_button("waiting-clear", "Clear", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(None, cx))))
+                        .child(crate::work_outline::hints::details_button("waiting-tomorrow", "Tomorrow", &theme).debug_selector(|| "waiting-tomorrow".into()).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 86_400_000), cx))))
+                        .child(crate::work_outline::hints::details_button("waiting-week", "1 week", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 604_800_000), cx))))
+                        .child(crate::work_outline::hints::details_button("waiting-clear", "Clear", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(None, cx))))
                     )
                     .child(div().flex().gap(px(6.0)).child(Self::input_frame(&self.waiting_input, &theme))
-                        .child(Self::small_button("waiting-custom", "Set date", &theme).on_click(cx.listener(|this, _, _, cx| this.save_waiting_date(cx)))))
+                        .child(crate::work_outline::hints::details_button("waiting-custom", "Set date", &theme).on_click(cx.listener(|this, _, _, cx| this.save_waiting_date(cx)))))
                 )
                 .child(required_actions)
                 .children(linear)

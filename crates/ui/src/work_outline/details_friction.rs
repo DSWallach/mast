@@ -254,7 +254,7 @@ impl WorkItemDetails {
                     .justify_between()
                     .child("Friction")
                     .child(
-                        Self::small_button("friction-import", "Import…", theme)
+                        crate::work_outline::hints::details_button("friction-import", "Import…", theme)
                             .on_click(cx.listener(|this, _, _, cx| this.preview_friction_file(cx))),
                     ),
             );
@@ -297,12 +297,12 @@ impl WorkItemDetails {
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        Self::small_button("friction-import-confirm", "Import", theme).on_click(
+                        crate::work_outline::hints::details_button("friction-import-confirm", "Import", theme).on_click(
                             cx.listener(|this, _, _, cx| this.import_friction_preview(cx)),
                         ),
                     )
                     .child(
-                        Self::small_button("friction-import-cancel", "Cancel", theme).on_click(
+                        crate::work_outline::hints::details_button("friction-import-cancel", "Cancel", theme).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.friction.import_preview = None;
                                 cx.notify();
@@ -323,7 +323,7 @@ impl WorkItemDetails {
         {
             let selected = self.friction.status == status;
             filters = filters.child(
-                Self::small_button(("friction-filter", index), label, theme)
+                crate::work_outline::hints::details_button(("friction-filter", index), label, theme)
                     .debug_selector({
                         let selector = format!("friction-filter-{label}");
                         move || selector.clone()
@@ -341,7 +341,7 @@ impl WorkItemDetails {
         if let Some(reports) = &self.friction.reports {
             let markdown = friction_markdown(reports);
             filters = filters.child(
-                Self::small_button("friction-export", "Export Markdown", theme)
+                crate::work_outline::hints::details_button("friction-export", "Export Markdown", theme)
                     .debug_selector(|| "friction-export".into())
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown.clone()));
@@ -500,7 +500,7 @@ impl WorkItemDetails {
                 let fingerprint = report.fingerprint.clone();
                 let report_id = report.id.clone();
                 let picker_open = self.friction.picker.as_deref() == Some(report.id.as_str());
-                let create = Self::small_button(("friction-create", index), "Create bug", theme)
+                let create = crate::work_outline::hints::details_button(("friction-create", index), "Create bug", theme)
                     .debug_selector({
                         let selector = format!("friction-create-{}", report.id);
                         move || selector.clone()
@@ -618,7 +618,7 @@ impl WorkItemDetails {
                         );
                     }
                 }
-                let dismiss = Self::small_button(("friction-dismiss", index), "Dismiss", theme)
+                let dismiss = crate::work_outline::hints::details_button(("friction-dismiss", index), "Dismiss", theme)
                     .debug_selector({
                         let selector = format!("friction-dismiss-{}", report.id);
                         move || selector.clone()
@@ -652,7 +652,7 @@ impl WorkItemDetails {
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty());
                 let propose =
-                    Self::small_button(("friction-propose", index), "Propose instruction", theme)
+                    crate::work_outline::hints::details_button(("friction-propose", index), "Propose instruction", theme)
                         .debug_selector({
                             let selector = format!("friction-propose-{}", report.id);
                             move || selector.clone()

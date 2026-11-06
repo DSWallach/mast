@@ -315,13 +315,13 @@ impl WorkItemDetails {
                 .gap(px(6.0))
                 .when(state.template_id.is_some(), |row| {
                     row.child(
-                        Self::small_button("work-item-convert-apply", "Apply", theme)
+                        crate::work_outline::hints::details_button("work-item-convert-apply", "Apply", theme)
                             .debug_selector(|| "work-item-convert-apply".into())
                             .on_click(cx.listener(|this, _, _, cx| this.apply_convert(cx))),
                     )
                 })
                 .child(
-                    Self::small_button("work-item-convert-cancel", "Cancel", theme)
+                    crate::work_outline::hints::details_button("work-item-convert-cancel", "Cancel", theme)
                         .debug_selector(|| "work-item-convert-cancel".into())
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_convert(cx))),
                 )
