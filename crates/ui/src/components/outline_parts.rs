@@ -1891,6 +1891,57 @@ pub fn outline_reference_marker(id: SharedString, theme: &Theme) -> Stateful<Div
         )
 }
 
+/// Harness badge on an outline chat row.
+pub fn outline_harness_badge(harness: String, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .max_w(px(100.0))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .bg(theme.element_hover.opacity(0.7))
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            9.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted.opacity(0.85))
+        .child(SharedString::from(harness))
+}
+
+/// Branch or pull-request marker on an outline chat row.
+pub fn outline_chat_reference(
+    icon: &'static str,
+    label: String,
+    max_width: Option<f32>,
+    theme: &Theme,
+) -> Div {
+    div()
+        .flex_none()
+        .when_some(max_width, |el, width| el.max_w(px(width)))
+        .flex()
+        .items_center()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child(
+            crate::icons::icon(icon)
+                .size(px(10.0))
+                .text_color(theme.text_faint),
+        )
+        .when(max_width.is_some(), |el| {
+            el.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(label.clone())),
+            )
+        })
+        .when(max_width.is_none(), |el| {
+            el.child(SharedString::from(label))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

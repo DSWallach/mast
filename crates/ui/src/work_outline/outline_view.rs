@@ -3594,16 +3594,7 @@ fn compact_chat_segment(
         .when_some(drift, |el, drift| el.child(drift))
         .when_some(chat.harness.clone(), |el, harness| {
             el.child(
-                div()
-                    .flex_none()
-                    .max_w(px(100.0))
-                    .px(px(4.0))
-                    .rounded(px(3.0))
-                    .bg(theme.element_hover.opacity(0.7))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(9.0))
-                    .text_color(theme.text_muted.opacity(0.85))
-                    .child(SharedString::from(harness)),
+                crate::components::outline_harness_badge(harness, theme),
             )
         })
         .into_any_element()
@@ -3668,51 +3659,17 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
         .when_some(drift, |el, drift| el.child(drift))
         .when_some(chat.branch.clone(), |el, branch| {
             el.child(
-                div()
-                    .flex_none()
-                    .max_w(px(140.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child(
-                        crate::icons::icon(crate::icons::GIT_BRANCH)
-                            .size(px(10.0))
-                            .text_color(theme.text_faint),
-                    )
-                    .child(div().min_w_0().truncate().child(SharedString::from(branch))),
+                crate::components::outline_chat_reference(crate::icons::GIT_BRANCH, branch, Some(140.0), theme),
             )
         })
         .when_some(chat.pr_number.filter(|n| *n > 0), |el, number| {
             el.child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child(
-                        crate::icons::icon(crate::icons::PULL_REQUEST)
-                            .size(px(10.0))
-                            .text_color(theme.text_faint),
-                    )
-                    .child(SharedString::from(format!("#{number}"))),
+                crate::components::outline_chat_reference(crate::icons::PULL_REQUEST, format!("#{number}"), None, theme),
             )
         })
         .when_some(chat.harness.clone(), |el, harness| {
             el.child(
-                div()
-                    .flex_none()
-                    .max_w(px(100.0))
-                    .px(px(4.0))
-                    .rounded(px(3.0))
-                    .bg(theme.element_hover.opacity(0.7))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(9.0))
-                    .text_color(theme.text_muted.opacity(0.85))
-                    .child(SharedString::from(harness)),
+                crate::components::outline_harness_badge(harness, theme),
             )
         })
         .into_any_element()
