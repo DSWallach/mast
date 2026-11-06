@@ -290,7 +290,7 @@ pub fn option_card(
 pub fn section_card(theme: &Theme) -> gpui::Div {
     div()
         .mt(px(24.0))
-        .rounded(px(12.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(12.0)))
         .border_1()
         .border_color(theme.border)
         .bg(theme.card_glass_bg())
@@ -380,6 +380,9 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .px(px(8.0))
         .py(px(2.0))
         .rounded_full()
+        .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
+            el.rounded(px(radius))
+        })
         .border_1()
         .border_color(theme.border)
         .text_size(crate::typography::ui_rems(10.5))
@@ -397,6 +400,9 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .px(px(8.0))
         .py(px(2.0))
         .rounded_full()
+        .when_some(theme.ui_style.tokens.chip_radius, |el, radius| {
+            el.rounded(px(radius))
+        })
         .bg(emerald.opacity(0.12))
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(emerald_text.opacity(0.9))
@@ -407,6 +413,27 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
 /// pill whose knob slides right and track flips white when on. State is owned
 /// by the parent row — the caller adds `.id(..)` and `.on_click(..)`.
 pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
+    if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
+        return div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .h(px(24.0))
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .text_size(crate::typography::ui_rems(10.0))
+            .text_color(theme.text)
+            .child(div().size(px(8.0)).rounded_full().bg(if on {
+                theme.accent
+            } else {
+                theme.text_muted
+            }))
+            .child(if on { "ON" } else { "OFF" });
+    }
     div()
         .flex_none()
         .w(px(32.0))
@@ -435,7 +462,16 @@ pub fn ghost_action(theme: &Theme) -> gpui::Div {
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
+        .when(
+            theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+            |el| {
+                el.bg(theme.surface_raised)
+                    .border_1()
+                    .border_b_2()
+                    .border_color(theme.border)
+            },
+        )
         .px(px(10.0))
         .py(px(6.0))
         .text_size(crate::typography::ui_rems(12.0))

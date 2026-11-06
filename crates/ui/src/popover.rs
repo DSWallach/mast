@@ -325,8 +325,16 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
     div()
         .border_1()
         .border_color(theme.border)
-        .rounded(px(CARD_RADIUS))
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .panel_radius
+            .unwrap_or(CARD_RADIUS)))
+        .when(
+            !theme.is_frost()
+                && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
+            |el| el.shadow_lg(),
+        )
         .bg(surface_bg(theme))
         .p(px(CARD_INSET))
         .gap(px(MENU_GAP))
