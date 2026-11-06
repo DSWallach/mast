@@ -282,9 +282,9 @@ fn area(dark: bool) -> ThemeVariant {
             "area-dark",
             "Area Dark",
             Appearance::Dark,
-            "#183028",
-            "#183028",
-            "#D6F1DB",
+            "#182632",
+            "#263847",
+            "#F3F6FB",
             "#B5B5B5",
             ANSI_DARK,
         )
@@ -293,14 +293,14 @@ fn area(dark: bool) -> ThemeVariant {
             "area-light",
             "Area Light",
             Appearance::Light,
-            "#F3F3F3",
-            "#D6F1DB",
+            "#FFFFFF",
+            "#F3F6FB",
             "#183028",
             "#183028",
             ANSI_LIGHT,
         )
     };
-    variant(Seeds {
+    let mut result = variant(Seeds {
         id,
         family_id: "area",
         name,
@@ -329,7 +329,22 @@ fn area(dark: bool) -> ThemeVariant {
             "area-palette",
             "MIT",
         ),
-    })
+    });
+    // Purple and cyan are reference-inspired additions to the Cofactr palette.
+    for (index, color) in [
+        (4, "#3F69CC"),
+        (1, "#FE4B25"),
+        (5, "#8B7CF6"),
+        (3, "#DFBE1B"),
+        (2, "#38D059"),
+        (6, "#619C82"),
+    ] {
+        result.terminal.ansi[index] = c(color);
+    }
+    result.source.asset_hash.clear();
+    let encoded = serde_json::to_vec(&result).expect("built-in theme serializes");
+    result.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
+    result
 }
 
 fn industrial(dark: bool) -> ThemeVariant {

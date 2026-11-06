@@ -338,9 +338,15 @@ const GEIST_MONO: [&[u8]; 8] = [
     include_bytes!("../assets/fonts/GeistMono-BoldItalic.ttf"),
 ];
 
+const EB_GARAMOND: &[u8] = include_bytes!("../assets/fonts/EBGaramond.ttf");
+
 /// Font faces shared by the interface and SVG text-to-path conversion.
 pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
-    GEIST.iter().chain(GEIST_MONO.iter()).copied()
+    GEIST
+        .iter()
+        .chain(GEIST_MONO.iter())
+        .copied()
+        .chain(std::iter::once(EB_GARAMOND))
 }
 
 fn register_family(cx: &App, family: &UiFontFamily, faces: &'static [&'static [u8]]) -> bool {
@@ -430,6 +436,9 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
         .collect();
     let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
     let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
+    if let Err(err) = cx.text_system().add_fonts(vec![Cow::Borrowed(EB_GARAMOND)]) {
+        tracing::warn!(error = %err, "failed to register EB Garamond");
+    }
     FontAvailability {
         geist,
         geist_mono,

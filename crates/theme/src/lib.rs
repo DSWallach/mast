@@ -505,6 +505,13 @@ pub struct ThemeVariant {
 }
 
 impl ThemeVariant {
+    /// Character colours derive from the theme's terminal palette, keeping
+    /// identity independent of the selected presentation style.
+    pub fn identity_palette(&self) -> [Color; 6] {
+        let ansi = self.terminal.ansi;
+        [ansi[4], ansi[1], ansi[5], ansi[3], ansi[2], ansi[6]]
+    }
+
     pub fn accent_for(&self, selection: AccentSelection) -> AccentRoles {
         match selection {
             AccentSelection::ThemeDefault => self.accent,
