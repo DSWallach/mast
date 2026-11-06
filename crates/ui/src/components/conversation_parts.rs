@@ -4,6 +4,69 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_appshot_strip(gap: f32, pad_x: f32, pad_top: f32) -> gpui::Stateful<Div> {
+    div()
+        .id("composer-appshots-strip")
+        .flex()
+        .flex_row()
+        .gap(px(gap))
+        .px(px(pad_x))
+        .pt(px(pad_top))
+        .overflow_x_scroll()
+}
+
+pub fn conversation_appshot_card(
+    index: usize,
+    group: SharedString,
+    width: f32,
+    height: f32,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(("composer-appshot", index))
+        .group(group)
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+        .rounded(px(14.0))
+        .overflow_hidden()
+        .cursor_pointer()
+        .hover(|style| style.bg(crate::theme::ink(0.045)))
+}
+
+pub fn conversation_appshot_remove(
+    theme: &Theme,
+    index: usize,
+    group: SharedString,
+) -> gpui::Stateful<Div> {
+    conversation_reveal(
+        div()
+            .id(("composer-appshot-remove", index))
+            .absolute()
+            .top(px(6.0))
+            .right(px(6.0))
+            .size(px(22.0))
+            .rounded_full()
+            .bg(theme.bg.opacity(0.92))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .shadow_sm(),
+        theme,
+        group,
+        false,
+    )
+    .child(
+        crate::icons::icon(crate::icons::CLOSE_CIRCLE)
+            .size(px(15.0))
+            .text_color(theme.text_muted),
+    )
+}
+
 pub fn conversation_attachment_strip(gap: f32, pad_x: f32, pad_top: f32) -> Div {
     div()
         .w_full()

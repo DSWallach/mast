@@ -8,6 +8,7 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 mod conversation_parts;
 pub use conversation_parts::{
     ConversationComposerBody, agent_message_theme, conversation_add_harness_key, conversation_answer_button,
+    conversation_appshot_card, conversation_appshot_remove, conversation_appshot_strip,
     conversation_attachment_remove, conversation_attachment_strip, conversation_attachment_thumb,
     conversation_attach_key, conversation_code_copy_action, conversation_code_frame,
     conversation_code_icon_action, conversation_code_theme,

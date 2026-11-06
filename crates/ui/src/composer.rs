@@ -5365,14 +5365,7 @@ impl Composer {
         if appshots.is_empty() {
             return None;
         }
-        let mut strip = div()
-            .id("composer-appshots-strip")
-            .flex()
-            .flex_row()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP))
-            .overflow_x_scroll();
+        let mut strip = crate::components::conversation_appshot_strip(STRIP_GAP, STRIP_PAD_X, STRIP_PAD_TOP);
         let max_image_width = self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH)
             - 2.0 * Theme::SPACE_LG
             - 2.0
@@ -5405,20 +5398,7 @@ impl Composer {
             let (image_width, image_height) =
                 appshot_contained_size(appshot.screenshot_dimensions, max_image_width);
             let tile_width = (image_width + 2.0 * APPSHOT_IMAGE_INSET).max(APPSHOT_TILE_MIN_WIDTH);
-            let mut card = div()
-                .id(("composer-appshot", ix))
-                .group(group.clone())
-                .relative()
-                .w(px(tile_width))
-                .h(px(APPSHOT_TILE_HEIGHT))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .items_center()
-                .rounded(px(14.0))
-                .overflow_hidden()
-                .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::ink(0.045)))
+            let mut card = crate::components::conversation_appshot_card(ix, group.clone(), tile_width, APPSHOT_TILE_HEIGHT)
                 .tooltip(move |_, cx| {
                     cx.new(|_| AppshotActionTooltip(preview_label.clone()))
                         .into()
@@ -5522,20 +5502,7 @@ impl Composer {
                 ));
             }
             card = card.child(crate::frost::layered(
-                div()
-                    .id(("composer-appshot-remove", ix))
-                    .absolute()
-                    .top(px(6.0))
-                    .right(px(6.0))
-                    .size(px(22.0))
-                    .rounded_full()
-                    .bg(theme.bg.opacity(0.92))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .shadow_sm()
-                    .when(true, |el| crate::components::conversation_reveal(el, theme, group, false))
+                crate::components::conversation_appshot_remove(theme, ix, group)
                     .tooltip(move |_, cx| {
                         cx.new(|_| AppshotActionTooltip(remove_label.clone()))
                             .into()
@@ -5560,12 +5527,7 @@ impl Composer {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.remove_appshot(&remove_id, cx);
-                    }))
-                    .child(
-                        crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                            .size(px(15.0))
-                            .text_color(theme.text_muted),
-                    ),
+                    })),
             ));
             // Entity-owned timestamps prevent the entrance replaying on route remount.
             if let Some(start) = self.appshot_entrances.get(&appshot.id) {
