@@ -6551,35 +6551,10 @@ impl Transcript {
                 .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
-                let fade_key = format!("copy-message-hover-{entry_id}");
-                div()
-                    .id(SharedString::from(format!("copy-message-{entry_id}")))
-                    .size(px(Theme::SPACE_MD * 2.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .cursor_pointer()
-                    // Same quiet icon-button treatment as the copy action
-                    // over transcript code blocks.
-                    .bg(motion::hover_blend(
-                        &fade_key,
-                        gpui::transparent_black(),
-                        crate::theme::ink(0.08),
-                    ))
-                    .on_hover(motion::hover_listener(fade_key))
+                crate::components::conversation_message_copy_button(&theme, &entry_id, copied_message)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
-                    .child(
-                        crate::icons::icon(if copied_message {
-                            crate::icons::CHECK
-                        } else {
-                            crate::icons::COPY
-                        })
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
-                    )
             });
             let metadata = div()
                 .flex()

@@ -4,6 +4,37 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_message_copy_button(
+    theme: &Theme,
+    entry_id: &str,
+    copied: bool,
+) -> gpui::Stateful<Div> {
+    let fade_key = format!("copy-message-hover-{entry_id}");
+    div()
+        .id(SharedString::from(format!("copy-message-{entry_id}")))
+        .size(px(Theme::SPACE_MD * 2.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .cursor_pointer()
+        .bg(crate::motion::hover_blend(
+            &fade_key,
+            gpui::transparent_black(),
+            crate::theme::ink(0.08),
+        ))
+        .on_hover(crate::motion::hover_listener(fade_key))
+        .child(
+            crate::icons::icon(if copied {
+                crate::icons::CHECK
+            } else {
+                crate::icons::COPY
+            })
+            .size(px(14.0))
+            .text_color(theme.text_muted),
+        )
+}
+
 pub fn conversation_harness_tab(
     theme: &Theme,
     id: SharedString,
