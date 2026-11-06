@@ -1860,7 +1860,12 @@ impl Inner {
         let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
         let root = std::path::Path::new(&space.path);
         let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &snapshot.space_settings.approval_rules) else { return false; };
-        let labels = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>().join(", ");
+        let mut ids = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        let labels = ids.join(", ");
+        // The audit summary must retain every rule id without truncation.
+        if labels.chars().count() > 118 { return false; }
         let Some(mut approval) = friction_approval(question) else { return false; };
         approval.answer = Some(true);
         self.capture_friction_with_policy(chat_id, mast_proto::FrictionKind::Permission, &format!("Auto-approved by rule {labels}"), &question.question, Some(approval), true).is_some()

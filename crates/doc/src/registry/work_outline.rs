@@ -80,6 +80,7 @@ pub const WORK_OUTLINE_KINDS: &[&str] = &[
     KIND_WORK_ITEM_INSTRUCTION_PROPOSALS,
     KIND_WORK_OUTLINE_SPACE_SETTINGS,
     pr_review_sync::KIND_APPROVAL_RULES,
+    crate::registry::friction::KIND_FRICTION_REPORTS,
     KIND_WORK_ITEM_TEMPLATES,
     // Planning artifacts carry `spaceId` too: the Space cascade and the
     // orphan sweep cover them.
@@ -418,6 +419,7 @@ impl RegistryDoc {
             instructions: self.overlay_rows(KIND_WORK_ITEM_INSTRUCTIONS),
             space_settings: self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id),
             approval_rules: self.overlay_rows(pr_review_sync::KIND_APPROVAL_RULES),
+            approval_audit: self.friction_reports(space_id),
             templates: self
                 .overlay_rows(KIND_WORK_ITEM_TEMPLATES)
                 .into_iter()

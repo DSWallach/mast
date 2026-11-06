@@ -3943,6 +3943,10 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].summary.contains("Auto-approved by rule rule-1"));
     assert_eq!(rows[0].approval.as_ref().unwrap().answer, Some(true));
+    let inputs = rig.core.workspace.work_outline_inputs(SPACE);
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &inputs);
+    assert_eq!(snapshot.space_settings.approval_rules[0].hit_count, 1);
+    assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
 }
