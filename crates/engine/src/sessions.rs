@@ -1846,7 +1846,7 @@ impl Inner {
 
     fn auto_approve_command(&self, chat_id: &str, question: &UserInputQuestion) -> bool {
         use mast_proto::work_outline::ApprovalRuleHarness;
-        if question.header != "Approve command" || question.options != ["Yes", "No"] { return false; }
+        if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || question.options != ["Yes", "No"] { return false; }
         let Some(details) = &question.command_approval else { return false; };
         let Some(cwd) = details.cwd.as_deref() else { return false; };
         let Some(ws) = self.workspace() else { return false; };

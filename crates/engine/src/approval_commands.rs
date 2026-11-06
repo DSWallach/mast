@@ -209,7 +209,7 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
             || segment
                 .argv
                 .windows(2)
-                .any(|pair| pair[0] == "git" && pair[1] == "push")
+                .any(|pair| (pair[0] == "git" && pair[1] == "push") || (pair[0] == "rm" && matches!(pair[1].as_str(), "-rf" | "-fr")))
         {
             return false;
         }
@@ -650,6 +650,7 @@ mod tests {
             "cargo test --offline;sudo ps",
             "cargo test --offline -- sudo",
             "cargo test --offline -- git push",
+            "cargo test -- rm -rf",
             "cargo test --offline | sh",
             "cargo test --offline | bash",
             "cargo test --offline $(rm -rf /tmp/x)",
