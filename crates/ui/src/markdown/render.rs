@@ -545,53 +545,6 @@ pub(crate) fn take_question_log() -> Vec<(String, bool, bool, usize)> {
     QUESTION_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
 
-fn question_pill(label: &str, color: Hsla, filled: bool) -> gpui::Div {
-    div()
-        .px(crate::typography::ui_rems(7.0))
-        .h(crate::typography::ui_rems(18.0))
-        .flex()
-        .items_center()
-        .rounded(px(9.0))
-        .border_1()
-        .border_color(color.opacity(0.55))
-        .when(filled, |pill| pill.bg(color.opacity(0.14)))
-        .text_size(crate::typography::ui_rems(11.0))
-        .line_height(crate::typography::ui_rems(16.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color)
-        .child(label.to_owned())
-}
-
-fn answer_button(
-    id: SharedString,
-    selector: String,
-    label: &'static str,
-    primary: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let color = if primary {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
-    div()
-        .id(id)
-        .debug_selector(move || selector.clone())
-        .px(crate::typography::ui_rems(8.0))
-        .h(crate::typography::ui_rems(20.0))
-        .flex()
-        .items_center()
-        .rounded(px(5.0))
-        .cursor_pointer()
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .when(primary, |button| button.bg(color.opacity(0.12)))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(color)
-        .hover(|style| style.bg(color.opacity(0.2)))
-        .child(label)
-}
-
 /// The "Answer" button of an open question, or its input with Send / Cancel.
 fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Theme) -> AnyElement {
     let editing = ui.editing.as_deref() == Some(id) && ui.input.is_some();
@@ -602,7 +555,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
             .flex()
             .flex_row()
             .child(
-                answer_button(
+                crate::components::conversation_answer_button(
                     SharedString::from(format!("{row_key}-answer-{id}")),
                     format!("question-answer-{id}"),
                     "Answer",
@@ -643,7 +596,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
                 .flex_row()
                 .gap(crate::typography::ui_rems(6.0))
                 .child(
-                    answer_button(
+                    crate::components::conversation_answer_button(
                         SharedString::from(format!("{row_key}-answer-send-{id}")),
                         format!("question-answer-send-{id}"),
                         "Send",
@@ -653,7 +606,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
                     .on_click(move |_, window, cx| send(target.clone(), window, cx)),
                 )
                 .child(
-                    answer_button(
+                    crate::components::conversation_answer_button(
                         SharedString::from(format!("{row_key}-answer-cancel-{id}")),
                         format!("question-answer-cancel-{id}"),
                         "Cancel",
@@ -727,9 +680,9 @@ fn render_question(
                 .child(id.clone()),
         );
     }
-    header = header.child(question_pill(status.label(), status_color, true));
+    header = header.child(crate::components::conversation_question_pill(theme, status.label(), status_color, true));
     if card.blocking {
-        header = header.child(question_pill("Blocking", theme.danger, false));
+        header = header.child(crate::components::conversation_question_pill(theme, "Blocking", theme.danger, false));
     }
     if collapsible {
         let ui = opts.question.clone().expect("collapsible implies an owner");

@@ -1189,3 +1189,55 @@ pub fn conversation_question_chip(
         )
         .into_any_element()
 }
+
+pub fn conversation_question_pill(
+    theme: &Theme,
+    label: &str,
+    color: Hsla,
+    filled: bool,
+) -> gpui::Div {
+    div()
+        .px(crate::typography::ui_rems(7.0))
+        .h(crate::typography::ui_rems(18.0))
+        .flex()
+        .items_center()
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(9.0)))
+        .border_1()
+        .border_color(color.opacity(0.55))
+        .when(filled, |pill| pill.bg(color.opacity(0.14)))
+        .text_size(crate::typography::ui_rems(11.0))
+        .line_height(crate::typography::ui_rems(16.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(color)
+        .child(label.to_owned())
+}
+
+pub fn conversation_answer_button(
+    id: SharedString,
+    selector: String,
+    label: &'static str,
+    primary: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let color = if primary {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .px(crate::typography::ui_rems(8.0))
+        .h(crate::typography::ui_rems(20.0))
+        .flex()
+        .items_center()
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(5.0)))
+        .cursor_pointer()
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .when(primary, |button| button.bg(color.opacity(0.12)))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(color)
+        .hover(|style| style.bg(color.opacity(0.2)))
+        .child(label)
+}
