@@ -314,7 +314,7 @@ fn area(dark: bool) -> ThemeVariant {
         muted,
         faint: muted,
         accent: "#3F69CC",
-        danger: text,
+        danger: "#FE4B25",
         warning: text,
         success: text,
         terminal_background: background,
