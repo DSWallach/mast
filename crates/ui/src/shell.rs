@@ -7317,11 +7317,27 @@ impl Shell {
             }
         };
         let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
-        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), preview) {
+        let area_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let archive_id = id.clone();
+        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), preview, area_hovered, archived, cx.listener(move |this, _, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))) {
             let select_id = id.clone();
             let menu_id = id.clone();
             return row
                 .when(!preview, |el| el.cursor_pointer()
+                    .on_hover({
+                        let hover_id = row_id.clone();
+                        cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                                    this.chat_status_hover = Some(hover_id.clone());
+                                    cx.notify();
+                                }
+                            } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                                this.chat_status_hover = None;
+                                cx.notify();
+                            }
+                        })
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.open_chat(select_id.clone(), cx)))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter().find(|chat| chat.id == menu_id).and_then(|chat| chat.cwd.as_deref()));

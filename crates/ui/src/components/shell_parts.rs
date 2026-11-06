@@ -371,6 +371,9 @@ pub(crate) fn area_sidebar_chat_row(
     account: Option<String>,
     change_request: Option<mast_proto::ChangeRequestSummary>,
     preview: bool,
+    hovered: bool,
+    archived: bool,
+    on_archive: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Option<gpui::Stateful<gpui::Div>> {
     if !super::is_area(theme) || searching {
         return None;
@@ -402,6 +405,42 @@ pub(crate) fn area_sidebar_chat_row(
             )
         }
     });
+    let corner = if hovered && !preview {
+        div()
+            .id(SharedString::from(format!("{row_id}-corner")))
+            .aria_label(if archived { "Unarchive" } else { "Archive" })
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                on_archive(event, window, cx);
+            })
+            .child(
+                icon(if archived {
+                    crate::icons::ARCHIVE_UP_MINIMALISTIC
+                } else {
+                    crate::icons::ARCHIVE_MINIMALISTIC
+                })
+                .size(px(14.0))
+                .text_color(foreground),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .debug_selector(move || status_selector.clone())
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(crate::status_style::indicator_for_theme(status, theme))
+            .when(theme.ui_style.behavior.status_words, |el| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .child(status_label),
+                )
+            })
+            .into_any_element()
+    };
     Some(
         div()
             .id(SharedString::from(row_id))
@@ -431,21 +470,7 @@ pub(crate) fn area_sidebar_chat_row(
                     .debug_selector(move || account_selector.clone())
             }))
             .children(badge)
-            .child(
-                div()
-                    .debug_selector(move || status_selector.clone())
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(crate::status_style::indicator_for_theme(status, theme))
-                    .when(theme.ui_style.behavior.status_words, |el| {
-                        el.child(
-                            div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .child(status_label),
-                        )
-                    }),
-            ),
+            .child(corner),
     )
 }
 
