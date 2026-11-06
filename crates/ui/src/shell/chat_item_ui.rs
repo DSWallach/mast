@@ -485,29 +485,7 @@ impl Shell {
             let icon_selector = format!("{selector}-icon");
             let clickable = url.is_some();
             let (border, text) = chip_palette(theme, tone);
-            div()
-                .id(id)
-                .debug_selector(move || selector.clone())
-                .max_w(px(230.0))
-                .h(px(20.0))
-                .px(px(7.0))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(border)
-                .bg(theme.element_hover.opacity(0.55))
-                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface_raised))
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(text)
-                .when(is_model && theme.ui_style.controls == crate::ui_style::ControlVariant::Key && tone == ChipTone::Plain, |chip| {
-                    let dark = theme.appearance.is_dark();
-                    chip.rounded(px(0.0)).bg(if dark { theme.bg } else { theme.solid })
-                        .border_color(theme.industrial_colors().rule)
-                        .font_family(theme.font_mono.clone())
-                        .text_color(if dark { theme.text } else { theme.on_solid })
-                })
+            crate::components::shell_parts::chat_header_chip(id, selector, theme, border, text, is_model && tone == ChipTone::Plain)
                 .when(clickable, |chip| {
                     chip.cursor_pointer()
                         .hover(|chip| chip.bg(theme.element_hover))
@@ -517,13 +495,7 @@ impl Shell {
                         .debug_selector(move || icon_selector.clone())
                         .flex_none()
                         .child(crate::icons::icon(icon_path).size(px(11.0)).text_color(
-                            if is_model && theme.ui_style.controls == crate::ui_style::ControlVariant::Key && tone == ChipTone::Plain {
-                                if theme.appearance.is_dark() { theme.text } else { theme.on_solid }
-                            } else if tone == ChipTone::Link {
-                                theme.accent
-                            } else {
-                                text
-                            },
+                            crate::components::shell_parts::chat_header_chip_icon_color(theme, text, is_model && tone == ChipTone::Plain, tone == ChipTone::Link),
                         )),
                 )
                 .child(div().min_w_0().truncate().child(SharedString::from(label)))

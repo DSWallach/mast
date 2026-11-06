@@ -37,6 +37,63 @@ pub(crate) fn sidebar_section_label(theme: &Theme, label: SharedString) -> gpui:
         .child(label)
 }
 
+pub(crate) fn chat_header_chip(
+    id: SharedString,
+    selector: String,
+    theme: &Theme,
+    border: gpui::Hsla,
+    text: gpui::Hsla,
+    model: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .max_w(px(230.0))
+        .h(px(20.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(border)
+        .bg(theme.element_hover.opacity(0.55))
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface_raised),
+        )
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(text)
+        .when(model && super::is_industrial(theme), |chip| {
+            let dark = theme.appearance.is_dark();
+            chip.rounded(px(0.0))
+                .bg(if dark { theme.bg } else { theme.solid })
+                .border_color(theme.industrial_colors().rule)
+                .font_family(theme.font_mono.clone())
+                .text_color(if dark { theme.text } else { theme.on_solid })
+        })
+}
+
+pub(crate) fn chat_header_chip_icon_color(
+    theme: &Theme,
+    text: gpui::Hsla,
+    model: bool,
+    link: bool,
+) -> gpui::Hsla {
+    if model && super::is_industrial(theme) {
+        if theme.appearance.is_dark() {
+            theme.text
+        } else {
+            theme.on_solid
+        }
+    } else if link {
+        theme.accent
+    } else {
+        text
+    }
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(
