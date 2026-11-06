@@ -2726,17 +2726,7 @@ impl OutlineView {
             format!("{count} artifacts").into()
         };
         Some(
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(10.0)))
-                .child(SharedString::from(count.to_string()))
+            crate::components::outline_artifact_count(SharedString::from(selector), count, theme)
                 .children(changed.map(|(from, to)| {
                     crate::artifacts::questions_ui::changed_dot(
                         format!("outline-artifacts-changed-{key}"),
@@ -2767,28 +2757,7 @@ impl OutlineView {
             .is_some_and(|state| state.drift);
         (drift && !chat.dangling).then(|| {
             let chat_id = chat.chat.id.clone();
-            div()
-                .id(SharedString::from(format!("outline-drift-{key}")))
-                .debug_selector({
-                    let selector = format!("outline-drift-{key}");
-                    move || selector.clone()
-                })
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.warning)
-                .hover(|el| el.bg(theme.element_hover))
-                .child(
-                    crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                        .size(px(10.0))
-                        .text_color(theme.warning),
-                )
-                .child("Instructions changed")
+            crate::components::outline_drift_button(SharedString::from(format!("outline-drift-{key}")), theme)
                 .hint(chips::INSTRUCTION_DRIFT_TOOLTIP, HintKey::None)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();

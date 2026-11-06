@@ -746,6 +746,50 @@ pub fn outline_details_footer() -> Div {
     div().flex().items_start()
 }
 
+/// Artifact count marker in an outline row.
+pub fn outline_artifact_count(id: SharedString, count: usize, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(10.0)))
+        .child(SharedString::from(count.to_string()))
+}
+
+/// Instruction drift action in an outline row.
+pub fn outline_drift_button(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.warning)
+        .hover(|el| el.bg(theme.element_hover))
+        .child(
+            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                .size(px(10.0))
+                .text_color(theme.warning),
+        )
+        .child("Instructions changed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
