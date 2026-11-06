@@ -6,6 +6,7 @@ use mast_ui::{
 use std::path::PathBuf;
 
 struct Frame {
+    screen: String,
     label: String,
     view: AnyView,
 }
@@ -25,7 +26,7 @@ impl Render for Frame {
                     .flex()
                     .items_center()
                     .bg(theme.surface_raised)
-                    .child(self.label.clone()),
+                    .child(format!("{}   |   {}", self.screen, self.label)),
             )
             .child(div().flex_1().min_h_0().child(self.view.clone()))
     }
@@ -207,7 +208,11 @@ pub fn render(
                     .into(),
                 _ => unreachable!(),
             };
-            cx.new(|_| Frame { label, view })
+            cx.new(|_| Frame {
+                screen,
+                label,
+                view,
+            })
         },
     )
 }

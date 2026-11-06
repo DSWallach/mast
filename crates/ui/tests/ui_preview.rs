@@ -79,7 +79,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
         );
         for (index, cell) in cells
             .iter()
-            .filter(|cell| cell.screen == screen)
+            .filter(|cell| cell.screen == screen.as_str())
             .enumerate()
         {
             let style = UiStyleId::ALL[style_names.iter().position(|s| s == cell.style).unwrap()];
