@@ -1572,6 +1572,7 @@ impl Render for WorkItemDetails {
                     .p(px(2.0))
                     .rounded(px(6.0))
                     .bg(theme.element_hover.opacity(0.5))
+                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
                     .children(status_pills),
             )
             .when_some(attention, |el, attention| el.child(attention))
