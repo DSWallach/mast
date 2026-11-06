@@ -241,31 +241,19 @@ pub(super) struct TourHunk {
     pub identity: String,
 }
 
-/// Legacy sidecars predate shared identities and used a different hash.
-fn step_covers_hunk(step: &ReviewStep, file: &FileDiff, hunk: usize, legacy: bool) -> bool {
+/// ArtifactContent normalizes legacy hashes when the reviewed commits are
+/// available. An unmatched hash remains uncovered rather than guessing by line.
+fn step_covers_hunk(step: &ReviewStep, file: &FileDiff, hunk: usize) -> bool {
     if step.file != file.path {
         return false;
     }
     let Some(hunk) = file.hunks.get(hunk) else {
         return false;
     };
-    if !legacy {
-        let identity = hunk_identity(&file.path, hunk);
-        return step
-            .hunks
-            .iter()
-            .any(|anchor| anchor.hunk_hash.as_deref() == Some(identity.as_str()));
-    }
-    let mut lines = hunk.lines.iter().filter_map(|line| line.new_no);
-    let Some(first) = lines.next() else {
-        return false;
-    };
-    let (start, end) = lines.fold((first, first), |(start, end), line| {
-        (start.min(line), end.max(line))
-    });
-    step.hunks.iter().any(|range| {
-        range.new_start <= range.new_end && range.new_start <= end && start <= range.new_end
-    })
+    let identity = hunk_identity(&file.path, hunk);
+    step.hunks
+        .iter()
+        .any(|anchor| anchor.hunk_hash.as_deref() == Some(identity.as_str()))
 }
 
 #[derive(Clone, Debug)]
@@ -276,7 +264,7 @@ pub(super) struct TourCoverage {
 }
 
 impl TourCoverage {
-    pub fn new(steps: &[ReviewStep], files: &[FileDiff], legacy: bool) -> Self {
+    pub fn new(steps: &[ReviewStep], files: &[FileDiff]) -> Self {
         let mut covered = HashSet::new();
         let complete = steps
             .iter()
@@ -287,7 +275,7 @@ impl TourCoverage {
                         single.hunks = vec![range.clone()];
                         files.iter().any(|file| {
                             (0..file.hunks.len())
-                                .any(|index| step_covers_hunk(&single, file, index, legacy))
+                                .any(|index| step_covers_hunk(&single, file, index))
                         })
                     })
             })
@@ -303,7 +291,7 @@ impl TourCoverage {
                             .iter()
                             .enumerate()
                             .filter_map(move |(hunk_index, hunk)| {
-                                step_covers_hunk(step, file, hunk_index, legacy).then(|| TourHunk {
+                                step_covers_hunk(step, file, hunk_index).then(|| TourHunk {
                                     file: file_index,
                                     hunk: hunk_index,
                                     identity: hunk_identity(&file.path, hunk),
@@ -374,7 +362,6 @@ struct TourReview {
     steps: Vec<ReviewStep>,
     head: String,
     target_key: String,
-    legacy_hashes: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -386,7 +373,6 @@ struct ReviewDocument {
 
 impl ReviewDocument {
     fn into_review(self) -> Result<(ReviewTarget, TourReview), String> {
-        let legacy = self.target.is_none();
         let target = match self.target {
             Some(target) => target,
             None => {
@@ -410,7 +396,6 @@ impl ReviewDocument {
                 steps: self.steps,
                 head,
                 target_key,
-                legacy_hashes: legacy,
             },
         ))
     }
@@ -440,9 +425,8 @@ impl Walkthrough {
     }
 
     fn coverage(&mut self) -> &TourCoverage {
-        self.coverage.get_or_insert_with(|| {
-            TourCoverage::new(&self.review.steps, &self.files, self.review.legacy_hashes)
-        })
+        self.coverage
+            .get_or_insert_with(|| TourCoverage::new(&self.review.steps, &self.files))
     }
 
     fn select_step(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -624,7 +608,16 @@ impl Render for Walkthrough {
                                 " "
                             }),
                     )
-                    .child(format!("{}. {}", index + 1, step.title)),
+                    .child(format!(
+                        "{}. {}{}",
+                        index + 1,
+                        step.title,
+                        if !self.files.is_empty() && !coverage.complete[index] {
+                            " · Outdated"
+                        } else {
+                            ""
+                        }
+                    )),
             );
         }
         let mut uncovered = div()
@@ -799,13 +792,12 @@ mod tests {
                 steps: sidecar.steps,
                 head: sidecar.pr.head_sha,
                 target_key: "pr:o/r#1".into(),
-                legacy_hashes: true,
             }
         }
     }
 
     fn fixture() -> (ReviewSidecar, Vec<FileDiff>) {
-        let review = serde_json::from_str(
+        let mut review: ReviewSidecar = serde_json::from_str(
             r#"{
           "schema":"mast.review/v1", "pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},
           "summary":"Summary", "steps":[{"id":"s1","title":"First", "file":"a.rs",
@@ -818,13 +810,14 @@ mod tests {
         let files = parse_patch(
             "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n@@ -9 +9 @@\n-before\n+after\n",
         );
+        review.steps[0].hunks[0].hunk_hash = Some(hunk_identity("a.rs", &files[0].hunks[0]));
         (review, files)
     }
 
     #[test]
     fn coverage_and_progress_use_manual_hunk_marks() {
         let (review, files) = fixture();
-        let coverage = TourCoverage::new(&review.steps, &files, true);
+        let coverage = TourCoverage::new(&review.steps, &files);
         assert_eq!(coverage.steps[0].len(), 1);
         assert_eq!(coverage.uncovered.len(), 1);
         let mut viewed = BTreeSet::new();
@@ -844,11 +837,8 @@ mod tests {
         let changed = parse_patch(
             "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+different\n",
         );
-        assert_eq!(
-            TourCoverage::new(&review.steps, &moved, false).steps[0].len(),
-            1
-        );
-        let coverage = TourCoverage::new(&review.steps, &changed, false);
+        assert_eq!(TourCoverage::new(&review.steps, &moved).steps[0].len(), 1);
+        let coverage = TourCoverage::new(&review.steps, &changed);
         assert!(coverage.steps[0].is_empty());
         assert_eq!(coverage.uncovered.len(), 1);
     }
@@ -859,7 +849,6 @@ mod tests {
         let (target, review) = document.into_review().unwrap();
         assert!(matches!(target, ReviewTarget::Branch { .. }));
         assert_eq!(review.head, "abc");
-        assert!(!review.legacy_hashes);
     }
 
     #[test]
@@ -870,12 +859,21 @@ mod tests {
             new_end: 51,
             hunk_hash: None,
         });
-        let coverage = TourCoverage::new(&review.steps, &files, true);
+        let coverage = TourCoverage::new(&review.steps, &files);
         let viewed = coverage.steps[0]
             .iter()
             .map(|hunk| hunk.identity.clone())
             .collect();
         assert_eq!(coverage.reviewed_count(&viewed), 0);
+    }
+
+    #[test]
+    fn unnormalized_hash_does_not_match_by_line_number() {
+        let (mut review, files) = fixture();
+        review.steps[0].hunks[0].hunk_hash = Some("legacy-hash".into());
+        let coverage = TourCoverage::new(&review.steps, &files);
+        assert!(coverage.steps[0].is_empty());
+        assert_eq!(coverage.uncovered.len(), 2);
     }
 
     #[test]
