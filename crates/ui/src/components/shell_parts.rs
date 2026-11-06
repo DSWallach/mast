@@ -355,6 +355,80 @@ pub(crate) fn titlebar_overlay(theme: &Theme, title_bar: AnyElement) -> gpui::Di
         .child(title_bar)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn area_sidebar_chat_row(
+    theme: &Theme,
+    row_id: String,
+    chat_id: &str,
+    title: SharedString,
+    status: mast_proto::ChatIndicator,
+    selected: bool,
+    searching: bool,
+    account: Option<String>,
+    change_request: Option<mast_proto::ChangeRequestSummary>,
+    preview: bool,
+) -> Option<gpui::Stateful<gpui::Div>> {
+    if !super::is_area(theme) || searching {
+        return None;
+    }
+    let identity = theme.identity_color(chat_id);
+    let foreground = if selected {
+        theme.identity_text(identity)
+    } else {
+        theme.text
+    };
+    let selector = format!("chat-{chat_id}");
+    let badge = change_request.map(|summary| {
+        let badge_id = SharedString::from(format!("{row_id}-compact-pr"));
+        if preview {
+            crate::change_requests::pull_request_badge_preview(
+                badge_id,
+                summary,
+                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                theme,
+            )
+        } else {
+            crate::change_requests::pull_request_badge(
+                badge_id,
+                summary,
+                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                theme,
+            )
+        }
+    });
+    Some(
+        div()
+            .id(SharedString::from(row_id))
+            .aria_label(SharedString::from(format!("{title} · {status:?}")))
+            .debug_selector(move || selector.clone())
+            .h(px(theme.ui_style.tokens.sidebar_row_compact_h))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded_full()
+            .text_color(foreground)
+            .when(selected, |el| el.bg(identity))
+            .when(!selected, |el| {
+                el.hover(|style| style.bg(theme.element_hover))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(8.0))
+                    .rounded_full()
+                    .bg(if selected { foreground } else { identity }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(title))
+            .children(account.map(|label| crate::managed_accounts::account_pill(theme, label)))
+            .children(badge)
+            .child(crate::status_style::indicator_for_theme(
+                status.into(),
+                theme,
+            )),
+    )
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(

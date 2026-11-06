@@ -7284,18 +7284,10 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
-        if theme.ui_style.id == crate::ui_style::UiStyleId::Area && search_query.is_none() {
-            let identity = theme.identity_color(&id);
-            let foreground = if selected { theme.identity_text(identity) } else { theme.text };
+        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, title.clone(), status, selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), preview) {
             let select_id = id.clone();
             let menu_id = id.clone();
-            return div().id(SharedString::from(row_id)).aria_label(SharedString::from(format!("{title} · {status:?}"))).debug_selector({ let id = id.clone(); move || format!("chat-{id}") })
-                .h(px(theme.ui_style.tokens.sidebar_row_compact_h)).px(px(10.0)).flex().items_center().gap(px(8.0))
-                .rounded(px(12.0)).text_color(foreground)
-                .when(selected, |el| el.bg(identity))
-                .when(!selected, |el| el.hover(|style| style.bg(theme.element_hover)))
-                .child(div().flex_none().size(px(8.0)).rounded_full().bg(if selected { foreground } else { identity }))
-                .child(div().flex_1().min_w_0().truncate().child(title))
+            return row
                 .when(!preview, |el| el.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.open_chat(select_id.clone(), cx)))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
