@@ -4,6 +4,31 @@ use crate::theme::Theme;
 use crate::ui_style::ConversationVariant;
 use gpui::{AnyElement, Div, Hsla, SharedString, div, prelude::*, px};
 
+pub fn conversation_harness_tab(
+    theme: &Theme,
+    id: SharedString,
+    identity: Hsla,
+    icon: &'static str,
+    selected: bool,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(28.0))
+        .rounded_t(px(14.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(identity)
+        .text_color(theme.identity_text(identity))
+        .when(!selected, |el| el.opacity(0.75))
+        .cursor_pointer()
+        .child(
+            crate::icons::icon(icon)
+                .size(px(16.0))
+                .text_color(theme.identity_text(identity)),
+        )
+}
+
 pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
     div()
         .id("composer-attach")

@@ -8750,12 +8750,7 @@ impl Render for Composer {
                 let (path, _) = crate::pickers::harness_brand_icon(harness);
                 let selected = selected == Some(harness);
                 let tab_identity = theme.identity_color(&format!("harness:{harness:?}"));
-                div().id(SharedString::from(format!("area-harness-{harness:?}")))
-                    .size(px(28.0)).rounded_t(px(14.0)).flex().items_center().justify_center()
-                    .bg(tab_identity)
-                    .text_color(theme.identity_text(tab_identity))
-                    .when(!selected, |el| el.opacity(0.75))
-                    .cursor_pointer().child(crate::icons::icon(path).size(px(16.0)).text_color(theme.identity_text(tab_identity)))
+                crate::components::conversation_harness_tab(&theme, SharedString::from(format!("area-harness-{harness:?}")), tab_identity, path, selected)
                     .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
                         pickers.pick_harness(harness, cx);
                         pickers.open_model_menu(window, cx);
