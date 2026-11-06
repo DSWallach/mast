@@ -63,6 +63,7 @@ use mast_syntax::LanguageId as Lang;
 mod file_list;
 mod ref_picker;
 mod review_state;
+mod walkthrough;
 
 use file_list::*;
 use review_state::*;
