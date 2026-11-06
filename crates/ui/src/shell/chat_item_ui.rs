@@ -218,7 +218,18 @@ impl Shell {
         self.leave_overview_for_chat(cx);
         self.set_surfaces_open(true, cx);
         self.set_right_active(RightSurface::Item, cx);
-        self.load_branch_review_target(self.active_chat.clone(), cx);
+        let mut review_chats = vec![self.active_chat.clone()];
+        if let Some(facts) = self.chat_item_facts(&self.active_chat, cx)
+            && let Some(item) = facts.item
+        {
+            let state = self.state.read(cx);
+            let load = state.work_outline(&item.space_id);
+            let chats = load.snapshot().and_then(|snapshot| snapshot.items.iter().find(|row| row.id == item.item_id)).map(|item| item.chat_ids.clone()).unwrap_or_default();
+            for chat in &chats {
+                if !review_chats.contains(chat) { review_chats.push(chat.clone()); }
+            }
+        }
+        for chat_id in review_chats { self.load_branch_review_target(chat_id, cx); }
         self.chat_item_card.dismiss();
         cx.notify();
     }
@@ -928,9 +939,16 @@ impl Shell {
                 .hover(|el| el.bg(theme.element_hover))
         };
         let mut col = div().flex().flex_col().gap(px(10.0));
-        if let Some(target) = self.branch_review_target(&facts.chat_id) {
-            let exists = self.existing_branch_review(&facts.chat_id, target, cx).is_some();
-            let chat_id = facts.chat_id.clone();
+        let review_chat = self.branch_review_target(&facts.chat_id).map(|_| facts.chat_id.clone()).or_else(|| {
+            let item = facts.item.as_ref()?;
+            let state = self.state.read(cx);
+            let load = state.work_outline(&item.space_id);
+            let snapshot = load.snapshot()?;
+            let item = snapshot.items.iter().find(|row| row.id == item.item_id)?;
+            item.chat_ids.iter().find(|chat_id| self.branch_review_target(chat_id).is_some()).cloned()
+        });
+        if let Some(chat_id) = review_chat {
+            let exists = self.branch_review_target(&chat_id).and_then(|target| self.existing_branch_review(&chat_id, target, cx)).is_some();
             col = col.child(link("chat-item-review-work".into(), theme.accent, false)
                 .child(if exists { "Open review" } else { "Review this work" })
                 .on_click(cx.listener(move |this, _, _, cx| this.open_branch_review_for_chat(chat_id.clone(), cx))));

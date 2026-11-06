@@ -234,6 +234,7 @@ mod tests {
     #[gpui::test]
     fn branch_review_opens_existing_review_without_launching(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx));
         let (shell, cx) = test_shell(cx, directory.path());
         let target = mast_proto::ReviewTarget::Branch {
             repo: Some("acme/repo".into()), checkout_path: Some("/repo/worktree".into()),
