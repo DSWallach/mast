@@ -1023,7 +1023,8 @@ fn container_template_button_shows_and_applies_proposal(cx: &mut gpui::TestAppCo
     vcx.run_until_parked();
     let recorded = calls.lock().unwrap().clone();
     assert_eq!(recorded[0]["proposalId"], "inline");
-    assert_eq!(recorded[0]["projectOnly"], false);
+    assert_eq!(recorded[0]["op"], "approveWorkItemInstructionProposal");
+    assert!(recorded[0].get("projectOnly").is_none());
 }
 
 #[gpui::test]
