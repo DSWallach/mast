@@ -1,6 +1,6 @@
 # Work Outline — implementation handoff
 
-Prepared 2026-10-14, last updated 2026-11-06. Read this first in a new chat picking up the Work Outline work.
+Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new chat picking up the Work Outline work.
 
 ## Where things are
 
@@ -1006,7 +1006,43 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-05 evening; coordinator handed off from chat 74bc70e5)
+## In flight (snapshot 2026-11-06 evening; coordinator 1d22a4b9 handing off)
+
+**State at hand-off (read this first):**
+- Installed and current: release 63, the component foundation (`ui-components`), which gives Style {Default,
+  Industrial, Area} × Layout {Minimal, Compact, Guided} × Theme as three independent pickers. Default+Minimal is
+  pixel-identical. Approval rules are installed (release 61). Mikey restarted after release 61; release 63 is
+  installed but may not be restarted into yet.
+- **Running (Codex Terra), the component MIGRATIONS** (parent item 06a135d5; slice ownership in
+  docs/internal/ui-components.md):
+  - `migrate-shell` (chat 8d4a5ade, item 8cb5b061): shell.rs, shell/, rail.rs. Titlebar and header buttons done.
+  - `migrate-conversation` (chat 54595609, item 90dbc4aa): transcript.rs, composer*, markdown/. Messages, tool
+    and code panels, SEND key, Area composer width + 3-line min done.
+  - `migrate-outline` (chat 7e43c6b5, item 624586b8): work_outline/, overview*.rs. Rows, status, toolbar, item
+    controls, Needs-you buttons done; UI 2577/0.
+  Each must: remove all style/layout branches from its files, lower the ratchet baseline (component_lint), keep
+  Default+Minimal ≥ 0.999 via the snapshot compare, then run ONE `scripts/ui-preview.sh` and look at it, then raise
+  Ready to merge. THE COORDINATOR REVIEWS THE SHEETS ITSELF (Read the PNGs) before merging. They may conflict on
+  components/mod.rs; new pieces were asked to go in components/<slice>_parts.rs.
+- **Next slices after these merge:** changes/walkthrough (changes.rs, changes/, files/), settings/appearance,
+  browser/artifacts, linear/team, menus/remaining (popover, pickers, app_menus, menu_bar). Then Area v2 polish and
+  Industrial polish as pure component skins (Mikey: "both inconsistently applied"; Area "all over the place"). The
+  Area reference images are the area.tech OpenAI case study (Sidebar, Writer_Demo, Tool_Dock_Demo,
+  Character_Tag_Demo, Warp_Code_Demo), described in docs/internal/styles/area.md.
+- **Waiting on Mikey (Needs-you):** proposed approval rule "UI preview sheets" (request 26af0df6, one-click accept;
+  it stops the per-render approvals); workflow pack draft; coworker readiness findings; active-checkout design.
+  Mikey should also enable the suggested approval rules (Space settings → Approval rules).
+- **Phase 0 observation** item 9516dd7c waits until 2026-11-12 (waitingUntil set): then re-run the metrics per
+  the observation log (mast-artifact:0b48afa2…) and give a go/no-go.
+- **Lessons this session:** merging two branches can break the build semantically even when git merges cleanly
+  (approval-rules used a helper that ui-components removed); always run at least `cargo build -p mast-ui` right
+  after merging, before starting workers from that base. Five concurrent clean builds overload the machine (load
+  ~98) and eat about 25 GB each: keep to about 3 builders, prune `target/debug` (`-mmin +180`) after each release,
+  delete merged worktrees' target-clean right away. Terra stops after the first slice almost every turn, so send
+  an ordered "keep going" list. Workers can't capture the screen, but the coordinator and Mikey can review offscreen
+  PNGs; Mikey can also paste screenshots into chat.
+
+## In flight (older snapshot 2026-11-05 evening; coordinator handed off from chat 74bc70e5)
 
 **Coordinator:** a fresh Mast Dev chat created by `hand_off_orchestrator` from 74bc70e5 (which ran 2026-11-03 → 11-05).
 Keep it thin: implementation goes to Codex Terra (Mikey's preference to save Anthropic usage). Release runs go
