@@ -1535,6 +1535,46 @@ pub fn outline_execution_exception_marker(count: usize, theme: &Theme) -> Statef
         )))
 }
 
+/// A blueprint review change row.
+pub fn outline_template_review_row(
+    selector: String,
+    sign: &'static str,
+    text: String,
+    theme: &Theme,
+) -> Div {
+    outline_detail_row(theme)
+        .debug_selector(move || selector.clone())
+        .child(
+            div()
+                .flex_none()
+                .w(px(10.0))
+                .text_size(crate::typography::ui_rems(
+                    10.5 + super::layout_type_adjustment(theme),
+                ))
+                .text_color(theme.text_muted)
+                .child(sign),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(crate::typography::ui_rems(
+                    10.5 + super::layout_type_adjustment(theme),
+                ))
+                .text_color(theme.text)
+                .child(SharedString::from(text)),
+        )
+}
+pub fn outline_template_review_status(status: SharedString, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

@@ -299,10 +299,7 @@ impl WorkItemDetails {
             .as_ref()
             .filter(|open| open.item_id == item.id);
         out.push(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
+            crate::components::outline_detail_row(theme)
                 .child(template_chip(
                     "work-item-template-changed".to_owned(),
                     from,
@@ -327,10 +324,7 @@ impl WorkItemDetails {
         };
         if open.rows.is_empty() {
             out.push(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child("Nothing differs in structure or instructions. Mark reviewed to clear the chip.")
+                crate::components::outline_secondary_text("Nothing differs in structure or instructions. Mark reviewed to clear the chip.".into(), theme)
                     .into_any_element(),
             );
         }
@@ -339,18 +333,13 @@ impl WorkItemDetails {
         }
         if let Some(error) = &open.error {
             out.push(
-                div()
+                crate::components::outline_secondary_text(error.clone(), theme)
                     .debug_selector(|| "work-item-review-error".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(error.clone()))
                     .into_any_element(),
             );
         }
         out.push(
-            div()
-                .flex()
-                .gap(px(6.0))
+            crate::components::outline_action_row(theme)
                 .child(
                     crate::work_outline::hints::details_button("work-item-review-accept-all", "Accept all", theme)
                         .debug_selector(|| "work-item-review-accept-all".into())
@@ -391,34 +380,10 @@ impl WorkItemDetails {
         };
         let actionable = review::applicable(&row.change)
             && matches!(row.state, RowState::Pending | RowState::Failed(_));
-        let mut line = div()
-            .debug_selector(move || selector.clone())
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(10.0))
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(sign),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text)
-                    .child(SharedString::from(text)),
-            );
+        let mut line = crate::components::outline_template_review_row(selector, sign, text, theme);
         if let Some(status) = status {
             line = line.child(
-                div()
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_muted)
-                    .child(status),
+                crate::components::outline_template_review_status(status, theme),
             );
         }
         if actionable {
