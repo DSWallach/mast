@@ -532,6 +532,11 @@ mod tests {
                                     ),
                             )
                             .child(crate::popover::popover_card(&theme).child("Menu"))
+                            .child(crate::popover::dialog_card(&theme)
+                                .child(crate::popover::dialog_title(&theme, "Title"))
+                                .child(crate::popover::dialog_field(&theme, div().child("Input").into_any_element()))
+                                .child(crate::popover::btn_primary(&theme, "Apply"))
+                                .child(crate::popover::btn_ghost(&theme, "Cancel", "industrial-test-cancel")))
                     }),
                 )
             }

@@ -540,7 +540,7 @@ impl Shell {
                 .child(
                     div()
                         .mt(px(16.0))
-                        .child(popover::dialog_field(input.into_any_element())),
+                        .child(popover::dialog_field(&theme, input.into_any_element())),
                 )
                 .child(
                     div()

@@ -936,7 +936,7 @@ impl AccountFlow {
                     div()
                         .flex()
                         .flex_col()
-                        .child(div().mt(px(12.0)).child(popover::dialog_field(
+                        .child(div().mt(px(12.0)).child(popover::dialog_field(&theme,
                             self.name_input.clone().into_any_element(),
                         )))
                         .child(
@@ -1082,7 +1082,7 @@ impl AccountFlow {
                 )
             })
             .when(login.awaiting_code, |el| {
-                el.child(div().mt(px(12.0)).child(popover::dialog_field(
+                el.child(div().mt(px(12.0)).child(popover::dialog_field(&theme,
                     self.code_input.clone().into_any_element(),
                 )))
                 .child(

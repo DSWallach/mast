@@ -2293,7 +2293,7 @@ impl AppearancePage {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        popover::dialog_field(input.into_any_element())
+                        popover::dialog_field(&theme, input.into_any_element())
                             .flex_1()
                             .min_w_0()
                             .h(px(36.0))

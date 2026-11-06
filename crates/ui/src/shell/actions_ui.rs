@@ -858,10 +858,10 @@ impl Shell {
             }))
             .child(popover::dialog_title(&theme, title))
             .child(action_field_label(&theme, "Name"))
-            .child(popover::dialog_field(name.into_any_element()))
+            .child(popover::dialog_field(&theme, name.into_any_element()))
             .child(action_field_label(&theme, "Command"))
             .child(
-                popover::dialog_field(
+                popover::dialog_field(&theme,
                     div()
                         .h(px(88.0))
                         .overflow_hidden()
