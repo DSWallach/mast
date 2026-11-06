@@ -359,26 +359,7 @@ impl Shell {
             return Vec::new();
         };
         let badge = |id: &'static str, glyph: &'static str, count: usize, color: gpui::Hsla| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .h(px(18.0))
-                .px(px(5.0))
-                .flex()
-                .items_center()
-                .gap(px(3.0))
-                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
-                .border_1()
-                .border_color(color)
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(color)
-                .hover(|el| el.bg(theme.element_hover))
-                .child(glyph)
-                .when(count > 0, |el| {
-                    el.child(SharedString::from(count.to_string()))
-                })
+            crate::components::shell_parts::header_attention_badge(theme, id, glyph, count, color)
                 .on_click(cx.listener(|this, _, _, cx| this.open_item_tab(cx)))
         };
         let mut out = Vec::new();

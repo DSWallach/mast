@@ -177,6 +177,37 @@ pub(crate) fn chat_header_title(theme: &Theme, title: String) -> gpui::Div {
         .child(SharedString::from(title))
 }
 
+pub(crate) fn header_attention_badge(
+    theme: &Theme,
+    id: &'static str,
+    glyph: &'static str,
+    count: usize,
+    color: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    let badge = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_none()
+        .h(px(18.0))
+        .px(px(5.0))
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(color)
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(color)
+        .hover(|el| el.bg(theme.element_hover))
+        .child(glyph)
+        .when(count > 0, |el| {
+            el.child(SharedString::from(count.to_string()))
+        });
+    super::segmented_key(badge, theme, false)
+}
+
 pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let menu = div()
         .id("chat-header-menu")
