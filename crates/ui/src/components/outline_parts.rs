@@ -600,6 +600,53 @@ pub fn outline_metadata_chip(label: String, theme: &Theme) -> Div {
         .child(SharedString::from(label))
 }
 
+/// A compact path label for an associated work item.
+pub fn outline_path_chip(id: SharedString, label: String, theme: &Theme) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    div()
+        .id(id)
+        .debug_selector(|| "work-item-path-chip".into())
+        .min_w_0()
+        .max_w(px(160.0))
+        .px(px(5.0 * scale))
+        .py(px(scale))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border)
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            9.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(label))
+}
+
+/// Status marker and count for a pending user action.
+pub fn outline_attention(id: SharedString, count: u32, theme: &Theme) -> Stateful<Div> {
+    let color =
+        crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance)
+            .color;
+    div()
+        .id(id)
+        .debug_selector(|| "work-item-attention".into())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            9.5 + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(crate::status_style::indicator_for_theme(
+            crate::status_style::Status::Waiting,
+            theme,
+        ))
+        .when(count > 1, |el| {
+            el.child(SharedString::from(count.to_string()))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
