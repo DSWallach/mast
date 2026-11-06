@@ -321,7 +321,7 @@ fn industrial(dark: bool) -> ThemeVariant {
         accent: "#fe4b25",
         danger: text,
         warning: muted,
-        success: muted,
+        success: "#38d059",
         terminal_background: background,
         ansi,
         syntax: [
@@ -335,6 +335,9 @@ fn industrial(dark: bool) -> ThemeVariant {
             "MIT",
         ),
     });
+    if !dark {
+        result.colors.success_muted = c("#245f31");
+    }
     result.colors.border = c(rule);
     result.colors.border_strong = c(rule);
     result.colors.input = c(key);
