@@ -738,6 +738,15 @@ impl Render for Walkthrough {
                     .items_center()
                     .gap_1()
                     .cursor_pointer()
+                    .when(
+                        theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+                        |row| {
+                            row.px(px(8.0))
+                                .py(px(8.0))
+                                .border_b_1()
+                                .border_color(theme.border)
+                        },
+                    )
                     .when(selected, |row| row.bg(theme.element_active))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         window.focus(&this.focus, cx);
@@ -867,7 +876,7 @@ impl Render for Walkthrough {
                             div()
                                 .id("review-risk")
                                 .px_2()
-                                .rounded_md()
+                                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
                                 .bg(theme.surface_raised)
                                 .text_color(theme.text_muted)
                                 .child(format!("{:?}", step.risk)),
@@ -915,7 +924,7 @@ impl Render for Walkthrough {
                         .children(step.tags.iter().map(|tag| {
                             div()
                                 .px_2()
-                                .rounded_md()
+                                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
                                 .bg(theme.surface_raised)
                                 .text_color(theme.text_muted)
                                 .child(tag.clone())
@@ -992,13 +1001,22 @@ impl Render for Walkthrough {
                         .gap_2()
                         .child(label);
                     if waiting {
-                        reply = reply.child(crate::loaders::gradient_spinner(
-                            "step-question-spinner",
-                            &theme,
-                            2.0,
-                            cx.entity_id(),
-                            cx,
-                        ));
+                        reply = if theme.ui_style.status_indicator
+                            == crate::ui_style::StatusIndicator::Dot
+                        {
+                            reply.child(crate::status_style::indicator_for_theme(
+                                crate::status_style::Status::Working,
+                                &theme,
+                            ))
+                        } else {
+                            reply.child(crate::loaders::gradient_spinner(
+                                "step-question-spinner",
+                                &theme,
+                                2.0,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                        };
                     }
                     if let Some(chat_id) = chat_id {
                         reply = reply.child(
@@ -1132,6 +1150,18 @@ impl Render for Walkthrough {
                         div()
                             .id("review-mode")
                             .cursor_pointer()
+                            .when(
+                                theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+                                |el| {
+                                    el.px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .bg(theme.surface_raised)
+                                        .border_1()
+                                        .border_b_2()
+                                        .border_color(theme.border)
+                                },
+                            )
                             .child(if self.tour { "Free diff" } else { "Tour" })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 window.focus(&this.focus, cx);
@@ -1155,6 +1185,15 @@ impl Render for Walkthrough {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
+                                .when(
+                                    theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+                                    |el| {
+                                        el.bg(theme.surface)
+                                            .p(px(8.0))
+                                            .border_r_1()
+                                            .border_color(theme.border)
+                                    },
+                                )
                                 .child(steps)
                                 .child(uncovered),
                         )
@@ -1177,6 +1216,16 @@ impl Render for Walkthrough {
                                         .max_w(px(280.))
                                         .min_h_0()
                                         .overflow_y_scroll()
+                                        .when(
+                                            theme.ui_style.surface
+                                                == crate::ui_style::SurfaceModel::Opaque,
+                                            |el| {
+                                                el.bg(theme.surface)
+                                                    .p(px(8.0))
+                                                    .border_l_1()
+                                                    .border_color(theme.border)
+                                            },
+                                        )
                                         .children(note),
                                 )
                             }),
@@ -1344,6 +1393,55 @@ mod tests {
                     .is_ok(),
                 "{id:?}"
             );
+        }
+    }
+
+    #[gpui::test]
+    fn industrial_walkthrough_renders_light_and_dark(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::for_selection(crate::theme::Appearance::Light, "industrial-light", Default::default(), mast_theme::SurfacePreference::Opaque).with_ui_style(crate::ui_style::UiStyle::INDUSTRIAL));
+        });
+        let (review, files) = fixture();
+        let (_, vcx) = cx.add_window_view(|_, cx| Walkthrough {
+            review: review.into(),
+            files: Arc::new(files),
+            coverage: None,
+            viewed: BTreeSet::new(),
+            seen: HashSet::new(),
+            target_selected: true,
+            selected: 0,
+            note_expanded: false,
+            tour: true,
+            stale_head: None,
+            focus: cx.focus_handle(),
+            changes: None,
+            _changes_observer: None,
+            step_input: None,
+            _step_input_events: None,
+            step_panel: None,
+            step_task: None,
+            step_cancelled: None,
+        });
+        for (appearance, id) in [
+            (crate::theme::Appearance::Light, "industrial-light"),
+            (crate::theme::Appearance::Dark, "industrial-dark"),
+        ] {
+            vcx.update(|window, cx| {
+                cx.set_global(
+                    Theme::for_selection(
+                        appearance,
+                        id,
+                        Default::default(),
+                        mast_theme::SurfacePreference::Opaque,
+                    )
+                    .with_ui_style(crate::ui_style::UiStyle::INDUSTRIAL),
+                );
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            assert!(vcx.debug_bounds("review-progress").is_some());
+            assert!(vcx.debug_bounds("review-note").is_some());
         }
     }
 

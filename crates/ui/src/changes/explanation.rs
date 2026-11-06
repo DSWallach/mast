@@ -445,8 +445,12 @@ impl Changes {
             .right(px(8.0))
             .top(px(0.0))
             .px_2()
-            .rounded_md()
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
             .bg(theme.surface_raised)
+            .when(
+                theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
+                |el| el.border_1().border_b_2().border_color(theme.border),
+            )
             .text_color(theme.text)
             .text_size(crate::typography::ui_rems(12.0))
             .child("Explain")
@@ -483,13 +487,22 @@ impl Changes {
                     .text_color(theme.text)
                     .child(label);
                 if matches!(status, ExplanationPanel::Waiting { .. }) {
-                    panel = panel.child(crate::loaders::gradient_spinner(
-                        "explanation-spinner",
-                        theme,
-                        2.0,
-                        cx.entity_id(),
-                        cx,
-                    ));
+                    panel = if theme.ui_style.status_indicator
+                        == crate::ui_style::StatusIndicator::Dot
+                    {
+                        panel.child(crate::status_style::indicator_for_theme(
+                            crate::status_style::Status::Working,
+                            theme,
+                        ))
+                    } else {
+                        panel.child(crate::loaders::gradient_spinner(
+                            "explanation-spinner",
+                            theme,
+                            2.0,
+                            cx.entity_id(),
+                            cx,
+                        ))
+                    };
                 }
                 if let Some(chat_id) = chat_id {
                     panel = panel.child(
