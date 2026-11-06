@@ -1074,7 +1074,7 @@ impl Render for Walkthrough {
                     div()
                         .id("review-mark-step")
                         .cursor_pointer()
-                        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.flex().items_center().gap(px(8.0)).px(px(16.0)).py(px(8.0)))
+                        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.self_start().flex().items_center().gap(px(8.0)).px(px(16.0)).py(px(8.0)))
                         .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, selected_reviewed))
                         .when(!selected_reviewed && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.bg(theme.accent).text_color(theme.on_accent))
                         .children(crate::surface_chrome::active_key_dot(&theme, selected_reviewed))

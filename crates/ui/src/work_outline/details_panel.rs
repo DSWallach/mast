@@ -1208,8 +1208,15 @@ impl WorkItemDetails {
         open: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        let has_count = label.chars().any(|c| c.is_ascii_digit());
-        let label = if theme.ui_style.tokens.label_size.is_some() { crate::popover::tracked_upper(&label) } else { label };
+        let (label, count) = if theme.ui_style.tokens.label_size.is_some() {
+            match label.rsplit_once(" (") {
+                Some((title, suffix)) if suffix.ends_with(')') && suffix[..suffix.len() - 1].chars().all(|c| c.is_ascii_digit()) =>
+                    (crate::popover::tracked_upper(title), Some(format!("({suffix}"))),
+                _ => (crate::popover::tracked_upper(&label), None),
+            }
+        } else {
+            (label, None)
+        };
         div()
             .id(id)
             .flex()
@@ -1218,7 +1225,7 @@ impl WorkItemDetails {
             .cursor_pointer()
             .text_size(crate::typography::ui_rems(theme.ui_style.tokens.label_size.unwrap_or(11.0)))
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .when(has_count && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
+            .when(theme.ui_style.tokens.label_size.is_some(), |el| el.font_family(theme.font_sans.clone()))
             .text_color(theme.text_muted)
             .hover(|el| el.text_color(theme.text))
             .child(
@@ -1231,6 +1238,7 @@ impl WorkItemDetails {
                 .text_color(theme.text_muted),
             )
             .child(SharedString::from(label))
+            .when_some(count, |el, count| el.child(div().font_family(theme.font_mono.clone()).child(SharedString::from(count))))
     }
 
     /// A compact details button. Its hover tooltip (label + live binding)
