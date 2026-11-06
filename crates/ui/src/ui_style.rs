@@ -87,6 +87,31 @@ pub struct StyleTokens {
     pub title_size: Option<f32>,
 }
 
+/// Optional values preserve each existing primitive's Minimal metrics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TypeRoles {
+    pub label: Option<f32>,
+    pub secondary: Option<f32>,
+    pub body: Option<f32>,
+    pub title: Option<f32>,
+    pub display: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpacingScale {
+    pub small: Option<f32>,
+    pub medium: Option<f32>,
+    pub large: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadiusRoles {
+    pub control: Option<f32>,
+    pub chip: Option<f32>,
+    pub panel: Option<f32>,
+    pub bubble: Option<f32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceModel {
     ThemeDefault,
@@ -340,6 +365,35 @@ impl UiStyle {
             UiStyleId::Default => Self::MINIMAL,
             UiStyleId::Industrial => Self::INDUSTRIAL,
             UiStyleId::Area => Self::AREA,
+        }
+    }
+
+    pub const fn type_roles(self) -> TypeRoles {
+        TypeRoles {
+            label: self.tokens.label_size,
+            secondary: self.tokens.secondary_size,
+            body: self.tokens.body_size,
+            title: self.tokens.title_size,
+            display: self.tokens.title_size,
+        }
+    }
+
+    pub fn spacing_scale(self) -> SpacingScale {
+        let grid = self.tokens.grid;
+        let scale = self.tokens.type_scale;
+        SpacingScale {
+            small: grid.map(|value| value * 0.5 * scale),
+            medium: grid.map(|value| value * scale),
+            large: grid.map(|value| value * 2.0 * scale),
+        }
+    }
+
+    pub const fn radius_roles(self) -> RadiusRoles {
+        RadiusRoles {
+            control: self.tokens.control_radius,
+            chip: self.tokens.chip_radius,
+            panel: self.tokens.panel_radius,
+            bubble: self.tokens.panel_radius,
         }
     }
 
