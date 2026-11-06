@@ -496,6 +496,9 @@ pub struct ApprovalRule {
     pub command_regex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_scope: Option<String>,
+    /// Require all three agent configuration directories to be under the system temporary directory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_isolated_home: bool,
     #[serde(default)]
     pub hit_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -564,9 +567,9 @@ pub struct SetPrReviewPromptsParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SetApprovalRulesParams {
+pub struct SetApprovalRuleParams {
     pub space_id: String,
-    pub rules: Vec<ApprovalRule>,
+    pub rule: ApprovalRule,
     pub operation_id: String,
 }
 
@@ -1516,7 +1519,7 @@ pub enum WorkOutlineMutation {
     // ── PR review sync ──
     SetPrReviewSyncDestination(SetPrReviewSyncDestinationParams),
     SetPrReviewPrompts(SetPrReviewPromptsParams),
-    SetApprovalRules(SetApprovalRulesParams),
+    SetApprovalRule(SetApprovalRuleParams),
     SetLinearAssignedDestination(SetLinearAssignedDestinationParams),
     // ── Project templates ──
     SaveWorkItemTemplate(crate::work_outline_templates::SaveWorkItemTemplateParams),
@@ -1559,7 +1562,7 @@ impl WorkOutlineMutation {
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
             Self::SetPrReviewPrompts(p) => &p.operation_id,
-            Self::SetApprovalRules(p) => &p.operation_id,
+            Self::SetApprovalRule(p) => &p.operation_id,
             Self::SetLinearAssignedDestination(p) => &p.operation_id,
             Self::SaveWorkItemTemplate(p) => &p.operation_id,
             Self::DeleteWorkItemTemplate(p) => &p.operation_id,
@@ -1600,7 +1603,7 @@ impl WorkOutlineMutation {
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",
             Self::SetPrReviewPrompts(_) => "setPrReviewPrompts",
-            Self::SetApprovalRules(_) => "setApprovalRules",
+            Self::SetApprovalRule(_) => "setApprovalRule",
             Self::SetLinearAssignedDestination(_) => "setLinearAssignedDestination",
             Self::SaveWorkItemTemplate(_) => "saveWorkItemTemplate",
             Self::DeleteWorkItemTemplate(_) => "deleteWorkItemTemplate",

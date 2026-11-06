@@ -60,36 +60,54 @@ fn decode_settings_item(row: Option<&RegistryRow>, field: &str) -> Option<String
         .map(str::to_owned)
 }
 
+pub const KIND_APPROVAL_RULES: &str = "approvalRules";
+
+pub(crate) fn decode_approval_rules(rows: &[RegistryRow], space_id: &str) -> Vec<mast_proto::work_outline::ApprovalRule> {
+    let mut rules: Vec<_> = rows.iter().filter(|row| row.fields.get("spaceId").and_then(Value::as_str) == Some(space_id))
+        .filter_map(|row| serde_json::from_value(Value::Object(row.fields.clone().into_iter().collect())).ok())
+        .collect();
+    rules.sort_by(|a: &mast_proto::work_outline::ApprovalRule, b| a.id.cmp(&b.id));
+    rules
+}
+
 impl RegistryDoc {
-    pub fn set_approval_rules(
+    pub fn set_approval_rule(
         &mut self,
-        p: &mast_proto::work_outline::SetApprovalRulesParams,
+        p: &mast_proto::work_outline::SetApprovalRuleParams,
         now_ms: i64,
     ) -> Outcome<()> {
         check_operation_id(&p.operation_id)?;
         self.require_space(&p.space_id)?;
-        let mut ids = std::collections::HashSet::new();
-        for rule in &p.rules {
-            check_id("approval rule id", &rule.id)?;
-            if !ids.insert(&rule.id) || rule.label.trim().is_empty() || rule.created_by.trim().is_empty()
-                || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
-                || rule.cwd_scope.as_deref().is_some_and(|scope| !std::path::Path::new(scope).is_absolute()) {
-                return Err(invalid("Invalid approval rule"));
-            }
+        let rule = &p.rule;
+        check_id("approval rule id", &rule.id)?;
+        if rule.label.trim().is_empty() || rule.created_by.trim().is_empty()
+            || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
+            || rule.cwd_scope.as_deref().is_some_and(|scope| !std::path::Path::new(scope).is_absolute()) {
+            return Err(invalid("Invalid approval rule"));
         }
-        let value = json!(p.rules);
-        if value.to_string().len() > 12_000 { return Err(invalid("Approval rules exceed 12000 bytes")); }
-        if self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id).as_ref()
-            .and_then(|row| row.fields.get("approvalRules")) == Some(&value) { return Ok(()); }
-        let plan = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
-            RowState::Live => Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
-                ("approvalRules".into(), value), ("updatedAt".into(), json!(now_ms)),
-            ])),
-            RowState::Absent => Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
-                ("spaceId".into(), json!(p.space_id)), ("approvalRules".into(), value),
-                ("updatedAt".into(), json!(now_ms)), ("v".into(), json!(WORK_OUTLINE_ROW_VERSION)),
-            ])),
-            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        let mut fields = BTreeMap::from([
+            ("id".into(), json!(rule.id)), ("spaceId".into(), json!(p.space_id)),
+            ("label".into(), json!(rule.label)), ("createdBy".into(), json!(rule.created_by)),
+            ("harness".into(), json!(rule.harness)), ("enabled".into(), json!(rule.enabled)),
+            ("argvPrefix".into(), json!(rule.argv_prefix)), ("commandRegex".into(), json!(rule.command_regex)),
+            ("cwdScope".into(), json!(rule.cwd_scope)), ("requireIsolatedHome".into(), json!(rule.require_isolated_home)),
+        ]);
+        if json!(fields).to_string().len() > 12_000 { return Err(invalid("Approval rule exceeds 12000 bytes")); }
+        let plan = match self.row_state(KIND_APPROVAL_RULES, &rule.id) {
+            RowState::Live => {
+                let current = self.overlay_row(KIND_APPROVAL_RULES, &rule.id).ok_or_else(|| not_found("Approval rule not found"))?;
+                if current.fields.get("spaceId").and_then(Value::as_str) != Some(&p.space_id) { return Err(invalid("Approval rule belongs to another Space")); }
+                fields.retain(|key, value| current.fields.get(key) != Some(value));
+                if fields.is_empty() { return Ok(()); }
+                fields.insert("updatedAt".into(), json!(now_ms));
+                Planned::update(KIND_APPROVAL_RULES, &rule.id, fields)
+            }
+            RowState::Absent => {
+                fields.insert("updatedAt".into(), json!(now_ms));
+                fields.insert("v".into(), json!(WORK_OUTLINE_ROW_VERSION));
+                Planned::upsert(KIND_APPROVAL_RULES, &rule.id, fields)
+            }
+            RowState::Tombstoned => return Err(not_found("Approval rule was deleted")),
         };
         self.commit(vec![plan], &[(KIND_SPACES, p.space_id.as_str())])
     }

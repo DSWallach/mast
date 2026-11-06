@@ -92,6 +92,7 @@ pub struct WorkOutlineInputs {
     pub instruction_proposals: Vec<RegistryRow>,
     /// The Space's live `workOutlineSpaceSettings` row (Linear), if any.
     pub space_settings: Option<RegistryRow>,
+    pub approval_rules: Vec<RegistryRow>,
     /// Live `workItemTemplates` rows of this Space (project templates).
     pub templates: Vec<RegistryRow>,
 }
@@ -1008,7 +1009,11 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         execution_exceptions: execution.exceptions,
         user_action_requests: user_actions.requests,
         instruction_proposals: user_actions.proposals,
-        space_settings: super::linear::decode_space_settings(inputs.space_settings.as_ref()),
+        space_settings: {
+            let mut settings = super::linear::decode_space_settings(inputs.space_settings.as_ref());
+            settings.approval_rules = super::pr_review_sync::decode_approval_rules(&inputs.approval_rules, space_id);
+            settings
+        },
         templates,
     }
 }
