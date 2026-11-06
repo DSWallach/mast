@@ -1485,6 +1485,136 @@ pub(crate) fn worker_activity(
         .child(SharedString::from(text))
 }
 
+pub(crate) fn worker_diff(theme: &Theme, selector: String, added: u32, removed: u32) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .gap(px(4.0))
+        .text_size(crate::typography::ui_rems(10.5))
+        .child(
+            div()
+                .text_color(theme.success)
+                .child(SharedString::from(format!("+{added}"))),
+        )
+        .child(
+            div()
+                .text_color(theme.danger)
+                .child(SharedString::from(format!("−{removed}"))),
+        )
+}
+
+pub(crate) fn worker_archive_hint(theme: &Theme, selector: String, reason: &str) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .pl(px(13.0))
+        .truncate()
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("can archive · {reason}")))
+}
+
+pub(crate) fn worker_ready_label(text: String, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(color)
+        .child(SharedString::from(format!("→ {text}")))
+}
+
+pub(crate) fn worker_jump_button(
+    theme: &Theme,
+    selector: String,
+    color: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    let button = div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(|el| el.bg(color.opacity(0.12)))
+        .child("Jump");
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn archive_confirmation(theme: &Theme, count: usize) -> gpui::Div {
+    div()
+        .debug_selector(|| "team-archive-confirm".into())
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .p(px(6.0))
+        .rounded(px(5.0))
+        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .border_1()
+        .border_color(theme.border)
+        .when(super::is_industrial(theme), |el| {
+            el.rounded(px(0.0)).bg(theme.industrial_colors().panel)
+        })
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(SharedString::from(format!(
+                    "Archive {count} finished {}?",
+                    if count == 1 { "worker" } else { "workers" }
+                ))),
+        )
+}
+
+pub(crate) fn archive_confirmation_worker(
+    theme: &Theme,
+    selector: String,
+    title: &str,
+    reason: &str,
+) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .truncate()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(format!("{title} · {reason}")))
+}
+
+pub(crate) fn archive_confirmation_note(theme: &Theme) -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_faint)
+        .child("They move to Show archived; Unarchive brings one back.")
+}
+
+pub(crate) fn archive_suggestion(theme: &Theme, count: usize) -> gpui::Div {
+    div()
+        .debug_selector(|| "team-archive-suggest".into())
+        .flex_1()
+        .min_w_0()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(format!(
+            "{count} finished workers can be archived"
+        )))
+}
+
+pub(crate) fn archived_worker_title(theme: &Theme, title: String) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(title))
+}
+
 pub(crate) fn worker_report_toggle(
     theme: &Theme,
     id: String,

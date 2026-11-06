@@ -391,25 +391,7 @@ impl Shell {
             if let Some((added, removed)) = worker.diff {
                 any = true;
                 chips = chips.child(
-                    div()
-                        .debug_selector({
-                            let selector = format!("team-diff-{id}");
-                            move || selector.clone()
-                        })
-                        .flex_none()
-                        .flex()
-                        .gap(px(4.0))
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(SharedString::from(format!("+{added}"))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(SharedString::from(format!("\u{2212}{removed}"))),
-                        ),
+                    crate::components::shell_parts::worker_diff(theme, format!("team-diff-{id}"), added, removed),
                 );
             }
             if any {
@@ -418,19 +400,7 @@ impl Shell {
         }
         if !compact && let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(
-                div()
-                    .debug_selector({
-                        let selector = format!("team-archivable-{id}");
-                        move || selector.clone()
-                    })
-                    .pl(px(13.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!(
-                        "can archive \u{b7} {}",
-                        verdict.reason
-                    ))),
+                crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason),
             );
         }
         if let Some(ready) = &worker.ready {
@@ -530,13 +500,7 @@ impl Shell {
                     .items_center()
                     .gap(px(6.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(ready_color)
-                            .child(SharedString::from(format!("→ {text}"))),
+                        crate::components::shell_parts::worker_ready_label(text, ready_color),
                     )
                     .when_some(lifecycle, |el, lifecycle| {
                         el.child(Self::chip(
@@ -547,22 +511,7 @@ impl Shell {
                         ))
                     })
                     .child(
-                        div()
-                            .id(SharedString::from(format!("{prefix}-jump-{id}")))
-                            .debug_selector({
-                                let selector = format!("{prefix}-jump-{id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(ready_color.opacity(0.5))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(ready_color)
-                            .cursor_pointer()
-                            .hover(|el| el.bg(ready_color.opacity(0.12)))
-                            .child("Jump")
+                        crate::components::shell_parts::worker_jump_button(theme, format!("{prefix}-jump-{id}"), ready_color)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.open_item_tab(cx);
@@ -592,25 +541,7 @@ impl Shell {
             return block.into_any_element();
         }
         if self.wakes.archive_confirm.contains(chat_id) {
-            let mut confirm = div()
-                .debug_selector(|| "team-archive-confirm".into())
-                .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .p(px(6.0))
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(SharedString::from(format!(
-                            "Archive {n} finished {}?",
-                            if n == 1 { "worker" } else { "workers" }
-                        ))),
-                );
+            let mut confirm = crate::components::shell_parts::archive_confirmation(theme, n);
             for worker in &finished {
                 let selector = format!("team-archive-confirm-row-{}", worker.chat_id);
                 let reason = worker
@@ -619,25 +550,14 @@ impl Shell {
                     .map(|a| a.reason.clone())
                     .unwrap_or_default();
                 confirm = confirm.child(
-                    div()
-                        .debug_selector(move || selector.clone())
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
-                            "{} \u{b7} {reason}",
-                            worker.title
-                        ))),
+                    crate::components::shell_parts::archive_confirmation_worker(theme, selector, &worker.title, &reason),
                 );
             }
             let go_chat = chat_id.to_owned();
             let cancel_chat = chat_id.to_owned();
             confirm = confirm
                 .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_faint)
-                        .child("They move to Show archived; Unarchive brings one back."),
+                    crate::components::shell_parts::archive_confirmation_note(theme),
                 )
                 .child(
                     div()
@@ -675,15 +595,7 @@ impl Shell {
         let mut line = div().flex().items_center().gap(px(8.0));
         if n >= SUGGEST_ARCHIVE_AT {
             line = line.child(
-                div()
-                    .debug_selector(|| "team-archive-suggest".into())
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format!(
-                        "{n} finished workers can be archived"
-                    ))),
+                crate::components::shell_parts::archive_suggestion(theme, n),
             );
         } else {
             line = line.child(div().flex_1());
@@ -736,13 +648,7 @@ impl Shell {
                 out.push(
                     crate::components::shell_parts::archived_worker_row(theme, selector)
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(11.5))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(worker.title.clone())),
+                            crate::components::shell_parts::archived_worker_title(theme, worker.title.clone()),
                         )
                         .child(
                             team_button(theme, button_id, "Unarchive".into(), false).on_click(
