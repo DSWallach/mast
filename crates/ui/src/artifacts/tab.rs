@@ -1059,6 +1059,7 @@ impl ArtifactTab {
                         .size(px(surface_chrome::ICON_SIZE))
                         .text_color(theme.text_muted),
                 )
+                .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded_full().border_1().border_color(theme.border_strong))
         };
         let shown = self
             .content
@@ -1098,9 +1099,10 @@ impl ArtifactTab {
                 toolbar.child(div().flex().items_center().rounded(px(12.0)).border_1().border_color(theme.border_strong).overflow_hidden()
                     .children([(previous_revision, icons::ALT_ARROW_LEFT, "artifact-previous-revision", "Previous revision"), (next_revision, icons::ALT_ARROW_RIGHT, "artifact-next-revision", "Next revision")].into_iter().map(|(revision, icon, id, label)| {
                         div().id(id).debug_selector(move || id.into()).aria_label(label).size(px(26.0)).flex().items_center().justify_center()
+                            .when(revision.is_some() && id == "artifact-previous-revision", |el| el.bg(theme.accent))
                             .when(revision.is_none(), |el| el.opacity(0.35))
                             .when_some(revision, |el, revision| el.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| this.load(Some(revision), window, cx))))
-                            .child(icons::icon(icon).size(px(12.0)).text_color(theme.text_muted))
+                            .child(icons::icon(icon).size(px(12.0)).text_color(if revision.is_some() && id == "artifact-previous-revision" { theme.identity_text(theme.accent) } else { theme.text_muted }))
                     })))
             })
             .child(
