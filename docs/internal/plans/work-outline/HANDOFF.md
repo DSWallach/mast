@@ -756,7 +756,7 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   reorder. 250-chat redraw 105.66→1.98 ms mean (p95 150.6→2.5), first draw 68.7→2.5 ms. Measured but not
   changed: prepared 2,000-message transcript open+draw 9.7 ms (prep 74 ms off-thread), production streaming
   5.8 ms/chunk mean (unchanged rows reused), Team facts 0.07 ms, outline redraw 3.2 ms. Benchmarks and method
-  in docs/performance-sweep.md (3 ignored bench tests). Release run: nextest passed, UI 2461/0.
+  in docs/internal/performance-sweep.md (3 ignored bench tests). Release run: nextest passed, UI 2461/0.
 - **First-run audit fixes** (2026-11-05 overnight, `first-run-audit`, Terra): report at
   docs/internal/first-run-audit.md (6 findings). Fixed: profile classification (fresh vs existing) now uses
   saved settings or real Space/chat registry data before either startup mode, so headless-first startup no
