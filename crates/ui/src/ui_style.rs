@@ -10,10 +10,17 @@ pub enum UiStyleId {
     Dense,
     Guided,
     Industrial,
+    Area,
 }
 
 impl UiStyleId {
-    pub const ALL: &'static [Self] = &[Self::Minimal, Self::Dense, Self::Guided, Self::Industrial];
+    pub const ALL: &'static [Self] = &[
+        Self::Minimal,
+        Self::Dense,
+        Self::Guided,
+        Self::Industrial,
+        Self::Area,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -21,6 +28,7 @@ impl UiStyleId {
             Self::Dense => "Dense",
             Self::Guided => "Guided",
             Self::Industrial => "Industrial",
+            Self::Area => "Area",
         }
     }
 
@@ -30,6 +38,7 @@ impl UiStyleId {
             Self::Dense => "More on screen",
             Self::Guided => "More labels and guidance",
             Self::Industrial => "Instrument panel",
+            Self::Area => "Editorial grid",
         }
     }
 
@@ -39,6 +48,7 @@ impl UiStyleId {
             Self::Dense => 2.0,
             Self::Guided => 6.0,
             Self::Industrial => 8.0,
+            Self::Area => 8.0,
         }
     }
 }
@@ -49,6 +59,7 @@ impl<'de> Deserialize<'de> for UiStyleId {
             "dense" => Self::Dense,
             "guided" => Self::Guided,
             "industrial" => Self::Industrial,
+            "area" => Self::Area,
             _ => Self::Minimal,
         })
     }
@@ -93,6 +104,13 @@ pub enum ControlVariant {
 pub enum StatusIndicator {
     Minimal,
     Dot,
+    Square,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabVariant {
+    Default,
+    Underline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +162,7 @@ pub struct UiStyle {
     pub surface: SurfaceModel,
     pub controls: ControlVariant,
     pub status_indicator: StatusIndicator,
+    pub tabs: TabVariant,
     pub font_preference: FontPreference,
 }
 
@@ -170,6 +189,7 @@ impl UiStyle {
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
+        tabs: TabVariant::Default,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
@@ -205,6 +225,7 @@ impl UiStyle {
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
+        tabs: TabVariant::Default,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
             labels: LabelMode::Primary,
@@ -240,6 +261,7 @@ impl UiStyle {
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
+        tabs: TabVariant::Default,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
             labels: LabelMode::All,
@@ -272,7 +294,34 @@ impl UiStyle {
         surface: SurfaceModel::Opaque,
         controls: ControlVariant::Key,
         status_indicator: StatusIndicator::Dot,
+        tabs: TabVariant::Default,
         font_preference: FontPreference::Geist,
+        behavior: StyleBehavior {
+            motion: Motion::Instant,
+            ..Self::MINIMAL.behavior
+        },
+    };
+    pub const AREA: Self = Self {
+        id: UiStyleId::Area,
+        tokens: StyleTokens {
+            sidebar_row_compact_h: 36.0,
+            control_size: 36.0,
+            control_radius: Some(0.0),
+            panel_radius: Some(0.0),
+            chip_radius: Some(0.0),
+            rule_width: Some(1.0),
+            grid: Some(8.0),
+            label_size: Some(10.0),
+            secondary_size: Some(12.0),
+            body_size: Some(13.0),
+            title_size: Some(20.0),
+            ..Self::MINIMAL.tokens
+        },
+        surface: SurfaceModel::Opaque,
+        controls: ControlVariant::FlatOutline,
+        status_indicator: StatusIndicator::Square,
+        tabs: TabVariant::Underline,
+        font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
             motion: Motion::Instant,
             ..Self::MINIMAL.behavior
@@ -284,6 +333,7 @@ impl UiStyle {
             UiStyleId::Dense => Self::DENSE,
             UiStyleId::Guided => Self::GUIDED,
             UiStyleId::Industrial => Self::INDUSTRIAL,
+            UiStyleId::Area => Self::AREA,
         }
     }
 }
