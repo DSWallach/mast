@@ -1453,29 +1453,7 @@ impl Render for WorkItemDetails {
         .into_iter()
         .map(|status| {
             let active = item.status == status;
-            div()
-                .id(SharedString::from(format!(
-                    "work-item-status-{}",
-                    chips::base_status_label(status).to_lowercase()
-                )))
-                .px(px(8.0))
-                .py(px(2.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.flex().items_center().gap(px(8.0)))
-                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
-                .when(active && status == WorkItemStatus::Completed && theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| {
-                    let foreground = if crate::theme::contrast_ratio(theme.text, theme.success) >= crate::theme::contrast_ratio(theme.bg, theme.success) { theme.text } else { theme.bg };
-                    el.bg(theme.success).text_color(foreground)
-                })
-                .children(crate::surface_chrome::active_key_dot(&theme, active && status != WorkItemStatus::Completed))
-                .hover(|el| el.text_color(theme.text))
-                .child(chips::base_status_label(status))
+            crate::components::outline_status_segment(chips::base_status_label(status), active, status == WorkItemStatus::Completed, &theme)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_status(status, cx)))
         });
         let attention = (item.effective_status == WorkItemEffectiveStatus::UserActionRequired
@@ -1505,21 +1483,8 @@ impl Render for WorkItemDetails {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                div().flex().flex_col().gap(px(2.0))
-                    .child(div().text_size(crate::typography::ui_rems(9.0)).text_color(theme.text_muted).child("STATUS"))
-                    .child(crate::surface_chrome::display(&theme).child(SharedString::from(chips::base_status_label(item.status).to_uppercase())))
-            ))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .p(px(2.0))
-                    .rounded(px(6.0))
-                    .bg(theme.element_hover.opacity(0.5))
-                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-                    .children(status_pills),
-            )
+            .children(crate::components::outline_status_readout(chips::base_status_label(item.status), &theme))
+            .child(crate::components::outline_status_group(&theme).children(status_pills))
             .when_some(attention, |el, attention| el.child(attention))
             .when_some(self.pinned_plan_id(&item.id, cx), |el, plan_id| {
                 el.child(

@@ -348,6 +348,85 @@ pub fn outline_action_button(
         .child(label)
 }
 
+/// A work-item status segment; the caller attaches its action.
+pub fn outline_status_segment(
+    label: &'static str,
+    active: bool,
+    completed: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let key = super::is_industrial(theme);
+    let button = div()
+        .id(SharedString::from(format!(
+            "work-item-status-{}",
+            label.to_lowercase()
+        )))
+        .px(px(8.0 * super::layout_spacing(theme)))
+        .py(px(2.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .when(active, |el| {
+            el.bg(theme.element_active).text_color(theme.text)
+        })
+        .when(!active, |el| el.text_color(theme.text_muted))
+        .when(key, |el| el.flex().items_center().gap(px(8.0)));
+    crate::surface_chrome::segmented_key(button, theme, active)
+        .when(active && completed && key, |el| {
+            let foreground = if crate::theme::contrast_ratio(theme.text, theme.success)
+                >= crate::theme::contrast_ratio(theme.bg, theme.success)
+            {
+                theme.text
+            } else {
+                theme.bg
+            };
+            el.bg(theme.success).text_color(foreground)
+        })
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .children(crate::surface_chrome::active_key_dot(
+            theme,
+            active && !completed,
+        ))
+        .hover(|el| el.text_color(theme.text))
+        .child(label)
+}
+
+/// Group surface for the status segments.
+pub fn outline_status_group(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .gap(px(2.0))
+        .p(px(2.0))
+        .rounded(px(6.0))
+        .bg(theme.element_hover.opacity(0.5))
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface),
+        )
+}
+
+/// Optional Industrial status readout.
+pub fn outline_status_readout(label: &'static str, theme: &Theme) -> Option<Div> {
+    super::is_industrial(theme).then(|| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(9.0))
+                    .text_color(theme.text_muted)
+                    .child("STATUS"),
+            )
+            .child(
+                crate::surface_chrome::display(theme)
+                    .child(SharedString::from(label.to_uppercase())),
+            )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
