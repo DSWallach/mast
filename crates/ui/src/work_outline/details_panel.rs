@@ -1587,7 +1587,7 @@ impl Render for WorkItemDetails {
                 div().px(px(8.0)).py(px(4.0)).border_1().border_color(theme.industrial_colors().rule)
                     .bg(theme.input_bg).font_family(theme.font_mono.clone())
                     .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
-                    .child("STATUS")
+                    .child(SharedString::from(format!("STATUS  {}", chips::base_status_label(item.status).to_uppercase())))
             ))
             .child(
                 div()
