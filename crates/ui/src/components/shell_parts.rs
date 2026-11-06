@@ -543,6 +543,80 @@ pub(crate) fn item_hover_card(theme: &Theme, width: f32) -> gpui::Stateful<gpui:
         .gap(px(8.0))
 }
 
+pub(crate) fn item_card_footer(theme: &Theme, pinned: bool) -> gpui::Div {
+    div()
+        .debug_selector(|| "chat-item-card-footer".into())
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(theme.text_faint)
+        .child(if pinned {
+            "⌥⌘I unpins · pinned open"
+        } else {
+            "⌥⌘I pins this card open"
+        })
+}
+
+pub(crate) fn item_needs_card(theme: &Theme, count: usize) -> gpui::Div {
+    div()
+        .debug_selector(|| "chat-item-needs-you".into())
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .p(px(8.0))
+        .rounded(px(6.0))
+        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .border_1()
+        .border_color(if count > 0 {
+            theme.warning.opacity(0.6)
+        } else {
+            theme.border
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.rounded(px(0.0)).bg(theme.industrial_colors().panel)
+        })
+}
+
+pub(crate) fn item_needs_count(theme: &Theme, count: usize) -> gpui::Div {
+    div()
+        .debug_selector(|| "chat-item-needs-you-count".into())
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.warning)
+        .child(SharedString::from(count.to_string()))
+}
+
+pub(crate) fn item_account_badge(theme: &Theme, account: String) -> gpui::Div {
+    let badge = div()
+        .debug_selector(|| "chat-item-account-badge".into())
+        .flex_none()
+        .h(px(20.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(5.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.element_hover.opacity(0.55))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text)
+        .child(
+            icon(crate::icons::KEY_MINIMALISTIC)
+                .size(px(11.0))
+                .text_color(theme.text),
+        )
+        .child(SharedString::from(account));
+    super::segmented_key(badge, theme, false)
+}
+
+pub(crate) fn instruction_entry(theme: &Theme, entry: &str) -> gpui::Div {
+    div()
+        .line_clamp(2)
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text)
+        .child(SharedString::from(format!("• {entry}")))
+}
+
 pub(crate) fn main_panel(theme: &Theme, main: AnyElement) -> AnyElement {
     let main = if super::is_industrial(theme) {
         div()

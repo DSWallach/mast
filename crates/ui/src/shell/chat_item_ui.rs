@@ -531,15 +531,7 @@ impl Shell {
             })
             .child(body)
             .child(
-                div()
-                    .debug_selector(|| "chat-item-card-footer".into())
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child(if pinned {
-                        "\u{2325}\u{2318}I unpins \u{b7} pinned open"
-                    } else {
-                        "\u{2325}\u{2318}I pins this card open"
-                    }),
+                crate::components::shell_parts::item_card_footer(theme, pinned),
             )
             .into_any_element()
     }
@@ -767,19 +759,7 @@ impl Shell {
             let list = self.item_needs_list(&item.space_id, &item.item_id, cx);
             let open = list.read(cx).rows().open.len();
             col = col.child(
-                div()
-                    .debug_selector(|| "chat-item-needs-you".into())
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .p(px(8.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(if open > 0 {
-                        theme.warning.opacity(0.6)
-                    } else {
-                        theme.border
-                    })
+                crate::components::shell_parts::item_needs_card(theme, open)
                     .child(
                         div()
                             .flex()
@@ -793,12 +773,7 @@ impl Shell {
                             ))
                             .when(open > 0, |el| {
                                 el.child(
-                                    div()
-                                        .debug_selector(|| "chat-item-needs-you-count".into())
-                                        .text_size(crate::typography::ui_rems(11.0))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.warning)
-                                        .child(SharedString::from(open.to_string())),
+                                    crate::components::shell_parts::item_needs_count(theme, open),
                                 )
                             }),
                     )
@@ -839,11 +814,7 @@ impl Shell {
                     .flex_col()
                     .gap(px(3.0))
                     .children(item.instructions.entries.iter().map(|entry| {
-                        div()
-                            .line_clamp(2)
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(format!("\u{2022} {entry}")))
+                        crate::components::shell_parts::instruction_entry(theme, entry)
                     }))
                     .child(
                         link("chat-item-instructions-edit".into(), theme.success, false)
@@ -936,27 +907,7 @@ impl Shell {
             .item_tab_open
             .contains("account")
             .then(|| match &facts.account {
-                Some(account) => div()
-                    .debug_selector(|| "chat-item-account-badge".into())
-                    .flex_none()
-                    .h(px(20.0))
-                    .px(px(7.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .rounded(px(5.0))
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .bg(theme.element_hover.opacity(0.55))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text)
-                    .child(
-                        crate::icons::icon(crate::icons::KEY_MINIMALISTIC)
-                            .size(px(11.0))
-                            .text_color(theme.text),
-                    )
-                    .child(SharedString::from(account.clone()))
-                    .into_any_element(),
+                Some(account) => crate::components::shell_parts::item_account_badge(theme, account.clone()).into_any_element(),
                 None => muted("Default login".into()).into_any_element(),
             });
         col = col.child(self.item_accordion(
@@ -1290,26 +1241,7 @@ impl Shell {
             );
             col = col.child(
                 section("account", "Account").child(match &facts.account {
-                    Some(account) => div()
-                        .debug_selector(|| "chat-item-account-badge".into())
-                        .flex_none()
-                        .h(px(20.0))
-                        .px(px(7.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.element_hover.opacity(0.55))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text)
-                        .child(
-                            crate::icons::icon(crate::icons::KEY_MINIMALISTIC)
-                                .size(px(11.0))
-                                .text_color(theme.text),
-                        )
-                        .child(SharedString::from(account.clone())),
+                    Some(account) => crate::components::shell_parts::item_account_badge(theme, account.clone()),
                     None => muted("Default login".into()),
                 }),
             );
