@@ -331,6 +331,22 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
 /// A selectable row; selection uses the active theme's semantic role.
 pub fn list_row(theme: &Theme, selected: bool) -> Div {
     let identity = theme.identity_color("");
+    let white = gpui::hsla(0.0, 0.0, 1.0, 1.0);
+    let selected_fill = if selected && is_area(theme) {
+        (0..=100)
+            .map(|step| {
+                gpui::hsla(
+                    identity.h,
+                    identity.s,
+                    identity.l * (1.0 - step as f32 / 100.0),
+                    identity.a,
+                )
+            })
+            .find(|fill| crate::theme::contrast_ratio(*fill, white) >= 4.5)
+            .unwrap_or(identity)
+    } else {
+        identity
+    };
     let colors = theme.industrial_colors();
     card_row(theme, true)
         .when(selected && !is_area(theme) && !is_industrial(theme), |el| {
@@ -338,14 +354,9 @@ pub fn list_row(theme: &Theme, selected: bool) -> Div {
         })
         .when(selected && is_area(theme), |el| {
             el.rounded_full()
-                .bg(identity)
-                .text_color(theme.identity_text(identity))
-                .child(
-                    div()
-                        .size(px(7.0))
-                        .rounded_full()
-                        .bg(theme.identity_text(identity)),
-                )
+                .bg(selected_fill)
+                .text_color(white)
+                .child(div().size(px(7.0)).rounded_full().bg(white))
         })
         .when(selected && is_industrial(theme), |el| {
             el.bg(colors.pressed)
