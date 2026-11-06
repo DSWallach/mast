@@ -1185,6 +1185,26 @@ impl Render for Walkthrough {
     }
 }
 
+#[cfg(feature = "snapshot")]
+pub(crate) fn snapshot_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    let document: ReviewDocument = serde_json::from_str(r#"{
+        "pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},
+        "steps":[{"id":"s1","title":"Review the data flow","file":"src/main.rs",
+        "hunks":[{"newStart":1,"newEnd":1}],"what":"Update the request handler",
+        "why":"Keep the view synchronized","risk":"low","riskNote":"Check error handling","tags":[]}],
+        "highlights":[],"questions":[]
+    }"#).unwrap();
+    let (_, review) = document.into_review().unwrap();
+    cx.new(|cx| Walkthrough {
+        review, files: Arc::new(Vec::new()), coverage: None,
+        viewed: BTreeSet::new(), seen: HashSet::new(), target_selected: true,
+        selected: 0, note_expanded: false, tour: true, stale_head: None,
+        focus: cx.focus_handle(), changes: None, _changes_observer: None,
+        step_input: None, _step_input_events: None, step_panel: None,
+        step_task: None, step_cancelled: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

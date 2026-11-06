@@ -93,3 +93,21 @@ fn render_chat_shell_offscreen() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "requires macOS Metal and access to macOS services"]
+fn render_walkthrough_offscreen() -> anyhow::Result<()> {
+    let baselines = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    for (style_name, style) in [("minimal", UiStyleId::Minimal), ("dense", UiStyleId::Dense), ("guided", UiStyleId::Guided)] {
+        for (appearance_name, appearance) in [("dark", Appearance::Dark), ("light", Appearance::Light)] {
+            let name = format!("walkthrough-{style_name}-{appearance_name}");
+            let path = mast_ui::snapshot::render_to_png(&name, size(px(640.), px(800.)), style, appearance, |_, cx| mast_ui::snapshot::walkthrough_fixture(cx))?;
+            let baseline = baselines.join(format!("{name}.png"));
+            if std::env::var_os("MAST_UPDATE_SNAPSHOTS").is_some() { std::fs::copy(&path, &baseline)?; }
+            let diff = image_compare::rgba_hybrid_compare(&image::open(baseline)?.into_rgba8(), &image::open(&path)?.into_rgba8())?;
+            diff.image.to_color_map().save(path.with_file_name(format!("{name}.diff.png")))?;
+            assert!(diff.score >= 0.9999, "{name} similarity: {}", diff.score);
+        }
+    }
+    Ok(())
+}

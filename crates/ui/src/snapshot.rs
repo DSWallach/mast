@@ -54,3 +54,8 @@ pub fn render_to_png<V: Render + 'static>(
     image.save(&path)?;
     Ok(path)
 }
+
+/// Construct the walkthrough test fixture using the production view.
+pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    crate::changes::walkthrough::snapshot_fixture(cx)
+}
