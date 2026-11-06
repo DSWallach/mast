@@ -7597,11 +7597,11 @@ impl Shell {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .rounded(px(if search_query.is_some() {
+            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(if search_query.is_some() {
                 popover::PALETTE_ITEM_RADIUS
             } else {
                 8.0
-            }))
+            })))
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))

@@ -3211,7 +3211,7 @@ impl OutlineView {
             .gap(px(4.0))
             .pl(px(Self::indent(row.depth)))
             .pr(px(8.0))
-            .rounded(px(4.0))
+            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
             .text_size(crate::typography::ui_rems(12.5))
             .border_1()
             .border_color(gpui::transparent_black())
