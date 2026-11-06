@@ -249,10 +249,7 @@ impl WorkItemDetails {
             ),
         };
         out.push(
-            div()
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(note))
+            crate::components::outline_secondary_text(note, theme)
                 .into_any_element(),
         );
         out.push(
@@ -269,15 +266,12 @@ impl WorkItemDetails {
         );
         if let Some(error) = &self.templates.error {
             out.push(
-                div()
+                crate::components::outline_secondary_text(error.clone(), theme)
                     .debug_selector(|| "work-item-template-error".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(error.clone()))
                     .into_any_element(),
             );
         }
-        let mut buttons = div().flex().gap(px(6.0));
+        let mut buttons = crate::components::outline_action_row(theme);
         if prompt.existing.is_some() {
             buttons = buttons
                 .child(

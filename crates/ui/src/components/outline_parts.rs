@@ -1155,6 +1155,21 @@ pub(crate) fn outline_proposal_diff(
         .into_any_element()
 }
 
+/// Secondary explanatory text in a details panel.
+pub fn outline_secondary_text(text: String, theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(text))
+}
+
+/// Horizontal group of details actions.
+pub fn outline_action_row(theme: &Theme) -> Div {
+    div().flex().gap(px(6.0 * super::layout_spacing(theme)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
