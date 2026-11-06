@@ -381,6 +381,8 @@ pub(crate) fn area_sidebar_chat_row(
         theme.text
     };
     let selector = format!("chat-{chat_id}");
+    let account_selector = format!("chat-account-{chat_id}");
+    let status_selector = format!("chat-status-{chat_id}");
     let badge = change_request.map(|summary| {
         let badge_id = SharedString::from(format!("{row_id}-compact-pr"));
         if preview {
@@ -423,11 +425,13 @@ pub(crate) fn area_sidebar_chat_row(
                     .bg(if selected { foreground } else { identity }),
             )
             .child(div().flex_1().min_w_0().truncate().child(title))
-            .children(account.map(|label| crate::managed_accounts::account_pill(theme, label)))
+            .children(account.map(|label| {
+                crate::managed_accounts::account_pill(theme, label)
+                    .debug_selector(move || account_selector.clone())
+            }))
             .children(badge)
-            .child(crate::status_style::indicator_for_theme(
-                status.into(),
-                theme,
+            .child(div().debug_selector(move || status_selector.clone()).child(
+                crate::status_style::indicator_for_theme(status.into(), theme),
             )),
     )
 }
@@ -883,6 +887,66 @@ pub(crate) fn rail_preview(
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
+
+pub(crate) fn panel_tab(
+    theme: &Theme,
+    id: &'static str,
+    accessible: &'static str,
+    label: String,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .h(px(24.0))
+        .flex_none()
+        .px(px(8.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(accessible)
+        .block_mouse_except_scroll()
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .when(active, |el| el.bg(crate::theme::wash(0.10)))
+        .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
+        .when(true, |el| super::segmented_key(el, theme, active))
+        .children(crate::surface_chrome::active_key_dot(theme, active))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(if active { theme.text } else { theme.text_muted })
+                .child(SharedString::from(label)),
+        )
+}
+
+pub(crate) fn panel_chip(
+    theme: &Theme,
+    id: String,
+    label: String,
+    border: gpui::Hsla,
+    text: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .h(px(18.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .rounded(px(5.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(border)
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(text)
+        .child(SharedString::from(label))
+}
 
 /// A Windows-owned caption target using the same system glyphs and native
 /// non-client hit-test areas as GPUI/Zed's platform titlebar.

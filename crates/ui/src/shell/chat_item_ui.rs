@@ -633,37 +633,11 @@ impl Shell {
             .chat_item_facts(&self.active_chat.clone(), cx)
             .and_then(|facts| facts.item)
             .is_some_and(|item| item.attention_count() + item.question_count() > 0);
-        div()
-            .id("right-surface-item-tab")
-            .debug_selector(|| "right-surface-item-tab".into())
-            .h(px(24.0))
-            .flex_none()
-            .px(px(8.0))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label("Item")
-            .block_mouse_except_scroll()
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                window.prevent_default()
-            })
-            .when(active, |el| el.bg(crate::theme::wash(0.10)))
-            .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
-            .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
-            .children(crate::surface_chrome::active_key_dot(&theme, active))
+        crate::components::shell_parts::panel_tab(&theme, "right-surface-item-tab", "Item", "Item".into(), active)
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
                 this.set_right_active(RightSurface::Item, cx);
             }))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(if active { theme.text } else { theme.text_muted })
-                    .child("Item"),
-            )
             .when(needs_you, |el| {
                 el.child(
                     div()

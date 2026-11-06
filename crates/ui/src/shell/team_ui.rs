@@ -90,37 +90,11 @@ impl Shell {
         let active = self.resolved_right_active(cx) == RightSurface::Team;
         let waiting = team.waiting() > 0;
         Some(
-            div()
-                .id("right-surface-team-tab")
-                .debug_selector(|| "right-surface-team-tab".into())
-                .h(px(24.0))
-                .flex_none()
-                .px(px(8.0))
-                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label("Team")
-                .block_mouse_except_scroll()
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                    window.prevent_default()
-                })
-                .when(active, |el| el.bg(crate::theme::wash(0.10)))
-                .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
-                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
-                .children(crate::surface_chrome::active_key_dot(&theme, active))
+            crate::components::shell_parts::panel_tab(&theme, "right-surface-team-tab", "Team", format!("Team {}", team.live().count()), active)
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.set_right_active(RightSurface::Team, cx);
                 }))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(if active { theme.text } else { theme.text_muted })
-                        .child(SharedString::from(format!("Team {}", team.live().count()))),
-                )
                 .when(waiting, |el| {
                     el.child(
                         div()
@@ -275,21 +249,7 @@ impl Shell {
 
     fn chip(theme: &Theme, id: String, label: String, tone: ChipTone) -> gpui::Stateful<gpui::Div> {
         let (border, text) = chip_palette(theme, tone);
-        let selector = id.clone();
-        div()
-            .id(SharedString::from(id))
-            .debug_selector(move || selector.clone())
-            .flex_none()
-            .h(px(18.0))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(border)
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(text)
-            .child(SharedString::from(label))
+        crate::components::shell_parts::panel_chip(theme, id, label, border, text)
     }
 
     fn pr_tone(pr: &WorkerPr) -> ChipTone {
