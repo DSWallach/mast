@@ -1133,6 +1133,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
             let field =
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
             UserInputQuestion {
+                allow_custom: true,
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),
                 question: field(["question", "prompt"]).unwrap_or("").into(),
@@ -1465,5 +1466,37 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+
+    #[tokio::test]
+    async fn multiple_question_control_response_preserves_answers() {
+        let input = json!({"questions": [
+            {"header":"One", "question":"Pick one?", "options":[{"label":"A"},{"label":"B"}], "multiSelect":false},
+            {"header":"Many", "question":"Pick many?", "options":[{"label":"C"},{"label":"D"}], "multiSelect":true},
+            {"header":"Other", "question":"Describe it?", "options":[{"label":"E"},{"label":"F"}], "multiSelect":false}
+        ]});
+        let request: ControlRequestFrame = serde_json::from_value(json!({
+            "request_id":"request-1", "request":{"subtype":"can_use_tool", "tool_name":"AskUserQuestion", "input":input}
+        })).unwrap();
+        let callback: Arc<RequestInputFn> = Arc::new(Box::new(|questions| {
+            let mut answers = vec![
+                UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["B".into()] },
+                UserInputAnswer { question_id: questions[1].id.clone(), labels: vec!["C".into(), "D".into()] },
+                UserInputAnswer { question_id: questions[2].id.clone(), labels: vec!["custom response".into()] },
+            ];
+            mast_proto::validate_input_answers(&questions, &mut answers).unwrap();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tx.send(answers).unwrap();
+            rx
+        }));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_control_request(request, &callback, &tx);
+        let StdinMsg::Line(line) = rx.recv().await.unwrap() else { panic!("expected response") };
+        let response: Value = serde_json::from_str(&line).unwrap();
+        let mut expected_input = input;
+        expected_input["answers"] = json!({"Pick one?":"B", "Pick many?":["C", "D"], "Describe it?":"custom response"});
+        assert_eq!(response, json!({"type":"control_response", "response":{
+            "subtype":"success", "request_id":"request-1", "response":{"behavior":"allow", "updatedInput":expected_input}
+        }}));
     }
 }

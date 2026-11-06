@@ -99,6 +99,15 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"wrapped up","errors":[],"usage":{"input_tokens":3,"output_tokens":3},"session_id":"sess-wake"}'
   ;;
 
+*scenario:multi-askuser*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-multi"}'
+  emit '{"type":"control_request","request_id":"multi-1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"header":"One","question":"Pick one?","options":[{"label":"A"},{"label":"B"}],"multiSelect":false},{"header":"Many","question":"Pick many?","options":[{"label":"C"},{"label":"D"}],"multiSelect":true},{"header":"Other","question":"Describe it?","options":[{"label":"E"},{"label":"F"}],"multiSelect":false}]}}}'
+  read -r response || exit 1
+  printf '%s\n' "$response" > multi-question-response.tmp
+  mv multi-question-response.tmp multi-question-response.json
+  emit '{"type":"result","subtype":"success","result":"answered","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-multi"}'
+  ;;
+
 *scenario:askuser*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-ask"}'
   # A plain tool permission request: must be auto-allowed.
