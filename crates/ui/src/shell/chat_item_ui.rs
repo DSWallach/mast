@@ -301,16 +301,7 @@ impl Shell {
             .collect::<Vec<_>>()
             .join(" \u{203a} ")
             .into();
-        let mut row = div()
-            .id("chat-header-breadcrumb")
-            .debug_selector(|| "chat-header-breadcrumb".into())
-            .flex_none()
-            .max_w(px(280.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
+        let mut row = crate::components::shell_parts::breadcrumb_frame(theme)
             .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: full.clone() }).into());
         if trimmed {
             row = row.child(
@@ -327,20 +318,7 @@ impl Shell {
                 row = row.child(div().text_color(theme.text_faint).child("\u{203a}"));
             }
             row = row.child(
-                div()
-                    .id(("chat-header-crumb", ix))
-                    .debug_selector(move || format!("chat-header-crumb-{ix}"))
-                    .min_w_0()
-                    .truncate()
-                    .rounded(px(3.0))
-                    .px(px(2.0))
-                    .cursor_pointer()
-                    .when(ix == last, |el| {
-                        el.font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                    })
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .child(SharedString::from(segment.title.clone()))
+                crate::components::shell_parts::breadcrumb_segment(theme, ix, segment.title.clone(), ix == last)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reveal_work_item_in_outline(&space_id, &item_id, window, cx)
                     })),

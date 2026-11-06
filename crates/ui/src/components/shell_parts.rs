@@ -177,6 +177,45 @@ pub(crate) fn chat_header_title(theme: &Theme, title: String) -> gpui::Div {
         .child(SharedString::from(title))
 }
 
+pub(crate) fn breadcrumb_frame(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("chat-header-breadcrumb")
+        .debug_selector(|| "chat-header-breadcrumb".into())
+        .flex_none()
+        .max_w(px(280.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted)
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+}
+
+pub(crate) fn breadcrumb_segment(
+    theme: &Theme,
+    index: usize,
+    title: String,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("chat-header-crumb", index))
+        .debug_selector(move || format!("chat-header-crumb-{index}"))
+        .min_w_0()
+        .truncate()
+        .rounded(px(3.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .px(px(2.0))
+        .cursor_pointer()
+        .when(last, |el| {
+            el.font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+        })
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .child(SharedString::from(title))
+}
+
 pub(crate) fn header_attention_badge(
     theme: &Theme,
     id: &'static str,
