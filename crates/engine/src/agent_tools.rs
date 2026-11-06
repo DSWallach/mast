@@ -1502,7 +1502,7 @@ impl AgentToolsService {
                 }
             }
         }
-        let args: CreateUserActionRequestArgs = parse_args(arguments)?;
+        let mut args: CreateUserActionRequestArgs = parse_args(arguments)?;
         if args.request.trim().is_empty() {
             return Err(AgentToolError::invalid("request is empty"));
         }
@@ -1511,13 +1511,19 @@ impl AgentToolsService {
                 "at most 8 links and 8 facts are allowed",
             ));
         }
-        for fact in &args.facts {
-            if fact.label.chars().count() > 40 || fact.value.chars().count() > 120 {
-                return Err(AgentToolError::invalid(format!(
-                    "fact '{}' exceeds the label or value limit",
-                    fact.label
-                )));
+        let mut warnings = Vec::new();
+        let mut truncate = |value: &mut String, limit: usize, field: String| {
+            if value.chars().count() > limit {
+                *value = value.chars().take(limit - 1).chain(std::iter::once('…')).collect();
+                warnings.push(format!("{field} truncated to {limit} characters"));
             }
+        };
+        for (index, fact) in args.facts.iter_mut().enumerate() {
+            truncate(&mut fact.label, 40, format!("fact {index} label"));
+            truncate(&mut fact.value, 120, format!("fact {index} value"));
+        }
+        for (index, link) in args.links.iter_mut().enumerate() {
+            truncate(&mut link.label, 40, format!("link {index} label"));
         }
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         for link in &args.links {
@@ -1704,6 +1710,7 @@ impl AgentToolsService {
         Ok(json!({
             "userActionRequestId": reply.user_action_request_id,
             "workItemId": work_item_id,
+            "warnings": warnings,
         }))
     }
 
