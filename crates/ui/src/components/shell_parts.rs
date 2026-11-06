@@ -364,7 +364,8 @@ pub(crate) fn area_sidebar_chat_row(
     row_id: String,
     chat_id: &str,
     title: SharedString,
-    status: mast_proto::ChatIndicator,
+    status: crate::status_style::Status,
+    status_label: &'static str,
     selected: bool,
     searching: bool,
     account: Option<String>,
@@ -404,7 +405,7 @@ pub(crate) fn area_sidebar_chat_row(
     Some(
         div()
             .id(SharedString::from(row_id))
-            .aria_label(SharedString::from(format!("{title} · {status:?}")))
+            .aria_label(SharedString::from(format!("{title} · {status_label}")))
             .debug_selector(move || selector.clone())
             .h(px(theme.ui_style.tokens.sidebar_row_compact_h))
             .px(px(10.0))
@@ -430,9 +431,21 @@ pub(crate) fn area_sidebar_chat_row(
                     .debug_selector(move || account_selector.clone())
             }))
             .children(badge)
-            .child(div().debug_selector(move || status_selector.clone()).child(
-                crate::status_style::indicator_for_theme(status.into(), theme),
-            )),
+            .child(
+                div()
+                    .debug_selector(move || status_selector.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(crate::status_style::indicator_for_theme(status, theme))
+                    .when(theme.ui_style.behavior.status_words, |el| {
+                        el.child(
+                            div()
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .child(status_label),
+                        )
+                    }),
+            ),
     )
 }
 

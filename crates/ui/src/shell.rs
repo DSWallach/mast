@@ -7284,7 +7284,40 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
-        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, title.clone(), status, selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), preview) {
+        // Send-truth overrides: a send unadopted past the grace window is
+        // FAILED (explicit, with the transcript's retry affordance); a send
+        // whose delivery path is degraded is QUEUED, not Working — the
+        // pending pill tells the truth instead of faking a spinner.
+        let (queued, undelivered) = {
+            let now = Utc::now();
+            let state = self.state.read(cx);
+            (
+                state.send_queued(&id, now),
+                state.send_undelivered(&id, now),
+            )
+        };
+        let status_color = if undelivered {
+            theme.danger
+        } else if queued {
+            theme.warning
+        } else {
+            spaces::status_dot_color(status, theme)
+        };
+        let status_label: Option<&'static str> = if undelivered {
+            Some("Failed")
+        } else if queued {
+            Some("Queued")
+        } else {
+            match status {
+                mast_proto::ChatIndicator::Working => Some("Working"),
+                mast_proto::ChatIndicator::AwaitingInput => Some(crate::components::shell_parts::awaiting_input_label(theme)),
+                mast_proto::ChatIndicator::Errored => Some("Failed"),
+                mast_proto::ChatIndicator::Completed => Some("Done"),
+                mast_proto::ChatIndicator::Idle => None,
+            }
+        };
+        let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), preview) {
             let select_id = id.clone();
             let menu_id = id.clone();
             return row
@@ -7328,38 +7361,6 @@ impl Shell {
                 .into_any_element()
         });
         let content_id = id.clone();
-        // Send-truth overrides: a send unadopted past the grace window is
-        // FAILED (explicit, with the transcript's retry affordance); a send
-        // whose delivery path is degraded is QUEUED, not Working — the
-        // pending pill tells the truth instead of faking a spinner.
-        let (queued, undelivered) = {
-            let now = Utc::now();
-            let state = self.state.read(cx);
-            (
-                state.send_queued(&id, now),
-                state.send_undelivered(&id, now),
-            )
-        };
-        let status_color = if undelivered {
-            theme.danger
-        } else if queued {
-            theme.warning
-        } else {
-            spaces::status_dot_color(status, theme)
-        };
-        let status_label: Option<&'static str> = if undelivered {
-            Some("Failed")
-        } else if queued {
-            Some("Queued")
-        } else {
-            match status {
-                mast_proto::ChatIndicator::Working => Some("Working"),
-                mast_proto::ChatIndicator::AwaitingInput => Some(crate::components::shell_parts::awaiting_input_label(theme)),
-                mast_proto::ChatIndicator::Errored => Some("Failed"),
-                mast_proto::ChatIndicator::Completed => Some("Done"),
-                mast_proto::ChatIndicator::Idle => None,
-            }
-        };
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
