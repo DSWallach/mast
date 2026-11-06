@@ -6383,7 +6383,7 @@ impl Transcript {
                     question: None,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                render::render_block(
+                let content = render::render_block(
                     &top.block,
                     *block_ix,
                     *block_ix,
@@ -6394,7 +6394,8 @@ impl Transcript {
                         .get(block_ix)
                         .and_then(|o| o.as_deref())
                         .map(|document| document.lines.as_slice()),
-                )
+                );
+                area_assistant_marker(content, area && *block_ix == 0, identity)
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
                 let mut theme = theme.clone();
@@ -6486,7 +6487,7 @@ impl Transcript {
                 if veil.is_some_and(|v| v.borrow().is_fading()) {
                     motion::pulse_lease(cx.entity_id(), cx);
                 }
-                el
+                area_assistant_marker(el, area && *block_ix == 0, identity)
             }
             RowKind::ToolGroup {
                 tools,
@@ -7472,6 +7473,14 @@ impl Transcript {
 /// run when there are none), with the same selection machinery as rendered
 /// markdown — the element registers into the frame's document-ordered
 /// registry, so drags select, span into adjacent rows, and Cmd+C copies.
+fn area_assistant_marker(content: AnyElement, show: bool, identity: gpui::Hsla) -> AnyElement {
+    if !show { return content; }
+    div().relative().min_w_0()
+        .child(div().absolute().left(px(-18.0)).top(px(4.0)).size(px(10.0)).rounded_full().bg(identity))
+        .child(content)
+        .into_any_element()
+}
+
 fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,
