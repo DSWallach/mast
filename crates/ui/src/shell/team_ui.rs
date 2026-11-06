@@ -9,7 +9,7 @@ use super::*;
 
 use crate::shell::chat_item_ui::{ChipTone, chip_palette};
 use crate::team::{
-    ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr, WorkerState,
+    ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr,
     team,
 };
 

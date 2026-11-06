@@ -7111,25 +7111,12 @@ impl Shell {
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
         // itself below the chrome.
-        div()
-            .h_full()
-            .flex_none()
-            .overflow_hidden()
-            .w(px(self.sidebar_now()))
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_r_1().border_color(theme.border))
-            .child(if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-                div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).flex().flex_col()
-                    .child(div().px(px(16.0)).pb(px(12.0)).font_family("EB Garamond").text_size(crate::typography::ui_rems(26.0)).text_color(theme.text_muted).child("Mast"))
-                    .child(div().id("area-new-session").mx(px(12.0)).mb(px(12.0)).px(px(12.0)).py(px(8.0))
-                        .rounded(px(12.0)).border_1().border_color(theme.border_strong).text_color(theme.text_muted)
-                        .cursor_pointer().child("+  New conversation")
-                        .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx))))
-                    .child(div().flex_1().min_h_0().overflow_hidden().child(inner))
-            } else {
-                div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner)
-            })
-            .into_any_element()
+        crate::components::shell_parts::sidebar_frame(
+            &theme,
+            self.sidebar_now(),
+            inner.into_any_element(),
+            cx.listener(|this, _, _, cx| this.open_new_session(cx)),
+        )
     }
 
     /// Settings-mode sidebar (zeron settings-sidebar.tsx): window-control

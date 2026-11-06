@@ -201,6 +201,63 @@ pub(crate) fn review_chip(theme: &Theme, selector: String) -> gpui::Stateful<gpu
         .text_color(theme.accent)
 }
 
+pub(crate) fn sidebar_frame(
+    theme: &Theme,
+    width: f32,
+    inner: AnyElement,
+    on_new_conversation: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .h_full()
+        .flex_none()
+        .overflow_hidden()
+        .w(px(width))
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface),
+        )
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
+                && !super::is_area(theme),
+            |el| el.border_r_1().border_color(theme.border),
+        )
+        .child(if super::is_area(theme) {
+            div()
+                .h_full()
+                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px(px(16.0))
+                        .pb(px(12.0))
+                        .font_family("EB Garamond")
+                        .text_size(crate::typography::ui_rems(26.0))
+                        .text_color(theme.text_muted)
+                        .child("Mast"),
+                )
+                .child(
+                    div()
+                        .id("area-new-session")
+                        .mx(px(12.0))
+                        .mb(px(12.0))
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .child("+  New conversation")
+                        .on_click(on_new_conversation),
+                )
+                .child(div().flex_1().min_h_0().overflow_hidden().child(inner))
+        } else {
+            div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner)
+        })
+        .into_any_element()
+}
+
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 pub(crate) fn window_control_button(
