@@ -853,6 +853,51 @@ pub fn outline_guide_cell(id: SharedString, x: f32, height: f32) -> Stateful<Div
         .h(px(height))
 }
 
+/// Insertion line shown while moving an outline row.
+pub fn outline_drop_line(selector: String, left: f32, before: bool, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .left(px(left))
+        .right(px(4.0))
+        .h(px(2.0))
+        .rounded(px(1.0))
+        .bg(theme.accent)
+        .when(before, |el| el.top(px(-1.0)))
+        .when(!before, |el| el.bottom(px(-1.0)))
+}
+
+/// Label shown beside an outline drop indicator.
+pub fn outline_drop_label(text: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "outline-drop-label".into())
+        .absolute()
+        .right(px(6.0))
+        .top(px(2.0))
+        .max_w(px(220.0))
+        .px(px(5.0))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.accent)
+        .bg(theme.surface_raised)
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .truncate()
+        .child(SharedString::from(text))
+}
+
+/// Transient highlight after moving a row.
+pub fn outline_move_flash(selector: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .inset_0()
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+        .bg(theme.accent_wash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
