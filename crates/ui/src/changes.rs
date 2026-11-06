@@ -1988,7 +1988,7 @@ pub struct Changes {
     review_head_for: Option<String>,
     review_head: Option<(String, String)>,
     review_checkout_matches: Option<bool>,
-    review_branch_repositories: HashMap<(String, String), String>,
+    review_branch_repositories: HashMap<(String, String), Option<String>>,
     review_branch_lookup: Option<(String, String)>,
     review_branch_lookup_task: Option<Task<()>>,
     review_status_task: Option<Task<()>>,

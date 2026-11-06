@@ -243,6 +243,11 @@ impl Changes {
                 if self.scope == DiffScope::Range {
                     let path = owner.cwd.as_ref()?;
                     let repo = self.review_branch_repositories.get(&(owner.chat_id.clone(), path.clone()))?;
+                    // Local and non-GitHub checkouts retain the old ref key;
+                    // it does not share marks with a walkthrough's branch key.
+                    let Some(repo) = repo else {
+                        return Some((format!("ref:{}:{}:{}", owner.device_id, path, range.head_ref), range.head_sha.clone()));
+                    };
                     let target = mast_proto::ReviewTarget::Branch {
                         repo: Some(repo.clone()), checkout_path: Some(path.clone()),
                         branch: Some(range.head_branch.clone()), base_ref: Some(range.base_ref.clone()),
@@ -521,9 +526,8 @@ impl Changes {
             self.review_branch_lookup_task = Some(cx.spawn(async move |this, cx| {
                 let result = task.await.and_then(|checkouts| checkouts.into_iter()
                     .find(|checkout| checkout.path == path)
-                    .and_then(|checkout| checkout.repo_slug)
-                    .filter(|repo| !repo.is_empty())
-                    .ok_or_else(|| "Could not identify the branch repository for review state".to_owned()));
+                    .map(|checkout| checkout.repo_slug.filter(|repo| !repo.is_empty()))
+                    .ok_or_else(|| "Could not find the branch checkout for review state".to_owned()));
                 this.update(cx, |this, cx| {
                     if this.review_branch_lookup.as_ref() != Some(&key) { return; }
                     this.review_branch_lookup = None;
@@ -898,16 +902,20 @@ mod mark_tests {
     }
 
     #[gpui::test]
-    fn unknown_repository_does_not_write_a_guessed_branch_key(cx: &mut gpui::TestAppContext) {
+    fn local_repository_preserves_the_existing_ref_key(cx: &mut gpui::TestAppContext) {
         use std::sync::{Arc, Mutex};
-        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
         let captured = calls.clone();
         cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
         let (changes, vcx) = cx.add_window_view(|_, cx| {
             let mut state = AppState::new();
-            state.chat_diff_rpc_override = Some(Arc::new(move |method, _| {
-                captured.lock().unwrap().push(method.into());
-                Ok(serde_json::json!({"candidates":[{"path":"/repo","kind":"own","repoName":"r","bound":false,"selected":true}]}))
+            state.chat_diff_rpc_override = Some(Arc::new(move |method, params| {
+                captured.lock().unwrap().push((method.into(), params));
+                match method {
+                    methods::LIST_CHAT_DIFF_CHECKOUTS => Ok(serde_json::json!({"candidates":[{"path":"/repo","kind":"own","repoName":"r","bound":false,"selected":true}]})),
+                    methods::GET_DIFF_REVIEW_STATE => Ok(serde_json::json!({"state":null})),
+                    _ => Err("not available in test".into()),
+                }
             }));
             let state = cx.new(|_| state);
             let owner = ChangesTarget { chat_id: "chat".into(), device_id: "device".into(), cwd: Some("/repo".into()), checkout_id: None, branch: None, unconfirmed: None, exact_checkout: false,
@@ -918,8 +926,8 @@ mod mark_tests {
         });
         changes.update(vcx, |changes, cx| changes.ensure_review_state(cx));
         vcx.run_until_parked();
-        assert!(changes.read_with(vcx, |changes, _| changes.review_error.is_some()));
-        assert!(!calls.lock().unwrap().iter().any(|method| method == methods::GET_DIFF_REVIEW_STATE));
+        assert!(changes.read_with(vcx, |changes, _| changes.review_error.is_none()));
+        assert!(calls.lock().unwrap().iter().any(|(method, params)| method == methods::GET_DIFF_REVIEW_STATE && params["target"] == "ref:device:/repo:refs/heads/feature"));
     }
 
     #[gpui::test]
