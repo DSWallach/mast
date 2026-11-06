@@ -788,6 +788,22 @@ impl TerminalColors {
 }
 
 impl Theme {
+    /// Stable character colour derived solely from the active theme palette.
+    pub fn identity_color(&self, chat_id: &str) -> Hsla {
+        let hash = chat_id.bytes().fold(14695981039346656037_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
+        });
+        let indices = [4, 1, 5, 3, 2, 6];
+        self.terminal.ansi[indices[(hash % 6) as usize]]
+    }
+
+    /// Select a theme text role with the strongest contrast on an identity fill.
+    pub fn identity_text(&self, fill: Hsla) -> Hsla {
+        [self.text, self.on_solid, self.on_accent]
+            .into_iter()
+            .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
+            .unwrap_or(self.text)
+    }
     // ---- numbers drive layout (px) ----
     /// Frost translucency over the blurred window background (macOS vibrancy
     /// or Windows Acrylic). Linux stays opaque because compositor blur is not

@@ -6208,6 +6208,8 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
+        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
+        let identity = theme.identity_color(self.chat_id.as_deref().unwrap_or(""));
         let workspace_root = {
             let state = self.state.read(cx);
             self.chat_id
@@ -6336,20 +6338,28 @@ impl Transcript {
                                 .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(Theme::BUBBLE_RADIUS)))
                                 .px(px(16.0))
                                 .py(px(10.0))
-                                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
+                                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && !area, |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))
+                                .when(area, |el| el.bg(identity).max_w_full())
                                 .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(14.0)))
                                 .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
-                                .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, false, &theme, window, cx,
-                                )),
+                                .child({
+                                    let mut bubble_theme = theme.clone();
+                                    if area { bubble_theme.text = theme.identity_text(identity); }
+                                    self.render_user_body(&row.id, ix, text, mentions, false, &bubble_theme, window, cx)
+                                }),
                         ),
                     );
                 }
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
+                let mut theme = theme.clone();
+                if area {
+                    theme.font_sans = "EB Garamond".into();
+                    if crate::theme::contrast_ratio(identity, theme.bg) >= 4.5 { theme.text = identity; }
+                }
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6383,6 +6393,11 @@ impl Transcript {
                 )
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
+                let mut theme = theme.clone();
+                if area {
+                    theme.font_sans = "EB Garamond".into();
+                    if crate::theme::contrast_ratio(identity, theme.bg) >= 4.5 { theme.text = identity; }
+                }
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };

@@ -7559,8 +7559,10 @@ impl Shell {
                 .into_any_element()
         };
         let mut corner = Some(corner);
-        let (hover, text) = (theme.glass_hover(), theme.text);
-        let selected_wash = if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque { theme.element_active } else { crate::theme::glass_selected_bg() };
+        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
+        let identity = theme.identity_color(&id);
+        let (hover, text) = (theme.glass_hover(), if area && selected { theme.identity_text(identity) } else { theme.text });
+        let selected_wash = if area { identity } else if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque { theme.element_active } else { crate::theme::glass_selected_bg() };
         let subline = if search_query.is_some() {
             theme.text_muted
         } else {
@@ -7706,6 +7708,7 @@ impl Shell {
                     } else {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
+                    .when(area, |el| el.child(div().flex_none().size(px(8.0)).rounded_full().bg(if selected { theme.identity_text(identity) } else { identity })))
                     .children(compact_status)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
