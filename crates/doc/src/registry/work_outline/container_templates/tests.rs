@@ -237,6 +237,15 @@ fn template_proposals_propagate_or_add_an_own_instruction() {
     let second = create(&mut d, "proposal-second", Some(&projects), "Second");
     let first_plan = child_titled(&snap(&d), &first, "Planning").id.clone();
     let second_plan = child_titled(&snap(&d), &second, "Planning").id.clone();
+    let default_target = d.apply_work_outline_mutation(&WorkOutlineMutation::ProposeWorkItemInstruction(ProposeWorkItemInstructionParams {
+        space_id: Some(SPACE.into()), target: InstructionProposalTarget {
+            scope: ProposalTargetScope::ChildTemplate, work_item_id: Some(first.clone()),
+            container_work_item_id: Some(projects.clone()), ..Default::default()
+        }, origin: InstructionProposalOrigin::default(), text: "Review the project".into(),
+        action: ProposalAction::Add, instruction_id: None, rationale: None, operation_id: "proposal-default-rule".into(),
+    }), &actor(WorkOutlineActorKind::User), NOW).unwrap().proposal_id.unwrap();
+    let root_id = snap(&d).item(&projects).unwrap().container_template.as_ref().unwrap().root.id.clone();
+    assert_eq!(d.instruction_proposal(&default_target).unwrap().target.rule_node_id.as_deref(), Some(root_id.as_str()));
     let row = snap(&d).instructions.iter().find(|i| i.work_item_id.as_deref() == Some(&first_plan)).unwrap().clone();
     // A child row may already have drifted due to the original approval bug.
     d.commit(vec![super::super::Planned::update(super::super::KIND_WORK_ITEM_INSTRUCTIONS, &row.id,
