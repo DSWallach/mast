@@ -2872,6 +2872,7 @@ impl Changes {
     fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
         if self.scope != scope {
             self.scope = scope;
+            self.explanation_selection = None;
             self.reset_horizontal_scroll();
             if scope == DiffScope::History {
                 self.history_pane(cx)
