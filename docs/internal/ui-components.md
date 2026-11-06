@@ -1072,13 +1072,20 @@ This mechanical index lists a filtered set of functions whose names match contro
 
 ## Candidate screen-owned migration slices
 
-- Shell and sidebar.
-- Outline and item details.
-- Conversation, composer and transcript.
-- Changes and walkthrough.
-- Settings and appearance.
-- Browser and artifacts.
-- Linear and Team.
-- Menus, popovers and remaining shared surfaces.
+Assign each slice only the paths listed; shared components are extended by the
+foundation owner before concurrent screen migrations begin.
 
-Each slice must audit its own call sites and remove screen-owned style branches after the shared components support the existing treatments.
+| Slice | Owned paths |
+| --- | --- |
+| Shell and sidebar | `shell.rs`, `shell/`, `rail.rs` |
+| Outline and item details | `work_outline/`, `overview.rs`, `overview_grouping.rs`, `overview_positions.rs` |
+| Conversation and composer | `transcript.rs`, `composer.rs`, `composer/`, `composer_dock.rs`, `markdown/` |
+| Changes and walkthrough | `changes.rs`, `changes/`, `files/` |
+| Settings and appearance | `settings.rs`, `settings/`, `appearance.rs` |
+| Browser and artifacts | `browser/`, `artifacts/` |
+| Linear and Team | `linear/`, `team/`, `team.rs` |
+| Menus and remaining surfaces | `popover.rs`, `pickers.rs`, `app_menus.rs`, `menu_bar.rs`, other paths not owned above |
+
+Each slice must audit its own inline call sites and remove screen-owned style
+and layout branches after shared components support the existing treatments.
+The candidate index is not a substitute for that audit.
