@@ -10969,14 +10969,7 @@ impl Shell {
                 .child(
                     // Leading slot: icon normally, ✕ on tab hover — two
                     // stacked layers opacity-swapped by the group hover.
-                    div()
-                        .id(("right-surface-close", ix))
-                        .debug_selector(|| format!("right-surface-close-{ix}"))
-                        .flex_none()
-                        .size(px(18.0))
-                        .rounded(px(4.0))
-                        .relative()
-                        .hover(|s| s.bg(crate::theme::wash(0.12)))
+                    crate::components::shell_parts::surface_close_slot(&theme, ix)
                         // The tab owns a drag payload. Claim the close press
                         // before it reaches that parent or GPUI starts a tab
                         // drag instead of delivering the close click.
@@ -11045,24 +11038,11 @@ impl Shell {
                         ),
                 )
                 .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(if is_active {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        })
-                        .child(title),
+                    crate::components::shell_parts::surface_tab_title(&theme, title, is_active),
                 )
                 .when(dirty, |chip| {
                     chip.child(
-                        div()
-                            .flex_none()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme.text_muted),
+                        crate::components::shell_parts::surface_dirty_indicator(&theme),
                     )
                 });
             // Sliding transform while a sibling drags over (the terminal
@@ -11095,23 +11075,7 @@ impl Shell {
         // The `+` — a small menu offering the available surfaces (t3 "Add panel
         // surface"); mirrors the picker cards.
         let plus_open = self.right_plus.get().is_some();
-        let plus_fade = "right-surface-add-fade";
-        let mut plus = div()
-            .id("right-surface-add")
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                plus_fade,
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.11),
-            ))
-            .on_hover(motion::hover_listener(plus_fade))
-            .block_mouse_except_scroll()
+        let mut plus = crate::components::shell_parts::surface_add_button(&theme)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, _| {

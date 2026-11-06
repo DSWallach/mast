@@ -201,6 +201,60 @@ pub(crate) fn right_surface_tab(
         .children(crate::surface_chrome::active_key_dot(theme, active))
 }
 
+pub(crate) fn surface_close_slot(theme: &Theme, index: usize) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("right-surface-close", index))
+        .debug_selector(move || format!("right-surface-close-{index}"))
+        .flex_none()
+        .size(px(18.0))
+        .rounded(px(4.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .relative()
+        .hover(|el| el.bg(crate::theme::wash(0.12)))
+}
+
+pub(crate) fn surface_tab_title(theme: &Theme, title: SharedString, active: bool) -> gpui::Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(if active { theme.text } else { theme.text_muted })
+        .when(super::is_industrial(theme), |el| {
+            el.font_family(theme.font_mono.clone())
+        })
+        .child(title)
+}
+
+pub(crate) fn surface_dirty_indicator(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(6.0))
+        .rounded_full()
+        .bg(theme.text_muted)
+}
+
+pub(crate) fn surface_add_button(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let fade = "right-surface-add-fade";
+    let button = div()
+        .id("right-surface-add")
+        .size(px(24.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .cursor_pointer()
+        .bg(motion::hover_blend(
+            fade,
+            crate::theme::wash(0.0),
+            crate::theme::wash(0.11),
+        ))
+        .on_hover(motion::hover_listener(fade))
+        .block_mouse_except_scroll();
+    super::icon_key(button, theme, false)
+}
+
 pub(crate) fn activity_indicator(
     status: crate::status_style::Status,
     key: String,
