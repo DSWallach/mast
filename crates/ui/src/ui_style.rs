@@ -38,7 +38,7 @@ impl UiStyleId {
             Self::Dense => "More on screen",
             Self::Guided => "More labels and guidance",
             Self::Industrial => "Instrument panel",
-            Self::Area => "Editorial grid",
+            Self::Area => "Character conversation",
         }
     }
 
@@ -104,13 +104,6 @@ pub enum ControlVariant {
 pub enum StatusIndicator {
     Minimal,
     Dot,
-    Square,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabVariant {
-    Default,
-    Underline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +155,6 @@ pub struct UiStyle {
     pub surface: SurfaceModel,
     pub controls: ControlVariant,
     pub status_indicator: StatusIndicator,
-    pub tabs: TabVariant,
     pub font_preference: FontPreference,
 }
 
@@ -189,7 +181,6 @@ impl UiStyle {
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
-        tabs: TabVariant::Default,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
@@ -225,7 +216,6 @@ impl UiStyle {
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
-        tabs: TabVariant::Default,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
             labels: LabelMode::Primary,
@@ -261,7 +251,6 @@ impl UiStyle {
         surface: SurfaceModel::ThemeDefault,
         controls: ControlVariant::Minimal,
         status_indicator: StatusIndicator::Minimal,
-        tabs: TabVariant::Default,
         font_preference: FontPreference::UserDefault,
         behavior: StyleBehavior {
             labels: LabelMode::All,
@@ -294,7 +283,6 @@ impl UiStyle {
         surface: SurfaceModel::Opaque,
         controls: ControlVariant::Key,
         status_indicator: StatusIndicator::Dot,
-        tabs: TabVariant::Default,
         font_preference: FontPreference::Geist,
         behavior: StyleBehavior {
             motion: Motion::Instant,
@@ -306,10 +294,10 @@ impl UiStyle {
         tokens: StyleTokens {
             sidebar_row_compact_h: 36.0,
             control_size: 36.0,
-            control_radius: Some(0.0),
-            panel_radius: Some(0.0),
-            chip_radius: Some(0.0),
-            rule_width: Some(1.0),
+            control_radius: Some(12.0),
+            panel_radius: Some(14.0),
+            chip_radius: Some(12.0),
+            rule_width: None,
             grid: Some(8.0),
             label_size: Some(10.0),
             secondary_size: Some(12.0),
@@ -318,12 +306,11 @@ impl UiStyle {
             ..Self::MINIMAL.tokens
         },
         surface: SurfaceModel::Opaque,
-        controls: ControlVariant::FlatOutline,
-        status_indicator: StatusIndicator::Square,
-        tabs: TabVariant::Underline,
-        font_preference: FontPreference::UserDefault,
+        controls: ControlVariant::Minimal,
+        status_indicator: StatusIndicator::Dot,
+        font_preference: FontPreference::Geist,
         behavior: StyleBehavior {
-            motion: Motion::Instant,
+            motion: Motion::Soft,
             ..Self::MINIMAL.behavior
         },
     };
