@@ -61,6 +61,39 @@ fn decode_settings_item(row: Option<&RegistryRow>, field: &str) -> Option<String
 }
 
 impl RegistryDoc {
+    pub fn set_approval_rules(
+        &mut self,
+        p: &mast_proto::work_outline::SetApprovalRulesParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        let mut ids = std::collections::HashSet::new();
+        for rule in &p.rules {
+            check_id("approval rule id", &rule.id)?;
+            if !ids.insert(&rule.id) || rule.label.trim().is_empty() || rule.created_by.trim().is_empty()
+                || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
+                || rule.cwd_scope.as_deref().is_some_and(|scope| !std::path::Path::new(scope).is_absolute()) {
+                return Err(invalid("Invalid approval rule"));
+            }
+        }
+        let value = json!(p.rules);
+        if value.to_string().len() > 12_000 { return Err(invalid("Approval rules exceed 12000 bytes")); }
+        if self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id).as_ref()
+            .and_then(|row| row.fields.get("approvalRules")) == Some(&value) { return Ok(()); }
+        let plan = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
+                ("approvalRules".into(), value), ("updatedAt".into(), json!(now_ms)),
+            ])),
+            RowState::Absent => Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
+                ("spaceId".into(), json!(p.space_id)), ("approvalRules".into(), value),
+                ("updatedAt".into(), json!(now_ms)), ("v".into(), json!(WORK_OUTLINE_ROW_VERSION)),
+            ])),
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![plan], &[(KIND_SPACES, p.space_id.as_str())])
+    }
+
     /// Initialize only missing prompt settings; safe to retry after an interrupted migration.
     pub fn initialize_pr_review_prompts(
         &mut self,

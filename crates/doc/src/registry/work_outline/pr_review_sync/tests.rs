@@ -423,3 +423,22 @@ fn prompt_migration_preserves_existing_and_explicit_values() {
         Some(PrReviewPrompts::neutral())
     );
 }
+
+#[test]
+fn approval_rules_are_space_scoped_and_only_users_can_change_them() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRulesParams};
+    let mut doc = doc();
+    let rule = ApprovalRule {
+        id: "r1".into(), label: "Tests".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex, enabled: false, argv_prefix: vec!["cargo".into(), "test".into()],
+        command_regex: None, cwd_scope: None, hit_count: 0, last_used_at: None,
+    };
+    let mutation = WorkOutlineMutation::SetApprovalRules(SetApprovalRulesParams {
+        space_id: SPACE.into(), rules: vec![rule.clone()], operation_id: "rules-1".into(),
+    });
+    assert_eq!(apply_as(&mut doc, WorkOutlineActorKind::Agent, mutation.clone()).unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
+    assert_eq!(apply_as(&mut doc, WorkOutlineActorKind::System, mutation.clone()).unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
+    apply_as(&mut doc, WorkOutlineActorKind::User, mutation).unwrap();
+    assert_eq!(snapshot(&doc, SPACE).space_settings.approval_rules, vec![rule]);
+    assert!(snapshot(&doc, OTHER).space_settings.approval_rules.is_empty());
+}

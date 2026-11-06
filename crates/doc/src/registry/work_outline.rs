@@ -770,6 +770,9 @@ impl RegistryDoc {
         now_ms: i64,
     ) -> Outcome<WorkOutlineMutateReply> {
         check_operation_id(mutation.operation_id())?;
+        if matches!(mutation, WorkOutlineMutation::SetApprovalRules(_)) && actor.kind != WorkOutlineActorKind::User {
+            return Err(WorkOutlineError::unauthorized("Only a user may change approval rules"));
+        }
         if actor.kind == WorkOutlineActorKind::Agent {
             let chat_id = actor.chat_id.as_deref().ok_or_else(|| {
                 WorkOutlineError::unauthorized("Agent changes need an originating Chat")
@@ -906,6 +909,9 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::SetPrReviewPrompts(p) => {
                 self.set_pr_review_prompts(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetApprovalRules(p) => {
+                self.set_approval_rules(p, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::SetPrReviewSyncDestination(p) => self
                 .set_pr_review_sync_destination(p, now_ms)

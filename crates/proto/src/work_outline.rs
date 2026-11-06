@@ -562,6 +562,14 @@ pub struct SetPrReviewPromptsParams {
     pub operation_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetApprovalRulesParams {
+    pub space_id: String,
+    pub rules: Vec<ApprovalRule>,
+    pub operation_id: String,
+}
+
 /// How a Chat relates to the outline. Lenient: unknown reads as `unassociated`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1508,6 +1516,7 @@ pub enum WorkOutlineMutation {
     // ── PR review sync ──
     SetPrReviewSyncDestination(SetPrReviewSyncDestinationParams),
     SetPrReviewPrompts(SetPrReviewPromptsParams),
+    SetApprovalRules(SetApprovalRulesParams),
     SetLinearAssignedDestination(SetLinearAssignedDestinationParams),
     // ── Project templates ──
     SaveWorkItemTemplate(crate::work_outline_templates::SaveWorkItemTemplateParams),
@@ -1550,6 +1559,7 @@ impl WorkOutlineMutation {
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
             Self::SetPrReviewPrompts(p) => &p.operation_id,
+            Self::SetApprovalRules(p) => &p.operation_id,
             Self::SetLinearAssignedDestination(p) => &p.operation_id,
             Self::SaveWorkItemTemplate(p) => &p.operation_id,
             Self::DeleteWorkItemTemplate(p) => &p.operation_id,
@@ -1590,6 +1600,7 @@ impl WorkOutlineMutation {
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",
             Self::SetPrReviewPrompts(_) => "setPrReviewPrompts",
+            Self::SetApprovalRules(_) => "setApprovalRules",
             Self::SetLinearAssignedDestination(_) => "setLinearAssignedDestination",
             Self::SaveWorkItemTemplate(_) => "saveWorkItemTemplate",
             Self::DeleteWorkItemTemplate(_) => "deleteWorkItemTemplate",
