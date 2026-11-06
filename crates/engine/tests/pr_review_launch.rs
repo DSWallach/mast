@@ -243,6 +243,12 @@ async fn branch_review_launch_is_idempotent_and_binds_checkout() {
         *branch = Some("different".into());
     }
     assert!(rig.client.start_branch_review(&changed).await.is_err());
+    let mut repo_only = p.clone();
+    repo_only.operation_id = "branch-review-repo".into();
+    if let mast_proto::ReviewTarget::Branch { checkout_path, .. } = &mut repo_only.target {
+        *checkout_path = None;
+    }
+    assert_eq!(rig.client.start_branch_review(&repo_only).await.unwrap().checkout_path, rig.flagship.to_string_lossy());
     assert!(gh_calls(&rig).is_empty());
 }
 
