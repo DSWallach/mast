@@ -1070,6 +1070,19 @@ unknown ids instead of denying.
   real append-versus-drain race rejected queued messages. Gallery: T cycles themes. Release 60: UI 2563/0, plus one
   engine test updated for truncate-not-refuse. Running: `approval-rules` (58571810): per-Space auto-approve
   patterns for worker command approvals; suggestions off by default; 39 adversarial cases must ask.
+- **2026-11-06 late (release 61, installed, clean: nextest 2477/2477, UI 2569/0):** `approval-rules`: per-Space
+  auto-approve rules for Codex command approvals. A fail-closed matcher unwraps zsh -lc, perl alarm, caffeinate,
+  ulimit and env prefixes; every segment of a chained command must match; 39+ adversarial cases always ask;
+  cargo test/nextest/build/check/clippy are allowed, while install/publish/login/add/update and registry/net config
+  always ask. Durable friction audit and counts; Space settings editor with a test box; "Always allow commands like
+  this…" on approval cards; agents can only PROPOSE rules (one-click accept). Suggested rules ship OFF. Codex only;
+  Claude Code permission prompts don't go through it. Mikey should enable the suggestions.
+- **Appearance model (Mikey, 2026-11-06): three independent settings.** Style {Default, Industrial, Area} = element
+  design; Layout {Minimal, Compact, Guided} = density and guidance; Theme = colours. Any combination must work. In
+  progress: `ui-components` (f08a32a7), a shared component layer so screens never branch on style/layout, plus a
+  ratchet test on literal sizes/radii and style branches. Then migrate screens in slices (see
+  docs/internal/ui-components.md). Area v2 and Industrial polish are PAUSED until the components land. Mikey's
+  verdict: both looks are "inconsistently applied", and Area "all over the place".
 - Release runs 50–55 passed (last: nextest 2405/2405, UI 2542/0). Run 54 failed two load-sensitive tests
   (`message_queue::queued_text_waits_for_a_steerable_turn_even_with_legacy_policy`,
   `executable::tests::stderr_versions_are_read_and_build_metadata_does_not_break_ties`) while worker builds ran
