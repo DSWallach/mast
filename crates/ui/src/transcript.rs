@@ -6208,8 +6208,6 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        let conversation = theme.ui_style.conversation;
-        let area = matches!(conversation, crate::ui_style::ConversationVariant::Area);
         let identity = theme.identity_color(self.chat_id.as_deref().unwrap_or(""));
         let workspace_root = {
             let state = self.state.read(cx);
@@ -6467,26 +6465,9 @@ impl Transcript {
                 auto_open,
                 summary,
             } => {
-                if area {
-                    let mut panel_theme = theme.clone();
-                    let panel = if theme.appearance.is_dark() { theme.surface_raised } else { theme.solid };
-                    let foreground = theme.identity_text(panel);
-                    panel_theme.bg = panel;
-                    panel_theme.surface = panel;
-                    panel_theme.surface_raised = panel;
-                    panel_theme.text = foreground;
-                    panel_theme.text_muted = foreground.opacity(0.8);
-                    panel_theme.text_faint = foreground.opacity(0.7);
-                    let body = self.render_tool_group(&row.id, tools, summary, *auto_open, &panel_theme, cx);
-                    div().rounded(px(14.0)).bg(panel).px(px(16.0)).py(px(12.0))
-                        .child(div().w_full().flex().justify_center().items_center().gap(px(6.0))
-                            .text_color(panel_theme.identity_foreground(identity)).font_family("EB Garamond")
-                            .text_size(crate::typography::ui_rems(16.0))
-                            .child(div().size(px(10.0)).rounded_full().bg(identity)).child("Tools"))
-                        .child(body).into_any_element()
-                } else {
-                    self.render_tool_group(&row.id, tools, summary, *auto_open, &theme, cx)
-                }
+                let panel_theme = crate::components::conversation_tool_theme(&theme);
+                let body = self.render_tool_group(&row.id, tools, summary, *auto_open, &panel_theme, cx);
+                crate::components::conversation_tool_panel(&panel_theme, identity, body)
             },
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
