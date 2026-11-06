@@ -228,6 +228,29 @@ pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
         .child("?")
 }
 
+/// Container for descendant status totals.
+pub fn outline_status_totals(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(theme.text_faint)
+        .when(super::is_industrial(theme), |el| {
+            let dark = theme.appearance.is_dark();
+            el.font_family(theme.font_mono.clone())
+                .px(px(4.0))
+                .border_1()
+                .border_color(theme.industrial_colors().rule)
+                .bg(if dark { theme.bg } else { theme.solid })
+                .text_color(if dark { theme.text } else { theme.on_solid })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
