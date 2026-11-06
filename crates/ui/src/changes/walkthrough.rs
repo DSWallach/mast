@@ -779,6 +779,14 @@ impl Render for Walkthrough {
                 .gap_2()
                 .p_3()
                 .bg(theme.surface_card)
+                .when(theme.ui_style.behavior.help_cards, |el| {
+                    el.child(format!("Step {} of {}", self.selected + 1, self.review.steps.len()))
+                        .child(div().flex().gap_2()
+                            .child(div().id("review-previous-step").cursor_pointer().child("Previous")
+                                .on_click(cx.listener(|this, _, _, cx| this.move_step(false, cx))))
+                            .child(div().id("review-next-step").cursor_pointer().child("Next")
+                                .on_click(cx.listener(|this, _, _, cx| this.move_step(true, cx)))))
+                })
                 .child(
                     div()
                         .font_weight(gpui::FontWeight::BOLD)
@@ -908,6 +916,7 @@ impl Render for Walkthrough {
             .p_3()
             .text_color(theme.text)
             .bg(theme.bg)
+            .children(crate::ui_style::help_card("review-walkthrough", "Follow each step to understand the change, then mark it reviewed.", &theme, cx))
             .when(!self.target_selected && self.changes.is_some(), |view| {
                 view.child(
                     div()

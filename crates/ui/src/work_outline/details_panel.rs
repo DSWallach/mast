@@ -1332,6 +1332,7 @@ impl Render for WorkItemDetails {
             .border_l_1()
             .border_color(theme.border)
             .bg(theme.surface)
+            .children(crate::ui_style::help_card("item-details", "Use item details to manage instructions, references, and work status.", &theme, cx))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key != "escape" {
                     return;
@@ -1371,6 +1372,9 @@ impl Render for WorkItemDetails {
             .id("work-item-details-close")
             .flex_none()
             .size(px(22.0))
+            .when(theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All, |el| {
+                el.h(px(32.0)).w_auto().px(px(6.0)).gap(px(4.0))
+            })
             .flex()
             .items_center()
             .justify_center()
@@ -1382,6 +1386,9 @@ impl Render for WorkItemDetails {
                     .size(px(12.0))
                     .text_color(theme.text_muted),
             )
+            .when(theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All, |el| {
+                el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child("Close"))
+            })
             .on_click(cx.listener(|this, _, _, cx| this.request_close(cx)));
         if self.is_space_root() {
             return self.render_space_root(shell_frame, close, &theme, cx);

@@ -42,11 +42,18 @@ use crate::surface_chrome::{
     CONTROL_RADIUS as TOOLBAR_BUTTON_RADIUS, CONTROL_SIZE as TOOLBAR_BUTTON_SIZE, toolbar,
 };
 
-pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+pub(super) fn toolbar_button(id: &'static str, label: &'static str, theme: &crate::theme::Theme) -> gpui::Stateful<gpui::Div> {
+    let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
     div()
         .id(id)
         .size(px(TOOLBAR_BUTTON_SIZE))
         .flex_none()
+        .when(guided, |element| {
+            element.h(px(theme.ui_style.tokens.control_size)).w_auto()
+                .min_w(px(theme.ui_style.tokens.control_size)).flex_shrink_1()
+                .px(px(6.0)).gap(px(4.0)).flex_row_reverse()
+                .child(div().min_w_0().truncate().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label))
+        })
         .rounded(px(TOOLBAR_BUTTON_RADIUS))
         .flex()
         .items_center()
@@ -1081,6 +1088,7 @@ impl FilesSurface {
                     } else {
                         "Show all files (even hidden)"
                     },
+                    &theme,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
                 .when(include_ignored, |element| {
@@ -1113,6 +1121,30 @@ mod explorer_tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn guided_toolbar_controls_shrink_in_narrow_panes(cx: &mut TestAppContext) {
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let theme = crate::theme::Theme::default().with_ui_style(crate::ui_style::UiStyle::GUIDED);
+                div().flex().flex_col().children([(300.0, "wide"), (80.0, "narrow")].into_iter().map(|(width, id)| {
+                    div().w(px(width)).flex().child(
+                        toolbar_button(id, "Reveal file in tree", &theme)
+                            .debug_selector(move || id.into())
+                            .child(crate::icons::icon(crate::icons::FOLDER).size(px(14.0)).flex_none())
+                    )
+                }))
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|window, cx| window.draw(cx).clear());
+        let wide = cx.debug_bounds("wide").unwrap();
+        let narrow = cx.debug_bounds("narrow").unwrap();
+        assert!(wide.size.width > narrow.size.width);
+        assert!(narrow.size.width <= px(80.0));
+        assert!(narrow.size.width >= px(32.0));
+    }
 
     #[gpui::test]
     fn explorer_header_search_and_visibility_toggle(cx: &mut TestAppContext) {

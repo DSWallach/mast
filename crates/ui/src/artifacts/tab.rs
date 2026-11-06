@@ -1032,7 +1032,7 @@ impl ArtifactTab {
             artifact.revisions.len() > 1
         };
         let button = |id: &'static str, label: &'static str, glyph: &'static str, enabled: bool| {
-            crate::files::toolbar_button(id, label)
+            crate::files::toolbar_button(id, label, theme)
                 .debug_selector(move || id.into())
                 .when(!enabled, |el| el.cursor_default().opacity(0.35))
                 .child(

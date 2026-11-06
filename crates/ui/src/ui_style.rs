@@ -160,7 +160,9 @@ pub fn reveal_on_hover<T: gpui::Styled + gpui::InteractiveElement>(
     if style.behavior.reveal == Reveal::Always {
         element.opacity(1.0)
     } else {
-        element.opacity(if visible { 1.0 } else { 0.0 }).group_hover(group, |s| s.opacity(1.0))
+        element
+            .opacity(if visible { 1.0 } else { 0.0 })
+            .group_hover(group, |s| s.opacity(1.0))
     }
 }
 
@@ -192,9 +194,81 @@ pub fn set_style(id: UiStyleId, window: &mut gpui::Window, cx: &mut gpui::App) -
     true
 }
 
+/// A device-local, dismissible explanation shown in the Guided style.
+pub fn help_card(
+    id: &'static str,
+    message: &'static str,
+    theme: &crate::theme::Theme,
+    cx: &gpui::App,
+) -> Option<gpui::AnyElement> {
+    use gpui::{div, prelude::*, px};
+    if !theme.ui_style.behavior.help_cards
+        || crate::settings::current(cx)
+            .dismissed_help_cards
+            .iter()
+            .any(|card| card == id)
+    {
+        return None;
+    }
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .p(px(8.0))
+            .rounded(px(6.0))
+            .bg(theme.surface_raised)
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .child(div().flex_1().min_w_0().child(message))
+            .child(
+                div()
+                    .id(gpui::SharedString::from(format!("dismiss-help-{id}")))
+                .debug_selector(move || format!("dismiss-help-{id}"))
+                    .flex_none()
+                    .cursor_pointer()
+                    .child("Dismiss")
+                    .on_click(move |_, _, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Immediate,
+                            cx,
+                            |settings| {
+                                if !settings.dismissed_help_cards.iter().any(|card| card == id) {
+                                    settings.dismissed_help_cards.push(id.to_owned());
+                                }
+                            },
+                        );
+                        cx.refresh_windows();
+                    }),
+            )
+            .into_any_element(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn help_card_dismissal_persists(cx: &mut gpui::TestAppContext) {
+        use gpui::{div, prelude::*, Context, Render, Window};
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+                let theme = crate::theme::Theme::default().with_ui_style(UiStyle::GUIDED);
+                div().children(help_card("test-card", "Help", &theme, cx))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (_, vcx) = cx.add_window_view(|_, _| Host);
+        vcx.update(|_, cx| crate::settings::init(Default::default(), directory.path(), cx));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let bounds = vcx.debug_bounds("dismiss-help-test-card").unwrap();
+        vcx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("dismiss-help-test-card").is_none());
+        assert_eq!(crate::settings::UiSettings::load(directory.path()).dismissed_help_cards, ["test-card"]);
+    }
     #[test]
     fn minimal_preserves_existing_metrics() {
         let t = UiStyle::MINIMAL.tokens;
@@ -209,6 +283,41 @@ mod tests {
             ),
             (1.0, 29.0, 0.0, 0.0, 28.0, 16.0)
         );
+        assert_eq!(
+            UiStyle::MINIMAL.behavior,
+            StyleBehavior {
+                labels: LabelMode::IconOnly,
+                reveal: Reveal::Hover,
+                hints: HintMode::Tooltip,
+                motion: Motion::Soft,
+                status_words: false,
+                help_cards: false,
+                status_bar: false,
+                outline_columns: false,
+                walkthrough_rail: false,
+            }
+        );
+    }
+    #[test]
+    fn guided_metrics_and_help_card_dismissals() {
+        let style = UiStyle::GUIDED;
+        assert_eq!(
+            (
+                style.tokens.control_size,
+                style.tokens.sidebar_row_extra_h,
+                style.tokens.outline_row_delta
+            ),
+            (32.0, 4.0, 6.0)
+        );
+        assert_eq!(style.behavior.labels, LabelMode::All);
+        assert!(style.behavior.help_cards);
+        let mut settings = crate::settings::UiSettings::default();
+        assert!(settings.dismissed_help_cards.is_empty());
+        settings.dismissed_help_cards.push("review-intro".into());
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert!(encoded.contains("dismissedHelpCards"));
+        let decoded: crate::settings::UiSettings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.dismissed_help_cards, settings.dismissed_help_cards);
     }
     #[test]
     fn settings_default_unknown_and_dense() {

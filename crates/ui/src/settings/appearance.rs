@@ -3007,6 +3007,12 @@ impl Render for AppearancePage {
                 "More on screen",
                 2.0,
             ),
+            (
+                crate::ui_style::UiStyleId::Guided,
+                "Guided",
+                "More labels and guidance",
+                6.0,
+            ),
         ]
         .into_iter()
         .map(|(id, label, description, gap)| {

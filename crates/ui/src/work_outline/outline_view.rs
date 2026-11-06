@@ -2617,6 +2617,10 @@ impl OutlineView {
             .child("No work items yet \u{2014} group Chats and share instructions under one.")
             .child(
                 button("outline-first-use-create")
+                    .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+                        el.h(px(32.0)).bg(theme.solid).text_color(theme.on_solid)
+                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
+                    })
                     .child("Create work item")
                     .when_some(create_keys, |el, keys| {
                         el.child(crate::popover::kbd_hint(theme, &keys))
@@ -3134,10 +3138,14 @@ impl OutlineView {
                     .text_size(crate::typography::ui_rems(10.0))
                     .text_color(theme.text_muted)
                     .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+                    .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+                        el.h(px(32.0)).px(px(8.0)).bg(theme.solid).text_color(theme.on_solid)
+                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
+                    })
                     .child(
                         crate::icons::icon(crate::icons::ACTION_PLAY)
                             .size(px(10.0))
-                            .text_color(theme.text_muted),
+                            .text_color(if theme.ui_style.id == crate::ui_style::UiStyleId::Guided { theme.on_solid } else { theme.text_muted }),
                     )
                     .child("Start Chat")
                     .hint(
@@ -3628,6 +3636,9 @@ fn item_body(
                     }
                 }),
         )
+        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(color).child(label))
+        })
         .child(
             div()
                 .flex_1()
@@ -3857,6 +3868,13 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
     }
     let status = crate::status_style::Status::from(chat.status);
     let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-chat-status-{key}"), cx.entity_id(), cx);
+    let status_label = match chat.status {
+        mast_proto::ChatIndicator::Working => "Working",
+        mast_proto::ChatIndicator::AwaitingInput => "Needs you",
+        mast_proto::ChatIndicator::Errored => "Failed",
+        mast_proto::ChatIndicator::Completed => "Done",
+        mast_proto::ChatIndicator::Idle => "Idle",
+    };
     div()
         .flex_1()
         .min_w_0()
@@ -3864,6 +3882,9 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
         .items_center()
         .gap(px(6.0))
         .child(indicator)
+        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted).child(status_label))
+        })
         .child(
             div()
                 .flex_1()
@@ -4213,6 +4234,7 @@ impl Render for OutlineView {
                         .child(SharedString::from(notice)),
                 )
             })
+            .children(crate::ui_style::help_card("outline", "Group work items and chats here to share context and instructions.", &theme, cx))
             .when_some(space_root_entry, |el, entry| el.child(entry))
             .when_some(picker, |el, picker| el.child(picker))
             // With only Chats in the tree, the first-use line sits above them.

@@ -3849,6 +3849,8 @@ impl Shell {
         };
 
         let view_open = self.sidebar_view_menu.is_open();
+        let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
+        let guided_labels_fit = guided && self.sidebar_shown_width() >= 400.0;
         let view_focus = self.sidebar_view_trigger_focus.clone();
         let view_trigger = div()
             .id("sidebar-view-options")
@@ -3857,6 +3859,8 @@ impl Shell {
             .aria_expanded(view_open)
             .track_focus(&view_focus)
             .size(px(29.0))
+            .when(guided, |el| el.size(px(32.0)))
+            .when(guided_labels_fit, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
             .flex_none()
             .flex()
             .items_center()
@@ -3905,7 +3909,8 @@ impl Shell {
                 icon(icons::MORE_HORIZONTAL)
                     .size(px(16.0))
                     .text_color(theme.text_muted.opacity(0.6)),
-            );
+            )
+            .when(guided_labels_fit, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).child("View options")));
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
@@ -3928,6 +3933,8 @@ impl Shell {
             .role(gpui::Role::Button)
             .aria_label("Open overview")
             .size(px(29.0))
+            .when(guided, |el| el.size(px(32.0)))
+            .when(guided_labels_fit, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
             .flex_none()
             .flex()
             .items_center()
@@ -3951,7 +3958,8 @@ impl Shell {
                     } else {
                         theme.text_muted.opacity(0.6)
                     }),
-            );
+            )
+            .when(guided_labels_fit, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child("Overview")));
 
         div()
             .flex_none()

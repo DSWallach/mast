@@ -4550,6 +4550,8 @@ impl Shell {
         self.settings.open_web_links_in_mast = current.open_web_links_in_mast;
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
+        self.settings.ui_style = current.ui_style;
+        self.settings.dismissed_help_cards = current.dismissed_help_cards.clone();
         self.settings.terminal_font_family = current.terminal_font_family;
         self.settings.terminal_font_size = current.terminal_font_size;
         self.settings.code_font_family = current.code_font_family;
@@ -7330,7 +7332,7 @@ impl Shell {
         } else {
             match status {
                 mast_proto::ChatIndicator::Working => Some("Working"),
-                mast_proto::ChatIndicator::AwaitingInput => Some("Input"),
+                mast_proto::ChatIndicator::AwaitingInput => Some(if theme.ui_style.id == crate::ui_style::UiStyleId::Guided { "Needs you" } else { "Input" }),
                 mast_proto::ChatIndicator::Errored => Some("Failed"),
                 mast_proto::ChatIndicator::Completed => Some("Done"),
                 mast_proto::ChatIndicator::Idle => None,
@@ -7367,12 +7369,14 @@ impl Shell {
                     move || format!("chat-status-{id}")
                 })
                 .size(px(13.0))
+                .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| el.w_auto().gap(px(4.0)))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
                 .aria_label(status_label.unwrap_or("Idle"))
                 .child(glyph)
+                .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| el.child(div().text_size(crate::typography::ui_rems(10.0)).text_color(status_color).child(status_label.unwrap_or("Idle"))))
                 .into_any_element()
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
@@ -8401,6 +8405,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
+            .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
@@ -13776,6 +13781,26 @@ mod tests {
         for id in ["style-minimal", "style-dense", "style-guided"] {
             assert!(vcx.debug_bounds(id).is_some());
         }
+    }
+
+    #[gpui::test]
+    fn guided_header_labels_collapse_when_space_is_limited(cx: &mut gpui::TestAppContext) {
+        struct StyleHost;
+        impl gpui::Render for StyleHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::default().with_ui_style(crate::ui_style::UiStyle::GUIDED);
+                div().flex().children([(true, "guided-wide"), (false, "guided-narrow")].into_iter().map(|(fits, id)| {
+                    header_icon_button(id, icons::PEN, "Rename", fits, &theme, |_, _, _| {})
+                        .debug_selector(move || id.into())
+                }))
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| StyleHost);
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let wide = vcx.debug_bounds("guided-wide").unwrap();
+        let narrow = vcx.debug_bounds("guided-narrow").unwrap();
+        assert!(wide.size.width > narrow.size.width);
+        assert_eq!(narrow.size.width, px(32.0));
     }
 
     #[test]
