@@ -1165,6 +1165,7 @@ pub fn conversation_model_picker(
                         .flex()
                         .justify_between()
                         .text_size(crate::typography::ui_rems(8.0))
+                        .line_height(crate::typography::ui_rems(8.0))
                         .text_color(theme.text_muted)
                         .child("MODEL")
                         .child("MODE"),
@@ -1679,6 +1680,9 @@ pub fn conversation_code_frame(
         .flex()
         .flex_col()
         .rounded(crate::typography::ui_rems(10.0))
+        .when_some(theme.ui_style.tokens.panel_radius, |el, radius| {
+            el.rounded(px(radius))
+        })
         .bg(crate::theme::ink(0.035))
         .border_1()
         .border_color(theme.border)
