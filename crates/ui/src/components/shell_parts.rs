@@ -1768,6 +1768,35 @@ pub(crate) fn start_chat_section_label(text: &'static str, theme: &Theme) -> gpu
         .child(text)
 }
 
+pub(crate) fn start_chat_account_toggle(
+    theme: &Theme,
+    open: bool,
+    label: String,
+) -> gpui::Stateful<gpui::Div> {
+    let toggle = div()
+        .id("start-chat-account-chip")
+        .debug_selector(|| "start-chat-account-chip".into())
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .child(
+            icon(if open {
+                crate::icons::ALT_ARROW_DOWN
+            } else {
+                crate::icons::ALT_ARROW_RIGHT
+            })
+            .size(px(10.0))
+            .text_color(theme.text_muted),
+        )
+        .child(SharedString::from(label));
+    super::segmented_key(toggle, theme, open)
+}
+
 pub(crate) fn team_button(
     theme: &Theme,
     id: impl Into<String>,

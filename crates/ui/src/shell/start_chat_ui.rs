@@ -1101,27 +1101,8 @@ fn start_chat_account_chip(
         .flex_col()
         .gap(px(2.0))
         .child(
-            div()
-                .id("start-chat-account-chip")
-                .debug_selector(|| "start-chat-account-chip".into())
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .hover(|el| el.text_color(theme.text))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_start_chat_account(cx)))
-                .child(
-                    icon(if dialog.account_open {
-                        icons::ALT_ARROW_DOWN
-                    } else {
-                        icons::ALT_ARROW_RIGHT
-                    })
-                    .size(px(10.0))
-                    .text_color(theme.text_muted),
-                )
-                .child(SharedString::from(label)),
+            crate::components::shell_parts::start_chat_account_toggle(theme, dialog.account_open, label)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_start_chat_account(cx))),
         );
     if dialog.account_open {
         for (ix, entry) in chip.entries.into_iter().enumerate() {
