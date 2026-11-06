@@ -504,7 +504,6 @@ impl WorkItemDetails {
             let from_template = instruction.template_instruction_id.is_some();
             let collapsible = needs_collapse(&instruction.text);
             let expanded = self.instructions_expanded.contains(&instruction.id);
-            let line_height = crate::typography::ui_rems(LINE_HEIGHT_REMS);
             section =
                 section.child(
                     crate::components::outline_instruction_row(ix, theme)
@@ -589,35 +588,12 @@ impl WorkItemDetails {
                                 )
                                 .when(from_template, |el| {
                                     el.child(
-                                        div()
-                                            .debug_selector(move || {
-                                                format!("work-item-instruction-template-{ix}")
-                                            })
-                                            .flex_none()
-                                            .px(px(4.0))
-                                            .rounded(px(3.0))
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .text_size(crate::typography::ui_rems(9.5))
-                                            .text_color(theme.accent)
-                                            .child("From child template"),
+                                        crate::components::outline_instruction_template_badge(ix, theme),
                                     )
                                 })
                                 .when_some(badge, |el, badge| {
                                     el.child(
-                                        div()
-                                            .id(("work-item-instruction-badge", ix))
-                                            .debug_selector(move || {
-                                                format!("work-item-instruction-badge-{ix}")
-                                            })
-                                            .flex_none()
-                                            .px(px(4.0))
-                                            .rounded(px(3.0))
-                                            .bg(theme.element_hover.opacity(0.7))
-                                            .cursor_pointer()
-                                            .text_size(crate::typography::ui_rems(9.5))
-                                            .text_color(theme.text_muted)
-                                            .child(badge)
+                                        crate::components::outline_instruction_provenance(ix, badge, theme)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if !this.excerpts_open.remove(&toggle_id) {
                                                     this.excerpts_open.insert(toggle_id.clone());
@@ -628,34 +604,12 @@ impl WorkItemDetails {
                                 }),
                         )
                         .child(
-                            div()
-                                .debug_selector(move || format!("work-item-instruction-text-{ix}"))
-                                .ml(px(14.0))
-                                .min_w_0()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .line_height(line_height)
-                                .text_color(theme.text)
-                                .when(collapsible && !expanded, |el| {
-                                    el.max_h(crate::typography::ui_rems(
-                                        LINE_HEIGHT_REMS * COLLAPSED_LINES as f32,
-                                    ))
-                                    .overflow_hidden()
-                                })
-                                .child(SharedString::from(instruction.text.clone())),
+                            crate::components::outline_instruction_text(ix, instruction.text.clone(), LINE_HEIGHT_REMS, (collapsible && !expanded).then_some(LINE_HEIGHT_REMS * COLLAPSED_LINES as f32), theme),
                         )
                         .when(collapsible, |el| {
                             el.child(
                                 div().ml(px(14.0)).flex().child(
-                                    div()
-                                        .id(("work-item-instruction-fold", ix))
-                                        .debug_selector(move || {
-                                            format!("work-item-instruction-fold-{ix}")
-                                        })
-                                        .cursor_pointer()
-                                        .text_size(crate::typography::ui_rems(10.5))
-                                        .text_color(theme.text_muted)
-                                        .hover(|el| el.text_color(theme.text))
-                                        .child(if expanded { "Show less" } else { "Show more" })
+                                    crate::components::outline_instruction_fold(ix, expanded, theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if !this.instructions_expanded.remove(&fold_id) {
                                                 this.instructions_expanded.insert(fold_id.clone());
@@ -667,18 +621,7 @@ impl WorkItemDetails {
                         })
                         .when_some(excerpt, |el, excerpt| {
                             el.child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("work-item-instruction-excerpt-{ix}")
-                                    })
-                                    .ml(px(14.0))
-                                    .pl(px(6.0))
-                                    .border_l_2()
-                                    .border_color(theme.border_strong)
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .italic()
-                                    .child(SharedString::from(excerpt)),
+                                crate::components::outline_instruction_excerpt(ix, excerpt, theme),
                             )
                         }),
                 );

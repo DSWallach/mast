@@ -2206,6 +2206,91 @@ pub fn outline_resolve_input(
         .child(input)
 }
 
+/// Provenance badges in an instruction header.
+pub fn outline_instruction_template_badge(index: usize, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || format!("work-item-instruction-template-{index}"))
+        .flex_none()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(
+            9.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .child("From child template")
+}
+pub fn outline_instruction_provenance(
+    index: usize,
+    label: &'static str,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(("work-item-instruction-badge", index))
+        .debug_selector(move || format!("work-item-instruction-badge-{index}"))
+        .flex_none()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .bg(theme.element_hover.opacity(0.7))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            9.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(label)
+}
+
+/// Instruction content, fold control, and source excerpt.
+pub fn outline_instruction_text(
+    index: usize,
+    text: String,
+    line_height: f32,
+    collapsed_height: Option<f32>,
+    theme: &Theme,
+) -> Div {
+    div()
+        .debug_selector(move || format!("work-item-instruction-text-{index}"))
+        .ml(px(14.0))
+        .min_w_0()
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .line_height(crate::typography::ui_rems(line_height))
+        .text_color(theme.text)
+        .when_some(collapsed_height, |el, height| {
+            el.max_h(crate::typography::ui_rems(height))
+                .overflow_hidden()
+        })
+        .child(SharedString::from(text))
+}
+pub fn outline_instruction_fold(index: usize, expanded: bool, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(("work-item-instruction-fold", index))
+        .debug_selector(move || format!("work-item-instruction-fold-{index}"))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .hover(|el| el.text_color(theme.text))
+        .child(if expanded { "Show less" } else { "Show more" })
+}
+pub fn outline_instruction_excerpt(index: usize, excerpt: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || format!("work-item-instruction-excerpt-{index}"))
+        .ml(px(14.0))
+        .pl(px(6.0))
+        .border_l_2()
+        .border_color(theme.border_strong)
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .italic()
+        .child(SharedString::from(excerpt))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
