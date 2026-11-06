@@ -100,23 +100,25 @@ fn render_ui_preview() -> anyhow::Result<()> {
     let mut sheets = Vec::new();
     for (screen_index, screen) in screens.iter().enumerate() {
         if screen == "components" {
-            let variant = registry.variant(&themes[0]).unwrap();
-            let appearance = if variant.appearance == mast_theme::Appearance::Dark {
-                Appearance::Dark
-            } else {
-                Appearance::Light
-            };
-            let path = render::render_component_matrix(
-                &themes[0],
-                appearance,
-                data_dir.path().to_owned(),
-                "preview-component-matrix",
-            )?;
-            let sheet = image::open(path)?.into_rgba8();
-            let path = directory.join("components.png");
-            sheet.save(&path)?;
-            println!("{}", path.display());
-            sheets.push(sheet);
+            for (theme_index, theme) in themes.iter().enumerate() {
+                let variant = registry.variant(theme).unwrap();
+                let appearance = if variant.appearance == mast_theme::Appearance::Dark {
+                    Appearance::Dark
+                } else {
+                    Appearance::Light
+                };
+                let path = render::render_component_matrix(
+                    theme,
+                    appearance,
+                    data_dir.path().to_owned(),
+                    &format!("preview-component-matrix-{theme_index}"),
+                )?;
+                let sheet = image::open(path)?.into_rgba8();
+                let path = directory.join(format!("components-{theme}.png"));
+                sheet.save(&path)?;
+                println!("{}", path.display());
+                sheets.push(sheet);
+            }
             continue;
         }
         let mut sheet = RgbaImage::new(
