@@ -692,6 +692,30 @@ pub fn outline_template_node(depth: usize, theme: &Theme) -> Div {
         })
 }
 
+/// Proposal content row in item details.
+pub fn outline_proposal_row(selector: String, theme: &Theme) -> Div {
+    let scale = super::layout_spacing(theme);
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_col()
+        .gap(px(4.0 * scale))
+        .pl(px(14.0))
+        .py(px(2.0 * scale))
+}
+
+/// Proposal provenance metadata line.
+pub fn outline_proposal_provenance(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

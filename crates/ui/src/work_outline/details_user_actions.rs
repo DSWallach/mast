@@ -914,12 +914,7 @@ impl WorkItemDetails {
             .filter(|review| review.proposal_id == id);
         let busy = self.in_flight.contains(&format!("proposal:{id}"));
         let open_chat = proposal.source_ref.chat_id.clone();
-        let provenance = div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_faint)
+        let provenance = crate::components::outline_proposal_provenance(theme)
             .child("Proposed by")
             .child(
                 div()
@@ -946,13 +941,7 @@ impl WorkItemDetails {
                 now,
             )));
         let selector = format!("work-item-proposal-{id}");
-        let mut row = div()
-            .debug_selector(move || selector.clone())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .pl(px(14.0))
-            .py(px(2.0))
+        let mut row = crate::components::outline_proposal_row(selector, theme)
             .child(provenance);
         let is_modification = proposal.action != ProposalAction::Add;
         if proposal.target.scope == mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate {
