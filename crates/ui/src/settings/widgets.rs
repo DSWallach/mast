@@ -427,11 +427,33 @@ pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
             .bg(theme.surface_raised)
             .text_size(crate::typography::ui_rems(10.0))
             .text_color(theme.text)
-            .child(div().size(px(8.0)).rounded_full().bg(if on {
-                theme.accent
-            } else {
-                theme.text_muted
-            }))
+            .child(
+                div()
+                    .relative()
+                    .w(px(24.0))
+                    .h(px(12.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.input_bg)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(1.0))
+                            .left(px(if on { 13.0 } else { 1.0 }))
+                            .size(px(8.0))
+                            .rounded(px(2.0))
+                            .bg(theme.text_muted)
+                            .when(on, |el| {
+                                el.child(
+                                    div()
+                                        .size(px(4.0))
+                                        .m(px(2.0))
+                                        .rounded_full()
+                                        .bg(theme.accent),
+                                )
+                            }),
+                    ),
+            )
             .child(if on { "ON" } else { "OFF" });
     }
     div()
