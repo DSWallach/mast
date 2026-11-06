@@ -24,6 +24,37 @@ pub fn conversation_composer_text_size(theme: &Theme, size: f32) -> f32 {
     }
 }
 
+pub fn conversation_panel_radius(theme: &Theme, fallback: f32) -> f32 {
+    theme.ui_style.tokens.panel_radius.unwrap_or(fallback)
+}
+
+pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    identity: Hsla,
+    fallback_radius: f32,
+    border: Hsla,
+) -> T {
+    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    element
+        .rounded(px(conversation_panel_radius(theme, fallback_radius)))
+        .border_1()
+        .border_color(if area { identity } else { border })
+        .bg(if area {
+            identity
+        } else if theme.is_frost() {
+            theme.composer_sidebar_tint()
+        } else {
+            theme.input_glass_bg()
+        })
+        .when(
+            !area
+                && !theme.is_frost()
+                && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
+            |el| el.shadow_lg(),
+        )
+}
+
 pub fn conversation_composer_width(theme: &Theme, width: f32, gutter: f32) -> f32 {
     if theme.ui_style.conversation == ConversationVariant::Area {
         width.min(720.0 + 2.0 * gutter)

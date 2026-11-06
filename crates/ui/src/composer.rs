@@ -8581,7 +8581,7 @@ impl Render for Composer {
                 morph_t
             };
         let text_pt = morph_text_pad(layout_morph_t);
-        let surface_radius = theme.ui_style.tokens.panel_radius.unwrap_or(COMPOSER_RADIUS - 4.0 * dock_amount);
+        let surface_radius = crate::components::conversation_panel_radius(&theme, COMPOSER_RADIUS - 4.0 * dock_amount);
         let route_to_single_line =
             self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
@@ -8679,7 +8679,7 @@ impl Render for Composer {
         };
         // Compensate for the transcript canvas beneath the frosted surface.
         // Keep the opaque fallback when frost is disabled or unsupported.
-        let pill = div()
+        let pill = crate::components::conversation_input_surface(div()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -8689,14 +8689,7 @@ impl Render for Composer {
                         window.focus(&this.input.focus_handle(cx), cx);
                     }
                 }),
-            )
-            .rounded(px(surface_radius))
-            .border_1()
-            .border_color(pill_border)
-            .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
-            .when(!theme.is_frost(), |el| el.bg(theme.input_glass_bg()))
-            .when(area, |el| el.bg(identity).border_color(identity))
-            .when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg());
+            ), &theme, identity, surface_radius, pill_border);
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
