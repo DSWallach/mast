@@ -2249,12 +2249,20 @@ impl ArtifactsService {
 
     /// Read the latest review published by this chat, optionally for one PR.
     pub fn agent_review_get(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
-        let requested_target: Option<mast_proto::ReviewTarget> = arguments
+        let mut requested_target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
             .map(serde_json::from_value)
             .transpose()
             .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+        if let Some(mast_proto::ReviewTarget::Branch { repo, checkout_path: Some(path), .. }) = &mut requested_target
+            && repo.as_deref().is_none_or(str::is_empty)
+        {
+            let path = Path::new(path.as_str());
+            *repo = git(path, &["remote", "get-url", "origin"])
+                .and_then(|url| crate::pr_review_launch::github_slug(&url))
+                .or_else(|| git(path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+        }
         let requested = arguments
             .get("prUrl")
             .and_then(Value::as_str)

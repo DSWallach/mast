@@ -337,6 +337,9 @@ async fn branch_review_publish_validates_range_anchors() {
     let mut repo_only = target.clone();
     repo_only.as_object_mut().unwrap().remove("checkoutPath");
     tool(&rig, &rig.token, "review_publish", json!({"target": repo_only, "review": review})).await.unwrap();
+    let mut path_only = target.clone();
+    path_only.as_object_mut().unwrap().remove("repo");
+    assert!(!tool(&rig, &rig.token, "review_get", json!({"target": path_only})).await.unwrap()["artifactId"].is_null());
 }
 
 /// `<profile store>/artifacts/<id>/<hash>` somewhere under the data dir.
