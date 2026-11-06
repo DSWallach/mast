@@ -2089,6 +2089,89 @@ pub fn outline_lane_heading(text: String, color: gpui::Hsla, depth: usize, theme
         .child(SharedString::from(label))
 }
 
+/// Required Actions panel shell.
+pub fn outline_required_panel(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("required-actions-panel")
+        .debug_selector(|| "required-actions-panel".into())
+        .flex_none()
+        .w_full()
+        .h_full()
+        .flex()
+        .flex_col()
+        .border_l_1()
+        .border_color(theme.border)
+        .bg(theme.surface)
+        .when(super::is_industrial(theme), |el| {
+            el.border_l_2().border_color(theme.industrial_colors().rule)
+        })
+}
+pub fn outline_required_close(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("required-actions-close")
+        .debug_selector(|| "required-actions-close".into())
+        .flex_none()
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .child(
+            crate::icons::icon(crate::icons::CLOSE)
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+        )
+        .when(
+            theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All,
+            |el| el.w_auto().px(px(6.0)).gap(px(4.0)).child("Close"),
+        )
+}
+pub fn outline_required_header(count: usize, color: gpui::Hsla, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(14.0))
+        .pt(px(10.0))
+        .pb(px(6.0 * super::layout_spacing(theme)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(crate::typography::ui_rems(
+                    15.0 + super::layout_type_adjustment(theme),
+                ))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child("Required Actions"),
+        )
+        .when(count > 0, |el| {
+            el.child(
+                div()
+                    .debug_selector(|| "required-actions-count".into())
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(
+                        11.0 + super::layout_type_adjustment(theme),
+                    ))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(SharedString::from(count.to_string())),
+            )
+        })
+}
+pub fn outline_required_body(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("required-actions-body")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(px(8.0 * super::layout_spacing(theme)))
+        .pb(px(10.0 * super::layout_spacing(theme)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

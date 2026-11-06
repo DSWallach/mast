@@ -2229,35 +2229,10 @@ impl Render for RequiredActionsList {
                 .child(self.render_body(rows, &theme, window, cx));
         }
         let count = rows.open.len() + self.pending_command_approvals(cx).len();
-        let close = div()
-            .id("required-actions-close")
-            .debug_selector(|| "required-actions-close".into())
-            .flex_none()
-            .size(px(22.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover))
-            .child(
-                crate::icons::icon(crate::icons::CLOSE)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-            )
+        let close = crate::components::outline_required_close(&theme)
             .on_click(cx.listener(|_, _, _, cx| cx.emit(RequiredActionsEvent::Close)));
-        div()
-            .id("required-actions-panel")
-            .debug_selector(|| "required-actions-panel".into())
+        crate::components::outline_required_panel(&theme)
             .track_focus(&self.focus)
-            .flex_none()
-            .w_full()
-            .h_full()
-            .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(theme.border)
-            .bg(theme.surface)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key != "escape" {
                     return;
@@ -2270,45 +2245,12 @@ impl Render for RequiredActionsList {
                 cx.stop_propagation();
             }))
             .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(14.0))
-                    .pt(px(10.0))
-                    .pb(px(6.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child("Required Actions"),
-                    )
-                    .when(count > 0, |el| {
-                        el.child(
-                            div()
-                                .debug_selector(|| "required-actions-count".into())
-                                .flex_none()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(chips::attention_color(&theme))
-                                .child(SharedString::from(count.to_string())),
-                        )
-                    })
+                crate::components::outline_required_header(count, chips::attention_color(&theme), &theme)
                     .child(close),
             )
             .child(
-                div()
-                    .id("required-actions-body")
+                crate::components::outline_required_body(&theme)
                     .track_scroll(&self.scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(8.0))
-                    .pb(px(10.0))
                     .child(self.render_body(rows, &theme, window, cx)),
             )
     }
