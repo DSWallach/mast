@@ -507,6 +507,39 @@ pub fn outline_panel_marks(theme: &Theme) -> Option<Div> {
     })
 }
 
+/// Root surface for the outline tree.
+pub fn outline_tree(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("work-outline")
+        .relative()
+        .debug_selector(|| "work-outline".into())
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |el| el.bg(theme.surface),
+        )
+}
+
+/// Row chrome; selection, drag handling and content remain with the caller.
+pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .h(px(height))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(theme.ui_style.tokens.grid.unwrap_or(4.0)))
+        .pl(px(indent))
+        .pr(px(8.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.tokens.body_size.unwrap_or(12.5),
+        ))
+        .border_1()
+        .border_color(gpui::transparent_black())
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

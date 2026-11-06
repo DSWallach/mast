@@ -2822,7 +2822,6 @@ impl OutlineView {
             self.editing.as_ref().map(|edit| &edit.kind),
             Some(EditKind::Rename { key: k, .. }) if *k == key
         );
-        let selector = format!("outline-row-{key}");
         let disclosure = if row.has_children {
             let toggle_key = key.clone();
             let collapsed = row.collapsed;
@@ -3159,20 +3158,7 @@ impl OutlineView {
         let drop_label = drop_zone.and_then(|_| self.drop_label_element(theme));
         let guides = self.guide_layer(ix, compact, theme, cx);
         let flash = self.move_flash_overlay(&key, theme);
-        div()
-            .id(SharedString::from(format!("outline-row-{key}")))
-            .debug_selector(move || selector.clone())
-            .h(px(Self::row_height(compact, theme.ui_style.tokens)))
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(theme.ui_style.tokens.grid.unwrap_or(4.0)))
-            .pl(px(Self::indent(row.depth)))
-            .pr(px(8.0))
-            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
-            .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(12.5)))
-            .border_1()
-            .border_color(gpui::transparent_black())
+        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), Self::indent(row.depth), theme)
             .when(highlighted, |el| el.border_color(theme.accent.opacity(0.6)))
             .when((selected || in_group) && focused, |el| {
                 el.bg(theme.element_active)
@@ -4029,11 +4015,7 @@ impl Render for OutlineView {
                 .track_scroll(&self.scroll)
                 .into_any_element()
         };
-        div()
-            .id("work-outline")
-            .relative()
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-            .debug_selector(|| "work-outline".into())
+        crate::components::outline_tree(&theme)
             .track_focus(&self.focus)
             .when(!editing, |el| el.key_context(KEY_CONTEXT))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
