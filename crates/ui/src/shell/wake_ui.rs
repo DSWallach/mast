@@ -190,29 +190,7 @@ impl Shell {
         } else {
             toggle.label().to_owned()
         };
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .flex_none()
-            .h(px(20.0))
-            .px(px(7.0))
-            .flex()
-            .items_center()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(border)
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(text)
-            .when(dimmed, |el| el.opacity(0.5))
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
-            .role(gpui::Role::Button)
-            .aria_label(SharedString::from(format!(
-                "{}: {}",
-                toggle.label(),
-                if on { "on" } else { "off" }
-            )))
-            .child(SharedString::from(label))
+        crate::components::shell_parts::wake_toggle(theme, selector, label, format!("{}: {}", toggle.label(), if on { "on" } else { "off" }), border, text, on, dimmed)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.toggle_wake(&chat_id, toggle, cx);

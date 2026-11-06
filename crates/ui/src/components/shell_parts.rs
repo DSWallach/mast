@@ -1145,6 +1145,39 @@ pub(crate) fn panel_link(
         .hover(|el| el.bg(theme.element_hover))
 }
 
+pub(crate) fn wake_toggle(
+    theme: &Theme,
+    selector: String,
+    label: String,
+    accessible: String,
+    border: gpui::Hsla,
+    text: gpui::Hsla,
+    active: bool,
+    dimmed: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let button = div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .h(px(20.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .rounded(px(5.0))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(border)
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(text)
+        .when(dimmed, |el| el.opacity(0.5))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+        .role(gpui::Role::Button)
+        .aria_label(SharedString::from(accessible))
+        .child(SharedString::from(label));
+    super::segmented_key(button, theme, active)
+}
+
 pub(crate) fn spaces_filter(theme: &Theme, open: bool) -> gpui::Stateful<gpui::Div> {
     let frame = div()
         .id("spaces-filter")
