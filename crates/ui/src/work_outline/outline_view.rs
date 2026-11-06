@@ -3628,6 +3628,9 @@ fn item_body(
                     }
                 }),
         )
+        .when(theme.ui_style.id == crate::ui_style::UiStyleId::Guided, |el| {
+            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(color).child(label))
+        })
         .child(
             div()
                 .flex_1()

@@ -8096,12 +8096,14 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
+        let guided = theme.ui_style.id == crate::ui_style::UiStyleId::Guided;
         // Zeron composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
             SendButtonMode::Stop => div()
                 .id("composer-stop")
                 .size(px(28.0))
+                .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
                 .flex_none()
                 .rounded_full()
                 .bg(theme.text)
@@ -8112,6 +8114,7 @@ impl Composer {
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
+                .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child("Stop")))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -8120,6 +8123,7 @@ impl Composer {
                 div()
                     .id("composer-send")
                     .size(px(28.0))
+                    .when(guided, |el| el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0)))
                     .flex_none()
                     .rounded_full()
                     .bg(theme.text)
@@ -8137,6 +8141,7 @@ impl Composer {
                             .size(px(14.0))
                             .text_color(theme.bg),
                     )
+                    .when(guided, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.bg).child(if mode == SendButtonMode::Queue { "Queue" } else { "Send" })))
                     .into_any_element()
             }
         }
