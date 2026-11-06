@@ -1787,9 +1787,7 @@ impl RequiredActionsList {
             });
             crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
         });
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
+        crate::components::outline_required_action_row(SharedString::from(selector), theme)
             .when_some(choice_focus, |el, focus| el.track_focus(&focus))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                 if !keyboard_enabled || event.is_held || event.keystroke.modifiers != gpui::Modifiers::default() { return; }
@@ -1800,13 +1798,6 @@ impl RequiredActionsList {
                             cx.stop_propagation();
                         }
             }))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .px(px(6.0))
-            .py(px(4.0))
-            .rounded(px(4.0))
-            .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
             .child(
                 div()
                     .flex()

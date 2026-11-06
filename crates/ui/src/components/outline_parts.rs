@@ -647,6 +647,28 @@ pub fn outline_attention(id: SharedString, count: u32, theme: &Theme) -> Statefu
         })
 }
 
+/// Required-action row surface.
+pub fn outline_required_action_row(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    let scale = super::layout_spacing(theme);
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_col()
+        .gap(px(2.0 * scale))
+        .px(px(6.0 * scale))
+        .py(px(4.0 * scale))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
+        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+        .when(super::is_industrial(theme), |el| {
+            el.border_1().border_color(theme.industrial_colors().rule)
+        })
+        .when(super::is_area(theme), |el| {
+            el.bg(theme.identity_color("").opacity(0.06))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;
