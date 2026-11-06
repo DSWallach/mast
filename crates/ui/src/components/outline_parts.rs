@@ -1636,6 +1636,83 @@ pub fn outline_conversion_preview(lines: Vec<String>, theme: &Theme) -> Div {
         )
 }
 
+/// Row in an item-details list.
+pub fn outline_details_list_row(
+    id: impl Into<gpui::ElementId>,
+    height: f32,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let scale = super::layout_spacing(theme);
+    div()
+        .id(id)
+        .h(px(height * scale))
+        .flex()
+        .items_center()
+        .gap(px(6.0 * scale))
+        .px(px(4.0 * scale))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .hover(|el| el.bg(theme.element_hover))
+}
+
+/// Open-chat label in an item-details list.
+pub fn outline_details_chat_label(
+    index: usize,
+    label: String,
+    missing: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(("work-item-chat-open", index))
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if missing && theme.appearance.is_dark() {
+            theme.text_muted
+        } else if missing {
+            theme.text_faint
+        } else {
+            theme.text
+        })
+        .when(missing, |el| el.italic())
+        .when(!missing, |el| el.cursor_pointer())
+        .child(SharedString::from(label))
+}
+
+/// Selectable chat in the association list.
+pub fn outline_associate_chat(index: usize, title: String, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(("work-item-associate", index))
+        .debug_selector(move || format!("work-item-associate-{index}"))
+        .h(px(22.0 * super::layout_spacing(theme)))
+        .flex()
+        .items_center()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .cursor_pointer()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            11.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .child(SharedString::from(title))
+}
+
+/// Child item title in a details list.
+pub fn outline_child_title(title: String, theme: &Theme) -> Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .child(SharedString::from(title))
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

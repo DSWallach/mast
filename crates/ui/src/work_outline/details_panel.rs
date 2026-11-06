@@ -1587,40 +1587,18 @@ impl Render for WorkItemDetails {
             let chat = self.chats.iter().find(|chat| &chat.id == chat_id);
             let label =
                 chat.map_or_else(|| format!("Missing chat · {chat_id}"), |c| c.title.clone());
-            let indicator = chat.map(|c| crate::status_style::animated_indicator(
-                c.status.into(), theme.appearance, format!("work-item-chat-status-{ix}"), cx.entity_id(), cx,
-            ));
+            let indicator = chat.map(|c| {
+                let status = crate::status_style::Status::from(c.status);
+                crate::components::outline_chat_indicator(status, format!("work-item-chat-status-{ix}"), crate::status_style::status_style(status, theme.appearance).color, &theme, cx.entity_id(), cx)
+            });
             let open_id = chat_id.clone();
             let remove_id = chat_id.clone();
             let missing = chat.is_none();
-            div()
-                .id(("work-item-chat", ix))
+            crate::components::outline_details_list_row(("work-item-chat", ix), 24.0, &theme)
                 .debug_selector(move || format!("work-item-chat-{ix}"))
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(4.0))
-                .rounded(px(4.0))
-                .hover(|el| el.bg(theme.element_hover))
                 .when_some(indicator, |el, indicator| el.child(indicator))
                 .child(
-                    div()
-                        .id(("work-item-chat-open", ix))
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(if missing && theme.appearance.is_dark() {
-                            theme.text_muted
-                        } else if missing {
-                            theme.text_faint
-                        } else {
-                            theme.text
-                        })
-                        .when(missing, |el| el.italic())
-                        .when(!missing, |el| el.cursor_pointer())
-                        .child(SharedString::from(label))
+                    crate::components::outline_details_chat_label(ix, label, missing, &theme)
                         .on_click(cx.listener(move |_, _, _, cx| {
                             if !missing {
                                 cx.emit(DetailsEvent::OpenChat(open_id.clone()));
@@ -1668,20 +1646,7 @@ impl Render for WorkItemDetails {
                     )
                 })
                 .children(candidates.into_iter().enumerate().map(|(ix, (id, title))| {
-                    div()
-                        .id(("work-item-associate", ix))
-                        .debug_selector(move || format!("work-item-associate-{ix}"))
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .px(px(4.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text_muted)
-                        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                        .child(SharedString::from(title))
+                    crate::components::outline_associate_chat(ix, title, &theme)
                         .on_click(cx.listener(move |this, _, _, cx| this.associate(id.clone(), cx)))
                 }))
         });
@@ -1732,25 +1697,10 @@ impl Render for WorkItemDetails {
                     let (glyph, _, color) = chips::status_style(child.effective_status, &theme);
                     let space_id = self.space_id.clone();
                     let item_id = child.id.clone();
-                    div()
-                        .id(("work-item-child", ix))
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(4.0))
-                        .rounded(px(4.0))
+                    crate::components::outline_details_list_row(("work-item-child", ix), 22.0, &theme)
                         .cursor_pointer()
-                        .hover(|el| el.bg(theme.element_hover))
-                        .child(div().w(px(12.0)).text_color(color).child(glyph))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from(child.title)),
-                        )
+                        .child(div().w(px(12.0)).child(crate::components::outline_item_indicator(glyph, color, &theme)))
+                        .child(crate::components::outline_child_title(child.title, &theme))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(DetailsEvent::OpenItem {
                                 space_id: space_id.clone(),
