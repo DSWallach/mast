@@ -28,6 +28,7 @@ const KEY_CONTEXT: &str =
     "ReviewWalkthrough && !Input && !Composer && !MessageComposer && !PaletteSearch";
 
 pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
+    super::explanation::bind_keys(cx, keymap);
     use crate::settings::ShortcutId as S;
     for (id, action) in [
         (
@@ -355,6 +356,11 @@ pub(crate) struct Walkthrough {
     focus: FocusHandle,
     changes: Option<Entity<Changes>>,
     _changes_observer: Option<Subscription>,
+    step_input: Option<Entity<crate::composer::ComposerInput>>,
+    _step_input_events: Option<Subscription>,
+    step_panel: Option<super::explanation::ExplanationPanel>,
+    step_task: Option<Task<()>>,
+    step_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Presentation data independent of whether the review targets a PR or branch.
@@ -402,12 +408,62 @@ impl ReviewDocument {
 }
 
 impl Walkthrough {
+    fn cancel_step_question(&mut self) {
+        if let Some(cancelled) = self.step_cancelled.take() { cancelled.store(true, std::sync::atomic::Ordering::Relaxed); }
+        if let Some(task) = self.step_task.take() { task.detach(); }
+        self.step_panel = None;
+    }
+
+    fn ask_step(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.step_input.as_ref() else { return; };
+        let question = input.read(cx).text().trim().to_owned();
+        if question.is_empty() { return; }
+        let Some(step) = self.review.steps.get(self.selected) else { return; };
+        let Some(changes) = self.changes.as_ref() else { return; };
+        let changes = changes.read(cx);
+        let Some(chat_id) = changes.owner_chat_id_owned() else { return; };
+        let state = changes.state.clone();
+        let message = super::explanation::step_question(step, &question);
+        self.cancel_step_question();
+        self.step_input.as_ref().unwrap().update(cx, |input, cx| input.set_text("", cx));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.step_cancelled = Some(cancelled.clone());
+        self.step_panel = Some(super::explanation::ExplanationPanel::Waiting { queued: false, chat_id: None });
+        let send = super::explanation::send_question(state.clone(), chat_id.clone(), message, cx);
+        self.step_task = Some(cx.spawn(async move |this, cx| {
+            let sent = match send.await {
+                Ok(sent) => sent,
+                Err(error) => {
+                    if !cancelled.load(std::sync::atomic::Ordering::Relaxed) { let _ = this.update(cx, |this, cx| { this.step_panel = Some(super::explanation::ExplanationPanel::Error(error)); cx.notify(); }); }
+                    return;
+                }
+            };
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) { return; }
+            let watch = match this.update(cx, |this, cx| {
+                this.step_panel = Some(super::explanation::ExplanationPanel::Waiting { queued: sent.queued, chat_id: Some(chat_id.clone()) });
+                cx.notify();
+                super::explanation::watch_question(state, chat_id.clone(), sent.message_id, cancelled.clone(), cx)
+            }) { Ok(task) => task, Err(_) => return };
+            let reply = watch.await;
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) { return; }
+            let _ = this.update(cx, |this, cx| {
+                this.step_panel = Some(match reply { Ok(text) => super::explanation::ExplanationPanel::Answer { chat_id, text }, Err(error) => super::explanation::ExplanationPanel::Error(error) });
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     fn new(review: TourReview, changes: Entity<Changes>, cx: &mut Context<Self>) -> Self {
         changes.update(cx, |changes, _| {
             changes.review_walkthrough = true;
             changes.review_tour = true;
         });
         let observer = cx.observe(&changes, |_, _, cx| cx.notify());
+        let step_input = cx.new(|cx| crate::composer::ComposerInput::new("Ask about this step", cx).with_single_line());
+        let step_events = cx.subscribe(&step_input, |this: &mut Self, _, event, cx| {
+            if matches!(event, crate::composer::ComposerInputEvent::Submitted | crate::composer::ComposerInputEvent::ModifiedSubmitted) { this.ask_step(cx); }
+        });
         Self {
             review,
             files: Arc::new(Vec::new()),
@@ -421,6 +477,11 @@ impl Walkthrough {
             focus: cx.focus_handle(),
             changes: Some(changes),
             _changes_observer: Some(observer),
+            step_input: Some(step_input),
+            _step_input_events: Some(step_events),
+            step_panel: None,
+            step_task: None,
+            step_cancelled: None,
         }
     }
 
@@ -433,6 +494,7 @@ impl Walkthrough {
         if index >= self.review.steps.len() {
             return;
         }
+        if self.selected != index { self.cancel_step_question(); }
         self.selected = index;
         let coverage = self.coverage().clone();
         if let (Some(changes), Some(hunk)) = (&self.changes, coverage.steps[index].first()) {
@@ -672,6 +734,25 @@ impl Render for Walkthrough {
                 .child(format!("What: {}", step.what))
                 .child(format!("Why: {}", step.why))
                 .child(step.risk_note.clone())
+                .when_some(self.step_input.clone(), |el, input| el.child(
+                    div().id("review-step-question").flex().gap_2().items_center()
+                        .child(div().flex_1().min_w_0().child(input))
+                        .child(div().id("review-step-ask").cursor_pointer().child("Ask").on_click(cx.listener(|this, _, _, cx| this.ask_step(cx))))
+                ))
+                .when_some(self.step_panel.as_ref(), |el, panel| {
+                    let (label, chat_id, waiting) = match panel {
+                        super::explanation::ExplanationPanel::Waiting { queued, chat_id } => (if *queued { "Queued".to_owned() } else { "Waiting for reply…".to_owned() }, chat_id.clone(), true),
+                        super::explanation::ExplanationPanel::Answer { chat_id, text } => (text.clone(), Some(chat_id.clone()), false),
+                        super::explanation::ExplanationPanel::Error(error) => (error.clone(), None, false),
+                    };
+                    let mut reply = div().id("review-step-reply").p_2().bg(theme.surface_raised).flex().flex_col().gap_2().child(label);
+                    if waiting { reply = reply.child(crate::loaders::gradient_spinner("step-question-spinner", &theme, 2.0, cx.entity_id(), cx)); }
+                    if let Some(chat_id) = chat_id { reply = reply.child(div().id("review-step-open-chat").cursor_pointer().child("Open in chat").on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(changes) = &this.changes { let state = changes.read(cx).state.clone(); state.update(cx, |state, cx| state.select_chat(Some(chat_id.clone()), cx)); }
+                    }))); }
+                    reply = reply.child(div().id("review-step-close").cursor_pointer().child(if waiting { "Cancel" } else { "Close" }).on_click(cx.listener(|this, _, _, cx| { this.cancel_step_question(); cx.notify(); })));
+                    el.child(reply)
+                })
                 .child(
                     div()
                         .id("review-mark-step")
@@ -917,6 +998,11 @@ mod tests {
             focus: cx.focus_handle(),
             changes: None,
             _changes_observer: None,
+            step_input: None,
+            _step_input_events: None,
+            step_panel: None,
+            step_task: None,
+            step_cancelled: None,
         });
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("review-progress").is_some());
@@ -957,6 +1043,11 @@ mod tests {
             focus: cx.focus_handle(),
             changes: None,
             _changes_observer: None,
+            step_input: None,
+            _step_input_events: None,
+            step_panel: None,
+            step_task: None,
+            step_cancelled: None,
         });
         vcx.update(|window, cx| {
             let focus = view.read(cx).focus.clone();

@@ -494,7 +494,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::SearchWorkspaceContent
         | ShortcutId::GoToLine
         | ShortcutId::ReplaceFile => "Files",
-        ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode => "Review",
+        ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode | ShortcutId::ExplainDiff => "Review",
         ShortcutId::BrowserReload => "Browser",
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
@@ -548,6 +548,7 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::ReviewPreviousHunk => "Previous review hunk.",
         ShortcutId::ReviewMarkReviewed => "Mark review hunk viewed.",
         ShortcutId::ReviewToggleMode => "Toggle review mode.",
+        ShortcutId::ExplainDiff => "Explain the selected change or focused hunk.",
 
         ShortcutId::SearchWorkspaceContent => "Search text in workspace files.",
         ShortcutId::GoToLine => "Go to a line in the active file or diff.",

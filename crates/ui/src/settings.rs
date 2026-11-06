@@ -945,6 +945,7 @@ pub enum ShortcutId {
     ReviewPreviousHunk,
     ReviewMarkReviewed,
     ReviewToggleMode,
+    ExplainDiff,
     SearchWorkspaceContent,
     GoToLine,
     ReplaceFile,
@@ -979,7 +980,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 28 + WORK_OUTLINE_SHORTCUTS + 23 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 28 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -997,6 +998,7 @@ impl ShortcutId {
         ShortcutId::ReviewPreviousHunk,
         ShortcutId::ReviewMarkReviewed,
         ShortcutId::ReviewToggleMode,
+        ShortcutId::ExplainDiff,
         ShortcutId::SearchWorkspaceContent,
         ShortcutId::GoToLine,
         ShortcutId::ReplaceFile,
@@ -1087,6 +1089,7 @@ impl ShortcutId {
             ShortcutId::ReviewPreviousHunk => "Previous review hunk",
             ShortcutId::ReviewMarkReviewed => "Mark review hunk viewed",
             ShortcutId::ReviewToggleMode => "Toggle review mode",
+            ShortcutId::ExplainDiff => "Explain diff selection",
 
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New Space",
@@ -1151,6 +1154,7 @@ impl ShortcutId {
             ShortcutId::ReviewPreviousHunk => "[",
             ShortcutId::ReviewMarkReviewed => "v",
             ShortcutId::ReviewToggleMode => "t",
+            ShortcutId::ExplainDiff => "e",
 
             ShortcutId::NewSession => "mod-n",
             ShortcutId::NewProject => "mod-shift-n",
@@ -1267,6 +1271,7 @@ pub struct KeymapConfig {
     pub review_previous_hunk: String,
     pub review_mark_reviewed: String,
     pub review_toggle_mode: String,
+    pub explain_diff: String,
 
     pub new_session: String,
     pub new_project: String,
@@ -1367,6 +1372,7 @@ impl Default for KeymapConfig {
             review_previous_hunk: ShortcutId::ReviewPreviousHunk.default_combo().into(),
             review_mark_reviewed: ShortcutId::ReviewMarkReviewed.default_combo().into(),
             review_toggle_mode: ShortcutId::ReviewToggleMode.default_combo().into(),
+            explain_diff: ShortcutId::ExplainDiff.default_combo().into(),
 
             new_session: ShortcutId::NewSession.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
@@ -1429,6 +1435,7 @@ impl KeymapConfig {
             ShortcutId::ReviewPreviousHunk => &self.review_previous_hunk,
             ShortcutId::ReviewMarkReviewed => &self.review_mark_reviewed,
             ShortcutId::ReviewToggleMode => &self.review_toggle_mode,
+            ShortcutId::ExplainDiff => &self.explain_diff,
 
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NewProject => &self.new_project,
@@ -1489,6 +1496,7 @@ impl KeymapConfig {
             ShortcutId::ReviewPreviousHunk => self.review_previous_hunk = combo,
             ShortcutId::ReviewMarkReviewed => self.review_mark_reviewed = combo,
             ShortcutId::ReviewToggleMode => self.review_toggle_mode = combo,
+            ShortcutId::ExplainDiff => self.explain_diff = combo,
 
             ShortcutId::NewSession => self.new_session = combo,
             ShortcutId::NewProject => self.new_project = combo,
@@ -1660,7 +1668,7 @@ pub fn combo_from_keystroke_on(
 
 /// Outline and side-panel shortcuts cannot be active at the same time.
 pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
-    let review = |id| matches!(id, ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode);
+    let review = |id| matches!(id, ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode | ShortcutId::ExplainDiff);
     if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }
     !matches!(
         (left, right),
@@ -2084,6 +2092,7 @@ impl UiSettings {
                             (ShortcutId::ReviewPreviousHunk, "reviewPreviousHunk"),
                             (ShortcutId::ReviewMarkReviewed, "reviewMarkReviewed"),
                             (ShortcutId::ReviewToggleMode, "reviewToggleMode"),
+                            (ShortcutId::ExplainDiff, "explainDiff"),
                         ] {
                             let taken = !keymap.contains_key(field) && keymap.iter().any(|(name, existing)| {
                                 name != "openTeamTabFromPanel" && existing.as_str().is_some_and(|combo| shortcut_combos_conflict(combo, id.default_combo()))

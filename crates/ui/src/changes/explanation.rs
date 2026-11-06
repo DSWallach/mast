@@ -1,15 +1,112 @@
 //! Context carried by questions about a diff or a walkthrough step.
 
 use super::{Changes, DiffLine, FileDiff, LineKind, SourceSide};
-use gpui::{AppContext as _, Context};
+use gpui::{AppContext as _, Context, IntoElement, div, prelude::*, px};
 use mast_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use mast_proto::ReviewStep;
+
+gpui::actions!(diff_explanation, [ExplainDiff]);
+
+pub(super) fn bind_keys(cx: &mut gpui::App, keymap: &crate::settings::KeymapConfig) {
+    let id = crate::settings::ShortcutId::ExplainDiff;
+    let combo = keymap.get(id);
+    if combo.is_empty() {
+        return;
+    }
+    let combo = crate::settings::platform_combo(combo);
+    let combo = if gpui::Keystroke::parse(&combo).is_ok() {
+        combo
+    } else {
+        crate::settings::platform_combo(id.default_combo())
+    };
+    let predicate = Some(std::rc::Rc::new(
+        gpui::KeyBindingContextPredicate::parse(
+            "ChangesDiff && !Input && !Composer && !MessageComposer && !PaletteSearch",
+        )
+        .unwrap(),
+    ));
+    if let Ok(binding) = gpui::KeyBinding::load(
+        &combo,
+        Box::new(ExplainDiff),
+        predicate,
+        false,
+        None,
+        &gpui::DummyKeyboardMapper,
+    ) {
+        cx.bind_keys([binding]);
+    }
+}
+
+pub(super) enum ExplanationPanel {
+    Waiting {
+        queued: bool,
+        chat_id: Option<String>,
+    },
+    Answer {
+        chat_id: String,
+        text: String,
+    },
+    Error(String),
+}
 
 /// The message identity is retained for transcript correlation, including
 /// when the host parks it in the busy chat's queue.
 pub(super) struct SentQuestion {
     pub message_id: String,
     pub queued: bool,
+}
+
+/// Watch the destination transcript independently of whichever chat the
+/// reader currently has open. Dropping the task stops waiting only.
+pub(super) fn watch_question<T: 'static>(
+    state: gpui::Entity<crate::state::AppState>,
+    chat_id: String,
+    message_id: String,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cx: &mut Context<T>,
+) -> gpui::Task<Result<String, String>> {
+    let Some(engine) = state.read(cx).engine().cloned() else {
+        return gpui::Task::ready(Err("Engine not connected".into()));
+    };
+    cx.spawn(async move |_, cx| {
+        let mut receiver = engine
+            .client()
+            .subscribe(
+                mast_rpc::methods::WATCH_DOC_MESSAGES,
+                serde_json::json!({"chatId": chat_id}),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut entries = Vec::new();
+        loop {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Cancelled".into());
+            }
+            let receive = receiver.recv();
+            let timer = cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(250));
+            futures::pin_mut!(receive, timer);
+            if let futures::future::Either::Left((value, _)) =
+                futures::future::select(receive, timer).await
+            {
+                let value = value.ok_or("Transcript watch ended")?;
+                let update: mast_doc::TranscriptUpdate =
+                    serde_json::from_value(value).map_err(|error| error.to_string())?;
+                mast_doc::apply_transcript_frame(&mut entries, update.frame)
+                    .map_err(|error| error.to_string())?;
+            }
+            let busy = state.update(cx, |state, _| {
+                matches!(
+                    state.indicator_for(&chat_id, chrono::Utc::now()),
+                    crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+                )
+            });
+            if let Some(reply) = completed_reply(&entries, &message_id, busy) {
+                return Ok(reply);
+            }
+        }
+    })
 }
 
 /// Resolve a matching review from sidecar contents, rather than assuming that
@@ -235,6 +332,318 @@ impl DiffSelection {
 }
 
 impl Changes {
+    pub(super) fn explain_focused_hunk(&mut self, cx: &mut Context<Self>) {
+        if self.explanation_selection.is_some() {
+            self.explain_selection(cx);
+            return;
+        }
+        let top = self
+            .list
+            .logical_scroll_top()
+            .item_ix
+            .min(self.rows.len().saturating_sub(1));
+        let file = self.rows.get(top).and_then(|row| row.file());
+        let Some((file_index, hunk_index)) =
+            self.rows
+                .iter()
+                .take(top + 1)
+                .rev()
+                .find_map(|row| match row {
+                    super::DiffRow::HunkHeader {
+                        file: candidate,
+                        hunk,
+                    } if Some(*candidate as usize) == file => {
+                        Some((*candidate as usize, *hunk as usize))
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let Some(file) = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.get(file_index))
+        else {
+            return;
+        };
+        let Some(hunk) = file.hunks.get(hunk_index) else {
+            return;
+        };
+        let side = if hunk.lines.iter().any(|line| line.new_no.is_some()) {
+            SourceSide::New
+        } else {
+            SourceSide::Old
+        };
+        let numbers: Vec<_> = hunk
+            .lines
+            .iter()
+            .filter_map(|line| match side {
+                SourceSide::Old => line.old_no,
+                SourceSide::New => line.new_no,
+            })
+            .collect();
+        let (Some(first), Some(last)) = (numbers.first(), numbers.last()) else {
+            return;
+        };
+        self.explanation_selection = Some(DiffSelection {
+            path: file.path.clone(),
+            side,
+            anchor: *first,
+            extent: *last,
+        });
+        self.explanation_hunk = Some((file_index, hunk_index));
+        self.explain_selection(cx);
+    }
+
+    pub(super) fn render_explanation(
+        &self,
+        theme: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let trigger = div()
+            .id("diff-explanation")
+            .absolute()
+            .right(px(8.0))
+            .top(px(0.0))
+            .px_2()
+            .rounded_md()
+            .bg(theme.surface_raised)
+            .text_color(theme.text)
+            .child("Explain")
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        match &self.explanation_panel {
+            None => trigger
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.explain_selection(cx)))
+                .into_any_element(),
+            Some(status) => {
+                let (label, chat_id) = match status {
+                    ExplanationPanel::Waiting { queued, chat_id } => (
+                        if *queued {
+                            "Queued".to_owned()
+                        } else {
+                            "Waiting for explanation…".to_owned()
+                        },
+                        chat_id.clone(),
+                    ),
+                    ExplanationPanel::Answer { chat_id, text } => {
+                        (text.clone(), Some(chat_id.clone()))
+                    }
+                    ExplanationPanel::Error(error) => (error.clone(), None),
+                };
+                let mut panel = div()
+                    .w(px(320.0))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .text_color(theme.text)
+                    .child(label);
+                if matches!(status, ExplanationPanel::Waiting { .. }) {
+                    panel = panel.child(crate::loaders::gradient_spinner(
+                        "explanation-spinner",
+                        theme,
+                        2.0,
+                        cx.entity_id(),
+                        cx,
+                    ));
+                }
+                if let Some(chat_id) = chat_id {
+                    panel = panel.child(
+                        div()
+                            .id("explanation-open-chat")
+                            .cursor_pointer()
+                            .child("Open in chat")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.update(cx, |state, cx| {
+                                    state.select_chat(Some(chat_id.clone()), cx)
+                                });
+                            })),
+                    );
+                }
+                panel = panel.child(
+                    div()
+                        .id("explanation-close")
+                        .cursor_pointer()
+                        .child(if matches!(status, ExplanationPanel::Waiting { .. }) {
+                            "Cancel"
+                        } else {
+                            "Close"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cancel_explanation();
+                            cx.notify();
+                        })),
+                );
+                trigger
+                    .child(crate::popover::anchored_menu_below_end(
+                        "explanation-panel",
+                        panel.into_any_element(),
+                        None,
+                    ))
+                    .into_any_element()
+            }
+        }
+    }
+
+    pub(super) fn cancel_explanation(&mut self) {
+        if let Some(cancelled) = self.explanation_cancelled.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(task) = self.explanation_task.take() {
+            task.detach();
+        }
+        self.explanation_panel = None;
+    }
+
+    pub(super) fn explain_selection(&mut self, cx: &mut Context<Self>) {
+        self.cancel_explanation();
+        let Some(selection) = self.explanation_selection.clone() else {
+            return;
+        };
+        let Some(file) = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.iter().find(|file| file.path == selection.path))
+        else {
+            return;
+        };
+        let lines = self
+            .explanation_hunk
+            .and_then(|(file_index, hunk_index)| {
+                self.parsed
+                    .as_ref()?
+                    .files
+                    .get(file_index)?
+                    .hunks
+                    .get(hunk_index)
+            })
+            .map(|hunk| hunk.lines.iter().collect())
+            .unwrap_or_else(|| selection.lines(file));
+        if lines.is_empty() {
+            return;
+        }
+        let Some(owner) = self.owner.as_ref() else {
+            return;
+        };
+        let owner_chat = owner.chat_id.clone();
+        let head = owner
+            .range
+            .as_ref()
+            .and_then(|range| range.head_sha.clone());
+        let target = self
+            .commit
+            .as_ref()
+            .map(|commit| commit.sha.clone())
+            .or_else(|| head.clone())
+            .unwrap_or_else(|| self.scope.label().to_owned());
+        let message = selection_question(
+            &selection.path,
+            selection.side,
+            selection.anchor,
+            selection.extent,
+            &lines,
+            &target,
+        );
+        let space = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == owner_chat)
+            .and_then(|chat| chat.space_id.clone());
+        let lookup = match (space, self.review_target.as_deref()) {
+            (Some(space), Some(key)) => Some(review_chat_for_target(
+                self.state.clone(),
+                &space,
+                key,
+                head.as_deref(),
+                cx,
+            )),
+            _ => None,
+        };
+        self.explanation_panel = Some(ExplanationPanel::Waiting {
+            queued: false,
+            chat_id: None,
+        });
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.explanation_cancelled = Some(cancelled.clone());
+        let state = self.state.clone();
+        self.explanation_task = Some(cx.spawn(async move |this, cx| {
+            let chat_id = match lookup {
+                Some(lookup) => match lookup.await {
+                    Ok(chat) => chat.unwrap_or(owner_chat),
+                    Err(error) => {
+                        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        let _ = this.update(cx, |this, cx| {
+                            this.explanation_panel = Some(ExplanationPanel::Error(error));
+                            cx.notify();
+                        });
+                        return;
+                    }
+                },
+                None => owner_chat,
+            };
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let send = match this.update(cx, |_, cx| {
+                send_question(state.clone(), chat_id.clone(), message, cx)
+            }) {
+                Ok(task) => task,
+                Err(_) => return,
+            };
+            let sent = match send.await {
+                Ok(sent) => sent,
+                Err(error) => {
+                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    let _ = this.update(cx, |this, cx| {
+                        this.explanation_panel = Some(ExplanationPanel::Error(error));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let watch = match this.update(cx, |this, cx| {
+                this.explanation_panel = Some(ExplanationPanel::Waiting {
+                    queued: sent.queued,
+                    chat_id: Some(chat_id.clone()),
+                });
+                cx.notify();
+                watch_question(
+                    state,
+                    chat_id.clone(),
+                    sent.message_id,
+                    cancelled.clone(),
+                    cx,
+                )
+            }) {
+                Ok(task) => task,
+                Err(_) => return,
+            };
+            let result = watch.await;
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.explanation_panel = Some(match result {
+                    Ok(text) => ExplanationPanel::Answer { chat_id, text },
+                    Err(error) => ExplanationPanel::Error(error),
+                });
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     pub(super) fn select_explanation_line(
         &mut self,
         path: &str,
@@ -243,6 +652,8 @@ impl Changes {
         extend: bool,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_explanation();
+        self.explanation_hunk = None;
         if let Some(selection) = self
             .explanation_selection
             .as_mut()

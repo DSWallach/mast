@@ -2008,6 +2008,10 @@ pub struct Changes {
     seen_candidates: HashMap<String, review_state::SeenCandidate>,
     seen_hunks: std::collections::HashSet<String>,
     explanation_selection: Option<explanation::DiffSelection>,
+    explanation_hunk: Option<(usize, usize)>,
+    explanation_panel: Option<explanation::ExplanationPanel>,
+    explanation_task: Option<Task<()>>,
+    explanation_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     seen_task: Option<Task<()>>,
     seen_last_render: std::time::Instant,
     seen_scroll_epoch: u64,
@@ -2248,6 +2252,10 @@ impl Changes {
             seen_candidates: HashMap::new(),
             seen_hunks: std::collections::HashSet::new(),
             explanation_selection: None,
+            explanation_hunk: None,
+            explanation_panel: None,
+            explanation_task: None,
+            explanation_cancelled: None,
             seen_task: None,
             seen_last_render: std::time::Instant::now(),
             seen_scroll_epoch: 0,
@@ -2412,6 +2420,7 @@ impl Changes {
         self.diffs.clear();
         self.parsed = None;
         self.explanation_selection = None;
+        self.cancel_explanation();
         self.rows.clear();
         self.row_ranges.clear();
         self.section_headers.clear();
@@ -2873,6 +2882,7 @@ impl Changes {
         if self.scope != scope {
             self.scope = scope;
             self.explanation_selection = None;
+            self.cancel_explanation();
             self.reset_horizontal_scroll();
             if scope == DiffScope::History {
                 self.history_pane(cx)
@@ -4401,12 +4411,14 @@ impl Changes {
                 let leave_path = path.clone();
                 let select_path = path.clone();
                 let selected = self.explanation_line_selected(&path, source_side, line_no);
+                let selection_end = self.explanation_selection.as_ref().is_some_and(|s| s.path == path && s.side == source_side && s.extent == line_no);
                 div()
                     .id(("diff-line", ix))
                     .w_full()
                     .relative()
                     .when(selected, |el| el.bg(theme.element_active))
                     .child(row)
+                    .when(selection_end, |el| el.child(self.render_explanation(&theme, cx)))
                     .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                         window.focus(&this.diff_focus, cx);
                         this.select_explanation_line(&select_path, source_side, line_no, event.modifiers.shift, cx);
@@ -4497,8 +4509,9 @@ impl Changes {
                 let left_path = path.clone();
                 let left_move_path = path.clone();
                 let left = cell(left, true)
-                    .map(|cell| cell.id(("split-old", ix))
+                    .map(|cell| cell.id(("split-old", ix)).relative()
                         .when(left_number.is_some_and(|number| self.explanation_line_selected(&path, SourceSide::Old, number)), |el| el.bg(theme.element_active))
+                        .when(left_number.is_some_and(|number| self.explanation_selection.as_ref().is_some_and(|s| s.path == path.as_ref() && s.side == SourceSide::Old && s.extent == number)), |el| el.child(self.render_explanation(&theme, cx)))
                         .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                             window.focus(&this.diff_focus, cx);
                             if let Some(number) = left_number { this.select_explanation_line(&left_path, SourceSide::Old, number, event.modifiers.shift, cx); }
@@ -4515,8 +4528,9 @@ impl Changes {
                         let (side, line_no) = anchor;
                         let (move_path, leave_path) = (path.clone(), path.clone());
                         let select_path = path.clone();
-                        cell.id(("split-new", ix))
+                        cell.id(("split-new", ix)).relative()
                             .when(self.explanation_line_selected(&path, SourceSide::New, line_no), |el| el.bg(theme.element_active))
+                            .when(self.explanation_selection.as_ref().is_some_and(|s| s.path == path.as_ref() && s.side == SourceSide::New && s.extent == line_no), |el| el.child(self.render_explanation(&theme, cx)))
                             .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                                 window.focus(&this.diff_focus, cx);
                                 this.select_explanation_line(&select_path, SourceSide::New, line_no, event.modifiers.shift, cx);
@@ -6928,6 +6942,8 @@ impl Render for Changes {
                                     .child(
                                         div()
                                             .track_focus(&self.diff_focus)
+                                            .key_context("ChangesDiff")
+                                            .on_action(cx.listener(|this, _: &explanation::ExplainDiff, _, cx| this.explain_focused_hunk(cx)))
                                             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                                                 this.diff_key_down(event, window, cx);
                                             }))
