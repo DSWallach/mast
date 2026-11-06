@@ -2629,6 +2629,63 @@ pub fn outline_binding_pinned(label: String, theme: &Theme) -> Div {
         .child(SharedString::from(label))
 }
 
+/// Expandable friction report heading.
+pub fn outline_friction_heading(
+    index: usize,
+    icon: &'static str,
+    summary: String,
+    count_selector: String,
+    count: u64,
+    age: String,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(("friction-row", index))
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .child(crate::icons::icon(icon).size(px(12.0)))
+        .child(div().flex_1().min_w_0().child(SharedString::from(summary)))
+        .child(
+            div()
+                .debug_selector(move || count_selector.clone())
+                .child(SharedString::from(format!("×{count}"))),
+        )
+        .child(
+            div()
+                .text_color(theme.text_muted)
+                .child(SharedString::from(age)),
+        )
+}
+pub fn outline_friction_badge(label: String, theme: &Theme) -> Div {
+    div()
+        .px(px(4.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .bg(theme.surface_overlay)
+        .text_color(theme.text_muted)
+        .text_size(crate::typography::ui_rems(
+            10.0 + super::layout_type_adjustment(theme),
+        ))
+        .child(SharedString::from(label))
+}
+pub fn outline_friction_details(selector: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.clone())
+        .pl(px(18.0))
+        .flex()
+        .flex_col()
+        .gap(px(3.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            10.5 + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::section_label;

@@ -375,35 +375,7 @@ impl WorkItemDetails {
                 .flex()
                 .flex_col()
                 .gap(px(3.0));
-            let mut heading = div()
-                .id(("friction-row", index))
-                .cursor_pointer()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text)
-                .child(crate::icons::icon(icon).size(px(12.0)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(SharedString::from(report.summary.clone())),
-                )
-                .child(
-                    div()
-                        .debug_selector({
-                            let selector =
-                                format!("friction-count-{}-{}", report.id, report.occurrences);
-                            move || selector.clone()
-                        })
-                        .child(SharedString::from(format!("×{}", report.occurrences))),
-                )
-                .child(
-                    div()
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(age)),
-                )
+            let mut heading = crate::components::outline_friction_heading(index, icon, report.summary.clone(), format!("friction-count-{}-{}", report.id, report.occurrences), report.occurrences, age, theme)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.friction.expanded.remove(&id) {
                         this.friction.expanded.insert(id.clone());
@@ -419,26 +391,13 @@ impl WorkItemDetails {
             .flatten()
             {
                 heading = heading.child(
-                    div()
-                        .px(px(4.0))
-                        .rounded(px(3.0))
-                        .bg(theme.surface_overlay)
-                        .text_color(theme.text_muted)
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .child(SharedString::from(chip.to_owned())),
+                    crate::components::outline_friction_badge(chip.to_owned(), theme),
                 );
             }
             row = row.child(heading);
             if expanded {
                 let selector = format!("friction-details-{}", report.id);
-                let mut details = div()
-                    .debug_selector(move || selector.clone())
-                    .pl(px(18.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted);
+                let mut details = crate::components::outline_friction_details(selector, theme);
                 for (label, value) in [
                     ("What happened", Some(report.what_happened.as_str())),
                     ("Workaround", report.workaround.as_deref()),
