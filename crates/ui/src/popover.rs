@@ -849,6 +849,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         row.bg(if active { theme.element_active } else { theme.surface })
             .text_color(theme.text)
+            .children(crate::surface_chrome::active_key_dot(theme, active))
     } else if active {
         row.bg(crate::theme::card_selected_bg())
             .text_color(theme.text)
