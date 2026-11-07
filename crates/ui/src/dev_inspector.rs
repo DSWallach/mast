@@ -143,6 +143,19 @@ pub fn init(cx: &mut App) {
                         copy_details(&clipboard_text, cx);
                         *copied.borrow_mut() = clipboard_text.clone();
                         window.refresh();
+                        let copied = copied.clone();
+                        let text = clipboard_text.clone();
+                        let handle = window.window_handle();
+                        cx.spawn(async move |cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(2))
+                                .await;
+                            if *copied.borrow() == text {
+                                copied.borrow_mut().clear();
+                                let _ = handle.update(cx, |_, window, _| window.refresh());
+                            }
+                        })
+                        .detach();
                     }),
             )
             .child(details)
