@@ -179,6 +179,14 @@ pub(crate) fn settings_option_card(
 }
 
 pub(crate) fn settings_row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
+    settings_row_tile_tinted(theme, icon_path, None)
+}
+
+pub(crate) fn settings_row_tile_tinted(
+    theme: &Theme,
+    icon_path: &'static str,
+    tint: Option<Hsla>,
+) -> gpui::Div {
     div()
         .flex_none()
         .size(px(36.0))
@@ -200,11 +208,11 @@ pub(crate) fn settings_row_tile(theme: &Theme, icon_path: &'static str) -> gpui:
         .child(
             crate::icons::icon(icon_path)
                 .size(px(16.0))
-                .text_color(if super::is_area(theme) {
+                .text_color(tint.unwrap_or(if super::is_area(theme) {
                     theme.accent
                 } else {
                     theme.text_muted
-                }),
+                })),
         )
 }
 
@@ -770,4 +778,39 @@ pub(crate) fn settings_device_switcher(
             gpui::transparent_black()
         })
         .when(!open, |el| el.hover(|s| s.bg(ink(0.04))))
+}
+
+/// Autosave delay choice.
+pub(crate) fn settings_autosave_choice(
+    theme: &Theme,
+    id: SharedString,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let area = super::is_area(theme);
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(10.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
+        .when(area, |el| el.rounded_full())
+        .border_1()
+        .when(super::is_industrial(theme), |el| el.border_b_2())
+        .border_color(if active {
+            theme.accent.opacity(0.7)
+        } else {
+            theme.border
+        })
+        .bg(if active {
+            theme.accent.opacity(0.11)
+        } else if area {
+            theme.accent.opacity(0.06)
+        } else {
+            crate::theme::wash(0.025)
+        })
+        .text_size(px(11.5))
+        .text_color(if active { theme.text } else { theme.text_muted })
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(crate::theme::wash(0.08)))
 }
