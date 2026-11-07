@@ -967,7 +967,9 @@ pub(crate) fn settings_account_switch(
         .py(px(4.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
         .when(super::is_area(theme), |el| {
-            el.rounded_full().bg(theme.accent)
+            el.rounded_full()
+                .bg(theme.accent_strong)
+                .text_color(theme.on_accent)
         })
         .when(super::is_industrial(theme), |el| el.border_b_2())
         .text_size(crate::typography::ui_rems(11.5))
