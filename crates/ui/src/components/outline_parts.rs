@@ -3,6 +3,15 @@
 use crate::theme::Theme;
 use gpui::{Div, SharedString, Stateful, div, prelude::*, px};
 
+/// Apply the Area toolbar treatment while preserving other styles.
+pub fn area_toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
+    if super::is_area(theme) {
+        super::toolbar_control(element, theme, primary)
+    } else {
+        element
+    }
+}
+
 fn section_label(label: String, industrial: bool) -> (String, Option<String>) {
     if !industrial {
         return (label, None);
@@ -34,12 +43,17 @@ pub fn outline_section_header(
     let (label, count) = section_label(label, industrial);
     div()
         .id(id)
+        .group("outline-section")
         .flex()
         .items_center()
         .gap(px(4.0 * super::layout_spacing(theme)))
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(
-            theme.ui_style.tokens.label_size.unwrap_or(11.0) + super::layout_type_adjustment(theme),
+            if super::is_area(theme) {
+                theme.ui_style.tokens.body_size.unwrap_or(13.0)
+            } else {
+                theme.ui_style.tokens.label_size.unwrap_or(11.0)
+            } + super::layout_type_adjustment(theme),
         ))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .when(industrial, |el| el.font_family(theme.font_sans.clone()))
@@ -52,7 +66,11 @@ pub fn outline_section_header(
                 crate::icons::ALT_ARROW_RIGHT
             })
             .size(px(10.0))
-            .text_color(theme.text_muted),
+            .text_color(theme.text_muted)
+            .when(super::is_area(theme), |el| {
+                el.opacity(0.0)
+                    .group_hover("outline-section", |el| el.opacity(1.0))
+            }),
         )
         .child(SharedString::from(label))
         .when_some(count, |el, count| {
@@ -73,12 +91,34 @@ pub fn outline_chat_indicator(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+    if super::is_area(theme) && status == crate::status_style::Status::Waiting {
+        div().size(px(8.0)).rounded_full().bg(theme.accent).into_any_element()
+    } else if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
         crate::status_style::indicator_for_theme(status, theme).into_any_element()
     } else if status == crate::status_style::Status::Working {
         crate::loaders::mini_mono_spinner(key, 1.5, working_color, view, cx).into_any_element()
     } else {
         crate::status_style::indicator_for_theme(status, theme).into_any_element()
+    }
+}
+
+pub fn outline_selected_chat_indicator(
+    status: crate::status_style::Status,
+    key: impl Into<SharedString>,
+    color: gpui::Hsla,
+    theme: &Theme,
+    selected: bool,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    if super::is_area(theme) && selected {
+        div()
+            .size(px(8.0))
+            .rounded_full()
+            .bg(theme.identity_text(theme.accent))
+            .into_any_element()
+    } else {
+        outline_chat_indicator(status, key, color, theme, view, cx)
     }
 }
 
@@ -101,7 +141,7 @@ pub fn outline_item_indicator(
 
 /// Status word shown when the layout requests it.
 pub fn outline_status_word(label: &'static str, color: gpui::Hsla, theme: &Theme) -> Option<Div> {
-    theme.ui_style.behavior.status_words.then(|| {
+    (theme.ui_style.behavior.status_words && !super::is_area(theme)).then(|| {
         div()
             .flex_none()
             .text_size(crate::typography::ui_rems(10.0))
@@ -205,9 +245,13 @@ pub fn outline_toolbar_button(
         })
         .when(!active, |el| el.text_color(theme.text_muted))
         .hover(|el| el.text_color(theme.text));
-    super::toolbar_control(crate::surface_chrome::segmented_key(button, theme, active), theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
-        .child(SharedString::from(label))
+    super::toolbar_control(
+        crate::surface_chrome::segmented_key(button, theme, active),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .child(SharedString::from(label))
 }
 
 /// Keyboard shortcut action in the outline toolbar.
@@ -226,10 +270,14 @@ pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
         .bg(theme.element_hover.opacity(0.5))
         .text_color(theme.text_muted)
         .hover(|el| el.text_color(theme.text));
-    super::toolbar_control(crate::surface_chrome::segmented_key(button, theme, false), theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
-        .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
-        .child("?")
+    super::toolbar_control(
+        crate::surface_chrome::segmented_key(button, theme, false),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
+    .child("?")
 }
 
 /// Container for descendant status totals.
@@ -281,6 +329,16 @@ pub fn outline_input_frame(
         .child(input.clone())
 }
 
+pub fn outline_date_input_frame(
+    input: &gpui::Entity<crate::composer::ComposerInput>,
+    theme: &Theme,
+    focused: bool,
+) -> Div {
+    outline_input_frame(input, theme).when(super::is_area(theme) && !focused, |el| {
+        el.border_color(theme.border)
+    })
+}
+
 /// Close action for item details, including the Guided label.
 pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
     let labels = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
@@ -290,6 +348,9 @@ pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
         .size(px(22.0))
         .when(labels, |el| {
             el.h(px(32.0)).w_auto().px(px(6.0)).gap(px(4.0))
+        })
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
         })
         .flex()
         .items_center()
@@ -348,20 +409,24 @@ pub fn outline_action_button(
         .when(!enabled, |el| {
             el.border_color(theme.border).text_color(theme.text_faint)
         });
-    super::toolbar_control(crate::surface_chrome::segmented_key(button, theme, primary && enabled), theme, false)
-        .when(super::is_area(theme), |el| {
-            if enabled && (primary || matches!(label, "Approve" | "Accept rule" | "Send")) {
-                el.rounded_full()
-                    .bg(theme.accent)
-                    .border_color(theme.accent)
-                    .text_color(theme.identity_text(theme.accent))
-            } else {
-                el.rounded_full()
-                    .border_color(theme.bg)
-                    .text_color(theme.text_muted)
-            }
-        })
-        .child(label)
+    super::toolbar_control(
+        crate::surface_chrome::segmented_key(button, theme, primary && enabled),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| {
+        if enabled && (primary || matches!(label, "Approve" | "Accept rule" | "Send")) {
+            el.rounded_full()
+                .bg(theme.accent)
+                .border_color(theme.accent)
+                .text_color(theme.identity_text(theme.accent))
+        } else {
+            el.rounded_full()
+                .border_color(theme.bg)
+                .text_color(theme.text_muted)
+        }
+    })
+    .child(label)
 }
 
 /// A work-item status segment; the caller attaches its action.
@@ -401,7 +466,13 @@ pub fn outline_status_segment(
             el.bg(theme.success).text_color(foreground)
         })
         .when(true, |el| super::toolbar_control(el, theme, false))
-        .when(active && completed && key, |el| el.text_color(theme.success))
+        .when(super::is_area(theme) && active, |el| {
+            el.bg(theme.accent)
+                .text_color(theme.identity_text(theme.accent))
+        })
+        .when(active && completed && key, |el| {
+            el.text_color(theme.success)
+        })
         .when(super::is_area(theme), |el| el.rounded_full())
         .children(crate::surface_chrome::active_key_dot(
             theme,
@@ -423,6 +494,9 @@ pub fn outline_status_group(theme: &Theme) -> Div {
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface),
         )
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.element_hover.opacity(0.3))
+        })
 }
 
 /// Optional Industrial status readout.
@@ -544,11 +618,16 @@ pub fn outline_tree(theme: &Theme) -> Stateful<Div> {
         .when(super::is_area(theme), |el| el.bg(theme.bg))
 }
 
+pub fn outline_overview_header(theme: &Theme) -> Div {
+    div().when(super::is_area(theme), |el| el.bg(theme.bg))
+}
+
 /// Row chrome; selection, drag handling and content remain with the caller.
 pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) -> Stateful<Div> {
     let selector = id.to_string();
     div()
         .id(id)
+        .group("outline-row")
         .debug_selector(move || selector.clone())
         .h(px(height))
         .w_full()
@@ -565,6 +644,95 @@ pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) ->
         .border_color(gpui::transparent_black())
 }
 
+pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
+    let mut result = theme.clone();
+    if super::is_area(theme) && selected {
+        result.text = theme.identity_text(theme.accent);
+        result.text_muted = result.text;
+        result.text_faint = result.text.opacity(0.8);
+    }
+    result
+}
+
+pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selected: bool) -> T {
+    if super::is_area(theme) && selected {
+        element
+            .max_w(px(400.0))
+            .rounded_full()
+            .bg(theme.accent)
+            .border_color(theme.accent)
+    } else {
+        element
+    }
+}
+
+pub fn outline_row_extras(theme: &Theme) -> bool {
+    !super::is_area(theme)
+}
+
+pub fn outline_attention_color(
+    theme: &Theme,
+    needs_attention: bool,
+    color: gpui::Hsla,
+) -> gpui::Hsla {
+    if super::is_area(theme) && needs_attention {
+        theme.accent
+    } else {
+        color
+    }
+}
+
+pub fn outline_selected_dot_color(theme: &Theme, selected: bool, color: gpui::Hsla) -> gpui::Hsla {
+    if super::is_area(theme) && selected {
+        theme.identity_text(theme.accent)
+    } else {
+        color
+    }
+}
+
+pub fn outline_row_highlight(theme: &Theme) -> gpui::Hsla {
+    if super::is_area(theme) {
+        gpui::transparent_black()
+    } else {
+        theme.accent.opacity(0.6)
+    }
+}
+
+pub fn outline_space_dot(
+    theme: &Theme,
+    id: &str,
+    needs_attention: bool,
+    selected: bool,
+) -> Option<Div> {
+    super::is_area(theme).then(|| {
+        div()
+            .flex_none()
+            .size(px(8.0))
+            .rounded_full()
+            .bg(outline_selected_dot_color(
+                theme,
+                selected,
+                if needs_attention {
+                    theme.accent
+                } else {
+                    theme.identity_color(id)
+                },
+            ))
+    })
+}
+
+pub fn outline_missing_chat(theme: &Theme, id: &str) -> Option<gpui::AnyElement> {
+    super::is_area(theme).then(|| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_color(theme.text_muted)
+            .child(SharedString::from(format!("Missing chat · {id}")))
+            .into_any_element()
+    })
+}
+
 /// Overview filter menu trigger.
 pub fn outline_filter_trigger(theme: &Theme) -> Stateful<Div> {
     let scale = super::layout_spacing(theme);
@@ -578,9 +746,13 @@ pub fn outline_filter_trigger(theme: &Theme) -> Stateful<Div> {
         .cursor_pointer()
         .text_color(theme.text_muted)
         .bg(theme.element_hover.opacity(0.5));
-    super::toolbar_control(crate::surface_chrome::segmented_key(trigger, theme, false), theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
-        .child("⋯")
+    super::toolbar_control(
+        crate::surface_chrome::segmented_key(trigger, theme, false),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .child("⋯")
 }
 
 /// Checkable overview filter menu row.
@@ -1709,7 +1881,7 @@ pub fn outline_details_chat_label(
         } else {
             theme.text
         })
-        .when(missing, |el| el.italic())
+        .when(missing && !super::is_area(theme), |el| el.italic())
         .when(!missing, |el| el.cursor_pointer())
         .child(SharedString::from(label))
 }
@@ -1828,7 +2000,11 @@ pub fn outline_disclosure(id: SharedString, collapsed: bool, theme: &Theme) -> S
                 crate::icons::ALT_ARROW_DOWN
             })
             .size(px(10.0))
-            .text_color(theme.text_muted),
+            .text_color(theme.text_muted)
+            .when(super::is_area(theme), |el| {
+                el.opacity(0.0)
+                    .group_hover("outline-row", |el| el.opacity(1.0))
+            }),
         )
 }
 pub fn outline_disclosure_space() -> Div {
@@ -2150,6 +2326,9 @@ pub fn outline_required_close(theme: &Theme) -> Stateful<Div> {
         .debug_selector(|| "required-actions-close".into())
         .flex_none()
         .size(px(22.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .flex()
         .items_center()
         .justify_center()
@@ -2927,9 +3106,17 @@ pub fn outline_details_attention(
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
-        .text_color(color)
+        .text_color(if super::is_area(theme) {
+            theme.accent
+        } else {
+            color
+        })
+        .when(super::is_area(theme), |el| {
+            el.child(SharedString::from(suffix.clone()))
+        })
         .when(
-            theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot,
+            !super::is_area(theme)
+                && theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot,
             |el| {
                 el.flex()
                     .items_center()
@@ -2942,7 +3129,8 @@ pub fn outline_details_attention(
             },
         )
         .when(
-            theme.ui_style.status_indicator != crate::ui_style::StatusIndicator::Dot,
+            !super::is_area(theme)
+                && theme.ui_style.status_indicator != crate::ui_style::StatusIndicator::Dot,
             |el| el.child(SharedString::from(format!("{glyph} {suffix}"))),
         )
 }

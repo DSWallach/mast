@@ -194,7 +194,10 @@ fn chat(data_dir: PathBuf, overview: bool, cx: &mut App) -> AnyView {
     let shell = cx.new(|cx| {
         let mut shell = mast_ui::shell::Shell::new(state, boot, cx);
         shell.fixture_snapshot_ready();
-        shell.fixture_snapshot_attachment(include_bytes!("../../assets/dock/mast-icon-ready.png").to_vec(), cx);
+        shell.fixture_snapshot_attachment(
+            include_bytes!("../../assets/dock/mast-icon-ready.png").to_vec(),
+            cx,
+        );
         if overview {
             shell.fixture_snapshot_overview(cx);
         }
@@ -226,7 +229,7 @@ pub fn render(
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => chat(data_dir, false, cx),
-                "overview" => chat(data_dir, true, cx),
+                "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

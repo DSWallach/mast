@@ -4,46 +4,18 @@
 pub(crate) mod browser_parts;
 mod settings_parts;
 pub(crate) use settings_parts::{
-    settings_accent_swatch,
-    settings_account_forget,
-    settings_account_switch,
-    settings_appearance_preview,
-    settings_archive_tile,
-    settings_archived_row,
-    settings_autosave_choice,
-    settings_background_thumbnail,
-    settings_choice,
-    settings_compact_action,
-    settings_destination,
-    settings_device_switcher,
-    settings_effective_surface,
-    settings_error_strip,
-    settings_ghost_action,
-    settings_import_close,
-    settings_import_error,
-    settings_import_mode,
-    settings_import_warning,
-    settings_layout_preview,
-    settings_meta_line,
-    settings_option_card,
-    settings_page_header,
-    settings_page_subtitle,
-    settings_picker,
-    settings_report_panel,
-    settings_row_tile,
-    settings_row_tile_tinted,
-    settings_row_title,
-    settings_send_behavior_group,
-    settings_send_behavior_option,
-    settings_send_behavior_reset,
-    settings_shortcut_key,
-    settings_style_preview,
-    settings_team_visibility,
-    settings_theme_import_checkbox,
-    settings_theme_import_row,
-    settings_theme_miniature,
-    settings_unarchive_action,
-    settings_warning_strip,
+    settings_accent_swatch, settings_account_forget, settings_account_switch,
+    settings_appearance_preview, settings_archive_tile, settings_archived_row,
+    settings_autosave_choice, settings_background_thumbnail, settings_choice,
+    settings_compact_action, settings_destination, settings_device_switcher,
+    settings_effective_surface, settings_error_strip, settings_ghost_action, settings_import_close,
+    settings_import_error, settings_import_mode, settings_import_warning, settings_layout_preview,
+    settings_meta_line, settings_option_card, settings_page_header, settings_page_subtitle,
+    settings_picker, settings_report_panel, settings_row_tile, settings_row_tile_tinted,
+    settings_row_title, settings_send_behavior_group, settings_send_behavior_option,
+    settings_send_behavior_reset, settings_shortcut_key, settings_style_preview,
+    settings_team_visibility, settings_theme_import_checkbox, settings_theme_import_row,
+    settings_theme_miniature, settings_unarchive_action, settings_warning_strip,
 };
 
 mod outline_parts;
@@ -59,32 +31,30 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 
 mod conversation_parts;
 pub use conversation_parts::{
-    ConversationComposerBody, agent_message_theme, conversation_add_harness_key, conversation_answer_button,
-    conversation_appshot_card, conversation_appshot_remove, conversation_appshot_strip,
+    ConversationComposerBody, agent_message_theme, conversation_add_harness_key,
+    conversation_answer_button, conversation_answer_input, conversation_appshot_card,
+    conversation_appshot_remove, conversation_appshot_strip, conversation_attach_key,
     conversation_attachment_remove, conversation_attachment_strip, conversation_attachment_thumb,
-    conversation_attach_key, conversation_code_copy_action, conversation_code_frame,
-    conversation_code_icon_action, conversation_code_theme,
-    conversation_code_token_color, conversation_column, conversation_composer_body,
-    conversation_composer_content_height, conversation_composer_expanded,
-    conversation_composer_text_size, conversation_composer_width, conversation_error_chip, conversation_footer_slot,
-    conversation_harness_tab, conversation_harness_tabs, conversation_input_surface,
-    conversation_input_text_color,
+    conversation_code_copy_action, conversation_code_frame, conversation_code_icon_action,
+    conversation_code_theme, conversation_code_token_color, conversation_column,
+    conversation_composer_body, conversation_composer_content_height,
+    conversation_composer_expanded, conversation_composer_text_size, conversation_composer_width,
+    conversation_error_chip, conversation_footer_slot, conversation_harness_tab,
+    conversation_harness_tabs, conversation_input_surface, conversation_input_text_color,
     conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
-    conversation_message_expander,
-    conversation_model_label, conversation_model_picker, conversation_panel_radius, conversation_question_card,
-    conversation_picker_approval, conversation_picker_footer_chip, conversation_picker_footer_content,
-    conversation_picker_footer_label, conversation_picker_footer_row, conversation_picker_icon, conversation_picker_label,
-    conversation_picker_suffix, conversation_picker_trigger,
+    conversation_message_expander, conversation_model_label, conversation_model_picker,
+    conversation_panel_radius, conversation_picker_approval, conversation_picker_footer_chip,
+    conversation_picker_footer_content, conversation_picker_footer_label,
+    conversation_picker_footer_row, conversation_picker_icon, conversation_picker_label,
+    conversation_picker_suffix, conversation_picker_trigger, conversation_question_card,
     conversation_question_chip, conversation_question_id, conversation_question_pill,
-    conversation_answer_input,
     conversation_reveal, conversation_send_hint, conversation_send_key, conversation_skill_chip,
-    conversation_skill_remove, conversation_subagent_chip_frame, conversation_thought_line, conversation_tool_chip_frame,
-    conversation_tool_detail_frame, conversation_tool_group_header, conversation_tool_more_lines,
-    conversation_tool_output_line,
-    conversation_tool_file_badge, conversation_tool_header, conversation_tool_icon_tile, conversation_tool_patch_header,
-    conversation_tool_stat_row,
-    conversation_tool_panel, conversation_tool_theme, conversation_user_bubble,
-    conversation_wizard_surface, user_message_theme,
+    conversation_skill_remove, conversation_subagent_chip_frame, conversation_thought_line,
+    conversation_tool_chip_frame, conversation_tool_detail_frame, conversation_tool_file_badge,
+    conversation_tool_group_header, conversation_tool_header, conversation_tool_icon_tile,
+    conversation_tool_more_lines, conversation_tool_output_line, conversation_tool_panel,
+    conversation_tool_patch_header, conversation_tool_stat_row, conversation_tool_theme,
+    conversation_user_bubble, conversation_wizard_surface, user_message_theme,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,7 +522,7 @@ pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
 
 pub fn toolbar_search_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
     let frame = search_input_frame(theme, input);
-    if is_industrial(theme) {
+    if is_industrial(theme) || is_area(theme) {
         toolbar_control(frame.mb(px(0.0)), theme, false)
     } else {
         frame
@@ -617,6 +587,26 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             .shadow(Vec::new())
             .flex()
             .items_center()
+    } else if is_area(theme) {
+        let fill = if primary {
+            theme.accent
+        } else {
+            gpui::transparent_black()
+        };
+        element
+            .h(px(theme.ui_style.tokens.control_size))
+            .py_0()
+            .mb_0()
+            .flex()
+            .items_center()
+            .rounded_full()
+            .bg(fill)
+            .border_color(gpui::transparent_black())
+            .text_color(if primary {
+                theme.identity_text(fill)
+            } else {
+                theme.text_muted
+            })
     } else {
         element
     }
@@ -874,8 +864,16 @@ pub fn agent_message_bubble(
             .child(
                 div()
                     .px(px(10.0 * layout_spacing(theme)))
-                    .pt(px(if continues { gap } else { 10.0 * layout_spacing(theme) }))
-                    .pb(px(if continued_by_next { 0.0 } else { 10.0 * layout_spacing(theme) }))
+                    .pt(px(if continues {
+                        gap
+                    } else {
+                        10.0 * layout_spacing(theme)
+                    }))
+                    .pb(px(if continued_by_next {
+                        0.0
+                    } else {
+                        10.0 * layout_spacing(theme)
+                    }))
                     .border_l_1()
                     .border_r_1()
                     .when(!continues, |el| el.border_t_1())
@@ -907,7 +905,8 @@ pub fn agent_message_bubble(
 }
 
 pub fn agent_message_row_gap(theme: &Theme, continues: bool, gap: f32) -> f32 {
-    if continues && theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
+    if continues && theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial
+    {
         0.0
     } else {
         gap

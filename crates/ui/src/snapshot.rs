@@ -83,6 +83,31 @@ struct OutlineFixture {
     _shell: Entity<crate::shell::Shell>,
 }
 
+/// Offline Overview with its outline toolbar visible.
+pub fn overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview> {
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.connection = mast_proto::view::ConnectionStatus::Ready;
+        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+        state.local_device_id = Some("local".into());
+        state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state
+    });
+    let transcript = cx.new(|cx| crate::transcript::Transcript::new(state.clone(), cx));
+    let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+    let overview = cx.new(|cx| {
+        crate::overview::Overview::new(
+            state,
+            gpui::WeakEntity::new_invalid(),
+            transcript,
+            composer,
+            cx,
+        )
+    });
+    overview.update(cx, |overview, cx| overview.show_snapshot_outline(cx));
+    overview
+}
+
 impl gpui::Render for OutlineFixture {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{div, prelude::*, px};

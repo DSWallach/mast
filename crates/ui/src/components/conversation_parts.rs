@@ -27,8 +27,14 @@ pub fn conversation_picker_label(label: SharedString) -> Div {
     div().min_w_0().truncate().child(label)
 }
 
-pub fn conversation_picker_icon<T: gpui::Styled + gpui::prelude::FluentBuilder>(theme: &Theme, icon: T) -> T {
-    icon.when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| el.flex_none())
+pub fn conversation_picker_icon<T: gpui::Styled + gpui::prelude::FluentBuilder>(
+    theme: &Theme,
+    icon: T,
+) -> T {
+    icon.when(
+        theme.ui_style.conversation == ConversationVariant::Industrial,
+        |el| el.flex_none(),
+    )
 }
 
 pub fn conversation_picker_suffix(theme: &Theme, label: SharedString, tint: Option<Hsla>) -> Div {
@@ -103,7 +109,10 @@ pub fn conversation_picker_trigger(
     let chip = div()
         .id(id)
         .h(px(32.0))
-        .when(theme.ui_style.conversation != ConversationVariant::Industrial, |el| el.max_w(px(248.0)))
+        .when(
+            theme.ui_style.conversation != ConversationVariant::Industrial,
+            |el| el.max_w(px(248.0)),
+        )
         .min_w_0()
         .flex()
         .flex_row()
@@ -131,9 +140,13 @@ pub fn conversation_picker_trigger(
         })
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer()
-        .when(theme.ui_style.conversation == ConversationVariant::Industrial && id == "picker-model", |el| {
-            el.relative().child(conversation_key_caption(theme, "MODEL"))
-        })
+        .when(
+            theme.ui_style.conversation == ConversationVariant::Industrial && id == "picker-model",
+            |el| {
+                el.relative()
+                    .child(conversation_key_caption(theme, "MODEL"))
+            },
+        )
         .when(
             theme.ui_style.layout == crate::ui_style::UiLayout::Guided
                 && theme.ui_style.conversation != ConversationVariant::Industrial,
@@ -149,7 +162,7 @@ pub fn conversation_picker_trigger(
     if theme.ui_style.conversation == ConversationVariant::Industrial {
         conversation_industrial_icon_key(chip, theme, false)
     } else {
-        super::segmented_key(chip, theme, open)
+        super::toolbar_control(super::segmented_key(chip, theme, open), theme, false)
     }
 }
 
@@ -184,7 +197,7 @@ pub fn conversation_picker_footer_chip(
         })
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer();
-    super::segmented_key(chip, theme, open)
+    super::area_toolbar_control(super::segmented_key(chip, theme, open), theme, false)
 }
 
 pub fn conversation_picker_approval(
@@ -215,7 +228,10 @@ pub fn conversation_picker_approval(
     let chip = div()
         .id(id)
         .h(px(20.0))
-        .when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| el.h(px(theme.ui_style.tokens.control_size)))
+        .when(
+            theme.ui_style.conversation == ConversationVariant::Industrial,
+            |el| el.h(px(theme.ui_style.tokens.control_size)),
+        )
         .flex_none()
         .flex()
         .flex_row()
@@ -231,14 +247,19 @@ pub fn conversation_picker_approval(
         .bg(bg)
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer()
-        .when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| {
-            el.relative().child(conversation_key_caption(theme, "MODE"))
-        })
+        .when(
+            theme.ui_style.conversation == ConversationVariant::Industrial,
+            |el| el.relative().child(conversation_key_caption(theme, "MODE")),
+        )
         .child(
             crate::icons::icon(icon)
                 .size(px(12.0))
                 .flex_none()
-                .text_color(icon_color),
+                .text_color(if super::is_area(theme) {
+                    theme.text_muted
+                } else {
+                    icon_color
+                }),
         )
         .child(
             if theme.ui_style.layout == crate::ui_style::UiLayout::Guided {
@@ -250,7 +271,7 @@ pub fn conversation_picker_approval(
     if theme.ui_style.conversation == ConversationVariant::Industrial {
         conversation_industrial_icon_key(chip, theme, false)
     } else {
-        super::segmented_key(chip, theme, auto)
+        super::toolbar_control(super::segmented_key(chip, theme, auto), theme, false)
     }
 }
 
@@ -261,6 +282,9 @@ pub fn conversation_picker_footer_label(
 ) -> Div {
     div()
         .h(px(20.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .max_w(px(160.0))
         .min_w_0()
         .flex()
@@ -948,7 +972,8 @@ pub fn conversation_send_hint(
             let hint = crate::work_outline::hints::kbd_chip(theme, shortcut);
             if theme.ui_style.conversation == ConversationVariant::Industrial {
                 super::toolbar_control(hint, theme, false)
-                    .min_w(px(theme.ui_style.tokens.control_size)).justify_center()
+                    .min_w(px(theme.ui_style.tokens.control_size))
+                    .justify_center()
             } else {
                 hint
             }
@@ -1021,7 +1046,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
             )
             .child(
                 div()
-                    .h(px(40.0))
+                    .h(px(theme.ui_style.tokens.control_size + 8.0))
                     .w_full()
                     .relative()
                     .flex()
@@ -1129,7 +1154,13 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
                     .child(
                         div()
                             .min_w_0()
-                            .max_w(px(surface_width * if theme.ui_style.conversation == ConversationVariant::Industrial { 0.75 } else { 0.45 }))
+                            .max_w(px(surface_width
+                                * if theme.ui_style.conversation == ConversationVariant::Industrial
+                                {
+                                    0.75
+                                } else {
+                                    0.45
+                                }))
                             .relative()
                             .top(px(-cluster_offset))
                             .children(model),
@@ -1187,7 +1218,14 @@ pub fn conversation_model_picker(
     let area = theme.ui_style.conversation == ConversationVariant::Area;
     let picker = div()
         .min_w_0()
-        .max_w(px(width * if area { 0.55 } else if theme.ui_style.conversation == ConversationVariant::Industrial { 1.0 } else { 0.45 }))
+        .max_w(px(width
+            * if area {
+                0.55
+            } else if theme.ui_style.conversation == ConversationVariant::Industrial {
+                1.0
+            } else {
+                0.45
+            }))
         .relative()
         .left(px(if area { 0.0 } else { offset }))
         .opacity(if area { 1.0 } else { opacity })
@@ -1282,7 +1320,10 @@ pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
     div()
         .id("composer-attach")
         .size(px(28.0))
-        .when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| el.size(px(theme.ui_style.tokens.control_size)))
+        .when(
+            theme.ui_style.conversation == ConversationVariant::Industrial || super::is_area(theme),
+            |el| el.size(px(theme.ui_style.tokens.control_size)),
+        )
         .flex_none()
         .flex()
         .items_center()
@@ -1317,7 +1358,8 @@ pub fn conversation_composer_content_height(theme: &Theme, content: f32, line: f
 }
 
 pub fn conversation_composer_expanded(theme: &Theme, expanded: bool, width: Option<f32>) -> bool {
-    expanded || theme.ui_style.conversation == ConversationVariant::Area
+    expanded
+        || theme.ui_style.conversation == ConversationVariant::Area
         || (theme.ui_style.conversation == ConversationVariant::Industrial
             && width.is_some_and(|width| width < 500.0))
 }
@@ -1406,7 +1448,7 @@ mod tests {
 /// Send, queue, and interrupt control; callers attach the corresponding action.
 pub fn conversation_send_key(
     theme: &Theme,
-    identity: Hsla,
+    _identity: Hsla,
     stop: bool,
     queue: bool,
 ) -> gpui::Stateful<Div> {
@@ -1414,11 +1456,7 @@ pub fn conversation_send_key(
     let area = theme.ui_style.conversation == ConversationVariant::Area;
     let key = theme.ui_style.conversation == ConversationVariant::Industrial;
     let guided = theme.ui_style.layout == UiLayout::Guided;
-    let fill = if area {
-        crate::theme::flatten(theme.text_muted.opacity(0.28), identity)
-    } else {
-        theme.text
-    };
+    let fill = if area { theme.accent } else { theme.text };
     let text = if area {
         theme.identity_text(fill)
     } else if key {
@@ -1456,12 +1494,17 @@ pub fn conversation_send_key(
         .when(guided, |el| {
             el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0))
         })
-        .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
+        .when(area, |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+                .w(px(96.0))
+                .gap(px(6.0))
+        })
         .flex_none()
         .rounded_full()
         .when_some(theme.ui_style.tokens.control_radius, |el, radius| {
             el.rounded(px(radius))
         })
+        .when(area, |el| el.rounded_full())
         .bg(fill)
         .when(key, |el| conversation_industrial_icon_key(el, theme, true))
         .flex()

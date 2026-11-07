@@ -483,7 +483,8 @@ fn hash_color(key: &str) -> gpui::Hsla {
 
 /// Shared chat status glyph and descriptive label.
 fn status_style(status: ChatIndicator) -> (&'static str, &'static str) {
-    let glyph = crate::status_style::status_style(status.into(), crate::theme::Appearance::Dark).glyph;
+    let glyph =
+        crate::status_style::status_style(status.into(), crate::theme::Appearance::Dark).glyph;
     let label = match status {
         ChatIndicator::Working => "working",
         ChatIndicator::AwaitingInput => "needs input",
@@ -3268,8 +3269,19 @@ impl Overview {
             .take(visible_count)
             .map(|sub| {
                 let color = sub.status.color(theme.appearance);
-                let status = if sub.status == SubagentStatus::Running { crate::status_style::Status::Working } else { crate::status_style::Status::Done };
-                let indicator = crate::components::outline_chat_indicator(status, format!("overview-subagent-status-{chat_id}-{}", sub.agent_id), color, theme, cx.entity_id(), cx);
+                let status = if sub.status == SubagentStatus::Running {
+                    crate::status_style::Status::Working
+                } else {
+                    crate::status_style::Status::Done
+                };
+                let indicator = crate::components::outline_chat_indicator(
+                    status,
+                    format!("overview-subagent-status-{chat_id}-{}", sub.agent_id),
+                    color,
+                    theme,
+                    cx.entity_id(),
+                    cx,
+                );
                 let name = sub.display_name();
                 let peeking = self
                     .subagent_peek
@@ -4647,7 +4659,9 @@ impl Render for Overview {
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
                             .hover(|el| el.text_color(theme.text))
-                            .when(true, |el| crate::components::toolbar_control(el, &theme, false))
+                            .when(true, |el| {
+                                crate::components::toolbar_control(el, &theme, false)
+                            })
                             .child("Pull requests")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(shell) = this.shell.upgrade() {
@@ -4689,46 +4703,54 @@ impl Render for Overview {
                     Some(ix) => format!("{label} {}", ix + 1),
                     None => label.to_string(),
                 };
-                div()
-                    .id(SharedString::from(format!("overview-group-{label}")))
-                    .px(px(7.0))
-                    .py(px(2.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .when(active, |el| {
-                        el.bg(theme.element_active).text_color(theme.text)
-                    })
-                    .when(!active, |el| el.text_color(theme.text_muted))
-                    .child(SharedString::from(text))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.toggle_group(dim, cx);
-                            cx.notify();
-                        }),
-                    )
+                crate::components::area_toolbar_control(
+                    div()
+                        .id(SharedString::from(format!("overview-group-{label}")))
+                        .px(px(7.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .text_size(crate::typography::ui_rems(10.5))
+                        .when(active, |el| {
+                            el.bg(theme.element_active).text_color(theme.text)
+                        })
+                        .when(!active, |el| el.text_color(theme.text_muted)),
+                    &theme,
+                    false,
+                )
+                .child(SharedString::from(text))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.toggle_group(dim, cx);
+                        cx.notify();
+                    }),
+                )
             });
             toolbar = toolbar.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .p(px(2.0))
-                    .rounded(px(6.0))
-                    .bg(theme.element_hover.opacity(0.3))
-                    .child(
-                        div()
-                            .px(px(5.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(SharedString::from("Group by")),
-                    )
-                    .children(chips),
+                crate::components::area_toolbar_control(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .p(px(2.0))
+                        .rounded(px(6.0))
+                        .bg(theme.element_hover.opacity(0.3)),
+                    &theme,
+                    false,
+                )
+                .child(
+                    div()
+                        .px(px(5.0))
+                        .text_size(crate::typography::ui_rems(10.5))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .child(SharedString::from("Group by")),
+                )
+                .children(chips),
             );
         }
 
-        let header = div()
+        let header = crate::components::outline_overview_header(&theme)
             .flex_none()
             .flex()
             .flex_col()
@@ -4888,7 +4910,9 @@ impl Overview {
         };
         popover::btn_primary(theme, "+ New chat")
             .id("overview-new-chat")
-            .when(true, |el| crate::components::toolbar_control(el, theme, true))
+            .when(true, |el| {
+                crate::components::toolbar_control(el, theme, true)
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 let _ = this.shell.update(cx, |shell, cx| {
                     shell.open_new_session_from_overview(cx);
@@ -4921,7 +4945,9 @@ impl Overview {
             })
             .when(!active, |el| el.text_color(theme.text_muted))
             .hover(|el| el.text_color(theme.text))
-            .when(true, |el| crate::components::toolbar_control(el, theme, false))
+            .when(true, |el| {
+                crate::components::toolbar_control(el, theme, false)
+            })
             .child(SharedString::from(format!(
                 "{} ▾",
                 repo_filter_label(hidden)
@@ -5101,7 +5127,8 @@ impl Overview {
             return trigger.into_any_element();
         }
         let popup = theme.for_popup();
-        let row = |id, label, checked| crate::components::outline_filter_row(id, label, checked, &popup);
+        let row =
+            |id, label, checked| crate::components::outline_filter_row(id, label, checked, &popup);
         let card = popover::popover_card(&popup)
             .w(px(180.0))
             .flex()
@@ -5415,7 +5442,12 @@ impl Overview {
                 .pr(px(10.0))
                 .pt(px(if depth == 0 { 14.0 } else { 8.0 }))
                 .pb(px(2.0))
-                .child(crate::components::outline_lane_heading(format!("{label} ({count})"), color, depth, &theme))
+                .child(crate::components::outline_lane_heading(
+                    format!("{label} ({count})"),
+                    color,
+                    depth,
+                    &theme,
+                ))
                 .into_any_element(),
             ListPresentationItem::Row { row_index, .. } => {
                 let rows = self.list_rows.clone();
@@ -5466,7 +5498,14 @@ impl Overview {
             .unwrap_or_else(|| format_time_ago(row.chat.created_at, now))
             .into();
         let dot = crate::status_style::status_style(row.status.into(), theme.appearance).color;
-        let indicator = crate::components::outline_chat_indicator(row.status.into(), format!("overview-status-{chat_id}"), dot, theme, cx.entity_id(), cx);
+        let indicator = crate::components::outline_chat_indicator(
+            row.status.into(),
+            format!("overview-status-{chat_id}"),
+            dot,
+            theme,
+            cx.entity_id(),
+            cx,
+        );
         let (icon, label) = status_style(row.status);
         let unread = is_unread_done(
             &self.acknowledged_done,
@@ -5774,7 +5813,8 @@ impl Overview {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let pill = |id, label, active| crate::components::outline_toolbar_button(id, label, active, theme);
+        let pill =
+            |id, label, active| crate::components::outline_toolbar_button(id, label, active, theme);
         let mut out = vec![
             pill("outline-new-item", "New item".into(), false)
                 .debug_selector(|| "outline-new-item".into())
@@ -5930,6 +5970,7 @@ impl Overview {
                     cx.notify();
                 }
             }));
+        let trigger = crate::components::area_toolbar_control(trigger, theme, false);
         if self.work_item_filter_popup.get().is_none() {
             return trigger.into_any_element();
         }
@@ -6216,14 +6257,23 @@ impl Overview {
         cx: &mut Context<Self>,
     ) {
         let key = row_key::item(&space_id, &item_id);
-        let chat_ids = self.state.read(cx).work_outline(&space_id).snapshot()
+        let chat_ids = self
+            .state
+            .read(cx)
+            .work_outline(&space_id)
+            .snapshot()
             .and_then(|snapshot| snapshot.items.iter().find(|item| item.id == item_id))
-            .map(|item| item.chat_ids.clone()).unwrap_or_default();
+            .map(|item| item.chat_ids.clone())
+            .unwrap_or_default();
         let shell = self.shell.clone();
         cx.defer(move |cx| {
-            shell.update(cx, |shell, cx| {
-                for chat_id in chat_ids { shell.load_branch_review_target(chat_id, cx); }
-            }).ok();
+            shell
+                .update(cx, |shell, cx| {
+                    for chat_id in chat_ids {
+                        shell.load_branch_review_target(chat_id, cx);
+                    }
+                })
+                .ok();
         });
         let details = cx.new(|cx| {
             WorkItemDetails::new(
@@ -6846,7 +6896,13 @@ impl Overview {
         }
     }
 
-    pub(crate) fn decide_required_action(&mut self, request_id: String, decision: crate::menu_bar::RequestDecision, via: &'static str, cx: &mut Context<Self>) {
+    pub(crate) fn decide_required_action(
+        &mut self,
+        request_id: String,
+        decision: crate::menu_bar::RequestDecision,
+        via: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         self.open_required_actions(cx);
         let spaces = self.required_action_spaces(cx);
         let chats = self.outline_chats.clone();
@@ -6911,6 +6967,24 @@ impl Overview {
         self.set_mode(OverviewMode::Outline, cx);
         let handle = gpui::Focusable::focus_handle(self.outline.read(cx), cx);
         window.focus(&handle, cx);
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn show_snapshot_outline(&mut self, cx: &mut Context<Self>) {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
+        snapshot.external_references.clear();
+        self.set_outline_loads(
+            [(
+                "fixture-space".into(),
+                WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+            )]
+            .into_iter()
+            .collect(),
+            cx,
+        );
+        self.set_mode(OverviewMode::Outline, cx);
+        self.sync_outline(cx);
+        self.outline.update(cx, |outline, cx| outline.select(&row_key::item("fixture-space", "w-api"), cx));
     }
 
     /// Outline navigation bindings for fixtures that run without a Shell.
@@ -7267,11 +7341,19 @@ mod logic_tests {
         assert_eq!(decoded[3].status, SubagentStatus::Done);
         assert_eq!(
             SubagentStatus::Running.color(crate::theme::Appearance::Dark),
-            crate::status_style::status_style(crate::status_style::Status::Working, crate::theme::Appearance::Dark).color
+            crate::status_style::status_style(
+                crate::status_style::Status::Working,
+                crate::theme::Appearance::Dark
+            )
+            .color
         );
         assert_eq!(
             SubagentStatus::Done.color(crate::theme::Appearance::Dark),
-            crate::status_style::status_style(crate::status_style::Status::Done, crate::theme::Appearance::Dark).color
+            crate::status_style::status_style(
+                crate::status_style::Status::Done,
+                crate::theme::Appearance::Dark
+            )
+            .color
         );
     }
 
@@ -7601,7 +7683,10 @@ mod logic_tests {
                 ..Default::default()
             },
         );
-        assert_eq!(flags, BTreeSet::from(["groupBy:ticket".to_string(), VIEW_OUTLINE_FLAG.to_string()]));
+        assert_eq!(
+            flags,
+            BTreeSet::from(["groupBy:ticket".to_string(), VIEW_OUTLINE_FLAG.to_string()])
+        );
     }
 
     /// A saved `groupBy` written while Category and Origin grouping existed
@@ -9405,7 +9490,10 @@ mod logic_tests {
     fn commands_without_a_selection_open_the_outline_with_a_notice(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (overview, _state, vcx) = outline_overview(cx, dir.path());
-        assert_eq!(overview.read_with(vcx, |o, _| o.mode()), OverviewMode::Outline);
+        assert_eq!(
+            overview.read_with(vcx, |o, _| o.mode()),
+            OverviewMode::Outline
+        );
         vcx.update(|window, cx| {
             overview.update(cx, |o, cx| {
                 o.run_work_outline_command(WorkOutlineCommand::RenameWorkItem, window, cx)

@@ -23,6 +23,7 @@ use crate::theme::Theme;
 /// Apply the details surface's shortcut hint to the shared secondary button.
 pub(crate) fn details_button(id: impl Into<gpui::ElementId>, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let button = crate::components::toolbar_control(crate::components::button(id, label, crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme), theme, false);
+    let button = crate::components::area_toolbar_control(button, theme, matches!(label, "Save" | "Add" | "Set date"));
     match details_button_hint(label) {
         Some((tip, key)) => WithHint::hint(button, tip, key),
         None => button,

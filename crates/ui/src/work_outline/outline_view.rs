@@ -2748,6 +2748,8 @@ impl OutlineView {
         };
         let key = row.key.clone();
         let selected = self.selected.as_deref() == Some(key.as_str());
+        let row_theme = crate::components::outline_row_theme(theme, selected);
+        let theme = &row_theme;
         let in_group = self.multi.contains(&key);
         let highlighted = self.details_key.as_deref() == Some(key.as_str())
             || row
@@ -2840,6 +2842,7 @@ impl OutlineView {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
+                    .children(crate::components::outline_space_dot(theme, space_id, totals.is_some_and(|totals| totals.user_action_required > 0), selected))
                     .child(
                         div()
                             .flex_1()
@@ -2856,10 +2859,10 @@ impl OutlineView {
                             theme,
                         ))
                     })
-                    .when(proposals > 0, |el| {
+                    .when(proposals > 0 && crate::components::outline_row_extras(theme), |el| {
                         el.child(self.proposals_chip(&key, space_id, "", proposals, theme, cx))
                     })
-                    .child(
+                    .children(Some(
                         crate::components::outline_inline_action(SharedString::from(format!("outline-space-instructions-{key}")), format!("outline-space-instructions-{space_id}"), "Instructions", theme.text_faint, theme)
                             .tooltip(|_, cx| {
                                 cx.new(|_| TextTooltip("Space-root instructions".into()))
@@ -2873,7 +2876,7 @@ impl OutlineView {
                                     });
                                 }
                             })),
-                    )
+                    ).filter(|_| crate::components::outline_row_extras(theme)))
                     .into_any_element()
             }
             OutlineRowKind::Unassociated { label, .. } => div()
@@ -2889,13 +2892,13 @@ impl OutlineView {
                         .text_color(theme.text_muted)
                         .child(SharedString::from(label.clone())),
                 )
-                .child(
+                .children(Some(
                     div()
                         .flex_none()
                         .text_size(crate::typography::ui_rems(10.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(row.child_count.to_string())),
-                )
+                ).filter(|_| crate::components::outline_row_extras(theme)))
                 .into_any_element(),
             OutlineRowKind::Notice { text, tone, .. } => div()
                 .flex_1()
@@ -2966,6 +2969,7 @@ impl OutlineView {
                     item_body(
                         &key,
                         item,
+                        selected,
                         compact_chat,
                         open_details,
                         linear_outline::join_chips(
@@ -2979,13 +2983,13 @@ impl OutlineView {
             }
             OutlineRowKind::Chat(chat) => {
                 let chip = self.drift_chip(&key, chat, theme, cx);
-                chat_body(&key, chat, chip, theme, cx)
+                chat_body(&key, chat, chip, selected, theme, cx)
             }
         };
         // Row action: Start Chat on the selected, live work item.
         let start_chat = row
             .item()
-            .filter(|item| selected && !renaming && !item.archived)
+            .filter(|item| selected && !renaming && !item.archived && crate::components::outline_row_extras(theme))
             .map(|item| {
                 let space_id = item.space_id.clone();
                 let item_id = item.item_id.clone();
@@ -3044,7 +3048,7 @@ impl OutlineView {
         let guides = self.guide_layer(ix, compact, theme, cx);
         let flash = self.move_flash_overlay(&key, theme);
         crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), Self::indent(row.depth), theme)
-            .when(highlighted, |el| el.border_color(theme.accent.opacity(0.6)))
+            .when(highlighted, |el| el.border_color(crate::components::outline_row_highlight(theme)))
             .when((selected || in_group) && focused, |el| {
                 el.bg(theme.element_active)
             })
@@ -3054,6 +3058,7 @@ impl OutlineView {
             .when(!(selected || in_group), |el| {
                 el.hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             })
+            .when(true, |el| crate::components::outline_row_selection(el, theme, selected))
             .when(dimmed, |el| el.opacity(0.6))
             .relative()
             .when(drop_zone == Some(DropZone::Into), |el| {
@@ -3176,10 +3181,10 @@ impl OutlineView {
                 }),
             )
             .children(flash)
-            .children(guides)
+            .children(guides.filter(|_| crate::components::outline_row_extras(theme)))
             .child(disclosure)
             .child(body)
-            .children(start_chat)
+            .children(start_chat.filter(|_| crate::components::outline_row_extras(theme)))
             .children(drop_line)
             .children(drop_label)
             .into_any_element()
@@ -3320,10 +3325,10 @@ fn status_totals_element(
         .when_some(totals.active_label(), |el, label| {
             el.child(SharedString::from(label))
         })
-        .when(totals.active > 0 && totals.user_action_required > 0, |el| {
+        .when(totals.active > 0 && totals.user_action_required > 0 && crate::components::outline_row_extras(theme), |el| {
             el.child("\u{b7}")
         })
-        .when_some(totals.attention_label(), |el, label| {
+        .when_some(totals.attention_label().filter(|_| crate::components::outline_row_extras(theme)), |el, label| {
             el.child(
                 div()
                     .text_color(chips::attention_color(theme))
@@ -3346,17 +3351,22 @@ type GlyphHandlers = (
 fn item_body(
     key: &str,
     item: &ItemRow,
+    selected: bool,
     compact_chat: Option<AnyElement>,
     open_details: Option<GlyphHandlers>,
     proposals: Option<AnyElement>,
     pr_slots: Option<AnyElement>,
     theme: &Theme,
 ) -> AnyElement {
+    let pr_slots = pr_slots.filter(|_| crate::components::outline_row_extras(theme));
+    let proposals = proposals.filter(|_| crate::components::outline_row_extras(theme));
+    let compact_chat = compact_chat.filter(|_| crate::components::outline_row_extras(theme));
     let compact_pr = pr_slots.is_some();
     let totals = (!item.archived && !compact_pr)
         .then(|| super::required_actions::status_totals(&item.rollup))
         .flatten();
     let (glyph, label, color) = chips::status_style(item.effective_status, theme);
+    let color = crate::components::outline_selected_dot_color(theme, selected, crate::components::outline_attention_color(theme, item.needs_user_action(), color));
     let status_tip: SharedString = format!("Status: {label}").into();
     let chats_tip: SharedString = format!(
         "{} associated chat{}",
@@ -3405,7 +3415,7 @@ fn item_body(
                 .child(SharedString::from(item.title.clone())),
         )
         .children(compact_chat)
-        .when_some(item.waiting_until, |el, until| {
+        .when_some(item.waiting_until.filter(|_| crate::components::outline_row_extras(theme)), |el, until| {
             let due = until <= chrono::Utc::now().timestamp_millis();
             let date = chrono::DateTime::from_timestamp_millis(until)
                 .map(|date| date.with_timezone(&chrono::Local).format("%b %-d").to_string())
@@ -3419,7 +3429,7 @@ fn item_body(
                 item.unresolved_actions,
                 theme,
             )
-            .filter(|_| !compact_pr),
+            .filter(|_| !compact_pr && crate::components::outline_row_extras(theme)),
             |el, indicator| el.child(indicator),
         )
         .when_some(totals, |el, totals| {
@@ -3431,7 +3441,7 @@ fn item_body(
         })
         .children(proposals)
         .when_some(
-            item.template_changed.filter(|_| !item.archived),
+            item.template_changed.filter(|_| !item.archived && crate::components::outline_row_extras(theme)),
             |el, (from, to)| {
                 let tip: SharedString =
                     "The blueprint this item came from changed. Open details to review".into();
@@ -3449,14 +3459,14 @@ fn item_body(
                 )
             },
         )
-        .when(item.follows_template && !item.archived, |el| {
+        .when(item.follows_template && !item.archived && crate::components::outline_row_extras(theme), |el| {
             el.child(
                 crate::components::outline_glyph_marker(SharedString::from(format!("outline-follows-template-{key}")), "◇", theme)
                     .hint("Follows its parent\u{2019}s child template", HintKey::None),
             )
         })
         .when(
-            item.chat_count > 0 && !compact_pr && item.compact_chat.is_none(),
+            item.chat_count > 0 && !compact_pr && item.compact_chat.is_none() && crate::components::outline_row_extras(theme),
             |el| {
                 el.child(
                     crate::components::outline_count_marker(SharedString::from(format!("outline-chats-{key}")), crate::icons::CHAT_ROUND_LINE, item.chat_count.to_string(), theme.text_faint, theme)
@@ -3464,14 +3474,14 @@ fn item_body(
                 )
             },
         )
-        .when(item.execution_exceptions > 0, |el| {
+        .when(item.execution_exceptions > 0 && crate::components::outline_row_extras(theme), |el| {
             let tip = super::execution::exception_tooltip(item.execution_exceptions as usize);
             el.child(
                 crate::components::outline_count_marker(SharedString::from(format!("outline-execution-exceptions-{key}")), crate::icons::FOLDER_WITH_FILES, item.execution_exceptions.to_string(), theme.accent, theme)
                     .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
             )
         })
-        .when(item.has_references && !compact_pr, |el| {
+        .when(item.has_references && !compact_pr && crate::components::outline_row_extras(theme), |el| {
             el.child(
                 crate::components::outline_reference_marker(SharedString::from(format!("outline-refs-{key}")), theme)
                     .tooltip(|_, cx| {
@@ -3523,9 +3533,12 @@ fn compact_chat_segment(
         .into_any_element()
 }
 
-fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme, cx: &mut Context<OutlineView>) -> AnyElement {
+fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool, theme: &Theme, cx: &mut Context<OutlineView>) -> AnyElement {
     let chat = &row.chat;
     if row.dangling {
+        if let Some(missing) = crate::components::outline_missing_chat(theme, &chat.id) {
+            return missing;
+        }
         let tip: SharedString = format!(
             "The association survives but chat {} is gone. Disassociate it from Work Item Details.",
             chat.id
@@ -3555,7 +3568,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
             .into_any_element();
     }
     let status = crate::status_style::Status::from(chat.status);
-    let indicator = crate::components::outline_chat_indicator(status, format!("outline-chat-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, cx.entity_id(), cx);
+    let indicator = crate::components::outline_selected_chat_indicator(status, format!("outline-chat-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, selected, cx.entity_id(), cx);
     let status_label = match chat.status {
         mast_proto::ChatIndicator::Working => "Working",
         mast_proto::ChatIndicator::AwaitingInput => "Needs you",
@@ -3579,18 +3592,18 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
                 .text_color(theme.text_muted)
                 .child(SharedString::from(chat.title.clone())),
         )
-        .when_some(drift, |el, drift| el.child(drift))
-        .when_some(chat.branch.clone(), |el, branch| {
+        .when_some(drift.filter(|_| crate::components::outline_row_extras(theme)), |el, drift| el.child(drift))
+        .when_some(chat.branch.clone().filter(|_| crate::components::outline_row_extras(theme)), |el, branch| {
             el.child(
                 crate::components::outline_chat_reference(crate::icons::GIT_BRANCH, branch, Some(140.0), theme),
             )
         })
-        .when_some(chat.pr_number.filter(|n| *n > 0), |el, number| {
+        .when_some(chat.pr_number.filter(|n| *n > 0 && crate::components::outline_row_extras(theme)), |el, number| {
             el.child(
                 crate::components::outline_chat_reference(crate::icons::PULL_REQUEST, format!("#{number}"), None, theme),
             )
         })
-        .when_some(chat.harness.clone(), |el, harness| {
+        .when_some(chat.harness.clone().filter(|_| crate::components::outline_row_extras(theme)), |el, harness| {
             el.child(
                 crate::components::outline_harness_badge(harness, theme),
             )
