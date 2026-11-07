@@ -282,10 +282,10 @@ fn area(dark: bool) -> ThemeVariant {
             "area-dark",
             "Area Dark",
             Appearance::Dark,
-            "#182632",
-            "#263847",
-            "#F3F6FB",
-            "#B5B5B5",
+            "#18191B",
+            "#18191B",
+            "#FFFFFF",
+            "#8EA4B8",
             ANSI_DARK,
         )
     } else {
@@ -294,9 +294,9 @@ fn area(dark: bool) -> ThemeVariant {
             "Area Light",
             Appearance::Light,
             "#FFFFFF",
-            "#F3F6FB",
-            "#183028",
-            "#183028",
+            "#FFFFFF",
+            "#111111",
+            "#8EA4B8",
             ANSI_LIGHT,
         )
     };
@@ -313,10 +313,10 @@ fn area(dark: bool) -> ThemeVariant {
         text,
         muted,
         faint: muted,
-        accent: "#3F69CC",
-        danger: "#FE4B25",
-        warning: text,
-        success: text,
+        accent: "#8EA4B8",
+        danger: "#FF7759",
+        warning: "#FFB800",
+        success: "#1DCB43",
         terminal_background: background,
         ansi,
         syntax: [
@@ -330,14 +330,14 @@ fn area(dark: bool) -> ThemeVariant {
             "MIT",
         ),
     });
-    // Purple and cyan are reference-inspired additions to the Cofactr palette.
+    // Identity colours sampled from the Area character-tag reference.
     for (index, color) in [
-        (4, "#3F69CC"),
-        (1, "#FE4B25"),
-        (5, "#8B7CF6"),
-        (3, "#DFBE1B"),
-        (2, "#38D059"),
-        (6, "#619C82"),
+        (4, "#0BA7FF"),
+        (1, "#FF7759"),
+        (5, "#B388E4"),
+        (3, "#FFB800"),
+        (2, "#1DCB43"),
+        (6, "#8EA4B8"),
     ] {
         result.terminal.ansi[index] = c(color);
     }
