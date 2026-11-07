@@ -537,6 +537,68 @@ impl Render for DesignPanel {
                                 style.id == UiStyleId::Industrial
                             ));
                         }
+                        if let Some(style_overrides) = overrides.styles.get(style_name(style.id)) {
+                            for (layout, values) in &style_overrides.layouts {
+                                let layout_id = match layout.as_str() {
+                                    "compact" => UiLayout::Compact,
+                                    "guided" => UiLayout::Guided,
+                                    _ => UiLayout::Minimal,
+                                };
+                                let mut base_overrides = overrides.clone();
+                                if let Some(entry) =
+                                    base_overrides.styles.get_mut(style_name(style.id))
+                                {
+                                    entry.layouts.clear();
+                                }
+                                let base =
+                                    base_overrides.apply(UiStyle::resolve(style.id, layout_id));
+                                for token in Token::ALL {
+                                    if let Some(value) = token.get(values) {
+                                        patch.push_str(&format!(
+                                            "{layout} · {}: {} → {value}px\n",
+                                            token.label(),
+                                            token.base_description(base)
+                                        ));
+                                    }
+                                }
+                                for (label, value) in [
+                                    (
+                                        "Details border",
+                                        values.details_border.map(|v| v.to_string()),
+                                    ),
+                                    (
+                                        "Details uses page colour",
+                                        values.details_page_surface.map(|v| v.to_string()),
+                                    ),
+                                    (
+                                        "Primary action colour",
+                                        values.primary_colour.map(|v| v.label().to_owned()),
+                                    ),
+                                    (
+                                        "Secondary action colour",
+                                        values.secondary_colour.map(|v| v.label().to_owned()),
+                                    ),
+                                    (
+                                        "Settings heading family",
+                                        values.heading_family.map(|v| format!("{v:?}")),
+                                    ),
+                                    (
+                                        "Settings heading weight",
+                                        values.heading_weight.map(|v| format!("{v:?}")),
+                                    ),
+                                    (
+                                        "Settings heading tracked caps",
+                                        values.tracked_caps.map(|v| v.to_string()),
+                                    ),
+                                ] {
+                                    if let Some(value) = value {
+                                        patch.push_str(&format!(
+                                            "{layout} · {label}: style default → {value}\n"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(patch));
                     })),
                 ),
