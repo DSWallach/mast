@@ -2086,10 +2086,10 @@ impl Render for DiffHeaderTooltip {
         div()
             .px(px(8.0))
             .py(px(6.0))
-            .rounded(px(6.0))
             .border_1()
             .border_color(theme.border_strong)
             .bg(theme.surface_raised)
+            .when(true, |el| crate::components::changes_tooltip(el, theme))
             .shadow_md()
             .text_size(px(11.0))
             .text_color(theme.text)
@@ -4384,6 +4384,7 @@ impl Changes {
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
                         .text_size(px(10.0)).text_color(theme.text_muted)
+                        .when(true, |el| crate::components::review_text_action(el, &theme))
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
                         .child(label))
                     .into_any_element()
@@ -4693,7 +4694,7 @@ impl Changes {
             .pr(px(Theme::SPACE_MD))
             .bg(theme.ink(0.025))
             .cursor_pointer()
-            .hover(|style| style.bg(theme.ink(0.05)))
+            .when(true, |element| crate::components::changes_diff_header(element, theme, theme.ink(0.05)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_submodule(group_ix, cx);
             }))
@@ -4765,9 +4766,7 @@ impl Changes {
                         .text_size(px(9.0))
                         .px(px(5.0))
                         .py(px(1.0))
-                        .rounded(px(3.0))
-                        .bg(theme.warning.opacity(0.08))
-                        .text_color(theme.warning.opacity(0.85))
+                        .when(true, |el| crate::components::changes_warning_badge(el, theme, crate::components::ChangesWarning::Dirty))
                         .child("DIRTY"),
                 )
             })
@@ -4872,7 +4871,7 @@ impl Changes {
             .pr(px(Theme::SPACE_MD))
             .bg(rest_bg)
             .cursor_pointer()
-            .hover(move |s| s.bg(hover_bg))
+            .when(true, |element| crate::components::changes_diff_header(element, theme, hover_bg))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_fold(ix, cx);
                 window.focus(&this.diff_focus, cx);
@@ -5015,42 +5014,7 @@ impl Changes {
         active: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .size(px(crate::surface_chrome::CONTROL_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-            .cursor_pointer()
-            // Latched: the blend is neither read nor driven, and its listener
-            // would dirty the whole window on every enter/leave for nothing.
-            .map(|el| {
-                if active {
-                    el.bg(crate::theme::wash(0.14))
-                } else {
-                    el.bg(motion::hover_blend(
-                        id,
-                        crate::theme::wash(0.0),
-                        crate::theme::wash(0.14),
-                    ))
-                    .on_hover(motion::hover_listener(id))
-                }
-            })
-            .occlude()
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                window.prevent_default()
-            })
-            .child(
-                crate::icons::icon(icon_path)
-                    .size(px(crate::surface_chrome::ICON_SIZE))
-                    .text_color(if active {
-                        theme.text
-                    } else {
-                        theme.text_muted.opacity(0.7)
-                    }),
-            )
+        crate::components::changes_header_toggle(id, icon_path, active, theme)
     }
 
     /// The unified ⇄ split layout toggle (both the scoped and the
@@ -5123,10 +5087,9 @@ impl Changes {
                         .flex_none()
                         .h(px(crate::surface_chrome::CONTROL_SIZE))
                         .px(px(6.0))
-                        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+                        .when(true, |el| crate::components::changes_revision_label(el, &theme))
                         .flex()
                         .items_center()
-                        .bg(crate::theme::ink(0.05))
                         .font_family(theme.font_mono.clone())
                         .text_size(px(10.5))
                         .text_color(theme.text_muted)
@@ -5204,7 +5167,6 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
@@ -5212,6 +5174,7 @@ impl Changes {
                 crate::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("changes-scope-trigger"))
+            .when(true, |element| crate::components::changes_selector(element, &theme, crate::components::ChangesSelector::Scope))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -5461,7 +5424,6 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .rounded(px(6.0))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-ref-trigger",
@@ -5469,6 +5431,7 @@ impl Changes {
                 crate::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-ref-trigger"))
+            .when(true, |element| crate::components::changes_selector(element, theme, crate::components::ChangesSelector::Reference))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -5647,7 +5610,6 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .rounded(px(5.0))
             .cursor_pointer()
             .text_size(px(11.0))
             .text_color(theme.text_muted)
@@ -5657,6 +5619,7 @@ impl Changes {
                 crate::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-checkout-trigger"))
+            .when(true, |element| crate::components::changes_selector(element, theme, crate::components::ChangesSelector::Target))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -5811,10 +5774,8 @@ impl Changes {
                                             div()
                                                 .flex_none()
                                                 .px(px(5.0))
-                                                .rounded(px(4.0))
-                                                .bg(theme.accent.opacity(0.14))
+                                                .when(true, |el| crate::components::changes_suggested_badge(el, theme))
                                                 .text_size(px(9.5))
-                                                .text_color(theme.accent)
                                                 .child("suggested"),
                                         )
                                     })
@@ -5956,9 +5917,7 @@ impl Changes {
                             .text_size(px(10.0))
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(4.0))
-                            .bg(theme.warning.opacity(0.08))
-                            .text_color(theme.warning.opacity(0.75))
+                            .when(true, |el| crate::components::changes_warning_badge(el, theme, crate::components::ChangesWarning::Partial))
                             .child(SharedString::from("Partial snapshot")),
                     )
                 })
@@ -6072,10 +6031,7 @@ impl Changes {
                         .gap(px(4.0))
                         .px(px(6.0))
                         .py(px(1.0))
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(if active { theme.accent } else { theme.border })
-                        .when(active, |el| el.bg(theme.accent.opacity(0.08)))
+                        .when(true, |el| crate::components::changes_repository_chip(el, theme, active))
                         .cursor_pointer()
                         .text_size(px(11.0))
                         .text_color(if active { theme.text } else { theme.text_muted })
@@ -7011,6 +6967,7 @@ impl Render for Changes {
                 el.child(div().flex().items_center().gap(px(8.0))
                     .child(crate::error_notice::ErrorNotice::from_text("changes-review-state-error", &theme, &message))
                     .child(div().id("changes-review-state-retry").cursor_pointer().text_color(theme.text_muted)
+                        .when(true, |el| crate::components::review_text_action(el, &theme))
                         .on_click(cx.listener(|this, _, _, cx| this.retry_review_state(cx)))
                         .child("Retry")))
             })
@@ -7030,6 +6987,57 @@ impl Render for Changes {
             .child(content)
             .into_any_element()
     }
+}
+
+#[cfg(feature = "snapshot")]
+fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
+    let state = cx.new(|_| AppState::new());
+    cx.new(|cx| {
+        let mut changes = Changes::new(state, cx);
+        let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-    old();\n+    validate();\n+    save();\n }\ndiff --git a/src/model.rs b/src/model.rs\n--- a/src/model.rs\n+++ b/src/model.rs\n@@ -1 +1 @@\n-old model\n+new model\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old text\n+new text\n";
+        let diff = CheckoutDiff {
+            checkout_id: "snapshot".into(),
+            device_id: "local".into(),
+            cwd: "/snapshot".into(),
+            patch: patch.into(),
+            files: Vec::new(),
+            submodules: Vec::new(),
+            additions: 4,
+            deletions: 3,
+            truncated: false,
+            checksum: "snapshot".into(),
+            updated_at: chrono::Utc::now(),
+        };
+        changes.pinned_cwd = Some("/snapshot".into());
+        changes.scoped_for = Some("local|||/snapshot|workingTree|||".into());
+        let key = changes.parse_key(&diff);
+        let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+        let identities = hunk_identities(&files);
+        let (rows, ranges, headers) = flatten_diff_tree(
+            &files, &submodules, &layout, &[], None, changes.mode, |_| false, |_| false,
+        );
+        changes.list.reset_with_uniform_height(
+            rows.len(), px(diff_line_height(Theme::of(cx))),
+        );
+        changes.rows = rows;
+        changes.row_ranges = ranges;
+        changes.section_headers = headers;
+        changes.parsed = Some(ParsedDiff {
+            key,
+            truncated: false,
+            additions: 4,
+            deletions: 3,
+            file_count: files.len(),
+            horizontal: files.iter().map(FileHorizontalState::new).collect(),
+            hunk_identities: Arc::new(identities),
+            files: Arc::new(files),
+            origins: Arc::new(origins),
+            submodules: Arc::new(submodules),
+            layout: Arc::new(layout),
+        });
+        changes.scoped = Some(diff);
+        changes
+    })
 }
 
 #[cfg(test)]

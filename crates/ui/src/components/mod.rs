@@ -47,6 +47,8 @@ pub(crate) use settings_parts::{
 };
 
 mod outline_parts;
+mod changes_parts;
+pub(crate) use changes_parts::*;
 pub use outline_parts::*;
 pub(crate) use outline_parts::{outline_proposal_diff, outline_revision_line};
 pub(crate) mod shell_parts;

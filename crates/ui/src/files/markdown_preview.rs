@@ -1447,7 +1447,7 @@ impl MarkdownPreview {
                                                     .absolute()
                                                     .left(px(-20.0))
                                                     .top(px(3.0))
-                                                    .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
+                                                    .when(true, |el| crate::components::file_reveal(el, &theme, group))
                                                     .child(
                                                         crate::comment_ui::render_comment_adder(
                                                             format!(

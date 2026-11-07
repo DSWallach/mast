@@ -626,10 +626,7 @@ impl FilesSurface {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(selected, |element| element.bg(crate::theme::wash(0.1)))
-            .when(!selected, |element| {
-                element.hover(|style| style.bg(crate::theme::wash(0.055)))
-            })
+            .when(true, |element| crate::components::file_search_row(element, &theme, selected))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.search_state.active = index;
                 this.activate_search_result(cx);

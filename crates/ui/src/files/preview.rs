@@ -529,19 +529,7 @@ pub(super) struct FileEditorTooltip {
 impl Render for FileEditorTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        let card = div()
-            .max_w(px(360.0))
-            .px(px(9.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .font_family(theme.font_sans.clone())
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
-            .child(self.text.clone());
-        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+        crate::components::file_editor_tooltip(self.text.clone(), theme)
     }
 }
 
@@ -2027,6 +2015,7 @@ impl FilesSurface {
                                         .when(self.target_change_pending, |button| button.hidden())
                                         .ml_auto()
                                         .cursor_pointer()
+                                        .when(true, |el| crate::components::review_text_action(el, &theme))
                                         .text_color(theme.text)
                                         .child("Retry")
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2038,6 +2027,7 @@ impl FilesSurface {
                                         div()
                                             .id("files-keep-open")
                                             .cursor_pointer()
+                                            .when(true, |el| crate::components::review_text_action(el, &theme))
                                             .text_color(theme.text_muted)
                                             .child("Keep Open")
                                             .on_click(
@@ -2049,6 +2039,7 @@ impl FilesSurface {
                                     div()
                                         .id("files-discard-close-changes")
                                         .cursor_pointer()
+                                        .when(true, |el| crate::components::review_text_action(el, &theme))
                                         .text_color(theme.danger_muted)
                                         .child("Discard Changes")
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2096,6 +2087,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-keep-external-edits")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text_muted)
                                                     .child("Keep Editing")
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2106,6 +2098,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-reload-external")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text)
                                                     .child("Reload from Disk")
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2119,6 +2112,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-cancel-reload")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text_muted)
                                                     .child("Cancel")
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2129,6 +2123,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-confirm-reload")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text)
                                                     .child("Discard & Reload")
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2272,7 +2267,7 @@ impl FilesSurface {
                         },
                         theme,
                     )
-                    .when(showing_markdown, |el| el.bg(crate::theme::wash(0.1)))
+                    .when(true, |el| crate::components::file_toolbar_selection(el, theme, showing_markdown))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let Some(path) = this.preview.active.clone() else {
                             return;
@@ -2312,7 +2307,7 @@ impl FilesSurface {
                         .id("files-save-status")
                         .h(px(crate::surface_chrome::CONTROL_SIZE))
                         .px(px(6.0))
-                        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+                        .when(true, |element| crate::components::file_save_status(element, theme))
                         .flex()
                         .items_center()
                         .flex_none()
@@ -2366,9 +2361,7 @@ impl FilesSurface {
                     },
                     theme,
                 )
-                .when(self.preview.word_wrap(), |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
+                .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.preview.word_wrap()))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_word_wrap(window, cx)))
                 .child(
                     icon(icons::LIST)
@@ -2718,9 +2711,8 @@ impl FilesSurface {
                         .child(
                             div()
                                 .size(px(comments::COMMENT_ADDER_SIZE))
-                                .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
-                                .rounded(px(4.0))
-                                .bg(theme.solid)
+                                .when(true, |el| crate::components::file_reveal(el, &theme, group))
+                                .when(true, |el| crate::components::file_comment_action(el, &theme, crate::components::FileCommentAction::Add))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -2831,9 +2823,9 @@ impl FilesSurface {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(4.0))
+                            .when(true, |el| crate::components::file_comment_action(el, theme, crate::components::FileCommentAction::Remove))
                             .cursor_pointer()
-                            .when(true, |el| crate::ui_style::reveal_on_hover(el, group, theme.ui_style, false))
+                            .when(true, |el| crate::components::file_reveal(el, &theme, group))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_editor_comment(&id, cx)
                             }))
@@ -2890,10 +2882,7 @@ impl FilesSurface {
                     .h(px(48.0))
                     .flex_none()
                     .overflow_hidden()
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.input_glass_bg())
+                    .when(true, |el| crate::components::file_comment_input(el, theme))
                     .px(px(8.0))
                     .py(px(5.0))
                     .text_size(px(12.0))
@@ -3094,30 +3083,7 @@ fn editor_comment_action(
     primary: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(22.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .cursor_pointer()
-        .when(primary, |element| {
-            element.bg(theme.solid).text_color(theme.on_solid)
-        })
-        .when(!primary, |element| {
-            element
-                .text_color(crate::motion::hover_blend(id, theme.text_muted, theme.text))
-                .bg(crate::motion::hover_blend(
-                    id,
-                    gpui::transparent_black(),
-                    theme.element_hover,
-                ))
-                .on_hover(crate::motion::hover_listener(id))
-        })
-        .child(SharedString::from(label))
+    crate::components::file_comment_button(id, label, primary, theme)
 }
 
 fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyElement {

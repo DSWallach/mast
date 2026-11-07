@@ -38,36 +38,10 @@ use preview::FilePreviewState;
 use search::FileSearchState;
 
 static NEXT_REVIEW_COMMENT_FLUSH_SOURCE: AtomicU64 = AtomicU64::new(1);
-use crate::surface_chrome::{
-    CONTROL_RADIUS as TOOLBAR_BUTTON_RADIUS, CONTROL_SIZE as TOOLBAR_BUTTON_SIZE, toolbar,
-};
+use crate::surface_chrome::toolbar;
 
 pub(super) fn toolbar_button(id: &'static str, label: &'static str, theme: &crate::theme::Theme) -> gpui::Stateful<gpui::Div> {
-    let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
-    div()
-        .id(id)
-        .size(px(TOOLBAR_BUTTON_SIZE))
-        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |element| element.size(px(theme.ui_style.tokens.control_size)))
-        .flex_none()
-        .when(guided, |element| {
-            element.h(px(theme.ui_style.tokens.control_size)).w_auto()
-                .min_w(px(theme.ui_style.tokens.control_size)).flex_shrink_1()
-                .px(px(6.0)).gap(px(4.0)).flex_row_reverse()
-                .child(div().min_w_0().truncate().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label))
-        })
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(TOOLBAR_BUTTON_RADIUS)))
-        .when(true, |element| crate::surface_chrome::icon_key(element, theme, false))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .occlude()
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-            window.prevent_default()
-        })
-        .hover(|style| style.bg(crate::theme::wash(0.14)))
+    crate::components::file_toolbar_button(id, label, theme)
         .tooltip(move |_, cx| {
             cx.new(|_| preview::FileEditorTooltip { text: label.into() })
                 .into()
@@ -118,10 +92,10 @@ impl Render for WorkspacePathDragGhost {
             .flex()
             .items_center()
             .gap(px(5.0))
-            .rounded(px(6.0))
             .bg(theme.surface_raised)
             .border_1()
             .border_color(theme.border_strong)
+            .when(true, |el| crate::components::file_drag_ghost(el, theme))
             .text_size(px(11.5))
             .text_color(theme.text)
             .opacity(0.85)
@@ -294,11 +268,11 @@ impl FilesSurface {
                         .id("files-retry-root")
                         .h(px(28.0))
                         .px(px(12.0))
-                        .rounded(px(7.0))
                         .border_1()
                         .border_color(theme.border)
                         .bg(crate::theme::wash(0.04))
                         .hover(|style| style.bg(crate::theme::wash(0.09)))
+                        .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Retry))
                         .cursor_pointer()
                         .flex()
                         .items_center()
@@ -361,7 +335,6 @@ impl FilesSurface {
                                 .h(px(20.0))
                                 .flex_none()
                                 .px(px(6.0))
-                                .rounded(px(5.0))
                                 .flex()
                                 .items_center()
                                 .cursor_pointer()
@@ -369,6 +342,7 @@ impl FilesSurface {
                                 .aria_label("Refresh workspace files now")
                                 .text_color(theme.text_muted)
                                 .hover(|style| style.bg(crate::theme::wash(0.07)))
+                                .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Refresh))
                                 .child("Refresh now")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.refresh(cx);
@@ -1093,9 +1067,7 @@ impl FilesSurface {
                     &theme,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
-                .when(include_ignored, |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
+                .when(true, |element| crate::components::file_toolbar_selection(element, &theme, include_ignored))
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_ignored(cx);
