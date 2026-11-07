@@ -622,6 +622,15 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
     }
 }
 
+/// Apply the Industrial panel radius to a shared error notice.
+pub(crate) fn error_notice_panel<T: gpui::Styled>(element: T, theme: &Theme) -> T {
+    if is_industrial(theme) {
+        element.rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(10.0)))
+    } else {
+        element
+    }
+}
+
 pub fn icon_key<T: gpui::Styled + gpui::ParentElement + gpui::StatefulInteractiveElement>(
     element: T,
     theme: &Theme,

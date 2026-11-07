@@ -773,7 +773,7 @@ pub(crate) fn changes_header_toggle(
             }
         })
         .when(super::is_industrial(theme), |el| {
-            super::icon_key(el, theme, active)
+            super::toolbar_control(el, theme, active)
         })
         .when(super::is_area(theme), |el| {
             el.rounded_full()

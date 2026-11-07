@@ -208,6 +208,7 @@ impl RenderOnce for ErrorNotice {
             .flex_col()
             .gap(px(6.0))
             .rounded(px(10.0))
+            .when(true, |element| crate::components::error_notice_panel(element, &theme))
             .border_1()
             .border_color(accent.opacity(0.55))
             .bg(accent.opacity(0.10))
