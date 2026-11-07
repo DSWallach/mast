@@ -547,17 +547,7 @@ impl Shell {
         let menu_mounted = self.project_actions.menu.get().is_some();
         let menu_closing = self.project_actions.menu.closing_since();
 
-        let mut control = div()
-            .relative()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(24.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .occlude();
+        let mut control = crate::components::shell_parts::action_control(&theme);
 
         if let Some(action) = preferred.clone() {
             let run_action = action.clone();

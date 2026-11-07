@@ -202,6 +202,11 @@ pub(crate) fn chat_header_chip(
         .when(super::is_area(theme), |el| el.rounded_full())
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(text)
+        .when(super::is_area(theme), |el| {
+            el.bg(theme.bg)
+                .border_color(theme.bg)
+                .text_color(theme.text_muted)
+        })
         .when(model && super::is_industrial(theme), |chip| {
             let dark = theme.appearance.is_dark();
             chip.rounded(px(0.0))
@@ -260,6 +265,7 @@ pub(crate) fn right_surface_tab(
         .when(active, |el| el.bg(crate::theme::wash(0.10)))
         .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
         .when(true, |el| super::segmented_key(el, theme, active))
+        .when(super::is_area(theme), |el| el.bg(theme.bg))
         .children(crate::surface_chrome::active_key_dot(theme, active))
 }
 
@@ -350,15 +356,15 @@ pub(crate) fn chat_header_frame(theme: &Theme) -> gpui::Stateful<gpui::Div> {
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface).border_color(theme.border).px(px(16.0)),
         )
+        .when(super::is_area(theme), |el| {
+            el.bg(theme.bg).border_color(theme.bg)
+        })
 }
 
 pub(crate) fn chat_header_title(theme: &Theme, title: String) -> gpui::Div {
     div()
         .debug_selector(|| "chat-header-title".into())
         .min_w_0()
-        .when(super::is_area(theme), |el| {
-            el.bg(theme.bg).border_color(theme.bg)
-        })
         .truncate()
         .text_size(crate::typography::ui_rems(
             theme.ui_style.tokens.title_size.unwrap_or(15.0),
@@ -641,13 +647,13 @@ pub(crate) fn item_needs_card(theme: &Theme, count: usize) -> gpui::Div {
         } else {
             theme.border
         })
+        .when(super::is_area(theme), |el| el.border_color(theme.bg))
         .when(super::is_industrial(theme), |el| {
             el.rounded(px(0.0)).bg(theme.industrial_colors().panel)
         })
 }
 
 pub(crate) fn item_needs_count(theme: &Theme, count: usize) -> gpui::Div {
-        .when(super::is_area(theme), |el| el.border_color(theme.bg))
     div()
         .debug_selector(|| "chat-item-needs-you-count".into())
         .text_size(crate::typography::ui_rems(11.0))
@@ -1353,11 +1359,7 @@ pub(crate) fn header_icon_button(
     let show_label =
         labels_fit && theme.ui_style.behavior.labels != crate::ui_style::LabelMode::IconOnly;
     let fade_key = format!("header-icon-{id}");
-    let rest = if super::is_area(theme) {
-        theme.identity_color("").opacity(0.12)
-    } else {
-        crate::theme::wash(0.0)
-    };
+    let rest = crate::theme::wash(0.0);
     div()
         .id(id)
         .size(px(theme.ui_style.tokens.control_size))
@@ -1367,9 +1369,7 @@ pub(crate) fn header_icon_button(
         .items_center()
         .justify_center()
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| {
-            el.rounded_full().bg(theme.identity_color("").opacity(0.12))
-        })
+        .when(super::is_area(theme), |el| el.rounded_full())
         .when(true, |el| super::segmented_key(el, theme, false))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
@@ -1527,11 +1527,16 @@ pub(crate) fn panel_tab(
         .when(active, |el| el.bg(crate::theme::wash(0.10)))
         .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
         .when(true, |el| super::segmented_key(el, theme, active))
+        .when(super::is_area(theme), |el| el.bg(theme.bg))
         .children(crate::surface_chrome::active_key_dot(theme, active))
         .child(
             div()
                 .text_size(crate::typography::ui_rems(11.5))
-                .text_color(if active { theme.text } else { theme.text_muted })
+                .text_color(if active && !super::is_area(theme) {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
                 .child(SharedString::from(label)),
         )
 }
@@ -2728,6 +2733,9 @@ pub(crate) fn chat_identity_button(
         ))
         .when(super::is_area(theme), |el| el.rounded_full())
         .when(true, |el| super::segmented_key(el, theme, false))
+        .when(super::is_area(theme), |el| {
+            el.bg(theme.bg).border_color(theme.bg)
+        })
         .on_hover(motion::hover_listener(fade_key))
         .occlude()
         .role(gpui::Role::Button)
@@ -2834,6 +2842,21 @@ mod tests {
     }
 }
 
+pub(crate) fn action_control(theme: &Theme) -> gpui::Div {
+    div()
+        .relative()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(24.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.border)
+        .when(super::is_area(theme), |el| el.border_color(theme.bg))
+        .occlude()
+}
+
 pub(crate) fn action_segment(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -2844,6 +2867,7 @@ pub(crate) fn action_segment(theme: &Theme, id: &'static str) -> gpui::Stateful<
         .gap(px(5.0))
         .text_size(px(11.5))
         .text_color(theme.text.opacity(0.9))
+        .when(super::is_area(theme), |el| el.text_color(theme.text_muted))
         .when(super::is_area(theme), |el| el.rounded_full())
         .when(super::is_industrial(theme), |el| {
             el.font_family(theme.font_mono.clone())
@@ -2865,7 +2889,9 @@ pub(crate) fn action_chevron(
         .justify_center()
         .border_l_1()
         .border_color(theme.border)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().border_color(theme.bg)
+        })
         .cursor_pointer()
         .hover(|style| style.bg(crate::theme::ink(0.07)))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
