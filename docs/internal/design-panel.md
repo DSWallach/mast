@@ -6,9 +6,11 @@ Changes apply to the currently selected Style immediately; use Appearance to
 change Style or Layout. The controls apply to the actual running app.
 
 The sliders change control, panel, chip and bubble radii, control height,
-sidebar row height, grid size, small spacing and rule width where components use those tokens.
-The sidebar separator toggle changes the sidebar rule. The details controls affect the work-item details frame: its border and whether
-its background uses the page colour. The outline control changes the tree and overview header background. Primary and secondary colour choices affect
+sidebar row height, grid size, small spacing and rule width where components use
+those tokens. The sidebar separator toggle changes the sidebar rule. The details
+controls affect the work-item details frame: its border and whether its background
+uses the page colour. The outline control changes the tree and overview header
+background. Primary and secondary colour choices affect
 shared buttons, toolbars, selected sidebar and outline rows, chat header chips,
 and composer keys. Heading family and weight affect settings page headings;
 tracked caps also affect sidebar section labels and composer captions. The surface

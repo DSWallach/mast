@@ -823,7 +823,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| init(cx, dir.path(), dir.path()));
         cx.run_until_parked();
-        std::fs::write(mast_ui::style_overrides::Overrides::path(dir.path()), r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":25,"layouts":{"compact":{"controlRadius":19}}},"industrial":{"controlRadius":3}}}"#).unwrap();
+        std::fs::write(mast_ui::style_overrides::Overrides::path(dir.path()), r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":25,"surfaces":{"composer":{"border":true}},"layouts":{"compact":{"controlRadius":19}}},"industrial":{"controlRadius":3}}}"#).unwrap();
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(600));
         cx.run_until_parked();
@@ -849,6 +849,15 @@ mod tests {
                 &overrides,
             );
             assert_eq!(area.ui_style.tokens.control_radius, Some(19.0));
+            let surface = mast_ui::style_overrides::DesignSurface::Composer;
+            assert_eq!(
+                area.ui_style.design_roles.surface(surface).border,
+                Some(true)
+            );
+            assert_eq!(
+                industrial.ui_style.design_roles.surface(surface).border,
+                None
+            );
             assert_eq!(industrial.ui_style.tokens.control_radius, Some(3.0));
             assert_eq!(default.ui_style.tokens.control_radius, None);
             assert_eq!(ui_style::current(cx).id, ui_style::UiStyleId::Default);

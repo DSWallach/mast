@@ -1020,6 +1020,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn design_overrides_change_targeted_shared_surfaces_without_changing_empty_defaults() {
+        use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
+        use gpui::Styled as _;
+        let empty = crate::style_overrides::Overrides::default();
+        let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":3,"primaryColour":"success","surfaces":{"toolbar":{"border":true,"pageColour":true},"composer":{"border":true},"code":{"pageColour":true}}}}}"#);
+        for id in UiStyleId::ALL {
+            let base_style = UiStyle::resolve(*id, UiLayout::Minimal);
+            let base = Theme::dark().with_ui_style(base_style);
+            let no_override = Theme::dark().with_ui_style(empty.apply(base_style));
+            assert_eq!(toolbar_control(div(), &base, true).style(), toolbar_control(div(), &no_override, true).style());
+            assert_eq!(conversation_parts::conversation_input_surface(div(), &base, base.accent, 8.0, base.border).style(), conversation_parts::conversation_input_surface(div(), &no_override, base.accent, 8.0, base.border).style());
+        }
+        let base = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        let changed = Theme::dark().with_ui_style(overrides.apply(base.ui_style));
+        assert_ne!(toolbar_control(div(), &base, true).style(), toolbar_control(div(), &changed, true).style());
+        assert_ne!(conversation_parts::conversation_input_surface(div(), &base, base.accent, 8.0, base.border).style(), conversation_parts::conversation_input_surface(div(), &changed, base.accent, 8.0, base.border).style());
+    }
+
+    #[test]
     fn tab_inset_preserves_default_minimal_and_scales_all_other_combinations() {
         use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
         for (style, expected) in [
