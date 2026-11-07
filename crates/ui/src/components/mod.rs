@@ -806,6 +806,9 @@ pub fn agent_message_bubble(
     identity: gpui::Hsla,
     first: bool,
     first_block: bool,
+    continues: bool,
+    continued_by_next: bool,
+    gap: f32,
     model: Option<String>,
     content: AnyElement,
 ) -> AnyElement {
@@ -831,8 +834,13 @@ pub fn agent_message_bubble(
             })
             .child(
                 div()
-                    .p(px(10.0 * layout_spacing(theme)))
-                    .border_1()
+                    .px(px(10.0 * layout_spacing(theme)))
+                    .pt(px(if continues { gap } else { 10.0 * layout_spacing(theme) }))
+                    .pb(px(if continued_by_next { 0.0 } else { 10.0 * layout_spacing(theme) }))
+                    .border_l_1()
+                    .border_r_1()
+                    .when(!continues, |el| el.border_t_1())
+                    .when(!continued_by_next, |el| el.border_b_1())
                     .border_color(theme.industrial_colors().rule)
                     .bg(theme.industrial_colors().panel)
                     .child(content),
@@ -856,6 +864,14 @@ pub fn agent_message_bubble(
             .into_any_element()
     } else {
         content
+    }
+}
+
+pub fn agent_message_row_gap(theme: &Theme, continues: bool, gap: f32) -> f32 {
+    if continues && theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
+        0.0
+    } else {
+        gap
     }
 }
 
