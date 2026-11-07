@@ -3,6 +3,46 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) enum FileCommentAction {
+    Add,
+    Remove,
+}
+
+pub(crate) fn file_comment_action<T: Styled + ParentElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    action: FileCommentAction,
+) -> T {
+    let element = element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)));
+    match action {
+        FileCommentAction::Add => element
+            .bg(theme.solid)
+            .when(super::is_area(theme), |element| {
+                element.rounded_full().bg(theme.accent)
+            }),
+        FileCommentAction::Remove => {
+            let element = super::segmented_key(element, theme, false);
+            element.when(super::is_area(theme), |element| {
+                element.rounded_full().bg(theme.accent.opacity(0.10))
+            })
+        }
+    }
+}
+
+pub(crate) fn file_comment_input<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(7.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.input_glass_bg())
+        .when(super::is_industrial(theme), |element| {
+            element.bg(theme.input_bg)
+        })
+        .when(super::is_area(theme), |element| {
+            element.bg(theme.accent.opacity(0.06))
+        })
+}
+
 pub(crate) enum FileAction {
     Retry,
     Refresh,
