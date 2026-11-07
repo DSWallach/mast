@@ -1025,9 +1025,17 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
     rule's cwdScope (canonical path check; everything else still fails closed; reviewed by the coordinator),
     `dev-inspector` feature (⌘⌥⇧I read-only inspector; NOT for the installed app: always-on per-element cost),
     hot-patch spike: Subsecond not viable (tip-crate restriction).
-- **Running:** gallery-screens (chat 4978f51f): inspector in the gallery only + Screens section built from the
-  preview fixtures (chat, sidebar, details/Needs-you, Overview, populated changes, Appearance, Developer → Design,
-  browser) + coverage doc for the surfaces Mikey tweaks.
+- **Merged after release 67 (source-run, no release needed):** `gallery-screens` (12e34d5a): gallery-only inspector
+  (⌘⌥⇧I; the installed app has no inspector feature) and a Screens section built from the preview fixtures (chat +
+  sidebar, details/Needs-you, Overview/outline, populated changes, Appearance, Developer → Design, browser), keys
+  1/2/3 style, ⇧1-3 layout, L/D, T theme; coverage doc docs/internal/gallery.md. No workers running.
+- **Waiting on Mikey:** proposed approval rule "Headless UI snapshot renders (mast-ui / mast-gallery)" (request
+  0302ff3e); coworker readiness findings (2fda739e: ad-hoc DMG vs notarised, fresh-Mac tester, stale branches);
+  active-checkout design (a53732a1); UI-styles question D Board (now a gallery prototype; list|board toggle later) and
+  H (style per person vs per machine). Workflow pack parked (item 2bdaeb10). Phase 0 go/no-go 2026-11-12.
+- **Workflow for design tweaks (agreed 2026-11-07):** value tweaks → Mikey uses the Design panel and sends "Copy
+  patch" → a worker makes them permanent defaults; structural tweaks → standing per-style Terra design worker, Mikey
+  watches the gallery; new layouts → gallery story first. Review previews before merging; never use HTML mockups.
 - **Follow-ups:** Area SEND under non-Area themes; Area Light selected Style/Layout cards grey; Linear/team and menus
   slices; standing per-style design workers once Mikey sends a tweak list; engine test
   `rpc::tests::local_opening_tail_arrives_before_full_mirror_and_keeps_all_history` fails when the engine lib suite
