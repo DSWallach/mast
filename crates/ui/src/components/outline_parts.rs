@@ -91,7 +91,9 @@ pub fn outline_chat_indicator(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
+    if super::is_area(theme) && status == crate::status_style::Status::Waiting {
+        div().size(px(8.0)).rounded_full().bg(theme.accent).into_any_element()
+    } else if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
         crate::status_style::indicator_for_theme(status, theme).into_any_element()
     } else if status == crate::status_style::Status::Working {
         crate::loaders::mini_mono_spinner(key, 1.5, working_color, view, cx).into_any_element()
