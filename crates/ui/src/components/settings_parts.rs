@@ -642,3 +642,76 @@ pub(crate) fn settings_compact_action(
         .items_center()
         .text_size(crate::typography::ui_rems(11.5))
 }
+
+/// Import mode card with an accessible selection indicator.
+pub(crate) fn settings_import_mode(
+    theme: &Theme,
+    id: SharedString,
+    label: &'static str,
+    description: &'static str,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let title = if super::is_industrial(theme) {
+        crate::popover::tracked_upper(label)
+    } else {
+        label.to_owned()
+    };
+    div()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .p(px(10.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(9.0)))
+        .border_1()
+        .when(super::is_industrial(theme), |el| el.border_b_2())
+        .border_color(if active { theme.accent } else { theme.border })
+        .bg(if active {
+            theme.accent_wash
+        } else if super::is_area(theme) {
+            theme.accent.opacity(0.08)
+        } else {
+            theme.surface_raised.opacity(0.28)
+        })
+        .cursor_pointer()
+        .when(!active, |control| {
+            control.hover(|style| style.bg(theme.surface_raised_hover))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .size(px(16.0))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if active {
+                            theme.accent
+                        } else {
+                            theme.border_strong
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(active, |dot| {
+                            dot.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(if active { theme.text } else { theme.text_muted })
+                        .child(SharedString::from(title)),
+                ),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .ml(px(23.0))
+                .text_size(crate::typography::ui_rems(10.5))
+                .text_color(theme.text_muted)
+                .child(description),
+        )
+}

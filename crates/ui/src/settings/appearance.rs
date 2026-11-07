@@ -1911,70 +1911,15 @@ impl AppearancePage {
 
         let mode_control = |label: &'static str, description: &'static str, value: InstallMode| {
             let active = mode == value;
-            div()
-                .id(SharedString::from(format!(
-                    "theme-import-mode-{}",
-                    slug(label)
-                )))
-                .flex_1()
-                .min_w_0()
-                .p(px(10.0))
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(if active { theme.accent } else { theme.border })
-                .bg(if active {
-                    theme.accent_wash
-                } else {
-                    theme.surface_raised.opacity(0.28)
-                })
-                .cursor_pointer()
-                .when(!active, |control| {
-                    control.hover(|style| style.bg(theme.surface_raised_hover))
-                })
+            crate::components::settings_import_mode(
+                theme, SharedString::from(format!("theme-import-mode-{}", slug(label))), label, description, active,
+            )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(dialog) = this.import_dialog.as_mut() {
                         dialog.mode = value;
                     }
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(
-                            div()
-                                .size(px(16.0))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(if active {
-                                    theme.accent
-                                } else {
-                                    theme.border_strong
-                                })
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(active, |dot| {
-                                    dot.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if active { theme.text } else { theme.text_muted })
-                                .child(label),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt(px(4.0))
-                        .ml(px(23.0))
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted)
-                        .child(description),
-                )
         };
 
         let section_label = |label: &'static str| {
