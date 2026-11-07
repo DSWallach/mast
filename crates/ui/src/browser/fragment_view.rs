@@ -250,13 +250,7 @@ impl BrowserSurface {
         let local = view.source.local_root.is_some();
         let preview = view.source.local_preview().is_some();
         let label = |id: &'static str, text: &'static str, glyph: &'static str, enabled: bool| {
-            crate::files::toolbar_button(id, text, theme)
-                .when(!enabled, |el| el.cursor_default().opacity(0.35))
-                .child(
-                    icons::icon(glyph)
-                        .size(px(surface_chrome::ICON_SIZE))
-                        .text_color(theme.text_muted),
-                )
+            crate::components::browser_parts::browser_toolbar_button(id, text, glyph, enabled, theme)
         };
         let title: SharedString = view.source.title.clone().into();
         let path: SharedString = view.source.path.clone().into();
@@ -430,23 +424,7 @@ fn status_button(
     label: &'static str,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(28.0))
-        .px(px(10.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised)
-        .cursor_pointer()
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .hover(|style| style.bg(crate::theme::wash(0.10)))
-        .flex()
-        .items_center()
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text)
-        .child(label)
+    crate::components::browser_parts::browser_status_button(id, label, theme)
 }
 
 #[cfg(test)]

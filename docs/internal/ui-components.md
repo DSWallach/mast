@@ -1366,3 +1366,315 @@ function or its first inline element, rather than every child `div`.
   assembly `:6019`. Their visual frames now live in `conversation_parts.rs`;
   picker popover and menu bodies remain outside this slice. No direct style or
   layout comparisons were present in these picker sites before migration.
+
+## Browser and artifacts audit
+
+This historical index records presentation candidates and style references at the integration base. Shared browser parts now own the direct style branches, toolbar, picker and navigation controls, cards, badges, and preview surfaces. Separators and native web-page backing remain theme-colored structural boundaries. The current fixed text-size literals are listed below the historical index.
+
+- `crates/ui/src/browser/fragment.rs:118`: `("--input", css(theme.border_strong)),`
+- `crates/ui/src/browser/fragment_view.rs:253`: `crate::files::toolbar_button(id, text, theme)`
+- `crates/ui/src/browser/fragment_view.rs:418`: `.border_b_1()`
+- `crates/ui/src/browser/fragment_view.rs:419`: `.border_color(theme.border)`
+- `crates/ui/src/browser/fragment_view.rs:437`: `.rounded(px(6.0))`
+- `crates/ui/src/browser/fragment_view.rs:438`: `.border_1()`
+- `crates/ui/src/browser/fragment_view.rs:439`: `.border_color(theme.border)`
+- `crates/ui/src/browser/fragment_view.rs:440`: `.bg(theme.surface_raised)`
+- `crates/ui/src/browser/fragment_view.rs:444`: `.hover(|style| style.bg(crate::theme::wash(0.10)))`
+- `crates/ui/src/browser/view.rs:8`: `fn button(`
+- `crates/ui/src/browser/view.rs:18`: `crate::files::toolbar_button(id, label, theme)`
+- `crates/ui/src/browser/view.rs:130`: `let border_strong = theme.border_strong;`
+- `crates/ui/src/browser/view.rs:145`: `.rounded(px(10.0))`
+- `crates/ui/src/browser/view.rs:146`: `.border_1()`
+- `crates/ui/src/browser/view.rs:147`: `.border_color(theme.border)`
+- `crates/ui/src/browser/view.rs:148`: `.bg(crate::theme::ink(0.02))`
+- `crates/ui/src/browser/view.rs:156`: `.bg(crate::theme::ink(0.05))`
+- `crates/ui/src/browser/view.rs:157`: `.border_color(border_strong)`
+- `crates/ui/src/browser/view.rs:209`: `.rounded(px(6.0))`
+- `crates/ui/src/browser/view.rs:219`: `.hover(|style| style.bg(crate::theme::ink(0.05)))`
+- `crates/ui/src/browser/view.rs:241`: `.rounded(px(8.0))`
+- `crates/ui/src/browser/view.rs:242`: `.border_1()`
+- `crates/ui/src/browser/view.rs:243`: `.border_color(theme.border)`
+- `crates/ui/src/browser/view.rs:320`: `.rounded(px(12.0))`
+- `crates/ui/src/browser/view.rs:321`: `.border_1()`
+- `crates/ui/src/browser/view.rs:322`: `.border_color(theme.border)`
+- `crates/ui/src/browser/view.rs:323`: `.bg(theme.surface_raised.opacity(0.5))`
+- `crates/ui/src/browser/view.rs:355`: `.rounded(px(6.0))`
+- `crates/ui/src/browser/view.rs:356`: `.border_1()`
+- `crates/ui/src/browser/view.rs:357`: `.border_color(theme.border)`
+- `crates/ui/src/browser/view.rs:358`: `.bg(theme.surface_raised)`
+- `crates/ui/src/browser/view.rs:366`: `.hover(|style| style.bg(crate::theme::wash(0.10)))`
+- `crates/ui/src/browser/view.rs:408`: `let back = button(`
+- `crates/ui/src/browser/view.rs:419`: `let forward = button(`
+- `crates/ui/src/browser/view.rs:430`: `let reload = button(`
+- `crates/ui/src/browser/view.rs:444`: `el.border_1().border_color(theme.danger)`
+- `crates/ui/src/browser/view.rs:477`: `.rounded(px(4.0))`
+- `crates/ui/src/browser/view.rs:484`: `.hover(|s| s.bg(crate::theme::wash(0.10)))`
+- `crates/ui/src/browser/view.rs:494`: `let open = button(`
+- `crates/ui/src/browser/view.rs:525`: `.when(has_page, |body| body.bg(theme.bg));`
+- `crates/ui/src/browser/view.rs:672`: `.when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)`
+- `crates/ui/src/browser/view.rs:676`: `.when(external, |el| el.child(div().h(px(26.0)).px(px(10.0)).flex().items_center().gap(px(5.0)).border_t_1().border_color(theme.border)`
+- `crates/ui/src/artifacts/cards.rs:113`: `.rounded(px(10.0))`
+- `crates/ui/src/artifacts/cards.rs:114`: `.border_1()`
+- `crates/ui/src/artifacts/cards.rs:115`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/cards.rs:116`: `.bg(theme.surface_raised)`
+- `crates/ui/src/artifacts/cards.rs:122`: `.hover(|card| card.bg(theme.element_hover))`
+- `crates/ui/src/artifacts/cards.rs:127`: `.rounded(px(7.0))`
+- `crates/ui/src/artifacts/cards.rs:128`: `.bg(theme.accent.opacity(0.10))`
+- `crates/ui/src/artifacts/cards.rs:166`: `.rounded(px(6.0))`
+- `crates/ui/src/artifacts/cards.rs:167`: `.border_1()`
+- `crates/ui/src/artifacts/cards.rs:168`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/cards.rs:171`: `.hover(|el| el.bg(theme.element_hover))`
+- `crates/ui/src/artifacts/plan_linear.rs:167`: `.rounded(px(6.0))`
+- `crates/ui/src/artifacts/plan_linear.rs:168`: `.border_1()`
+- `crates/ui/src/artifacts/plan_linear.rs:169`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/plan_linear.rs:170`: `.bg(theme.surface_card)`
+- `crates/ui/src/artifacts/plan_linear.rs:245`: `.rounded(px(3.0))`
+- `crates/ui/src/artifacts/plan_linear.rs:246`: `.border_1()`
+- `crates/ui/src/artifacts/plan_linear.rs:247`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/plan_linear.rs:266`: `.rounded(px(2.0))`
+- `crates/ui/src/artifacts/plan_linear.rs:267`: `.bg(crate::theme::wash(0.12))`
+- `crates/ui/src/artifacts/plan_linear.rs:271`: `.rounded(px(2.0))`
+- `crates/ui/src/artifacts/plan_linear.rs:272`: `.bg(theme.accent)`
+- `crates/ui/src/artifacts/questions_ui.rs:167`: `.rounded_full()`
+- `crates/ui/src/artifacts/questions_ui.rs:168`: `.bg(theme.accent)`
+- `crates/ui/src/artifacts/tab/comments_view.rs:426`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:434`: `.when(on, |el| el.bg(crate::theme::wash(0.10)))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:436`: `el.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:558`: `.border_l_1()`
+- `crates/ui/src/artifacts/tab/comments_view.rs:559`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/comments_view.rs:565`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/comments_view.rs:566`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/comments_view.rs:597`: `.rounded(px(6.0))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:598`: `.border_1()`
+- `crates/ui/src/artifacts/tab/comments_view.rs:599`: `.border_color(theme.accent.opacity(0.5))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:669`: `.rounded(px(6.0))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:670`: `.border_1()`
+- `crates/ui/src/artifacts/tab/comments_view.rs:671`: `.border_color(if focused { theme.accent } else { theme.border })`
+- `crates/ui/src/artifacts/tab/comments_view.rs:694`: `.rounded(px(8.0))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:695`: `.border_1()`
+- `crates/ui/src/artifacts/tab/comments_view.rs:696`: `.border_color(color.opacity(0.5))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:697`: `.bg(color.opacity(0.10))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:757`: `.rounded(px(5.0))`
+- `crates/ui/src/artifacts/tab/comments_view.rs:758`: `.border_1()`
+- `crates/ui/src/artifacts/tab/comments_view.rs:759`: `.border_color(if primary { theme.accent } else { theme.border })`
+- `crates/ui/src/artifacts/tab/comments_view.rs:761`: `el.bg(theme.accent).text_color(theme.on_accent)`
+- `crates/ui/src/artifacts/tab/compare_view.rs:978`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/compare_view.rs:979`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1075`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1076`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1271`: `.hover(|el| el.bg(theme.element_hover))`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1272`: `.when(selected, |el| el.bg(crate::theme::wash(0.08)))`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1297`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1298`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1299`: `.bg(theme.surface_raised)`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1437`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1438`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1608`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1614`: `.when(active, |el| el.bg(crate::theme::wash(0.12)))`
+- `crates/ui/src/artifacts/tab/compare_view.rs:1615`: `.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))`
+- `crates/ui/src/artifacts/tab/find_view.rs:762`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
+- `crates/ui/src/artifacts/tab/find_view.rs:768`: `.hover(|el| el.bg(crate::theme::wash(0.14)))`
+- `crates/ui/src/artifacts/tab/find_view.rs:786`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/find_view.rs:787`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/find_view.rs:815`: `button("artifact-find-prev", icons::ALT_ARROW_UP, has_matches)`
+- `crates/ui/src/artifacts/tab/find_view.rs:819`: `button("artifact-find-next", icons::ALT_ARROW_DOWN, has_matches)`
+- `crates/ui/src/artifacts/tab/find_view.rs:823`: `button("artifact-find-close", icons::CLOSE, true)`
+- `crates/ui/src/artifacts/tab/find_view.rs:864`: `.border_r_1()`
+- `crates/ui/src/artifacts/tab/find_view.rs:865`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/find_view.rs:871`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
+- `crates/ui/src/artifacts/tab/find_view.rs:876`: `.hover(|el| el.bg(crate::theme::wash(0.14)))`
+- `crates/ui/src/artifacts/tab/find_view.rs:902`: `.rounded(px(4.0))`
+- `crates/ui/src/artifacts/tab/find_view.rs:915`: `el.bg(crate::theme::wash(if rail_focused { 0.20 } else { 0.10 }))`
+- `crates/ui/src/artifacts/tab/find_view.rs:917`: `.hover(|el| el.bg(crate::theme::wash(0.14)))`
+- `crates/ui/src/artifacts/tab/find_view.rs:957`: `.border_r_1()`
+- `crates/ui/src/artifacts/tab/find_view.rs:958`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/find_view.rs:975`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
+- `crates/ui/src/artifacts/tab/find_view.rs:980`: `.hover(|el| el.bg(crate::theme::wash(0.14)))`
+- `crates/ui/src/artifacts/tab/options_view.rs:519`: `.rounded(px(5.0))`
+- `crates/ui/src/artifacts/tab/options_view.rs:525`: `.when(strong, |el| el.bg(theme.accent).text_color(theme.surface))`
+- `crates/ui/src/artifacts/tab/options_view.rs:527`: `el.border_1()`
+- `crates/ui/src/artifacts/tab/options_view.rs:528`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/options_view.rs:530`: `.hover(|el| el.text_color(theme.text).bg(crate::theme::wash(0.10)))`
+- `crates/ui/src/artifacts/tab/options_view.rs:588`: `.rounded(px(4.0))`
+- `crates/ui/src/artifacts/tab/options_view.rs:591`: `.border_1()`
+- `crates/ui/src/artifacts/tab/options_view.rs:592`: `.border_color(if on { theme.accent } else { theme.border })`
+- `crates/ui/src/artifacts/tab/options_view.rs:635`: `.rounded(px(4.0))`
+- `crates/ui/src/artifacts/tab/options_view.rs:638`: `.border_1()`
+- `crates/ui/src/artifacts/tab/options_view.rs:639`: `.border_color(if on { theme.accent } else { theme.border })`
+- `crates/ui/src/artifacts/tab/options_view.rs:677`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/options_view.rs:678`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/options_view.rs:699`: `.rounded(px(4.0))`
+- `crates/ui/src/artifacts/tab/options_view.rs:700`: `.border_1()`
+- `crates/ui/src/artifacts/tab/options_view.rs:701`: `.border_color(theme.accent)`
+- `crates/ui/src/artifacts/tab/options_view.rs:722`: `.rounded(px(5.0))`
+- `crates/ui/src/artifacts/tab/options_view.rs:723`: `.border_1()`
+- `crates/ui/src/artifacts/tab/options_view.rs:724`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/plan_view.rs:97`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/plan_view.rs:98`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab/questions_view.rs:464`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab/questions_view.rs:465`: `.border_color(theme.border);`
+- `crates/ui/src/artifacts/tab/questions_view.rs:528`: `.rounded(px(9.0))`
+- `crates/ui/src/artifacts/tab/questions_view.rs:529`: `.border_1()`
+- `crates/ui/src/artifacts/tab/questions_view.rs:530`: `.border_color(color.opacity(0.5))`
+- `crates/ui/src/artifacts/tab/questions_view.rs:531`: `.bg(color.opacity(0.10))`
+- `crates/ui/src/artifacts/tab/zoom_view.rs:392`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
+- `crates/ui/src/artifacts/tab/zoom_view.rs:400`: `.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))`
+- `crates/ui/src/artifacts/tab/zoom_view.rs:414`: `button(`
+- `crates/ui/src/artifacts/tab/zoom_view.rs:424`: `button("artifact-zoom-reset", zoom::label(level).into(), !default)`
+- `crates/ui/src/artifacts/tab/zoom_view.rs:432`: `button("artifact-zoom-in", "+".into(), level < zoom::MAX_ZOOM).on_click(`
+- `crates/ui/src/artifacts/tab.rs:951`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab.rs:952`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab.rs:1054`: `crate::files::toolbar_button(id, label, theme)`
+- `crates/ui/src/artifacts/tab.rs:1062`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded_full().border_1().border_color(theme.border_strong))`
+- `crates/ui/src/artifacts/tab.rs:1084`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
+- `crates/ui/src/artifacts/tab.rs:1091`: `.when(open, |el| el.bg(crate::theme::wash(0.10)))`
+- `crates/ui/src/artifacts/tab.rs:1092`: `.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))`
+- `crates/ui/src/artifacts/tab.rs:1098`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |toolbar| {`
+- `crates/ui/src/artifacts/tab.rs:1099`: `toolbar.child(div().flex().items_center().rounded(px(12.0)).border_1().border_color(theme.border_strong).overflow_hidden()`
+- `crates/ui/src/artifacts/tab.rs:1102`: `.when(revision.is_some() && id == "artifact-previous-revision", |el| el.bg(theme.accent))`
+- `crates/ui/src/artifacts/tab.rs:1147`: `button(`
+- `crates/ui/src/artifacts/tab.rs:1158`: `button("artifact-reveal", "Reveal in Finder", icons::FOLDER, local)`
+- `crates/ui/src/artifacts/tab.rs:1164`: `button("artifact-source", "View source", icons::FILE_CODE, text).when(text, |el| {`
+- `crates/ui/src/artifacts/tab.rs:1169`: `button(`
+- `crates/ui/src/artifacts/tab.rs:1175`: `.when(pinned, |el| el.bg(crate::theme::wash(0.10)))`
+- `crates/ui/src/artifacts/tab.rs:1183`: `button(`
+- `crates/ui/src/artifacts/tab.rs:1199`: `if theme.ui_style.id != crate::ui_style::UiStyleId::Area { return None; }`
+- `crates/ui/src/artifacts/tab.rs:1210`: `.when(local, |el| el.child(div().id("area-artifact-reveal").debug_selector(|| "area-artifact-reveal".into()).px(px(10.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border_strong).cursor_pointer().child("Reveal")`
+- `crates/ui/src/artifacts/tab.rs:1212`: `.when(standalone, |el| el.child(div().id("area-artifact-open").debug_selector(|| "area-artifact-open".into()).px(px(10.0)).py(px(5.0)).rounded_full().bg(theme.accent).text_color(theme.identity_text(theme.accent)).cursor_pointer().child("Open")`
+- `crates/ui/src/artifacts/tab.rs:1238`: `.hover(|el| el.bg(theme.element_hover))`
+- `crates/ui/src/artifacts/tab.rs:1268`: `.hover(|el| el.bg(theme.element_hover))`
+- `crates/ui/src/artifacts/tab.rs:1270`: `el.bg(crate::theme::wash(0.08))`
+- `crates/ui/src/artifacts/tab.rs:1303`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab.rs:1304`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab.rs:1305`: `.bg(theme.surface_raised)`
+- `crates/ui/src/artifacts/tab.rs:1422`: `.rounded(px(6.0))`
+- `crates/ui/src/artifacts/tab.rs:1423`: `.border_1()`
+- `crates/ui/src/artifacts/tab.rs:1424`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab.rs:1429`: `.hover(|el| el.bg(theme.element_hover))`
+- `crates/ui/src/artifacts/tab.rs:1533`: `.rounded(px(6.0))`
+- `crates/ui/src/artifacts/tab.rs:1534`: `.border_1()`
+- `crates/ui/src/artifacts/tab.rs:1535`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab.rs:1569`: `.rounded(px(6.0))`
+- `crates/ui/src/artifacts/tab.rs:1570`: `.border_1()`
+- `crates/ui/src/artifacts/tab.rs:1571`: `.border_color(theme.warning)`
+- `crates/ui/src/artifacts/tab.rs:1629`: `.bg(theme.bg);`
+- `crates/ui/src/artifacts/tab.rs:1667`: `.border_b_1()`
+- `crates/ui/src/artifacts/tab.rs:1668`: `.border_color(theme.border)`
+- `crates/ui/src/artifacts/tab.rs:1758`: `.rounded(px(3.0))`
+- `crates/ui/src/artifacts/tab.rs:1759`: `.border_1()`
+- `crates/ui/src/artifacts/tab.rs:1760`: `.border_color(theme.border)`
+
+### Browser and artifacts remaining fixed typography
+
+- `crates/ui/src/browser/fragment_view.rs:279`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:287`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:365`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:373`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:414`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:115`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:143`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:151`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:200`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:210`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:270`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:278`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:300`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:573`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:575`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:579`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/cards.rs:119`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/cards.rs:126`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/plan_linear.rs:207`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:513`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:551`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:577`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:644`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:654`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:663`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:670`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1077`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1306`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1375`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1427`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1470`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1511`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/find_view.rs:793`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/find_view.rs:916`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/options_view.rs:642`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/options_view.rs:695`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/plan_view.rs:67`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:968`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:996`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1211`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1283`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1307`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1348`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1384`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1393`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1404`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1424`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1432`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1441`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1483`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1492`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1517`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1523`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1531`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1582`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1604`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+
+## Settings and appearance audit (in progress)
+The index below is a mechanical inventory, including test and non-presentation matches. Each location needs classification during migration. Settings navigation chrome belongs to shell.
+### Explicit style and layout references
+- `crates/ui/src/settings.rs:756`: `pub ui_style: crate::ui_style::UiStyleId,`
+- `crates/ui/src/settings.rs:757`: `pub ui_layout: crate::ui_style::UiLayout,`
+- `crates/ui/src/settings.rs:874`: `ui_style: crate::ui_style::UiStyleId::default(),`
+- `crates/ui/src/settings.rs:875`: `ui_layout: crate::ui_style::UiLayout::default(),`
+- `crates/ui/src/settings.rs:3017`: `ui_style: crate::ui_style::UiStyleId::Default,`
+- `crates/ui/src/settings.rs:3018`: `ui_layout: crate::ui_style::UiLayout::Compact,`
+- `crates/ui/src/settings/appearance.rs:2997`: `let style_cards = crate::ui_style::UiStyleId::ALL`
+- `crates/ui/src/settings/appearance.rs:3031`: `ui_settings.ui_style == id,`
+- `crates/ui/src/settings/appearance.rs:3036`: `crate::ui_style::set_style(id, window, cx);`
+- `crates/ui/src/settings/appearance.rs:3042`: `let layout_cards = crate::ui_style::UiLayout::ALL.iter().copied().map(|layout| {`
+- `crates/ui/src/settings/appearance.rs:3045`: `crate::ui_style::UiLayout::Minimal => ("Current spacing", 4.0),`
+- `crates/ui/src/settings/appearance.rs:3046`: `crate::ui_style::UiLayout::Compact => ("More on screen", 2.0),`
+- `crates/ui/src/settings/appearance.rs:3047`: `crate::ui_style::UiLayout::Guided => ("More labels and guidance", 6.0),`
+- `crates/ui/src/settings/appearance.rs:3057`: `crate::ui_style::set_layout(layout, window, cx);`
+- `crates/ui/src/appearance.rs:107`: `let style = crate::ui_style::current(cx);`
+- `crates/ui/src/appearance.rs:145`: `_style: crate::ui_style::UiStyle,`
+- `crates/ui/src/appearance.rs:150`: `fn effective_accent(accent: AccentSelection, _style: crate::ui_style::UiStyle) -> AccentSelection {`
+- `crates/ui/src/appearance.rs:156`: `style: crate::ui_style::UiStyle,`
+- `crates/ui/src/appearance.rs:159`: `crate::ui_style::SurfaceModel::ThemeDefault => surface,`
+- `crates/ui/src/appearance.rs:160`: `crate::ui_style::SurfaceModel::Opaque => SurfacePreference::Opaque,`
+- `crates/ui/src/appearance.rs:161`: `crate::ui_style::SurfaceModel::Glass => SurfacePreference::Frosted,`
+- `crates/ui/src/appearance.rs:169`: `let style = crate::ui_style::current(cx);`
+
+### Inline presentation candidates
+
+Locations are line numbers at the audit commit; each includes a numeric text size, radius, or border call. Some are preview artwork, text formatting, or tests, and require individual review.
+
+- `crates/ui/src/settings/accounts.rs`: 355, 391, 446, 643, 701, 721, 1039, 1143, 1168, 1169, 1197, 1203, 1223, 1276, 1323, 1330, 1409, 1421, 1469, 1634, 1676, 1724, 1744, 1806, 1848
+- `crates/ui/src/settings/appearance.rs`: 395, 423, 449, 1219, 1269, 1270, 1277, 1309, 1310, 1317, 1350, 1376, 1377, 1452, 1454, 1473, 1474, 1479, 1498, 1499, 1508, 1509, 1518, 1530, 1540, 1556, 1557, 1567, 1573, 1576, 1600, 1601, 1605, 1658, 1668, 1675, 1682, 1685, 1704, 1705, 1803, 1866, 1867, 1973, 1974, 2052, 2053, 2093, 2214, 2215, 2241, 2256, 2266, 2275, 2346, 2379, 2380, 2404, 2405, 2442, 2449, 2500, 2502, 2517, 2535, 2540, 2577, 2578, 2717, 2789, 2929, 2949, 3006, 3016, 3022, 3049, 3051, 3052, 3134, 3246, 3248, 3253, 3438, 3553
+- `crates/ui/src/settings/appshots.rs`: 26, 91, 92, 103, 318, 332
+- `crates/ui/src/settings/archived.rs`: 173, 189, 190, 217, 225, 240, 268, 269, 271, 314, 320
+- `crates/ui/src/settings/devices.rs`: 351, 385, 427
+- `crates/ui/src/settings/files.rs`: 92, 93, 104
+- `crates/ui/src/settings/harnesses.rs`: 799, 834, 890, 1004, 1005
+- `crates/ui/src/settings/shortcuts.rs`: 298, 306, 352, 378, 379, 383, 656, 685, 707, 724, 729, 737, 767, 912
+- `crates/ui/src/settings/widgets.rs`: 177, 185, 196, 256, 258, 267, 302, 303, 322, 339, 398, 399, 402, 428, 429, 432
+
+### Settings migration status
+
+The original candidate index above records audit-commit locations. Explicit style and layout presentation decisions now reside in `components/settings_parts.rs`; the remaining `UiStyleId` / `UiLayout` uses in screens enumerate choices or persist settings, and the test constants are fixtures. Navigation remains in `shell_parts.rs`.
+
+The following remaining ratchet hits are fixed-content typography or miniature artwork, not interactive control geometry. Line numbers below refer to this migration revision.
+
+- `crates/ui/src/settings/accounts.rs` text sizes at 375, 430, 627, 685, 705, 1023, 1170, 1190, 1243, 1290, 1297, 1376, 1388, 1601, 1643, 1691, 1711, 1773, 1815: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/appearance.rs` text sizes at 1346, 1358, 1742, 1869, 1940, 1996, 2003, 2065, 2238, 2310, 2450, 2470, 3017: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/appshots.rs` text sizes at 26: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/archived.rs` text sizes at 195, 203, 218, 275, 281: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/devices.rs` text sizes at 351, 427: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/harnesses.rs` text sizes at 818, 874: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/shortcuts.rs` text sizes at 298, 306, 352, 628, 849: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/accounts.rs` radii at 1436: stays literal, in baseline: loading skeleton placeholders preserve their geometry.
+- `crates/ui/src/settings/appearance.rs` radii at 1292, 1326, 1336, 1368, 1384, 1395, 1401, 1404: stays literal, in baseline: thumbnail artwork models the selected theme.

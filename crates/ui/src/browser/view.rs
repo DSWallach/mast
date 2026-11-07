@@ -13,15 +13,7 @@ fn button(
     theme: &Theme,
     _cx: &mut Context<BrowserSurface>,
 ) -> gpui::Stateful<gpui::Div> {
-    // Match Files/History chrome, including focus-preserving mouse-down and
-    // tooltips. Disabled controls have neither a pointer cursor nor a handler.
-    crate::files::toolbar_button(id, label, theme)
-        .when(!enabled, |el| el.cursor_default().opacity(0.35))
-        .child(
-            icons::icon(glyph)
-                .size(px(surface_chrome::ICON_SIZE))
-                .text_color(theme.text_muted),
-        )
+    crate::components::browser_parts::browser_toolbar_button(id, label, glyph, enabled, theme)
 }
 
 impl BrowserSurface {
@@ -127,39 +119,18 @@ impl BrowserSurface {
         for service in &snapshot.services {
             let url = service.url(snapshot.proxy_port);
             let row_url = url.clone();
-            let border_strong = theme.border_strong;
             let label = if snapshot.remote {
                 format!("{} · localhost:{}", service.device_name, service.port)
             } else {
                 format!("localhost:{}", service.port)
             };
             content = content.child(
-                div()
-                    .id(gpui::SharedString::from(format!(
-                        "preview-row-{}",
-                        service.id
-                    )))
-                    .w_full()
-                    .h(px(56.0))
-                    .px(px(14.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.02))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .when(available, |el| {
-                        el.cursor_pointer()
-                            .hover(move |style| {
-                                style
-                                    .bg(crate::theme::ink(0.05))
-                                    .border_color(border_strong)
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.navigate(&row_url, window, cx)
-                            }))
-                    })
+                crate::components::browser_parts::browser_preview_row(
+                    gpui::SharedString::from(format!("preview-row-{}", service.id)), available, theme,
+                )
+                    .when(available, |el| el.on_click(cx.listener(move |this, _, window, cx| {
+                        this.navigate(&row_url, window, cx)
+                    })))
                     .child(
                         div()
                             .flex_1()
@@ -184,7 +155,8 @@ impl BrowserSurface {
                             ),
                     )
                     .child(
-                        div()
+                        crate::components::browser_parts::browser_preview_open(
+                            div()
                             .map(|el| {
                                 #[cfg(feature = "browser-fixture")]
                                 if snapshot
@@ -198,32 +170,14 @@ impl BrowserSurface {
                                     });
                                 }
                                 el
-                            })
-                            .id(gpui::SharedString::from(format!(
-                                "open-preview-{}",
-                                service.id
-                            )))
-                            .h(px(28.0))
-                            .px(px(6.0))
-                            .flex_shrink_0()
-                            .rounded(px(6.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .role(gpui::Role::Button)
-                            .aria_label(format!("Open {} preview", service.name))
-                            .when(available, |el| {
-                                el.cursor_pointer()
-                                    .hover(|style| style.bg(crate::theme::ink(0.05)))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.navigate(&url, window, cx)
-                                    }))
-                            })
-                            .when(!available, |el| el.opacity(0.4))
-                            .child("Open"),
+                            }),
+                            gpui::SharedString::from(format!("open-preview-{}", service.id)),
+                            format!("Open {} preview", service.name), available, theme,
+                        )
+                        .when(available, |el| el.on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.navigate(&url, window, cx)
+                        })))
                     ),
             );
         }
@@ -236,14 +190,7 @@ impl BrowserSurface {
                 "Start a dev server in this Space. It will appear here automatically, ready to open."
             };
             content = content.child(
-                div()
-                    .p(px(16.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
+                crate::components::browser_parts::browser_empty_notice(theme)
                     .child(message),
             );
         }
@@ -315,20 +262,7 @@ impl BrowserSurface {
                     .items_center()
                     .gap(px(12.0))
                     .child(
-                        div()
-                            .size(px(44.0))
-                            .rounded(px(12.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.surface_raised.opacity(0.5))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                icons::icon(icons::GLOBE)
-                                    .size(px(22.0))
-                                    .text_color(theme.text_muted),
-                            ),
+                        crate::components::browser_parts::browser_empty_icon(theme)
                     )
                     .child(
                         div()
@@ -347,28 +281,7 @@ impl BrowserSurface {
                             .child(description),
                     )
                     .child(
-                        div()
-                            .mt(px(6.0))
-                            .id("browser-empty-action")
-                            .h(px(28.0))
-                            .px(px(10.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.surface_raised)
-                            .cursor_pointer()
-                            .role(gpui::Role::Button)
-                            .aria_label(if has_error {
-                                "Retry page"
-                            } else {
-                                "Enter an address"
-                            })
-                            .hover(|style| style.bg(crate::theme::wash(0.10)))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text)
+                        crate::components::browser_parts::browser_empty_action(has_error, theme)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if has_error {
                                     this.reload(cx);
@@ -376,11 +289,9 @@ impl BrowserSurface {
                                     this.focus_address(window, cx);
                                 }
                             }))
-                            .child(if has_error {
-                                "Try again"
-                            } else {
-                                "Enter an address"
-                            })
+                            .child(crate::components::browser_parts::browser_action_label(
+                                if has_error { "Try again" } else { "Enter an address" }, theme,
+                            ))
                             .when(!has_error, |el| {
                                 el.child(
                                     div()
@@ -470,18 +381,7 @@ impl Render for BrowserSurface {
             )
             .when(focused || self.address_edited, |el| {
                 el.child(
-                    div()
-                        .id("browser-go")
-                        .size(px(18.0))
-                        .flex_none()
-                        .rounded(px(4.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .role(gpui::Role::Button)
-                        .aria_label("Go to address")
-                        .hover(|s| s.bg(crate::theme::wash(0.10)))
+                    crate::components::browser_parts::browser_go_button(&theme)
                         .on_mouse_down(MouseButton::Left, |_, w, _| w.prevent_default())
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
                         .child(

@@ -20,7 +20,6 @@ use gpui::{
 use super::{ArtifactTab, Presenter};
 use crate::artifacts::find::{FrameCommand, command_script};
 use crate::artifacts::zoom::{self, ZoomInput, ZoomMemory};
-use crate::surface_chrome;
 use crate::theme::Theme;
 
 /// Padding around a zoomed image.
@@ -382,25 +381,7 @@ impl ArtifactTab {
             theme.accent
         };
         let button = |id: &'static str, text: SharedString, enabled: bool| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .h(px(surface_chrome::CONTROL_SIZE))
-                .min_w(px(surface_chrome::CONTROL_SIZE))
-                .px(px(4.0))
-                .rounded(px(surface_chrome::CONTROL_RADIUS))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .when(enabled, |el| {
-                    el.cursor_pointer()
-                        .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
-                })
-                .when(!enabled, |el| el.cursor_default().opacity(0.35))
-                .child(text)
+            crate::components::browser_parts::artifact_zoom_button(id, text, enabled, theme)
         };
         Some(
             div()

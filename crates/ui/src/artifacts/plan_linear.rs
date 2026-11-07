@@ -156,20 +156,7 @@ pub(crate) fn render(
 ) -> AnyElement {
     let selector = |suffix: &str| -> SharedString { format!("{id}-{suffix}").into() };
     let frame = |sel: SharedString| {
-        div()
-            .id(sel.clone())
-            .debug_selector(move || sel.to_string())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_card)
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
+        crate::components::browser_parts::artifact_plan_frame(sel, theme)
     };
     let note = |sel: SharedString, text: String| {
         frame(sel)
@@ -235,19 +222,7 @@ pub(crate) fn render(
         )
         .when_some(model.state.clone(), |el, (label, tone)| {
             el.child(
-                div()
-                    .debug_selector({
-                        let sel = selector("state");
-                        move || sel.to_string()
-                    })
-                    .flex_none()
-                    .px(px(5.0))
-                    .rounded(px(3.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(tone_color(tone, theme))
-                    .child(SharedString::from(label)),
+                crate::components::browser_parts::artifact_plan_state(selector("state"), label, tone_color(tone, theme), theme)
             )
         });
     let progress = model.progress.map(|fraction| {
@@ -260,18 +235,7 @@ pub(crate) fn render(
             .items_center()
             .gap(px(6.0))
             .child(
-                div()
-                    .flex_1()
-                    .h(px(4.0))
-                    .rounded(px(2.0))
-                    .bg(crate::theme::wash(0.12))
-                    .child(
-                        div()
-                            .h_full()
-                            .rounded(px(2.0))
-                            .bg(theme.accent)
-                            .w(gpui::relative(fraction.clamp(0.0, 1.0))),
-                    ),
+                crate::components::browser_parts::artifact_progress(fraction, theme)
             )
             .child(SharedString::from(
                 model.progress_label.clone().unwrap_or_default(),

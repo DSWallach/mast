@@ -164,16 +164,7 @@ impl Render for ArchivedPage {
                 let chat_id = chat.id.clone();
                 // zeron settings.archived.tsx row: archive tile, medium title
                 // + tabular time, quiet device · location meta, Unarchive.
-                div()
-                    .id(("archived-row", ix))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(12.0))
-                    .rounded(px(8.0))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .hover(|s| s.bg(crate::theme::ink(0.03)))
+                crate::components::settings_archived_row(&theme, ix)
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered {
                             this.hovered = Some(ix);
@@ -183,20 +174,7 @@ impl Render for ArchivedPage {
                         cx.notify();
                     }))
                     .child(
-                        div()
-                            .flex_none()
-                            .size(px(32.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                crate::icons::icon(crate::icons::ARCHIVE_MINIMALISTIC)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted.opacity(0.6)),
-                            ),
+                        crate::components::settings_archive_tile(&theme)
                     )
                     .child(
                         div()
@@ -256,24 +234,7 @@ impl Render for ArchivedPage {
                         // Hidden until the row is hovered (zeron `opacity-0
                         // group-hover:opacity-100`); hover fill is the solid
                         // accent tone (`hover:bg-accent`).
-                        div()
-                            .id(("unarchive", ix))
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .opacity(if row_hovered || is_busy { 1.0 } else { 0.0 })
-                            .when(is_busy, |el| el.opacity(0.4))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
+                        crate::components::settings_unarchive_action(&theme, ix, row_hovered, is_busy)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.unarchive(chat_id.clone(), cx);
                             }))

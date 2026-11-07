@@ -102,39 +102,10 @@ pub(crate) fn artifact_card(
         .py(px(4.0))
         .w_full()
         .child(
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .w_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface_raised)
-                .px(px(10.0))
-                .py(px(9.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label(format!("Open artifact {title}"))
-                .hover(|card| card.bg(theme.element_hover))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(28.0))
-                        .rounded(px(7.0))
-                        .bg(theme.accent.opacity(0.10))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(card.icon)
-                                .size(px(15.0))
-                                .text_color(theme.accent),
-                        ),
-                )
+            crate::components::browser_parts::artifact_card_frame(
+                SharedString::from(selector), format!("Open artifact {title}"), theme,
+            )
+                .child(crate::components::browser_parts::artifact_card_icon(card.icon, theme))
                 .child(
                     div()
                         .min_w_0()
@@ -158,18 +129,9 @@ pub(crate) fn artifact_card(
                         ),
                 )
                 .child(
-                    div()
-                        .id(SharedString::from(format!("{row_id}#artifact-open")))
-                        .flex_none()
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text)
-                        .hover(|el| el.bg(theme.element_hover))
-                        .child("Open")
+                    crate::components::browser_parts::artifact_card_open(
+                        SharedString::from(format!("{row_id}#artifact-open")), theme,
+                    )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             open_button(window, cx)

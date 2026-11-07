@@ -167,35 +167,12 @@ pub fn page_column() -> gpui::Div {
 /// Page headline row: `flex items-baseline gap-2.5` — `text-base font-semibold`
 /// title + `text-[13px]` count sharing a baseline (zeron settings.devices.tsx).
 pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .gap(px(10.0))
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(16.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(SharedString::from(title.to_string())),
-        )
-        .when_some(count, |el, count| {
-            el.child(
-                div()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(format!("{count}"))),
-            )
-        })
+    crate::components::settings_page_header(theme, title, count)
 }
 
 /// Subtitle under the headline: `mt-1 text-[13px] text-muted-foreground`.
 pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .mt(px(4.0))
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted)
-        .child(copy.into())
+    crate::components::settings_page_subtitle(theme, copy)
 }
 
 /// Small label above a group of controls (`text-[13px] font-medium`) — the
@@ -241,43 +218,7 @@ pub fn option_card(
     selected: bool,
     preview: AnyElement,
 ) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(8.0))
-        .cursor_pointer()
-        .child(
-            div()
-                .h(px(OPTION_CARD_HEIGHT))
-                .w_full()
-                .rounded(px(OPTION_CARD_RADIUS))
-                .overflow_hidden()
-                .border_1()
-                .border_color(if selected { theme.accent } else { theme.border })
-                .child(preview),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(13.0))
-                .font_weight(if selected {
-                    gpui::FontWeight::MEDIUM
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(if selected {
-                    theme.accent
-                } else {
-                    theme.text_muted
-                })
-                .child(crate::icons::icon(icon_path).size(px(16.0)).flex_none())
-                .child(label.into()),
-        )
+    crate::components::settings_option_card(theme, icon_path, label, selected, preview)
 }
 
 /// Section card: `mt-6 overflow-hidden rounded-xl border border-border bg-card`
@@ -296,61 +237,19 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
 /// The identity tile on a row: `size-9 rounded-[10px] border bg-white/[0.03]`
 /// around a 16px icon.
 pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
-    div()
-        .flex_none()
-        .size(px(36.0))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(ink(0.03))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            crate::icons::icon(icon_path)
-                .size(px(16.0))
-                .text_color(theme.text_muted),
-        )
+    crate::components::settings_row_tile(theme, icon_path)
 }
 
 /// Row title. These metrics intentionally match the Shortcuts rows, whose
 /// title/description rhythm is the reference for the other settings cards.
 pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .min_w_0()
-        .truncate()
-        .text_size(crate::typography::ui_rems(ROW_TITLE_SIZE))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text)
-        .child(title.into())
+    crate::components::settings_row_title(theme, title)
 }
 
 /// The quiet meta line under a row title: `text-[12px]
 /// text-muted-foreground/65` fragments joined by dots.
 pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
-    let mut line = div()
-        .mt(px(Theme::TEXT_STACK_GAP))
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(8.0))
-        .gap_y(px(2.0))
-        .text_size(crate::typography::ui_rems(ROW_DESCRIPTION_SIZE))
-        .text_color(theme.text_muted.opacity(0.65));
-    let mut first = true;
-    for fragment in fragments {
-        if !first {
-            line = line.child(
-                div()
-                    .text_color(theme.text_muted.opacity(0.3))
-                    .child(SharedString::from("·")),
-            );
-        }
-        line = line.child(fragment);
-        first = false;
-    }
-    line
+    crate::components::settings_meta_line(theme, fragments)
 }
 
 /// Right-anchored badge pill: `rounded-full border px-2 py-0.5 text-[10.5px]`.
@@ -376,26 +275,7 @@ pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
 /// its own `.hover(..)` — gpui panics on a second hover, and the pages vary
 /// it (reveal opacity, 4% vs 6% washes).
 pub fn ghost_action(theme: &Theme) -> gpui::Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
-        .when(
-            theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
-            |el| {
-                el.bg(theme.surface_raised)
-                    .border_1()
-                    .border_b_2()
-                    .border_color(theme.border)
-            },
-        )
-        .px(px(10.0))
-        .py(px(6.0))
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text_muted)
-        .cursor_pointer()
+    crate::components::settings_ghost_action(theme)
 }
 
 /// The default ghost-action hover wash (`hover:bg-white/[0.06]
@@ -408,58 +288,12 @@ pub fn ghost_hover(theme: &Theme, s: gpui::StyleRefinement) -> gpui::StyleRefine
 /// border-red-400/20 bg-red-400/[0.06] text-red-300/90` with a leading
 /// `DangerTriangle mt-0.5 size-4`).
 pub fn error_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div {
-    let red = theme.danger; // red-400
-    let red_text = theme.danger_muted; // red-300
-    div()
-        .mt(px(16.0))
-        .px(px(16.0))
-        .py(px(12.0))
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(red.opacity(0.2))
-        .bg(red.opacity(0.06))
-        .text_size(crate::typography::ui_rems(12.5))
-        .text_color(red_text.opacity(0.9))
-        .flex()
-        .flex_row()
-        .items_start()
-        .gap(px(8.0))
-        .child(
-            div().flex_none().mt(px(2.0)).child(
-                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                    .size(px(16.0))
-                    .text_color(red_text.opacity(0.9)),
-            ),
-        )
-        .child(div().min_w_0().child(message.into()))
+    crate::components::settings_error_strip(theme, message)
 }
 
 /// The amber warning strip (`flex items-start gap-2 border-amber-400/20
 /// bg-amber-400/[0.06] text-amber-200/90` with a leading `DangerTriangle
 /// mt-0.5 size-3.5`).
 pub fn warning_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div {
-    let amber = theme.warning; // amber-400
-    let amber_text = theme.warning_muted; // amber-200
-    div()
-        .mt(px(8.0))
-        .px(px(16.0))
-        .py(px(10.0))
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(amber.opacity(0.2))
-        .bg(amber.opacity(0.06))
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(amber_text.opacity(0.9))
-        .flex()
-        .flex_row()
-        .items_start()
-        .gap(px(8.0))
-        .child(
-            div().flex_none().mt(px(2.0)).child(
-                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                    .size(px(14.0))
-                    .text_color(amber_text.opacity(0.9)),
-            ),
-        )
-        .child(div().min_w_0().child(message.into()))
+    crate::components::settings_warning_strip(theme, message)
 }

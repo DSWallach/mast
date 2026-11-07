@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyDownEvent, ObjectFit, Render, SharedString, StyledImage as _, Subscription, Window, div,
-    img, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, Render, SharedString, Subscription, Window, div,
+    prelude::*, px,
 };
 use mast_theme::vscode::{ImportReport, SourceCompilation};
 use mast_theme::{
@@ -1212,13 +1212,6 @@ fn format_px(size: f32) -> String {
     }
 }
 
-fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
-    div()
-        .h(px(5.0))
-        .w(gpui::relative(fraction))
-        .rounded(px(3.0))
-        .bg(tone)
-}
 
 fn accent_helper(accent: AccentSelection) -> String {
     match accent {
@@ -1259,39 +1252,14 @@ fn surface_choice(
     surface: SurfacePreference,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
-            "appearance-surface-{}",
-            surface_label(surface).to_lowercase().replace(' ', "-")
-        )))
-        .h(px(30.0))
-        .px(px(10.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
-            theme.accent_wash
-        } else {
-            theme.surface_raised.opacity(0.28)
-        })
-        .text_size(crate::typography::ui_rems(11.5))
-        .font_weight(if selected {
-            gpui::FontWeight::MEDIUM
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if selected {
-            theme.accent
-        } else {
-            theme.text_muted
-        })
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(!selected, |control| {
-            control.hover(|style| style.bg(theme.surface_raised_hover))
-        })
-        .child(surface_label(surface))
+    let label = surface_label(surface);
+    crate::components::settings_choice(
+        theme,
+        SharedString::from(format!("appearance-surface-{}", label.to_lowercase().replace(' ', "-"))),
+        label,
+        selected,
+        false,
+    )
 }
 
 fn background_effect_choice(
@@ -1299,143 +1267,15 @@ fn background_effect_choice(
     effect: crate::settings::NewThreadBackgroundEffect,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
-            "new-thread-background-effect-{}",
-            effect.label().to_lowercase()
-        )))
-        .h(px(28.0))
-        .px(px(9.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
-            theme.accent_wash
-        } else {
-            theme.surface_raised.opacity(0.28)
-        })
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(if selected {
-            gpui::FontWeight::MEDIUM
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if selected {
-            theme.accent
-        } else {
-            theme.text_muted
-        })
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(!selected, |control| {
-            control.hover(|style| style.bg(theme.surface_raised_hover))
-        })
-        .child(effect.label())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Corners {
-    All,
-    Left,
-    Right,
-}
-
-fn miniature(theme: &Theme, corners: Corners) -> AnyElement {
-    let line = theme.text.opacity(0.22);
-    let strong = theme.text.opacity(0.34);
-    let r = px(widgets::OPTION_CARD_RADIUS);
-    let root = div().size_full().flex().flex_row().bg(theme.surface);
-    let root = match corners {
-        Corners::All => root.rounded(r),
-        Corners::Left => root.rounded_tl(r).rounded_bl(r),
-        Corners::Right => root.rounded_tr(r).rounded_br(r),
-    };
-    root.child(
-        div()
-            .w(px(44.0))
-            .h_full()
-            .flex_none()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .gap(px(7.0))
-            .px(px(8.0))
-            .pt(px(14.0))
-            .child(bar(0.70, strong))
-            .child(bar(1.0, line))
-            .child(bar(0.85, line))
-            .child(bar(1.0, line)),
+    crate::components::settings_choice(
+        theme,
+        SharedString::from(format!("new-thread-background-effect-{}", effect.label().to_lowercase())),
+        effect.label(),
+        selected,
+        true,
     )
-    .child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .my(px(8.0))
-            .mr(px(8.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg)
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .gap(px(7.0))
-            .p(px(10.0))
-            .child(bar(0.62, strong))
-            .child(bar(0.88, line))
-            .child(bar(0.76, line))
-            .child(bar(0.52, line)),
-    )
-    .into_any_element()
 }
 
-fn miniature_split(
-    themes: &ThemeSelection,
-    accent: AccentSelection,
-    surface: SurfacePreference,
-) -> AnyElement {
-    let light = Theme::for_selection(Appearance::Light, &themes.light, accent, surface);
-    let dark = Theme::for_selection(Appearance::Dark, &themes.dark, accent, surface);
-    div()
-        .size_full()
-        .flex()
-        .flex_row()
-        .child(
-            div()
-                .w_1_2()
-                .h_full()
-                .overflow_hidden()
-                .child(miniature(&light, Corners::Left)),
-        )
-        .child(
-            div()
-                .w_1_2()
-                .h_full()
-                .overflow_hidden()
-                .child(miniature(&dark, Corners::Right)),
-        )
-        .into_any_element()
-}
-
-fn preview(
-    mode: AppearanceMode,
-    themes: &ThemeSelection,
-    accent: AccentSelection,
-    surface: SurfacePreference,
-) -> AnyElement {
-    match mode {
-        AppearanceMode::System => miniature_split(themes, accent, surface),
-        AppearanceMode::Light => miniature(
-            &Theme::for_selection(Appearance::Light, &themes.light, accent, surface),
-            Corners::All,
-        ),
-        AppearanceMode::Dark => miniature(
-            &Theme::for_selection(Appearance::Dark, &themes.dark, accent, surface),
-            Corners::All,
-        ),
-    }
-}
 
 fn model_appearance(appearance: Appearance) -> mast_theme::Appearance {
     match appearance {
@@ -1464,19 +1304,7 @@ fn compact_action(
     label: &str,
     id: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
-    let id = id.into();
-    popover::btn_ghost(theme, label, id.clone())
-        .id(id)
-        .h(px(28.0))
-        .px(px(9.0))
-        .py(px(0.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised.opacity(0.34))
-        .flex()
-        .items_center()
-        .text_size(crate::typography::ui_rems(11.5))
+    crate::components::settings_compact_action(theme, label, id)
 }
 
 fn import_scene_preview(variant: &mast_theme::ThemeVariant) -> AnyElement {
@@ -1498,7 +1326,7 @@ fn import_scene_preview(variant: &mast_theme::ThemeVariant) -> AnyElement {
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(theme.border)
-                .child(miniature(&theme, Corners::All)),
+                .child(crate::components::settings_theme_miniature(&theme)),
         )
         .child(
             div()
@@ -1579,66 +1407,7 @@ fn import_scene_preview(variant: &mast_theme::ThemeVariant) -> AnyElement {
 }
 
 fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Div> {
-    let summary = format!(
-        "{} mapped · {} adjusted · {} inferred/fallback · {} unsupported · {} warnings · {} validation",
-        report.mappings.len(),
-        report.adjustments.len(),
-        report.fallbacks.len(),
-        report.dropped.len(),
-        report.warnings.len(),
-        report.validation.len(),
-    );
-    div()
-        .id(SharedString::from(format!(
-            "theme-report-{}",
-            report.source_hash
-        )))
-        .mt(px(8.0))
-        .w_full()
-        .max_h(px(168.0))
-        .overflow_y_scroll()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised.opacity(0.35))
-        .p(px(10.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .line_height(px(16.0))
-        .text_color(theme.text_muted)
-        .child(div().text_color(theme.text).child(summary))
-        .children(report.adjustments.iter().map(|adjustment| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "Adjusted · {} {} → {} · {}",
-                adjustment.mast_role, adjustment.original, adjustment.resolved, adjustment.reason
-            )))
-        }))
-        .children(report.fallbacks.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Fallback · {message}")))
-        }))
-        .children(report.warnings.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Warning · {message}")))
-        }))
-        .children(report.validation.iter().map(|issue| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "Validation {:?} {:?} · {}",
-                issue.category, issue.severity, issue.message
-            )))
-        }))
-        .children(report.dropped.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Unsupported · {message}")))
-        }))
-        .children(report.mappings.iter().map(|mapping| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "{} ← {}",
-                mapping.mast_role, mapping.vscode_key
-            )))
-        }))
+    crate::components::settings_report_panel(theme, report)
 }
 
 fn accent_swatch(
@@ -1646,71 +1415,7 @@ fn accent_swatch(
     selection: AccentSelection,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let swatch_theme = Theme::for_selection(
-        page_theme.appearance,
-        page_theme.variant_id.as_ref(),
-        selection,
-        page_theme.surface_preference,
-    );
-    let sample = match selection {
-        AccentSelection::ThemeDefault => div()
-            .size_full()
-            .rounded(px(6.0))
-            .bg(swatch_theme.accent_wash)
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(2.0))
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(13.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.light),
-            )
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(16.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.mid),
-            )
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(11.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.deep),
-            ),
-        AccentSelection::Preset(_) => div().size_full().rounded(px(6.0)).bg(swatch_theme.accent),
-    };
-    div()
-        .id(SharedString::from(format!("accent-{}", selection.label())))
-        .flex_none()
-        .w(px(30.0))
-        .h(px(34.0))
-        .pb(px(4.0))
-        .border_b_2()
-        .border_color(if selected {
-            swatch_theme.accent
-        } else {
-            gpui::transparent_black()
-        })
-        .cursor_pointer()
-        .child(
-            div()
-                .size(px(30.0))
-                .p(px(2.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(if selected {
-                    page_theme.border_strong
-                } else {
-                    page_theme.border
-                })
-                .bg(page_theme.surface_raised.opacity(0.42))
-                .child(sample),
-        )
+    crate::components::settings_accent_swatch(page_theme, selection, selected)
 }
 
 impl AppearancePage {
@@ -1857,25 +1562,9 @@ impl AppearancePage {
 
         let open = self.font_menu(kind).is_open();
         let closing = self.font_menu(kind).closing_since();
-        div()
-            .id(SharedString::from(format!("{slug}-font-dropdown")))
-            .relative()
-            .w(px(220.0))
-            .h(px(36.0))
-            .px(px(11.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(if open {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(crate::theme::ink(0.025))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
+        crate::components::settings_picker(
+            theme, SharedString::from(format!("{slug}-font-dropdown")), 220.0, open, false,
+        )
             .track_focus(self.font_focus(kind))
             // Only the closed state: once open, the card above owns these keys
             // and stops their propagation before they reach us.
@@ -1964,25 +1653,9 @@ impl AppearancePage {
 
         let open = self.size_menu(kind).is_open();
         let closing = self.size_menu(kind).closing_since();
-        div()
-            .id(SharedString::from(format!("{slug}-font-size-dropdown")))
-            .relative()
-            .w(px(128.0))
-            .h(px(36.0))
-            .px(px(11.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(if open {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(crate::theme::ink(0.025))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
+        crate::components::settings_picker(
+            theme, SharedString::from(format!("{slug}-font-size-dropdown")), 128.0, open, false,
+        )
             .track_focus(self.size_focus(kind))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 this.on_size_key_down(kind, event, window, cx)
@@ -2035,35 +1708,11 @@ impl AppearancePage {
         );
         let open = self.theme_menu(appearance_kind).is_open();
 
-        let mut trigger = div()
-            .id(SharedString::from(format!(
-                "{}-theme-selector",
-                if appearance_kind.is_light() {
-                    "light"
-                } else {
-                    "dark"
-                }
-            )))
-            .relative()
-            .flex_none()
-            .w(px(218.0))
-            .h(px(34.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(if open {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(theme.surface_raised.opacity(if open { 0.75 } else { 0.42 }))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .when(!open, |el| {
-                el.hover(|style| style.bg(theme.surface_raised_hover))
-            })
+        let mut trigger = crate::components::settings_picker(
+            theme,
+            SharedString::from(format!("{}-theme-selector", if appearance_kind.is_light() { "light" } else { "dark" })),
+            218.0, open, true,
+        )
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, _, _| {
@@ -2203,70 +1852,15 @@ impl AppearancePage {
 
         let mode_control = |label: &'static str, description: &'static str, value: InstallMode| {
             let active = mode == value;
-            div()
-                .id(SharedString::from(format!(
-                    "theme-import-mode-{}",
-                    slug(label)
-                )))
-                .flex_1()
-                .min_w_0()
-                .p(px(10.0))
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(if active { theme.accent } else { theme.border })
-                .bg(if active {
-                    theme.accent_wash
-                } else {
-                    theme.surface_raised.opacity(0.28)
-                })
-                .cursor_pointer()
-                .when(!active, |control| {
-                    control.hover(|style| style.bg(theme.surface_raised_hover))
-                })
+            crate::components::settings_import_mode(
+                theme, SharedString::from(format!("theme-import-mode-{}", slug(label))), label, description, active,
+            )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(dialog) = this.import_dialog.as_mut() {
                         dialog.mode = value;
                     }
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(
-                            div()
-                                .size(px(16.0))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(if active {
-                                    theme.accent
-                                } else {
-                                    theme.border_strong
-                                })
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(active, |dot| {
-                                    dot.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if active { theme.text } else { theme.text_muted })
-                                .child(label),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt(px(4.0))
-                        .ml(px(23.0))
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted)
-                        .child(description),
-                )
         };
 
         let section_label = |label: &'static str| {
@@ -2372,54 +1966,14 @@ impl AppearancePage {
                     SurfacePreference::ThemeDefault,
                 );
                 main = main.child(
-                    div()
-                        .id(SharedString::from(format!("theme-import-row-{variant_id}")))
-                        .mt(px(8.0))
-                        .p(px(11.0))
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(if selected_now {
-                            theme.accent.opacity(0.7)
-                        } else {
-                            theme.border
-                        })
-                        .bg(if selected_now {
-                            theme.accent_wash.opacity(0.42)
-                        } else {
-                            theme.surface_raised.opacity(0.22)
-                        })
-                        .flex()
-                        .flex_col()
+                    crate::components::settings_theme_import_row(theme, SharedString::from(format!("theme-import-row-{variant_id}")), selected_now)
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(9.0))
                                 .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "theme-import-select-{variant_id}"
-                                        )))
-                                        .size(px(18.0))
-                                        .rounded(px(5.0))
-                                        .border_1()
-                                        .border_color(if selected_now {
-                                            theme.accent
-                                        } else {
-                                            theme.border_strong
-                                        })
-                                        .bg(if selected_now { theme.accent } else { theme.bg })
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .when(selected_now, |item| {
-                                            item.child(
-                                                icons::icon(icons::CHECK)
-                                                    .size(px(12.0))
-                                                    .text_color(theme.on_accent),
-                                            )
-                                        })
+                                    crate::components::settings_theme_import_checkbox(theme, SharedString::from(format!("theme-import-select-{variant_id}")), selected_now)
                                         .on_click(cx.listener({
                                             let variant_id = variant_id.clone();
                                             move |this, _, _, cx| {
@@ -2494,13 +2048,7 @@ impl AppearancePage {
             }
             for failure in &compilation.failures {
                 main = main.child(
-                    div()
-                        .mt(px(8.0))
-                        .p(px(10.0))
-                        .rounded(px(8.0))
-                        .bg(theme.warning.opacity(0.08))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.warning)
+                    crate::components::settings_import_warning(theme)
                         .child(SharedString::from(format!(
                             "{} could not be compiled · {}",
                             failure.name, failure.message
@@ -2529,23 +2077,7 @@ impl AppearancePage {
 
         if let Some(error) = error {
             main = main.child(
-                div()
-                    .mt(px(12.0))
-                    .p(px(10.0))
-                    .rounded(px(8.0))
-                    .bg(theme.danger.opacity(0.08))
-                    .flex()
-                    .items_start()
-                    .gap(px(7.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .line_height(px(16.0))
-                    .text_color(theme.danger)
-                    .child(
-                        icons::icon(icons::DANGER_TRIANGLE)
-                            .size(px(13.0))
-                            .flex_none()
-                            .mt(px(1.0)),
-                    )
+                crate::components::settings_import_error(theme)
                     .child(div().flex_1().min_w_0().truncate().child(error)),
             );
         }
@@ -2571,18 +2103,7 @@ impl AppearancePage {
                     ),
             )
             .child(
-                div()
-                    .id("theme-import-close")
-                    .size(px(28.0))
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.surface_raised.opacity(0.28))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.surface_raised_hover))
+                crate::components::settings_import_close(theme)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.import_dialog = None;
                         cx.notify();
@@ -2984,7 +2505,7 @@ impl Render for AppearancePage {
                     mode.icon(),
                     mode.label(),
                     mode == current_mode,
-                    preview(mode, &current_themes, current_accent, current_surface),
+                    crate::components::settings_appearance_preview(&theme, mode, &current_themes, current_accent, current_surface),
                 )
                 .id(SharedString::from(format!("appearance-{}", mode.label())))
                 .on_click(cx.listener(move |_, _, _, cx| {
@@ -2999,31 +2520,7 @@ impl Render for AppearancePage {
             .copied()
             .map(|id| {
                 let label = id.label();
-                let description = id.description();
-                let gap = id.preview_gap();
-                let preview = div()
-                    .size_full()
-                    .rounded(px(widgets::OPTION_CARD_RADIUS))
-                    .bg(theme.surface)
-                    .p(px(16.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(gap))
-                    .children((0..4).map(|_| {
-                        div()
-                            .h(px(12.0))
-                            .w_full()
-                            .rounded(px(3.0))
-                            .bg(theme.surface_raised)
-                    }))
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(description),
-                    )
-                    .into_any_element();
+                let preview = crate::components::settings_style_preview(&theme, id);
                 widgets::option_card(
                     &theme,
                     icons::MONITOR,
@@ -3041,16 +2538,7 @@ impl Render for AppearancePage {
 
         let layout_cards = crate::ui_style::UiLayout::ALL.iter().copied().map(|layout| {
             let label = layout.label();
-            let (description, gap) = match layout {
-                crate::ui_style::UiLayout::Minimal => ("Current spacing", 4.0),
-                crate::ui_style::UiLayout::Compact => ("More on screen", 2.0),
-                crate::ui_style::UiLayout::Guided => ("More labels and guidance", 6.0),
-            };
-            let preview = div().size_full().rounded(px(widgets::OPTION_CARD_RADIUS))
-                .bg(theme.surface).p(px(16.0)).flex().flex_col().gap(px(gap))
-                .children((0..4).map(|_| div().h(px(12.0)).w_full().rounded(px(3.0)).bg(theme.surface_raised)))
-                .child(div().mt(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(description))
-                .into_any_element();
+            let preview = crate::components::settings_layout_preview(&theme, layout);
             widgets::option_card(&theme, icons::MONITOR, label, ui_settings.ui_layout == layout, preview)
                 .id(SharedString::from(format!("layout-{label}")))
                 .on_click(cx.listener(move |_, _, window, cx| {
@@ -3127,18 +2615,7 @@ impl Render for AppearancePage {
         .into_iter()
         .map(|(value, label)| {
             let active = ui_settings.team_tab_visibility == value;
-            div()
-                .id(SharedString::from(format!("team-visibility-{label}")))
-                .px(px(10.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
-                .bg(if active {
-                    theme.accent.opacity(0.15)
-                } else {
-                    crate::theme::wash(0.025)
-                })
-                .cursor_pointer()
-                .child(label)
+            crate::components::settings_team_visibility(&theme, label, active)
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(AppearanceSettingsEvent::TeamTabVisibilityChanged(value));
                     cx.notify();
@@ -3240,20 +2717,7 @@ impl Render for AppearancePage {
         let background_tile: AnyElement = if let Some(background) =
             current_background.as_ref().filter(|_| background_available)
         {
-            div()
-                .flex_none()
-                .size(px(36.0))
-                .rounded(px(10.0))
-                .overflow_hidden()
-                .border_1()
-                .border_color(crate::theme::hairline(0.10))
-                .child(
-                    img(PathBuf::from(background.path.clone()))
-                        .size(px(34.0))
-                        .rounded(px(9.0))
-                        .object_fit(ObjectFit::Cover),
-                )
-                .into_any_element()
+            crate::components::settings_background_thumbnail(&theme, PathBuf::from(background.path.clone())).into_any_element()
         } else {
             widgets::row_tile(&theme, icons::FILE_IMAGE).into_any_element()
         };
