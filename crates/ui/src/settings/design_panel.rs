@@ -171,14 +171,22 @@ impl DesignPanel {
             .or_default();
         if index == 0 {
             entry.tokens.details_border = value;
-        } else {
+        } else if index == 1 {
             entry.tokens.details_page_surface = value;
+        } else if index == 2 {
+            entry.tokens.outline_page_surface = value;
+        } else {
+            entry.tokens.sidebar_border = value;
         }
         if let Some(layout) = entry.layouts.get_mut(layout_name(style.layout)) {
             if index == 0 {
                 layout.details_border = None;
-            } else {
+            } else if index == 1 {
                 layout.details_page_surface = None;
+            } else if index == 2 {
+                layout.outline_page_surface = None;
+            } else {
+                layout.sidebar_border = None;
             }
         }
         style_overrides::preview(overrides, cx);
@@ -351,16 +359,29 @@ impl Render for DesignPanel {
                     ),
             );
         }
-        for (index, label) in [(0, "Details border"), (1, "Details uses page colour")] {
+        for (index, label) in [
+            (0, "Details border"),
+            (1, "Details uses page colour"),
+            (2, "Outline uses page colour"),
+            (3, "Sidebar separator"),
+        ] {
             let roles = current.design_roles;
             let selected = if index == 0 {
                 roles
                     .details_border
                     .unwrap_or(current.id != UiStyleId::Area)
-            } else {
+            } else if index == 1 {
                 roles
                     .details_page_surface
                     .unwrap_or(current.id == UiStyleId::Area)
+            } else if index == 2 {
+                roles
+                    .outline_page_surface
+                    .unwrap_or(current.id == UiStyleId::Area)
+            } else {
+                roles
+                    .sidebar_border
+                    .unwrap_or(current.id != UiStyleId::Area)
             };
             content = content.child(
                 div()
@@ -511,6 +532,20 @@ impl Render for DesignPanel {
                                 value
                             ));
                         }
+                        if let Some(value) = tokens.sidebar_border {
+                            patch.push_str(&format!(
+                                "Sidebar separator: {} → {}\n",
+                                style.id != UiStyleId::Area,
+                                value
+                            ));
+                        }
+                        if let Some(value) = tokens.outline_page_surface {
+                            patch.push_str(&format!(
+                                "Outline uses page colour: {} → {}\n",
+                                style.id == UiStyleId::Area,
+                                value
+                            ));
+                        }
                         if let Some(role) = tokens.primary_colour {
                             patch.push_str(&format!(
                                 "Primary action colour: component default → {}\n",
@@ -569,6 +604,14 @@ impl Render for DesignPanel {
                                     (
                                         "Details uses page colour",
                                         values.details_page_surface.map(|v| v.to_string()),
+                                    ),
+                                    (
+                                        "Sidebar separator",
+                                        values.sidebar_border.map(|v| v.to_string()),
+                                    ),
+                                    (
+                                        "Outline uses page colour",
+                                        values.outline_page_surface.map(|v| v.to_string()),
                                     ),
                                     (
                                         "Primary action colour",

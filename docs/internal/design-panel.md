@@ -7,8 +7,8 @@ change Style or Layout. The controls apply to the actual running app.
 
 The sliders change control, panel, chip and bubble radii, control height,
 sidebar row height, grid size, small spacing and rule width where components use those tokens.
-The details controls affect the work-item details frame: its border and whether
-its background uses the page colour. Primary and secondary colour choices affect
+The sidebar separator toggle changes the sidebar rule. The details controls affect the work-item details frame: its border and whether
+its background uses the page colour. The outline control changes the tree and overview header background. Primary and secondary colour choices affect
 work-item action buttons. Heading family, weight and tracked caps affect settings
 page headings. Other components retain their existing decisions. Reset clears an
 individual override; Reset style clears all overrides for that style, including

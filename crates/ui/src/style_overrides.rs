@@ -80,7 +80,9 @@ impl HeadingWeight {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DesignRoles {
     pub details_border: Option<bool>,
+    pub sidebar_border: Option<bool>,
     pub details_page_surface: Option<bool>,
+    pub outline_page_surface: Option<bool>,
     pub primary_colour: Option<ColourRole>,
     pub secondary_colour: Option<ColourRole>,
     pub heading_family: Option<HeadingFamily>,
@@ -91,7 +93,9 @@ pub struct DesignRoles {
 impl DesignRoles {
     pub const NONE: Self = Self {
         details_border: None,
+        sidebar_border: None,
         details_page_surface: None,
+        outline_page_surface: None,
         primary_colour: None,
         secondary_colour: None,
         heading_family: None,
@@ -123,7 +127,11 @@ pub struct TokenOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details_border: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_border: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub details_page_surface: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline_page_surface: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_colour: Option<ColourRole>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,8 +151,14 @@ impl TokenOverrides {
         if self.details_border.is_some() {
             style.design_roles.details_border = self.details_border;
         }
+        if self.sidebar_border.is_some() {
+            style.design_roles.sidebar_border = self.sidebar_border;
+        }
         if self.details_page_surface.is_some() {
             style.design_roles.details_page_surface = self.details_page_surface;
+        }
+        if self.outline_page_surface.is_some() {
+            style.design_roles.outline_page_surface = self.outline_page_surface;
         }
         if self.primary_colour.is_some() {
             style.design_roles.primary_colour = self.primary_colour;
@@ -355,6 +369,22 @@ fn parse_tokens(object: &serde_json::Map<String, Value>, allow_layouts: bool) ->
             match serde_json::from_value::<ColourRole>(value.clone()) {
                 Ok(value) => *target = Some(value),
                 Err(_) => tracing::warn!(%key, "invalid colour role"),
+            }
+            continue;
+        }
+        if key == "sidebarBorder" {
+            if let Some(v) = value.as_bool() {
+                tokens.sidebar_border = Some(v);
+            } else {
+                tracing::warn!(%key, "invalid style token value");
+            }
+            continue;
+        }
+        if key == "outlinePageSurface" {
+            if let Some(v) = value.as_bool() {
+                tokens.outline_page_surface = Some(v);
+            } else {
+                tracing::warn!(%key, "invalid style token value");
             }
             continue;
         }

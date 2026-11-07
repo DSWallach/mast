@@ -693,10 +693,12 @@ pub fn outline_tree(theme: &Theme) -> Stateful<Div> {
             |el| el.bg(theme.surface),
         )
         .when(super::is_area(theme), |el| el.bg(theme.bg))
+        .when_some(theme.ui_style.design_roles.outline_page_surface, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
 }
 
 pub fn outline_overview_header(theme: &Theme) -> Div {
     div().when(super::is_area(theme), |el| el.bg(theme.bg))
+        .when_some(theme.ui_style.design_roles.outline_page_surface, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
 }
 
 /// Row chrome; selection, drag handling and content remain with the caller.

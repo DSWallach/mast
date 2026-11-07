@@ -8,11 +8,9 @@ use gpui::{
 
 pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
     div()
-        .h(px(if super::is_area(theme) {
-            0.0
-        } else {
+        .h(px(if theme.ui_style.design_roles.sidebar_border.unwrap_or_else(|| !super::is_area(theme)) {
             theme.ui_style.tokens.rule_width.unwrap_or(1.0)
-        }))
+        } else { 0.0 }))
         .bg(if theme.ui_style.tokens.rule_width.is_some() {
             theme.border
         } else {
