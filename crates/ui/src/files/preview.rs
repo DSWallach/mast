@@ -3090,30 +3090,7 @@ fn editor_comment_action(
     primary: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(22.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .cursor_pointer()
-        .when(primary, |element| {
-            element.bg(theme.solid).text_color(theme.on_solid)
-        })
-        .when(!primary, |element| {
-            element
-                .text_color(crate::motion::hover_blend(id, theme.text_muted, theme.text))
-                .bg(crate::motion::hover_blend(
-                    id,
-                    gpui::transparent_black(),
-                    theme.element_hover,
-                ))
-                .on_hover(crate::motion::hover_listener(id))
-        })
-        .child(SharedString::from(label))
+    crate::components::file_comment_button(id, label, primary, theme)
 }
 
 fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyElement {

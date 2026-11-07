@@ -609,3 +609,44 @@ pub(crate) fn changes_header_toggle(
                 }),
         )
 }
+
+pub(crate) fn file_comment_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(22.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .cursor_pointer()
+        .when(primary, |element| {
+            element.bg(theme.solid).text_color(theme.on_solid)
+        })
+        .when(!primary, |element| {
+            element
+                .text_color(crate::motion::hover_blend(id, theme.text_muted, theme.text))
+                .bg(crate::motion::hover_blend(
+                    id,
+                    gpui::transparent_black(),
+                    theme.element_hover,
+                ))
+                .on_hover(crate::motion::hover_listener(id))
+        })
+        .when(true, |element| {
+            super::segmented_key(element, theme, primary)
+        })
+        .when(super::is_area(theme), |element| {
+            element
+                .rounded_full()
+                .bg(theme.accent.opacity(if primary { 0.20 } else { 0.08 }))
+                .text_color(theme.text)
+        })
+        .child(gpui::SharedString::from(label))
+}
