@@ -3,12 +3,64 @@
 use crate::theme::Theme;
 use gpui::{Div, SharedString, Stateful, div, prelude::*, px};
 
-/// Apply the Area toolbar treatment while preserving other styles.
-pub fn area_toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
+/// Primary actions in the Area details surface.
+pub fn outline_details_primary(theme: &Theme, label: &str) -> bool {
+    super::is_area(theme) && matches!(label, "Start Chat" | "Save" | "Add" | "Set date")
+}
+
+pub fn overview_group_button(id: SharedString, active: bool, theme: &Theme) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(10.5))
+        .when(active, |el| {
+            el.bg(theme.element_active).text_color(theme.text)
+        })
+        .when(!active, |el| el.text_color(theme.text_muted));
     if super::is_area(theme) {
-        super::toolbar_control(element, theme, primary)
+        super::toolbar_control(button, theme, false)
     } else {
-        element
+        button
+    }
+}
+
+pub fn overview_group_frame(theme: &Theme) -> Div {
+    let frame = div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .p(px(2.0))
+        .rounded(px(6.0))
+        .bg(theme.element_hover.opacity(0.3));
+    if super::is_area(theme) {
+        super::toolbar_control(frame, theme, false)
+    } else {
+        frame
+    }
+}
+
+pub fn overview_work_item_filter(theme: &Theme, active: bool) -> Stateful<Div> {
+    let trigger = div()
+        .id("overview-work-item-filter")
+        .relative()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .bg(theme.element_hover.opacity(0.5))
+        .when(active, |el| {
+            el.bg(theme.element_active).text_color(theme.text)
+        })
+        .when(!active, |el| el.text_color(theme.text_muted))
+        .hover(|el| el.text_color(theme.text));
+    if super::is_area(theme) {
+        super::toolbar_control(trigger, theme, false)
+    } else {
+        trigger
     }
 }
 
@@ -44,6 +96,7 @@ pub fn outline_section_header(
     div()
         .id(id)
         .group("outline-section")
+        .when(super::is_area(theme), |el| el.relative())
         .flex()
         .items_center()
         .gap(px(4.0 * super::layout_spacing(theme)))
@@ -68,7 +121,10 @@ pub fn outline_section_header(
             .size(px(10.0))
             .text_color(theme.text_muted)
             .when(super::is_area(theme), |el| {
-                el.opacity(0.0)
+                el.absolute()
+                    .left(px(-14.0))
+                    .top(px(2.0))
+                    .opacity(0.0)
                     .group_hover("outline-section", |el| el.opacity(1.0))
             }),
         )
@@ -92,7 +148,11 @@ pub fn outline_chat_indicator(
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     if super::is_area(theme) && status == crate::status_style::Status::Waiting {
-        div().size(px(8.0)).rounded_full().bg(theme.accent).into_any_element()
+        div()
+            .size(px(8.0))
+            .rounded_full()
+            .bg(theme.accent)
+            .into_any_element()
     } else if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
         crate::status_style::indicator_for_theme(status, theme).into_any_element()
     } else if status == crate::status_style::Status::Working {
@@ -586,6 +646,12 @@ pub fn outline_list_heading(label: String, theme: &Theme) -> Div {
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
+        .when(super::is_area(theme), |el| {
+            el.text_size(crate::typography::ui_rems(
+                theme.ui_style.tokens.body_size.unwrap_or(13.0)
+                    + super::layout_type_adjustment(theme),
+            ))
+        })
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text_muted)
         .when(industrial, |el| el.font_family(theme.font_mono.clone()))
@@ -924,6 +990,13 @@ pub fn outline_waiting_section(theme: &Theme) -> Div {
                 .text_size(crate::typography::ui_rems(
                     11.0 + super::layout_type_adjustment(theme),
                 ))
+                .when(super::is_area(theme), |el| {
+                    el.text_size(crate::typography::ui_rems(
+                        theme.ui_style.tokens.body_size.unwrap_or(13.0)
+                            + super::layout_type_adjustment(theme),
+                    ))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                })
                 .child("Waiting until…"),
         )
 }
@@ -1390,6 +1463,12 @@ pub fn outline_section_action_heading(label: &'static str, theme: &Theme) -> Div
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
+        .when(super::is_area(theme), |el| {
+            el.text_size(crate::typography::ui_rems(
+                theme.ui_style.tokens.body_size.unwrap_or(13.0)
+                    + super::layout_type_adjustment(theme),
+            ))
+        })
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text_muted)
         .flex()
@@ -1421,6 +1500,12 @@ pub fn outline_detail_heading(label: &'static str, theme: &Theme) -> Div {
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
+        .when(super::is_area(theme), |el| {
+            el.text_size(crate::typography::ui_rems(
+                theme.ui_style.tokens.body_size.unwrap_or(13.0)
+                    + super::layout_type_adjustment(theme),
+            ))
+        })
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text_muted)
         .child(label)

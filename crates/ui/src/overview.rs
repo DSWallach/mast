@@ -4703,21 +4703,7 @@ impl Render for Overview {
                     Some(ix) => format!("{label} {}", ix + 1),
                     None => label.to_string(),
                 };
-                crate::components::area_toolbar_control(
-                    div()
-                        .id(SharedString::from(format!("overview-group-{label}")))
-                        .px(px(7.0))
-                        .py(px(2.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .when(active, |el| {
-                            el.bg(theme.element_active).text_color(theme.text)
-                        })
-                        .when(!active, |el| el.text_color(theme.text_muted)),
-                    &theme,
-                    false,
-                )
+                crate::components::overview_group_button(SharedString::from(format!("overview-group-{label}")), active, &theme)
                 .child(SharedString::from(text))
                 .on_mouse_up(
                     MouseButton::Left,
@@ -4728,17 +4714,7 @@ impl Render for Overview {
                 )
             });
             toolbar = toolbar.child(
-                crate::components::area_toolbar_control(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .p(px(2.0))
-                        .rounded(px(6.0))
-                        .bg(theme.element_hover.opacity(0.3)),
-                    &theme,
-                    false,
-                )
+                crate::components::overview_group_frame(&theme)
                 .child(
                     div()
                         .px(px(5.0))
@@ -5939,20 +5915,7 @@ impl Overview {
     /// The List work-item filter dropdown (same shape as "Repos").
     fn render_work_item_filter(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let active = !self.work_item_filter.is_empty() || self.work_item_filter_popup.is_open();
-        let trigger = div()
-            .id("overview-work-item-filter")
-            .relative()
-            .px(px(8.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(11.0))
-            .bg(theme.element_hover.opacity(0.5))
-            .when(active, |el| {
-                el.bg(theme.element_active).text_color(theme.text)
-            })
-            .when(!active, |el| el.text_color(theme.text_muted))
-            .hover(|el| el.text_color(theme.text))
+        let trigger = crate::components::overview_work_item_filter(theme, active)
             .child(SharedString::from(format!(
                 "{} ▾",
                 work_item_filter::filter_label(&self.work_item_filter)
@@ -5970,7 +5933,6 @@ impl Overview {
                     cx.notify();
                 }
             }));
-        let trigger = crate::components::area_toolbar_control(trigger, theme, false);
         if self.work_item_filter_popup.get().is_none() {
             return trigger.into_any_element();
         }
