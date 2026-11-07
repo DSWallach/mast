@@ -814,3 +814,52 @@ pub(crate) fn settings_autosave_choice(
         .cursor_pointer()
         .hover(|style| style.bg(crate::theme::wash(0.08)))
 }
+
+/// Container and options for the send-key setting.
+pub(crate) fn settings_send_behavior_group(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("composer-send-behavior")
+        .flex()
+        .flex_row()
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(9.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .p(px(2.0))
+        .bg(if super::is_area(theme) {
+            theme.accent.opacity(0.08)
+        } else {
+            ink(0.04)
+        })
+}
+pub(crate) fn settings_send_behavior_option(
+    theme: &Theme,
+    index: usize,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("composer-send-option", index))
+        .min_w(px(72.0))
+        .px(px(12.0))
+        .py(px(6.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .flex()
+        .items_center()
+        .justify_center()
+        .font_family(theme.font_mono.clone())
+        .text_size(px(12.0))
+        .text_color(if selected {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .when(selected, |el| {
+            el.bg(if super::is_area(theme) {
+                theme.accent.opacity(0.18)
+            } else {
+                theme.bg
+            })
+            .border_1()
+            .border_color(theme.border.opacity(0.8))
+            .when(super::is_industrial(theme), |el| el.border_b_2())
+        })
+}

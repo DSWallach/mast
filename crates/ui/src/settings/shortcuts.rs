@@ -672,13 +672,7 @@ impl Render for ShortcutsPage {
                 )
             })
             .child(
-                div()
-                    .id("composer-send-behavior")
-                    .flex()
-                    .flex_row()
-                    .rounded(px(9.0))
-                    .p(px(2.0))
-                    .bg(crate::theme::ink(0.04))
+                crate::components::settings_send_behavior_group(&theme)
                     .children(
                         [
                             (ComposerSendBehavior::Enter, "Enter"),
@@ -688,27 +682,7 @@ impl Render for ShortcutsPage {
                         .enumerate()
                         .map(|(ix, (behavior, label))| {
                             let selected = send_behavior == behavior;
-                            div()
-                                .id(("composer-send-option", ix))
-                                .min_w(px(72.0))
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded(px(7.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(12.0))
-                                .text_color(if selected {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                })
-                                .when(selected, |el| {
-                                    el.bg(theme.bg)
-                                        .border_1()
-                                        .border_color(theme.border.opacity(0.8))
-                                })
+                            crate::components::settings_send_behavior_option(&theme, ix, selected)
                                 .when(!selected, |el| {
                                     el.cursor_pointer()
                                         .hover(|s| s.text_color(theme.text))
