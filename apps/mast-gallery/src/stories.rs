@@ -119,7 +119,7 @@ fn fixture(story: Story, state: State, theme: &Theme, id: String) -> AnyElement 
         Story::Tool => c::conversation_tool_panel(
             theme,
             theme.accent,
-            c::conversation_tool_chip_frame(false, 36., 30., 4., 1.)
+            c::conversation_tool_chip_frame(false, 36., 30., 4., 1., theme)
                 .child(text)
                 .into_any_element(),
         ),
