@@ -97,6 +97,17 @@ pub fn conversation_picker_footer_row() -> Div {
         .gap(px(4.0))
 }
 
+fn conversation_key_caption(theme: &Theme, label: &'static str) -> Div {
+    div()
+        .absolute()
+        .top(px(-8.0))
+        .left(px(4.0))
+        .text_size(crate::typography::ui_rems(8.0))
+        .line_height(crate::typography::ui_rems(8.0))
+        .text_color(theme.text_muted)
+        .child(label)
+}
+
 pub fn conversation_picker_trigger(
     theme: &Theme,
     id: &'static str,
@@ -134,6 +145,9 @@ pub fn conversation_picker_trigger(
         })
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer()
+        .when(theme.ui_style.conversation == ConversationVariant::Industrial && id == "picker-model", |el| {
+            el.relative().child(conversation_key_caption(theme, "MODEL"))
+        })
         .when(
             theme.ui_style.layout == crate::ui_style::UiLayout::Guided
                 && theme.ui_style.conversation != ConversationVariant::Industrial,
@@ -226,6 +240,9 @@ pub fn conversation_picker_approval(
         .bg(bg)
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer()
+        .when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| {
+            el.relative().child(conversation_key_caption(theme, "MODE"))
+        })
         .child(
             crate::icons::icon(icon)
                 .size(px(12.0))
@@ -1171,25 +1188,6 @@ pub fn conversation_model_picker(
         .relative()
         .left(px(if area { 0.0 } else { offset }))
         .opacity(if area { 1.0 } else { opacity })
-        .when(
-            theme.ui_style.conversation == ConversationVariant::Industrial,
-            |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .top(px(-8.0))
-                        .left(px(4.0))
-                        .right(px(4.0))
-                        .flex()
-                        .justify_between()
-                        .text_size(crate::typography::ui_rems(8.0))
-                        .line_height(crate::typography::ui_rems(8.0))
-                        .text_color(theme.text_muted)
-                        .child("MODEL")
-                        .child("MODE"),
-                )
-            },
-        )
         .child(picker)
         .child(measure);
     if area {
