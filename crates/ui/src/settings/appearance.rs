@@ -2025,24 +2025,7 @@ impl AppearancePage {
                     SurfacePreference::ThemeDefault,
                 );
                 main = main.child(
-                    div()
-                        .id(SharedString::from(format!("theme-import-row-{variant_id}")))
-                        .mt(px(8.0))
-                        .p(px(11.0))
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(if selected_now {
-                            theme.accent.opacity(0.7)
-                        } else {
-                            theme.border
-                        })
-                        .bg(if selected_now {
-                            theme.accent_wash.opacity(0.42)
-                        } else {
-                            theme.surface_raised.opacity(0.22)
-                        })
-                        .flex()
-                        .flex_col()
+                    crate::components::settings_theme_import_row(theme, SharedString::from(format!("theme-import-row-{variant_id}")), selected_now)
                         .child(
                             div()
                                 .flex()
@@ -2747,18 +2730,7 @@ impl Render for AppearancePage {
         .into_iter()
         .map(|(value, label)| {
             let active = ui_settings.team_tab_visibility == value;
-            div()
-                .id(SharedString::from(format!("team-visibility-{label}")))
-                .px(px(10.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
-                .bg(if active {
-                    theme.accent.opacity(0.15)
-                } else {
-                    crate::theme::wash(0.025)
-                })
-                .cursor_pointer()
-                .child(label)
+            crate::components::settings_team_visibility(&theme, label, active)
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(AppearanceSettingsEvent::TeamTabVisibilityChanged(value));
                     cx.notify();

@@ -975,3 +975,62 @@ pub(crate) fn settings_account_switch(
         .text_size(crate::typography::ui_rems(11.5))
         .when(busy, |el| el.opacity(0.5))
 }
+
+/// Team tab visibility choice.
+pub(crate) fn settings_team_visibility(
+    theme: &Theme,
+    label: &'static str,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let text = if super::is_industrial(theme) {
+        crate::popover::tracked_upper(label)
+    } else {
+        label.to_owned()
+    };
+    div()
+        .id(SharedString::from(format!("team-visibility-{label}")))
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_industrial(theme), |el| {
+            el.border_1().border_b_2().border_color(theme.border)
+        })
+        .bg(if active {
+            theme.accent.opacity(0.15)
+        } else if super::is_area(theme) {
+            theme.accent.opacity(0.06)
+        } else {
+            crate::theme::wash(0.025)
+        })
+        .cursor_pointer()
+        .child(SharedString::from(text))
+}
+/// A selectable imported theme variant.
+pub(crate) fn settings_theme_import_row(
+    theme: &Theme,
+    id: SharedString,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .mt(px(8.0))
+        .p(px(11.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(10.0)))
+        .border_1()
+        .when(super::is_industrial(theme), |el| el.border_b_2())
+        .border_color(if selected {
+            theme.accent.opacity(0.7)
+        } else {
+            theme.border
+        })
+        .bg(if selected {
+            theme.accent_wash.opacity(0.42)
+        } else if super::is_area(theme) {
+            theme.accent.opacity(0.08)
+        } else {
+            theme.surface_raised.opacity(0.22)
+        })
+        .flex()
+        .flex_col()
+}
