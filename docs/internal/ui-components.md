@@ -1329,3 +1329,43 @@ function or its first inline element, rather than every child `div`.
   assembly `:6019`. Their visual frames now live in `conversation_parts.rs`;
   picker popover and menu bodies remain outside this slice. No direct style or
   layout comparisons were present in these picker sites before migration.
+
+## Settings and appearance audit (in progress)
+The index below is a mechanical inventory, including test and non-presentation matches. Each location needs classification during migration. Settings navigation chrome belongs to shell.
+### Explicit style and layout references
+- `crates/ui/src/settings.rs:756`: `pub ui_style: crate::ui_style::UiStyleId,`
+- `crates/ui/src/settings.rs:757`: `pub ui_layout: crate::ui_style::UiLayout,`
+- `crates/ui/src/settings.rs:874`: `ui_style: crate::ui_style::UiStyleId::default(),`
+- `crates/ui/src/settings.rs:875`: `ui_layout: crate::ui_style::UiLayout::default(),`
+- `crates/ui/src/settings.rs:3017`: `ui_style: crate::ui_style::UiStyleId::Default,`
+- `crates/ui/src/settings.rs:3018`: `ui_layout: crate::ui_style::UiLayout::Compact,`
+- `crates/ui/src/settings/appearance.rs:2997`: `let style_cards = crate::ui_style::UiStyleId::ALL`
+- `crates/ui/src/settings/appearance.rs:3031`: `ui_settings.ui_style == id,`
+- `crates/ui/src/settings/appearance.rs:3036`: `crate::ui_style::set_style(id, window, cx);`
+- `crates/ui/src/settings/appearance.rs:3042`: `let layout_cards = crate::ui_style::UiLayout::ALL.iter().copied().map(|layout| {`
+- `crates/ui/src/settings/appearance.rs:3045`: `crate::ui_style::UiLayout::Minimal => ("Current spacing", 4.0),`
+- `crates/ui/src/settings/appearance.rs:3046`: `crate::ui_style::UiLayout::Compact => ("More on screen", 2.0),`
+- `crates/ui/src/settings/appearance.rs:3047`: `crate::ui_style::UiLayout::Guided => ("More labels and guidance", 6.0),`
+- `crates/ui/src/settings/appearance.rs:3057`: `crate::ui_style::set_layout(layout, window, cx);`
+- `crates/ui/src/appearance.rs:107`: `let style = crate::ui_style::current(cx);`
+- `crates/ui/src/appearance.rs:145`: `_style: crate::ui_style::UiStyle,`
+- `crates/ui/src/appearance.rs:150`: `fn effective_accent(accent: AccentSelection, _style: crate::ui_style::UiStyle) -> AccentSelection {`
+- `crates/ui/src/appearance.rs:156`: `style: crate::ui_style::UiStyle,`
+- `crates/ui/src/appearance.rs:159`: `crate::ui_style::SurfaceModel::ThemeDefault => surface,`
+- `crates/ui/src/appearance.rs:160`: `crate::ui_style::SurfaceModel::Opaque => SurfacePreference::Opaque,`
+- `crates/ui/src/appearance.rs:161`: `crate::ui_style::SurfaceModel::Glass => SurfacePreference::Frosted,`
+- `crates/ui/src/appearance.rs:169`: `let style = crate::ui_style::current(cx);`
+
+### Inline presentation candidates
+
+Locations are line numbers at the audit commit; each includes a numeric text size, radius, or border call. Some are preview artwork, text formatting, or tests, and require individual review.
+
+- `crates/ui/src/settings/accounts.rs`: 355, 391, 446, 643, 701, 721, 1039, 1143, 1168, 1169, 1197, 1203, 1223, 1276, 1323, 1330, 1409, 1421, 1469, 1634, 1676, 1724, 1744, 1806, 1848
+- `crates/ui/src/settings/appearance.rs`: 395, 423, 449, 1219, 1269, 1270, 1277, 1309, 1310, 1317, 1350, 1376, 1377, 1452, 1454, 1473, 1474, 1479, 1498, 1499, 1508, 1509, 1518, 1530, 1540, 1556, 1557, 1567, 1573, 1576, 1600, 1601, 1605, 1658, 1668, 1675, 1682, 1685, 1704, 1705, 1803, 1866, 1867, 1973, 1974, 2052, 2053, 2093, 2214, 2215, 2241, 2256, 2266, 2275, 2346, 2379, 2380, 2404, 2405, 2442, 2449, 2500, 2502, 2517, 2535, 2540, 2577, 2578, 2717, 2789, 2929, 2949, 3006, 3016, 3022, 3049, 3051, 3052, 3134, 3246, 3248, 3253, 3438, 3553
+- `crates/ui/src/settings/appshots.rs`: 26, 91, 92, 103, 318, 332
+- `crates/ui/src/settings/archived.rs`: 173, 189, 190, 217, 225, 240, 268, 269, 271, 314, 320
+- `crates/ui/src/settings/devices.rs`: 351, 385, 427
+- `crates/ui/src/settings/files.rs`: 92, 93, 104
+- `crates/ui/src/settings/harnesses.rs`: 799, 834, 890, 1004, 1005
+- `crates/ui/src/settings/shortcuts.rs`: 298, 306, 352, 378, 379, 383, 656, 685, 707, 724, 729, 737, 767, 912
+- `crates/ui/src/settings/widgets.rs`: 177, 185, 196, 256, 258, 267, 302, 303, 322, 339, 398, 399, 402, 428, 429, 432
