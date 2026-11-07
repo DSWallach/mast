@@ -15303,6 +15303,10 @@ impl Shell {
     pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
     }
+
+    pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
+        self.open_overview(cx);
+    }
 }
 
 /// Native visual QA uses the production shell with isolated fixture data.

@@ -548,6 +548,15 @@ pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
         .child(input)
 }
 
+pub fn toolbar_search_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
+    let frame = search_input_frame(theme, input);
+    if is_industrial(theme) {
+        toolbar_control(frame.mb(px(0.0)), theme, false)
+    } else {
+        frame
+    }
+}
+
 pub fn dialog_field(theme: &Theme, input: AnyElement) -> gpui::Div {
     div()
         .w_full()
@@ -587,6 +596,25 @@ pub fn segmented_key<T: gpui::Styled + gpui::ParentElement>(
                 spread_radius: px(0.0),
                 inset: false,
             }])
+    } else {
+        element
+    }
+}
+
+/// Apply the Industrial toolbar frame while leaving other appearances unchanged.
+pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
+    if is_industrial(theme) {
+        let colors = theme.industrial_colors();
+        element
+            .h(px(theme.ui_style.tokens.control_size))
+            .py(px(0.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(colors.rule)
+            .bg(if primary { colors.signal } else { colors.key })
+            .shadow(Vec::new())
+            .flex()
+            .items_center()
     } else {
         element
     }

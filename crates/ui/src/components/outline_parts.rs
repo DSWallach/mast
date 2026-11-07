@@ -205,7 +205,7 @@ pub fn outline_toolbar_button(
         })
         .when(!active, |el| el.text_color(theme.text_muted))
         .hover(|el| el.text_color(theme.text));
-    crate::surface_chrome::segmented_key(button, theme, active)
+    super::toolbar_control(crate::surface_chrome::segmented_key(button, theme, active), theme, false)
         .when(super::is_area(theme), |el| el.rounded_full())
         .child(SharedString::from(label))
 }
@@ -226,7 +226,7 @@ pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
         .bg(theme.element_hover.opacity(0.5))
         .text_color(theme.text_muted)
         .hover(|el| el.text_color(theme.text));
-    crate::surface_chrome::segmented_key(button, theme, false)
+    super::toolbar_control(crate::surface_chrome::segmented_key(button, theme, false), theme, false)
         .when(super::is_area(theme), |el| el.rounded_full())
         .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
         .child("?")
@@ -297,6 +297,7 @@ pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
         .rounded(px(4.0))
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover))
+        .when(true, |el| super::toolbar_control(el, theme, false))
         .child(
             crate::icons::icon(crate::icons::CLOSE)
                 .size(px(12.0))
@@ -347,7 +348,7 @@ pub fn outline_action_button(
         .when(!enabled, |el| {
             el.border_color(theme.border).text_color(theme.text_faint)
         });
-    crate::surface_chrome::segmented_key(button, theme, primary && enabled)
+    super::toolbar_control(crate::surface_chrome::segmented_key(button, theme, primary && enabled), theme, false)
         .when(super::is_area(theme), |el| el.rounded_full())
         .child(label)
 }
@@ -388,6 +389,8 @@ pub fn outline_status_segment(
             };
             el.bg(theme.success).text_color(foreground)
         })
+        .when(true, |el| super::toolbar_control(el, theme, false))
+        .when(active && completed && key, |el| el.text_color(theme.success))
         .when(super::is_area(theme), |el| el.rounded_full())
         .children(crate::surface_chrome::active_key_dot(
             theme,
@@ -558,7 +561,7 @@ pub fn outline_filter_trigger(theme: &Theme) -> Stateful<Div> {
         .cursor_pointer()
         .text_color(theme.text_muted)
         .bg(theme.element_hover.opacity(0.5));
-    crate::surface_chrome::segmented_key(trigger, theme, false)
+    super::toolbar_control(crate::surface_chrome::segmented_key(trigger, theme, false), theme, false)
         .when(super::is_area(theme), |el| el.rounded_full())
         .child("⋯")
 }

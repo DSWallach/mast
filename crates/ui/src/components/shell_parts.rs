@@ -1260,6 +1260,7 @@ pub(crate) fn window_control_button(
             el.rounded_full().bg(theme.identity_color("").opacity(0.12))
         })
         .when(true, |el| super::segmented_key(el, theme, false))
+        .when(true, |el| super::toolbar_control(el, theme, false))
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
@@ -1299,6 +1300,7 @@ pub(crate) fn nav_history_button(
             .flex()
             .items_center()
             .justify_center()
+            .when(true, |el| super::toolbar_control(el, theme, false))
             // Even disabled it reads as a control — occlude so double-clicks
             // on it don't fall through to the titlebar strip's zoom handler.
             .occlude()
@@ -1344,6 +1346,7 @@ pub(crate) fn header_icon_button(
             el.rounded_full().bg(theme.identity_color("").opacity(0.12))
         })
         .when(true, |el| super::segmented_key(el, theme, false))
+        .when(true, |el| super::toolbar_control(el, theme, false))
         .cursor_pointer()
         // zeron __root.tsx header buttons: `transition-colors`.
         .when(
@@ -2691,6 +2694,7 @@ pub(crate) fn chat_identity_button(
         ))
         .when(super::is_area(theme), |el| el.rounded_full())
         .when(true, |el| super::segmented_key(el, theme, false))
+        .when(true, |el| super::toolbar_control(el, theme, false))
         .on_hover(motion::hover_listener(fade_key))
         .occlude()
         .role(gpui::Role::Button)
