@@ -1,4 +1,6 @@
 mod screen_stubs;
+#[cfg(target_os = "macos")]
+mod screens;
 mod stories;
 
 use gpui::{App, Context, IntoElement, Render, Window, div, prelude::*, px};
@@ -11,6 +13,9 @@ struct Gallery {
     transcript: gpui::Entity<mast_ui::transcript::Transcript>,
     composer: gpui::Entity<mast_ui::composer::Composer>,
     story: Story,
+    #[cfg(target_os = "macos")]
+    screen_view: Option<(screens::Screen, gpui::AnyView)>,
+    data_dir: std::path::PathBuf,
     appearance_page: gpui::Entity<settings::appearance::AppearancePage>,
     toggled: bool,
     menu_open: bool,
@@ -28,6 +33,8 @@ enum Story {
     Appearance,
     Board,
     Component(stories::Story),
+    #[cfg(target_os = "macos")]
+    Screen(screens::Screen),
 }
 
 const STORIES: [(Story, &str); 6] = [
@@ -80,6 +87,12 @@ impl GalleryState {
                     if let Some(&(story, _)) = STORIES.iter().find(|(_, label)| *label == value) {
                         result.story = story;
                     }
+                    #[cfg(target_os = "macos")]
+                    if let Some(&(screen, _)) =
+                        screens::SCREENS.iter().find(|(_, label)| *label == value)
+                    {
+                        result.story = Story::Screen(screen);
+                    }
                     if let Some(&(story, _)) =
                         stories::STORIES.iter().find(|(_, label)| *label == value)
                     {
@@ -120,6 +133,11 @@ impl GalleryState {
 
     fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         let label = match self.story {
+            #[cfg(target_os = "macos")]
+            Story::Screen(screen) => screens::SCREENS
+                .iter()
+                .find(|(s, _)| *s == screen)
+                .map(|(_, label)| *label),
             Story::Component(story) => stories::STORIES
                 .iter()
                 .find(|(s, _)| *s == story)
@@ -228,7 +246,20 @@ impl Gallery {
 }
 
 impl Render for Gallery {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        if let Story::Screen(screen) = self.story {
+            if self
+                .screen_view
+                .as_ref()
+                .is_none_or(|(current, _)| *current != screen)
+            {
+                self.screen_view = Some((
+                    screen,
+                    screens::build(screen, self.data_dir.clone(), window, cx),
+                ));
+            }
+        }
         let theme = Theme::of(cx);
         let badge = badges::MessageBadge {
             icon: icons::GIT_BRANCH,
@@ -295,6 +326,37 @@ impl Render for Gallery {
                     .flex_col()
                     .gap(px(12.))
                     .child("Inspector: ⌘⌥⇧I")
+                    .child("Screens")
+                    .children({
+                        #[cfg(target_os = "macos")]
+                        {
+                            screens::SCREENS
+                                .iter()
+                                .enumerate()
+                                .map(|(index, &(screen, label))| {
+                                    div()
+                                        .id(("screen", index))
+                                        .cursor_pointer()
+                                        .px(px(8.))
+                                        .py(px(6.))
+                                        .when(self.story == Story::Screen(screen), |el| {
+                                            el.rounded(px(5.)).bg(theme.surface_raised)
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.story = Story::Screen(screen);
+                                            this.save_state(cx);
+                                            cx.notify();
+                                        }))
+                                        .child(label)
+                                })
+                                .collect::<Vec<_>>()
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            Vec::<gpui::Div>::new()
+                        }
+                    })
+                    .child("Stories")
                     .children(
                         STORIES
                             .into_iter()
@@ -406,6 +468,26 @@ impl Render for Gallery {
                                     }))
                                     .child(self.theme_label()),
                             ),
+                    )
+                    .when_some(
+                        {
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Story::Screen(screen) = self.story {
+                                    self.screen_view
+                                        .as_ref()
+                                        .filter(|(current, _)| *current == screen)
+                                        .map(|(_, view)| view.clone())
+                                } else {
+                                    None
+                                }
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                None::<gpui::AnyView>
+                            }
+                        },
+                        |el, view| el.child(div().w_full().h(px(900.)).child(view)),
                     )
                     .when(self.story == Story::Chat, |el| {
                         el.child(
@@ -573,7 +655,11 @@ impl Render for Gallery {
     }
 }
 
-fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
+fn gallery(
+    focus: gpui::FocusHandle,
+    data_dir: std::path::PathBuf,
+    cx: &mut Context<Gallery>,
+) -> Gallery {
     use mast_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
     let saved = GalleryState::load();
     let state = cx.new(|_| {
@@ -596,6 +682,9 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
         }),
         composer: cx.new(|cx| mast_ui::composer::Composer::new(state.clone(), cx)),
         story: saved.story,
+        #[cfg(target_os = "macos")]
+        screen_view: None,
+        data_dir,
         appearance_page: cx.new(settings::appearance::AppearancePage::new),
         toggled: false,
         menu_open: false,
@@ -615,6 +704,14 @@ fn init(cx: &mut App, data_dir: &std::path::Path) {
     let fonts = typography::register_fonts(cx);
     ui_style::init_with_layout(saved.style, saved.layout, cx);
     mast_ui::composer::init(cx, settings.composer_send_behavior);
+    mast_ui::history::init(
+        settings.git_history_columns,
+        settings.git_history_column_widths,
+        settings.git_history_column_order,
+        settings.git_history_author_display,
+        cx,
+    );
+    mast_ui::terminal::panel::init(cx);
     typography::init(
         settings.ui_font_family,
         settings.ui_font_size,
@@ -648,7 +745,7 @@ fn main() {
                 cx.new(|cx| {
                     let focus = cx.focus_handle();
                     window.focus(&focus, cx);
-                    gallery(focus, cx)
+                    gallery(focus, data_dir.path().to_owned(), cx)
                 })
             })
             .expect("gallery window");
@@ -701,6 +798,29 @@ mod tests {
             )
             .unwrap();
         }
+        for (name, screen) in [
+            ("gallery-screen-chat", screens::Screen::Chat),
+            ("gallery-screen-overview", screens::Screen::Overview),
+            ("gallery-screen-walkthrough", screens::Screen::Walkthrough),
+        ] {
+            mast_ui::snapshot::render_to_png(
+                name,
+                gpui::size(px(1600.), px(1000.)),
+                ui_style::UiStyleId::Default,
+                mast_ui::theme::Appearance::Light,
+                |window, cx| {
+                    init(cx, dir.path());
+                    cx.new(|cx| {
+                        let focus = cx.focus_handle();
+                        window.focus(&focus, cx);
+                        let mut gallery = gallery(focus, dir.path().to_owned(), cx);
+                        gallery.story = Story::Screen(screen);
+                        gallery
+                    })
+                },
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -722,6 +842,12 @@ mod tests {
         assert_eq!(restored.dark, state.dark);
         assert_eq!(restored.themes.light, state.themes.light);
         assert_eq!(restored.themes.dark, state.themes.dark);
+        #[cfg(target_os = "macos")]
+        for (screen, _) in screens::SCREENS {
+            state.story = Story::Screen(screen);
+            state.save_to(&path).unwrap();
+            assert!(GalleryState::load_from(Some(&path)).story == state.story);
+        }
     }
 
     #[gpui::test]
@@ -775,7 +901,7 @@ mod tests {
         let window = cx.add_window(|window, cx| {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);
-            gallery(focus, cx)
+            gallery(focus, dir.path().to_owned(), cx)
         });
         for &style in gallery_styles() {
             for mode in [
@@ -813,6 +939,31 @@ mod tests {
                     .unwrap();
                 }
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn screens_render_with_preview_fixtures(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| init(cx, dir.path()));
+        let window = cx.add_window(|window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            gallery(focus, dir.path().to_owned(), cx)
+        });
+        for (screen, _) in screens::SCREENS {
+            window
+                .update(cx, |gallery, _, cx| {
+                    gallery.story = Story::Screen(screen);
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+            .unwrap();
         }
     }
 }

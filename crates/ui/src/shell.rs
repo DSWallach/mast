@@ -15305,6 +15305,10 @@ impl Shell {
             panel.right_active = RightSurface::Item;
         });
     }
+
+    pub fn fixture_snapshot_expand_tool_group(&mut self, cx: &mut Context<Self>) {
+        self.transcript.update(cx, |transcript, cx| transcript.fixture_expand_tool_group(cx));
+    }
 }
 
 /// Native visual QA uses the production shell with isolated fixture data.

@@ -162,51 +162,6 @@ fn initialize(
     );
 }
 
-fn chat(data_dir: PathBuf, overview: bool, cx: &mut App) -> AnyView {
-    let state = cx.new(|_| {
-        let mut state = mast_ui::state::AppState::new();
-        state.connection = mast_proto::view::ConnectionStatus::Ready;
-        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
-        state.local_device_id = Some("local".into());
-        state.selected_chat = Some("fixture-chat".into());
-        state.selected_space = Some("fixture-space".into());
-        state.auto_selected = true; state.chats_synced = true; state.spaces_synced = true;
-        state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
-        state.chats = vec![serde_json::from_value(serde_json::json!({"id":"fixture-chat","deviceId":"local","spaceId":"fixture-space","title":"Review the workspace","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"Opus 5.5","reasoning":"high","sandbox":"workspace-write"}})).unwrap()];
-        mast_ui::snapshot::preview_chat_outline(&mut state);
-        state
-    });
-    state.update(cx, |state, cx| {
-        state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
-            {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
-            {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I inspected the layout.\n\nThe controls now align with their captions.\n\n- The model name stays visible.\n- The attachment has one border.\n\nThe reply has one frame."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
-        ])).unwrap() }, cx).unwrap();
-    });
-    let boot = mast_ui::EngineBootConfig {
-        data_dir,
-        ipc_port: 0,
-        edge_url: String::new(),
-        edge_token: None,
-        org_id: None,
-        workos_client_id: None,
-        default_harness: mast_proto::HarnessId::Mock,
-    };
-    let shell = cx.new(|cx| {
-        let mut shell = mast_ui::shell::Shell::new(state, boot, cx);
-        shell.fixture_snapshot_ready();
-        shell.fixture_snapshot_attachment(
-            include_bytes!("../../assets/dock/mast-icon-ready.png").to_vec(),
-            cx,
-        );
-        if overview {
-            shell.fixture_snapshot_overview(cx);
-        }
-        shell
-    });
-    shell.update(cx, |shell, cx| shell.fixture_snapshot_item_panel(cx));
-    shell.into()
-}
-
 pub fn render(
     screen: &str,
     style: UiStyleId,
@@ -228,7 +183,7 @@ pub fn render(
         move |_, cx| {
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
-                "chat" => chat(data_dir, false, cx),
+                "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),

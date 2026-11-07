@@ -1191,6 +1191,11 @@ impl Render for Walkthrough {
 
 #[cfg(feature = "snapshot")]
 pub(crate) fn snapshot_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    snapshot_fixture_with_changes(std::env::var_os("MAST_SNAPSHOT_POPULATED_CHANGES").is_some(), cx)
+}
+
+#[cfg(feature = "snapshot")]
+pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> Entity<impl Render + use<>> {
     let document: ReviewDocument = serde_json::from_str(r#"{
         "pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},
         "steps":[{"id":"s1","title":"Review the data flow","file":"src/main.rs",
@@ -1199,8 +1204,7 @@ pub(crate) fn snapshot_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
         "highlights":[],"questions":[]
     }"#).unwrap();
     let (_, review) = document.into_review().unwrap();
-    let changes = std::env::var_os("MAST_SNAPSHOT_POPULATED_CHANGES")
-        .map(|_| super::snapshot_populated_changes(cx));
+    let changes = populated.then(|| super::snapshot_populated_changes(cx));
     let populated = changes.is_some();
     if let Some(changes) = &changes {
         changes.update(cx, |changes, _| changes.review_target = Some(review.target_key.clone()));
