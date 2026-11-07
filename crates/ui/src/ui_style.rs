@@ -412,7 +412,7 @@ impl UiStyle {
             UiLayout::Guided => 1.25,
         };
         SpacingScale {
-            small: base * factor,
+            small: self.design_roles.spacing_small.unwrap_or(base * factor),
             medium: base * 2.0 * factor,
             large: base * 4.0 * factor,
         }

@@ -18,9 +18,10 @@ enum Token {
     RowHeight,
     Grid,
     RuleWidth,
+    SpacingSmall,
 }
 impl Token {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::ControlRadius,
         Self::PanelRadius,
         Self::ChipRadius,
@@ -29,6 +30,7 @@ impl Token {
         Self::RowHeight,
         Self::Grid,
         Self::RuleWidth,
+        Self::SpacingSmall,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -40,6 +42,7 @@ impl Token {
             Self::RowHeight => "Sidebar row height",
             Self::Grid => "Grid",
             Self::RuleWidth => "Rule width",
+            Self::SpacingSmall => "Small spacing",
         }
     }
     fn max(self) -> f32 {
@@ -59,6 +62,7 @@ impl Token {
             Self::RowHeight => t.row_height,
             Self::Grid => t.grid,
             Self::RuleWidth => t.rule_width,
+            Self::SpacingSmall => t.spacing_small,
         }
     }
     fn set(self, t: &mut TokenOverrides, value: Option<f32>) {
@@ -71,6 +75,7 @@ impl Token {
             Self::RowHeight => t.row_height = value,
             Self::Grid => t.grid = value,
             Self::RuleWidth => t.rule_width = value,
+            Self::SpacingSmall => t.spacing_small = value,
         }
     }
     fn base_description(self, style: UiStyle) -> String {
@@ -82,6 +87,7 @@ impl Token {
             Self::BubbleRadius => t.bubble_radius,
             Self::Grid => t.grid,
             Self::RuleWidth => t.rule_width,
+            Self::SpacingSmall => Some(style.spacing_scale().small),
             Self::ControlHeight => Some(t.control_size),
             Self::RowHeight => Some(t.sidebar_row_compact_h),
         };
@@ -100,6 +106,7 @@ impl Token {
             Self::RowHeight => t.sidebar_row_compact_h,
             Self::Grid => t.grid.unwrap_or(8.0),
             Self::RuleWidth => t.rule_width.unwrap_or(1.0),
+            Self::SpacingSmall => style.spacing_scale().small,
         }
     }
 }

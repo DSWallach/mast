@@ -86,6 +86,7 @@ pub struct DesignRoles {
     pub heading_family: Option<HeadingFamily>,
     pub heading_weight: Option<HeadingWeight>,
     pub tracked_caps: Option<bool>,
+    pub spacing_small: Option<f32>,
 }
 impl DesignRoles {
     pub const NONE: Self = Self {
@@ -96,6 +97,7 @@ impl DesignRoles {
         heading_family: None,
         heading_weight: None,
         tracked_caps: None,
+        spacing_small: None,
     };
 }
 
@@ -132,6 +134,8 @@ pub struct TokenOverrides {
     pub heading_weight: Option<HeadingWeight>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracked_caps: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spacing_small: Option<f32>,
 }
 
 impl TokenOverrides {
@@ -156,6 +160,9 @@ impl TokenOverrides {
         }
         if self.tracked_caps.is_some() {
             style.design_roles.tracked_caps = self.tracked_caps;
+        }
+        if self.spacing_small.is_some() {
+            style.design_roles.spacing_small = self.spacing_small;
         }
         let tokens = &mut style.tokens;
         if let Some(v) = self.control_radius {
@@ -365,6 +372,7 @@ fn parse_tokens(object: &serde_json::Map<String, Value>, allow_layouts: bool) ->
             continue;
         }
         let target = match key.as_str() {
+            "spacingSmall" => &mut tokens.spacing_small,
             "controlRadius" => &mut tokens.control_radius,
             "panelRadius" => &mut tokens.panel_radius,
             "chipRadius" => &mut tokens.chip_radius,
@@ -437,6 +445,15 @@ mod tests {
             Overrides::parse(&serde_json::to_string(&overrides).unwrap()),
             overrides
         );
+    }
+
+    #[test]
+    fn small_spacing_changes_the_resolved_scale() {
+        let overrides = Overrides::parse(
+            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"spacingSmall":7}}}"#,
+        );
+        let style = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        assert_eq!(style.spacing_scale().small, 7.0);
     }
 
     #[test]

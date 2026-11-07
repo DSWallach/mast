@@ -6,7 +6,7 @@ Changes apply to the currently selected Style immediately; use Appearance to
 change Style or Layout. The controls apply to the actual running app.
 
 The sliders change control, panel, chip and bubble radii, control height,
-sidebar row height, grid size and rule width where components use those tokens.
+sidebar row height, grid size, small spacing and rule width where components use those tokens.
 The details controls affect the work-item details frame: its border and whether
 its background uses the page colour. Primary and secondary colour choices affect
 work-item action buttons. Heading family, weight and tracked caps affect settings
