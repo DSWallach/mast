@@ -32,7 +32,8 @@ and Browser each open their corresponding view. The Design screen can preview
 changes in memory; saving overrides from the gallery is disabled because it
 reads the installed profile in read-only mode. Save from Mast to share edits
 with the watcher. The older work outline and walkthrough stories remain fixture
-compositions. Press ⌘⌥⇧I to inspect an element in the gallery.
+compositions. Press ⌘⌥⇧I to inspect an element in the gallery. After picking
+an element, click Copy details to copy its source, bounds, and style to the clipboard.
 Hover the examples to see their interactive hover treatment. The disabled row
 is a dimmed fixture: the shared primitives do not all expose a disabled state.
 The Board story is a gallery-only composition of outline rows and cards.
