@@ -647,11 +647,16 @@ pub(crate) fn item_needs_card(theme: &Theme, count: usize) -> gpui::Div {
 }
 
 pub(crate) fn item_needs_count(theme: &Theme, count: usize) -> gpui::Div {
+        .when(super::is_area(theme), |el| el.border_color(theme.bg))
     div()
         .debug_selector(|| "chat-item-needs-you-count".into())
         .text_size(crate::typography::ui_rems(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.warning)
+        .text_color(if super::is_area(theme) {
+            theme.text_muted
+        } else {
+            theme.warning
+        })
         .child(SharedString::from(count.to_string()))
 }
 
@@ -1637,7 +1642,9 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         .border_color(theme.border)
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
-        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded(px(12.0)).border_color(theme.bg)
+        })
         .when(super::is_industrial(theme), |el| {
             el.rounded(px(0.0))
                 .border_color(theme.industrial_colors().rule)
@@ -2019,7 +2026,11 @@ pub(crate) fn panel_link(
         .when(super::is_area(theme), |el| el.rounded_full())
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(11.5))
-        .text_color(color)
+        .text_color(if super::is_area(theme) {
+            theme.text_muted
+        } else {
+            color
+        })
         .when(underline, |el| el.underline())
         .hover(|el| el.bg(theme.element_hover))
 }
@@ -2412,7 +2423,11 @@ pub(crate) fn section_label(
                 .when(super::is_industrial(theme), |el| {
                     el.font_family(theme.font_mono.clone())
                 })
-                .child(SharedString::from(label.to_uppercase())),
+                .child(SharedString::from(if super::is_area(theme) {
+                    label.to_owned()
+                } else {
+                    label.to_uppercase()
+                })),
         )
 }
 

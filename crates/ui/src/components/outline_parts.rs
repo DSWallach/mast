@@ -348,7 +348,18 @@ pub fn outline_action_button(
             el.border_color(theme.border).text_color(theme.text_faint)
         });
     crate::surface_chrome::segmented_key(button, theme, primary && enabled)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_area(theme), |el| {
+            if primary && enabled {
+                el.rounded_full()
+                    .bg(theme.accent)
+                    .border_color(theme.accent)
+                    .text_color(theme.identity_text(theme.accent))
+            } else {
+                el.rounded_full()
+                    .border_color(theme.bg)
+                    .text_color(theme.text_muted)
+            }
+        })
         .child(label)
 }
 
@@ -674,9 +685,7 @@ pub fn outline_required_action_row(id: SharedString, theme: &Theme) -> Stateful<
         .when(super::is_industrial(theme), |el| {
             el.border_1().border_color(theme.industrial_colors().rule)
         })
-        .when(super::is_area(theme), |el| {
-            el.bg(theme.identity_color("").opacity(0.06))
-        })
+        .when(super::is_area(theme), |el| el.py(px(8.0 * scale)))
 }
 
 /// Template editor node header.
@@ -934,7 +943,11 @@ pub fn outline_request_link(id: SharedString, label: String, theme: &Theme) -> S
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover));
     crate::surface_chrome::segmented_key(button, theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_area(theme), |el| {
+            el.rounded_full()
+                .border_color(theme.bg)
+                .text_color(theme.text_muted)
+        })
         .child(SharedString::from(label))
 }
 
@@ -984,7 +997,11 @@ pub fn outline_needs_heading(
             10.5 + super::layout_type_adjustment(theme),
         ))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(color)
+        .text_color(if super::is_area(theme) {
+            theme.text_muted
+        } else {
+            color
+        })
         .child(SharedString::from(displayed))
         .child(SharedString::from(format!("· {count}")))
 }
@@ -1007,7 +1024,9 @@ pub fn outline_approval_card(selector: String, theme: &Theme) -> Div {
         })
         .when(super::is_area(theme), |el| {
             el.rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(12.0)))
-                .bg(theme.identity_color("").opacity(0.06))
+                .border_color(theme.bg)
+                .bg(theme.bg)
+                .py(px(8.0 * scale))
         })
 }
 
