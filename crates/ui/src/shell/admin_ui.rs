@@ -270,16 +270,7 @@ impl Shell {
         let is_admin = self.chat_is_admin(chat_id, cx);
         let badge = self.render_admin_badge(chat_id, "chat-item", theme, cx);
         let id = chat_id.to_owned();
-        let link = div()
-            .id("chat-item-admin-grant")
-            .debug_selector(|| "chat-item-admin-grant".into())
-            .flex_none()
-            .px(px(4.0))
-            .rounded(px(3.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.accent)
-            .hover(|el| el.bg(theme.element_hover))
+        let link = crate::components::shell_parts::panel_link(theme, "chat-item-admin-grant".into(), theme.accent, false)
             .child(admin::grant_entry_label(is_admin))
             .on_click(cx.listener(move |this, _, _, cx| this.open_admin_dialog(&id, cx)));
         Some(
