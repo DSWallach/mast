@@ -930,3 +930,46 @@ pub(crate) fn settings_unarchive_action(
         .cursor_pointer()
         .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
 }
+
+/// Account actions with the page's compact geometry.
+pub(crate) fn settings_account_forget(
+    theme: &Theme,
+    index: usize,
+    busy: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("account-forget", index))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent.opacity(0.1))
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.surface_raised)
+                .border_1()
+                .border_b_2()
+                .border_color(theme.border)
+        })
+        .px(px(6.0))
+        .py(px(4.0))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .when(busy, |el| el.opacity(0.5))
+        .hover(|s| s.bg(ink(0.06)).text_color(theme.text))
+}
+pub(crate) fn settings_account_switch(
+    theme: &Theme,
+    index: usize,
+    busy: bool,
+) -> gpui::Stateful<gpui::Div> {
+    crate::popover::btn_primary(theme, if busy { "Switching…" } else { "Switch" })
+        .id(("account-switch", index))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent)
+        })
+        .when(super::is_industrial(theme), |el| el.border_b_2())
+        .text_size(crate::typography::ui_rems(11.5))
+        .when(busy, |el| el.opacity(0.5))
+}

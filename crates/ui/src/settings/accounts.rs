@@ -1122,15 +1122,7 @@ impl AccountsPage {
                 .items_center()
                 .gap(px(4.0))
                 .child(
-                    div()
-                        .id(("account-forget", ix))
-                        .rounded(px(6.0))
-                        .px(px(6.0))
-                        .py(px(4.0))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .when(is_busy, |el| el.opacity(0.5))
-                        .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                    crate::components::settings_account_forget(theme, ix, is_busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.account_action(methods::FORGET_AGENT_ACCOUNT, &forget_account, cx);
                         }))
@@ -1142,16 +1134,7 @@ impl AccountsPage {
                 )
                 .when(account.switchable, |el| {
                     el.child(
-                        crate::popover::btn_primary(
-                            theme,
-                            if is_busy { "Switching…" } else { "Switch" },
-                        )
-                        .id(("account-switch", ix))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .when(is_busy, |el| el.opacity(0.5))
+                        crate::components::settings_account_switch(theme, ix, is_busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.account_action(
                                 methods::ACTIVATE_AGENT_ACCOUNT,
