@@ -26,6 +26,8 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Claude Default reauthentication** (2026-11-07): signing in again to the active Claude account updates the live OAuth credentials before the account list snapshots them, preserving shared credentials. Distinct accounts remain saved separately. Release suite passed (2,480 non-UI and 2,581 UI tests); installed build has not yet been verified with a real login. Use Settings → Agent Accounts → Add Claude account, then retry the existing chat after restarting Mast.
+
 All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/work-outline.md`,
 `docs/pr-review.md`.
 
