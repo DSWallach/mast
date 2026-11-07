@@ -807,6 +807,7 @@ impl Render for Walkthrough {
                         "uncovered-hunk-{file}-{index}"
                     )))
                     .cursor_pointer()
+                    .when(true, |el| crate::components::review_text_action(el, &theme))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(changes) = &this.changes {
                             changes.update(cx, |changes, cx| changes.jump_to_hunk(file, index, cx));

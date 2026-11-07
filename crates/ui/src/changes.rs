@@ -6969,6 +6969,7 @@ impl Render for Changes {
                 el.child(div().flex().items_center().gap(px(8.0))
                     .child(crate::error_notice::ErrorNotice::from_text("changes-review-state-error", &theme, &message))
                     .child(div().id("changes-review-state-retry").cursor_pointer().text_color(theme.text_muted)
+                        .when(true, |el| crate::components::review_text_action(el, &theme))
                         .on_click(cx.listener(|this, _, _, cx| this.retry_review_state(cx)))
                         .child("Retry")))
             })

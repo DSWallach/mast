@@ -503,6 +503,7 @@ impl Changes {
                                         .id(("changes-file-viewed", index))
                                         .cursor_pointer()
                                         .text_color(theme.text_muted)
+                                        .when(true, |el| crate::components::review_text_action(el, theme))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
                                             this.toggle_review_file(index, cx);
