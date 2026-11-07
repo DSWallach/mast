@@ -1045,7 +1045,7 @@ mod tests {
     #[gpui::test]
     fn screens_render_with_preview_fixtures(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| init(cx, dir.path()));
+        cx.update(|cx| init(cx, dir.path(), dir.path()));
         let window = cx.add_window(|window, cx| {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);
