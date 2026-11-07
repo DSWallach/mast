@@ -4694,6 +4694,7 @@ impl Changes {
             .bg(theme.ink(0.025))
             .cursor_pointer()
             .hover(|style| style.bg(theme.ink(0.05)))
+            .when(true, |element| crate::components::changes_diff_header(element, theme))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_submodule(group_ix, cx);
             }))
@@ -4873,6 +4874,7 @@ impl Changes {
             .bg(rest_bg)
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
+            .when(true, |element| crate::components::changes_diff_header(element, theme))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_fold(ix, cx);
                 window.focus(&this.diff_focus, cx);

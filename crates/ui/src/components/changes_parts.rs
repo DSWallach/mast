@@ -3,6 +3,29 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn changes_diff_header<T: Styled + StatefulInteractiveElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+) -> T {
+    let area_background = crate::theme::flatten(theme.accent.opacity(0.08), theme.surface);
+    let area_hover = crate::theme::flatten(theme.accent.opacity(0.14), theme.surface);
+    let industrial_background = theme.surface_raised;
+    let industrial_hover = theme.element_hover;
+    element
+        .when(super::is_industrial(theme), |element| {
+            element
+                .bg(industrial_background)
+                .border_b_1()
+                .border_color(theme.border)
+                .hover(move |style| style.bg(industrial_hover))
+        })
+        .when(super::is_area(theme), |element| {
+            element
+                .bg(area_background)
+                .hover(move |style| style.bg(area_hover))
+        })
+}
+
 pub(crate) enum ChangesSelector {
     Scope,
     Reference,
