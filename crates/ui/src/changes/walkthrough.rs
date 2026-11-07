@@ -744,8 +744,7 @@ impl Render for Walkthrough {
                     .items_center()
                     .gap_1()
                     .cursor_pointer()
-                    .when(true, |row| crate::components::walkthrough_step_row(row, &theme))
-                    .when(selected, |row| row.bg(theme.element_active))
+                    .when(true, |row| crate::components::walkthrough_step_row(row, &theme, selected))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         window.focus(&this.focus, cx);
                         this.select_step(index, cx);
@@ -880,7 +879,6 @@ impl Render for Walkthrough {
                                 .id("review-risk")
                                 .px_2()
                                 .when(true, |el| crate::components::walkthrough_chip(el, &theme))
-                                .bg(theme.surface_raised)
                                 .text_color(theme.text_muted)
                                 .child(format!("{:?}", step.risk)),
                         ),
@@ -919,7 +917,6 @@ impl Render for Walkthrough {
                             div()
                                 .px_2()
                                 .when(true, |el| crate::components::walkthrough_chip(el, &theme))
-                                .bg(theme.surface_raised)
                                 .text_color(theme.text_muted)
                                 .child(tag.clone())
                         })),

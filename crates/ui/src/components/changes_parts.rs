@@ -179,8 +179,13 @@ pub(crate) fn walkthrough_title<T: Styled>(element: T, theme: &Theme) -> T {
     ))
 }
 
-pub(crate) fn walkthrough_chip<T: Styled>(element: T, theme: &Theme) -> T {
-    element.rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
+pub(crate) fn walkthrough_chip<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
+        .bg(theme.surface_raised)
+        .when(super::is_area(theme), |element| {
+            element.rounded_full().bg(theme.accent.opacity(0.12))
+        })
 }
 
 pub(crate) fn walkthrough_guidance<T: FluentBuilder>(
@@ -318,13 +323,29 @@ pub(crate) fn walkthrough_review_action<T: Styled + ParentElement + FluentBuilde
             };
             element.bg(theme.success).text_color(foreground)
         })
+        .when(super::is_area(theme), |element| {
+            element
+                .self_start()
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded_full()
+                .bg(theme.accent.opacity(0.16))
+        })
         .children(crate::surface_chrome::active_key_dot(theme, reviewed))
 }
 
 pub(crate) fn walkthrough_progress<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    element.when(super::is_industrial(theme), |element| {
-        element.font_family(theme.font_mono.clone())
-    })
+    element
+        .when(super::is_industrial(theme), |element| {
+            element.font_family(theme.font_mono.clone())
+        })
+        .when(super::is_area(theme), |element| {
+            element
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded_full()
+                .bg(theme.accent.opacity(0.12))
+        })
 }
 
 pub(crate) fn walkthrough_progress_label(progress: String, theme: &Theme) -> gpui::AnyElement {
@@ -338,52 +359,78 @@ pub(crate) fn walkthrough_progress_label(progress: String, theme: &Theme) -> gpu
 }
 
 pub(crate) fn walkthrough_mode<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    element.when(super::is_industrial(theme), |element| {
-        element
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
-            .bg(theme.surface_raised)
-            .border_1()
-            .border_b_2()
-            .border_color(theme.border)
-    })
+    element
+        .when(super::is_industrial(theme), |element| {
+            element
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+                .bg(theme.surface_raised)
+                .border_1()
+                .border_b_2()
+                .border_color(theme.border)
+        })
+        .when(super::is_area(theme), |element| {
+            element
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded_full()
+                .bg(theme.accent.opacity(0.12))
+        })
 }
 
-pub(crate) fn walkthrough_step_row<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    element.when(super::is_industrial(theme), |row| {
-        row.px(px(8.0))
-            .py(px(8.0))
-            .border_b_1()
-            .border_color(theme.border)
-    })
+pub(crate) fn walkthrough_step_row<T: Styled + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    selected: bool,
+) -> T {
+    element
+        .when(super::is_industrial(theme), |row| {
+            row.px(px(8.0))
+                .py(px(8.0))
+                .border_b_1()
+                .border_color(theme.border)
+        })
+        .when(selected, |row| row.bg(theme.element_active))
+        .when(super::is_area(theme), |row| {
+            row.rounded_full()
+                .when(selected, |row| row.bg(theme.accent.opacity(0.16)))
+        })
 }
 
 pub(crate) fn walkthrough_navigation<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    element.when(
-        theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
-            && theme.ui_style.id != crate::ui_style::UiStyleId::Area,
-        |element| {
-            element
-                .bg(theme.surface)
-                .p(px(8.0))
-                .border_r_1()
-                .border_color(theme.border)
-        },
-    )
+    element
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
+                && theme.ui_style.id != crate::ui_style::UiStyleId::Area,
+            |element| {
+                element
+                    .bg(theme.surface)
+                    .p(px(8.0))
+                    .border_r_1()
+                    .border_color(theme.border)
+            },
+        )
+        .when(super::is_area(theme), |element| {
+            element.bg(theme.accent.opacity(0.06))
+        })
 }
 
 pub(crate) fn walkthrough_notes<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    element.when(
-        theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
-        |element| {
-            element
-                .bg(theme.surface)
-                .p(px(8.0))
-                .border_l_1()
-                .border_color(theme.border)
-        },
-    )
+    element
+        .when(
+            theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
+            |element| {
+                element
+                    .bg(theme.surface)
+                    .p(px(8.0))
+                    .border_l_1()
+                    .border_color(theme.border)
+            },
+        )
+        .when(super::is_area(theme), |element| {
+            element.bg(theme.accent.opacity(0.06))
+        })
 }
 
 /// Icon action in the changes pane header.
