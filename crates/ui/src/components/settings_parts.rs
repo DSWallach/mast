@@ -240,3 +240,44 @@ pub(crate) fn settings_choice(
         })
         .child(SharedString::from(label))
 }
+
+/// Shortcut recording key; the page owns its keyboard and pointer actions.
+pub(crate) fn settings_shortcut_key(
+    theme: &Theme,
+    index: usize,
+    recording: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let area = super::is_area(theme);
+    let industrial = super::is_industrial(theme);
+    let key = div()
+        .id(("shortcut-combo", index))
+        .min_w(px(96.0))
+        .px(px(12.0))
+        .py(px(6.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(8.0)))
+        .when(area, |el| el.rounded_full())
+        .border_1()
+        .when(industrial, |el| el.border_b_2())
+        .flex()
+        .justify_center()
+        .font_family(theme.font_mono.clone())
+        .text_size(crate::typography::ui_rems(12.0))
+        .cursor_pointer();
+    if recording {
+        key.border_color(theme.text.opacity(0.3))
+            .bg(theme.text)
+            .text_color(theme.on_solid)
+    } else {
+        key.border_color(theme.border)
+            .bg(if area {
+                theme.accent.opacity(0.1)
+            } else {
+                theme.bg
+            })
+            .text_color(theme.text)
+            .hover(|s| {
+                s.border_color(theme.text.opacity(0.2))
+                    .bg(crate::theme::ink(0.03))
+            })
+    }
+}

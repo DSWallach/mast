@@ -362,8 +362,7 @@ impl ShortcutsPage {
                 )
             })
             .child(
-                div()
-                    .id(("shortcut-combo", ix))
+                crate::components::settings_shortcut_key(theme, ix, is_recording)
                     .role(gpui::Role::Button)
                     .aria_label(format!(
                         "Change {} shortcut: {}",
@@ -372,33 +371,6 @@ impl ShortcutsPage {
                     ))
                     .tab_index(0)
                     .focus_visible(move |style| style.border_2().border_color(accent))
-                    .min_w(px(96.0))
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .flex()
-                    .justify_center()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .cursor_pointer()
-                    .map(|el| {
-                        if is_recording {
-                            el.border_color(theme.text.opacity(0.3))
-                                .bg(theme.text)
-                                .text_color(theme.on_solid)
-                        } else {
-                            el.border_color(theme.border)
-                                .bg(theme.bg)
-                                .text_color(theme.text)
-                                .hover(|s| {
-                                    // `hover:border-foreground/20` — the
-                                    // neutral foreground, not pure white.
-                                    s.border_color(theme.text.opacity(0.2))
-                                        .bg(crate::theme::ink(0.03))
-                                })
-                        }
-                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.start_recording(id, window, cx);
                     }))
