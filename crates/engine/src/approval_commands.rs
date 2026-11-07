@@ -1,7 +1,8 @@
 //! Conservative parsing for command approvals. This module does not approve commands.
 //!
 //! Shell constructs that cannot be represented exactly are rejected. In particular,
-//! expansion, redirection, background jobs and nested shells are never interpreted.
+//! expansion other than scoped $PWD assignments, redirection, background jobs and
+//! nested shells are never interpreted.
 
 use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness};
 use serde_json::Value;
@@ -81,6 +82,9 @@ pub(crate) fn matching_rules<'a>(
     let mut matches = Vec::new();
     for segment in &segments {
         let (assignments, argv) = normalize_segment(segment)?;
+        if argv.iter().any(|word| word.contains('$')) {
+            return None;
+        }
         if known_wrapper(segment, &argv) {
             continue;
         }
@@ -95,6 +99,25 @@ pub(crate) fn matching_rules<'a>(
             }
             if !argv.starts_with(&rule.argv_prefix) {
                 return false;
+            }
+            if assignments
+                .iter()
+                .any(|assignment| assignment.contains('$'))
+            {
+                let Some(scope) = rule
+                    .cwd_scope
+                    .as_deref()
+                    .and_then(|s| Path::new(s).canonicalize().ok())
+                else {
+                    return false;
+                };
+                if !cwd.starts_with(&scope)
+                    || !assignments
+                        .iter()
+                        .all(|assignment| scoped_pwd_assignment(assignment, &cwd, &scope))
+                {
+                    return false;
+                }
             }
             if rule.require_isolated_home && !isolated_configuration(&assignments) {
                 return false;
@@ -124,6 +147,38 @@ pub(crate) fn matching_rules<'a>(
         matches.push(rule);
     }
     (!matches.is_empty()).then_some(matches)
+}
+
+// Resolve the nearest existing ancestor as well as checking the lexical path:
+// a symlink in a target directory must not escape the approved scope.
+fn scoped_pwd_assignment(assignment: &str, cwd: &Path, scope: &Path) -> bool {
+    let Some((_, value)) = assignment.split_once('=') else {
+        return false;
+    };
+    if !value.contains('$') {
+        return true;
+    }
+    let Some(suffix) = value.strip_prefix("$PWD") else {
+        return false;
+    };
+    if !suffix.is_empty() && !suffix.starts_with('/') {
+        return false;
+    }
+    let relative = suffix.strip_prefix('/').unwrap_or("");
+    if relative
+        .split('/')
+        .any(|part| part == ".." || part == "." || (part.is_empty() && !relative.is_empty()))
+    {
+        return false;
+    }
+    let mut path = cwd.join(relative);
+    while !path.exists() {
+        if !path.pop() {
+            return false;
+        }
+    }
+    path.canonicalize()
+        .is_ok_and(|path| path.starts_with(scope))
 }
 
 fn known_wrapper(segment: &CommandSegment, argv: &[String]) -> bool {
@@ -427,8 +482,7 @@ fn parse_script(script: &str) -> Option<Vec<CommandSegment>> {
     if script.chars().any(|c| {
         matches!(
             c,
-            '$' | '`'
-                | '\\'
+            '`' | '\\'
                 | '<'
                 | '>'
                 | '*'
@@ -445,6 +499,19 @@ fn parse_script(script: &str) -> Option<Vec<CommandSegment>> {
         )
     }) {
         return None;
+    }
+    // Only standalone assignment words can contain this expansion. In
+    // particular, a single-quoted value is literal in the shell, not $PWD.
+    if script.contains('$') {
+        let assignment = regex::Regex::new(r#"(?:^|[\s;])[_a-zA-Z][_a-zA-Z0-9]*=(?:\"\$PWD(?:/[a-zA-Z0-9_.-]+)*\"|\$PWD(?:/[a-zA-Z0-9_.-]+)*)(?:\s|$)"#).ok()?;
+        let covered: Vec<_> = assignment.find_iter(script).collect();
+        if script.match_indices('$').any(|(index, _)| {
+            !covered
+                .iter()
+                .any(|m| m.start() <= index && index < m.end())
+        }) {
+            return None;
+        }
     }
     let mut segments = Vec::new();
     let mut start = 0;
@@ -595,6 +662,83 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn scoped_pwd_assignments_require_safe_shell_syntax_and_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let rule = ApprovalRule {
+            id: "preview".into(),
+            label: "Preview".into(),
+            created_by: "user".into(),
+            harness: ApprovalRuleHarness::Codex,
+            enabled: true,
+            argv_prefix: vec!["scripts/ui-preview.sh".into()],
+            command_regex: None,
+            cwd_scope: Some(root.path().to_string_lossy().into()),
+            require_isolated_home: false,
+            hit_count: 0,
+            last_used_at: None,
+        };
+        let check = |script: &str, rule: &ApprovalRule| {
+            matching_rules(
+                &json!(["/bin/zsh", "-lc", script]),
+                ApprovalRuleHarness::Codex,
+                root.path(),
+                &[root.path()],
+                std::slice::from_ref(rule),
+            )
+            .is_some()
+        };
+        assert!(check(
+            "CARGO_TARGET_DIR=\"$PWD/target-clean\" perl -e 'alarm 1200; exec @ARGV' scripts/ui-preview.sh --screens chat",
+            &rule
+        ));
+        assert!(check("CARGO_TARGET_DIR=$PWD scripts/ui-preview.sh", &rule));
+        for script in [
+            "CARGO_TARGET_DIR=$HOME scripts/ui-preview.sh",
+            "CARGO_TARGET_DIR=$(touch /tmp/x) scripts/ui-preview.sh",
+            "CARGO_TARGET_DIR=`touch /tmp/x` scripts/ui-preview.sh",
+            "CARGO_TARGET_DIR=$PWD/../escape scripts/ui-preview.sh",
+            "CARGO_TARGET_DIR='$PWD/target' scripts/ui-preview.sh",
+            "CARGO_TARGET_DIR=$PWD/target scripts/ui-preview.sh; rm -rf /tmp/x",
+            "CARGO_TARGET_DIR=$PWD/target scripts/ui-preview.sh && rm -rf /tmp/x",
+        ] {
+            assert!(!check(script, &rule), "{script}");
+        }
+        let mut unscoped = rule.clone();
+        unscoped.cwd_scope = None;
+        assert!(!check(
+            "CARGO_TARGET_DIR=$PWD/target scripts/ui-preview.sh",
+            &unscoped
+        ));
+        let mut snapshot = rule.clone();
+        snapshot.argv_prefix = [
+            "cargo",
+            "test",
+            "-p",
+            "mast-ui",
+            "--features",
+            "snapshot",
+            "--test",
+            "ui_preview",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert!(check(
+            "CARGO_TARGET_DIR=\"$PWD/target-clean\" cargo test -p mast-ui --features snapshot --test ui_preview -- --ignored",
+            &snapshot
+        ));
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+            assert!(!check(
+                "CARGO_TARGET_DIR=$PWD/link/target scripts/ui-preview.sh",
+                &rule
+            ));
+        }
     }
 
     #[test]
