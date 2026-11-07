@@ -5088,6 +5088,7 @@ dependencies = [
  "clap",
  "ctor",
  "embed-resource",
+ "gpui",
  "libc",
  "mast-engine",
  "mast-harness",
