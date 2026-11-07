@@ -439,6 +439,9 @@ fn cargo_configuration_is_safe(argv: &[String]) -> bool {
 pub(crate) fn parse_command(command: &Value) -> Option<Vec<CommandSegment>> {
     match command {
         Value::String(script) => {
+            if let Some(argv) = parse_shell_invocation(script) {
+                return parse_argv(argv);
+            }
             let segments = parse_script(script)?;
             if segments.len() == 1 && is_shell(&segments[0].argv) {
                 parse_argv(segments.into_iter().next()?.argv)
@@ -455,6 +458,35 @@ pub(crate) fn parse_command(command: &Value) -> Option<Vec<CommandSegment>> {
         }
         _ => None,
     }
+}
+
+// A provider may serialize a shell invocation as one string. Decode only a
+// simple invocation: no outer shell expansion, control operators, or redirects.
+fn parse_shell_invocation(script: &str) -> Option<Vec<String>> {
+    let mut quote = None;
+    let mut escaped = false;
+    for c in script.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote != Some('\'') && c == '\\' {
+            escaped = true;
+            continue;
+        }
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), c) if q == c => quote = None,
+            (None, ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '$' | '`') => return None,
+            (Some('"'), '$' | '`') => return None,
+            _ => {}
+        }
+    }
+    if quote.is_some() || escaped {
+        return None;
+    }
+    let argv = shell_words::split(script).ok()?;
+    is_shell(&argv).then_some(argv)
 }
 
 fn parse_argv(argv: Vec<String>) -> Option<Vec<CommandSegment>> {
@@ -694,6 +726,27 @@ mod tests {
             "CARGO_TARGET_DIR=\"$PWD/target-clean\" perl -e 'alarm 1200; exec @ARGV' scripts/ui-preview.sh --screens chat",
             &rule
         ));
+        let serialized = r#"/bin/zsh -lc 'CARGO_TARGET_DIR="$PWD/target-clean" perl -e '"'"'alarm 1200; exec @ARGV'"'"' scripts/ui-preview.sh --screens chat'"#;
+        assert!(
+            matching_rules(
+                &json!(serialized),
+                ApprovalRuleHarness::Codex,
+                root.path(),
+                &[root.path()],
+                std::slice::from_ref(&rule)
+            )
+            .is_some()
+        );
+        assert!(
+            matching_rules(
+                &json!(format!("{serialized}; rm -rf /tmp/x")),
+                ApprovalRuleHarness::Codex,
+                root.path(),
+                &[root.path()],
+                std::slice::from_ref(&rule)
+            )
+            .is_none()
+        );
         assert!(check("CARGO_TARGET_DIR=$PWD scripts/ui-preview.sh", &rule));
         for script in [
             "CARGO_TARGET_DIR=$HOME scripts/ui-preview.sh",
