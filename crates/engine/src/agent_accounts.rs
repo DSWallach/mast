@@ -1133,7 +1133,7 @@ impl AgentAccounts {
             }
         }
 
-        self.write_slot(&Slot {
+        let slot = Slot {
             id: slot_id_for(HarnessId::ClaudeCode, &account_uuid),
             harness: HarnessId::ClaudeCode,
             account_key: account_uuid.clone(),
@@ -1149,10 +1149,30 @@ impl AgentAccounts {
             saved_at: now_ms(),
             created_at: None,
             promoted_to: None,
-        })?;
+        };
+        self.save_claude_login(&slot).await?;
         lock(&self.inner.flows).remove(login_id);
         self.invalidate_local_sign_in_status();
         self.list(false).await
+    }
+
+    /// Reauthentication of the active account must update the live login first:
+    /// the next list snapshots live credentials into the matching slot.
+    async fn save_claude_login(&self, slot: &Slot) -> Result<(), EngineError> {
+        let (active, warning) = self.detect_claude().await;
+        if let Some(active) = active.filter(|active| active.account_key == slot.account_key) {
+            let live = active.credentials.ok_or_else(|| {
+                EngineError::Other(warning.unwrap_or_else(||
+                    "Cannot read the active Claude credentials; sign-in was not applied.".into()))
+            })?;
+            let oauth = slot.credentials.get("claudeAiOauth").cloned().ok_or_else(||
+                EngineError::Other("The Claude sign-in returned no OAuth credentials.".into()))?;
+            self.write_claude_credentials(&with_claude_ai_oauth(&live, oauth)).await?;
+        } else {
+            // Adding a different account must not change the active login.
+            self.write_slot(slot)?;
+        }
+        Ok(())
     }
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
