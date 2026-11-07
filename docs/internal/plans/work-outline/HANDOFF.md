@@ -1008,6 +1008,31 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-07 17:20; coordinator e81de680)
+
+- **Installed and current: release 67** (b9d61506, 17:17; nextest 2485/2485, UI 2590/0/13). Backup of release 66:
+  `~/zeron-dev-app-backups/mast-20261107-1717-pre-release67`. Design-iteration tooling (research:
+  mast-artifact:2b0aa925…, item 7b93fcb1), Mikey's rule: tweak/prototype in real components, not HTML mockups.
+  - `design-gallery`: per-view styles (`Theme::with_ui_style`), story registry with states, Board prototype story,
+    `./scripts/gallery-watch.sh` (Mikey runs it; rebuild-on-save, keeps selection). No release needed to use it.
+  - `design-panel`: `mast.style-overrides/v1` file in the profile, watched live; Settings → Developer → Enable Design
+    (off by default) with component-backed roles (radius, sizes, per-surface border/page colour, primary/secondary
+    colour role, tracked caps, heading font) across toolbars, sidebar, header chips, composer/SEND,
+    message/tool/code panels, outline rows. Save writes the file (gallery follows it); Copy patch → coordinator turns it
+    into permanent defaults. No-file renders 18/18 pixel-identical. Docs: docs/internal/design-panel.md.
+  - `design-render`: warm preview server `scripts/ui-preview.sh --serve <dir>` (request.json/response.json, manifest),
+    `.claude/skills/mast-ui-render/SKILL.md`, approval matcher accepts `NAME=$PWD[/rel]` env prefixes only inside a
+    rule's cwdScope (canonical path check; everything else still fails closed; reviewed by the coordinator),
+    `dev-inspector` feature (⌘⌥⇧I read-only inspector; NOT for the installed app: always-on per-element cost),
+    hot-patch spike: Subsecond not viable (tip-crate restriction).
+- **Running:** gallery-screens (chat 4978f51f): inspector in the gallery only + Screens section built from the
+  preview fixtures (chat, sidebar, details/Needs-you, Overview, populated changes, Appearance, Developer → Design,
+  browser) + coverage doc for the surfaces Mikey tweaks.
+- **Follow-ups:** Area SEND under non-Area themes; Area Light selected Style/Layout cards grey; Linear/team and menus
+  slices; standing per-style design workers once Mikey sends a tweak list; engine test
+  `rpc::tests::local_opening_tail_arrives_before_full_mirror_and_keeps_all_history` fails when the engine lib suite
+  runs outside the release harness (timing), passes in release runs.
+
 ## In flight (snapshot 2026-11-07 00:10; coordinator e81de680)
 
 - **Installed and current: release 66** (f92924d9, 00:08; UI 2581/0/13). Area details section headings share one
