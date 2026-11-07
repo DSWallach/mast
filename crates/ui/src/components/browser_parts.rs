@@ -263,3 +263,128 @@ pub(crate) fn artifact_option_toggle(
         });
     super::segmented_key(button, theme, active)
 }
+
+pub(crate) fn artifact_find_button(
+    id: &'static str,
+    glyph: &'static str,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .size(px(20.0))
+        .flex_none()
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(surface_chrome::CONTROL_RADIUS)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .when(!enabled, |el| el.opacity(0.35))
+        .hover(|el| el.bg(crate::theme::wash(0.14)))
+        .child(
+            icons::icon(glyph)
+                .size(px(11.0))
+                .text_color(theme.text_muted),
+        )
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn artifact_zoom_button(
+    id: &'static str,
+    text: SharedString,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_none()
+        .h(px(surface_chrome::CONTROL_SIZE))
+        .min_w(px(surface_chrome::CONTROL_SIZE))
+        .px(px(4.0))
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(surface_chrome::CONTROL_RADIUS)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .when(enabled, |el| {
+            el.cursor_pointer()
+                .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
+        })
+        .when(!enabled, |el| el.cursor_default().opacity(0.35))
+        .child(text)
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn browser_status_button(
+    id: &'static str,
+    label: &'static str,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(10.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .hover(|style| style.bg(crate::theme::wash(0.10)))
+        .flex()
+        .items_center()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text)
+        .child(label)
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent_wash)
+        });
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn artifact_picker_button(
+    id: &'static str,
+    label: SharedString,
+    open: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_none()
+        .h(px(surface_chrome::CONTROL_SIZE))
+        .px(px(6.0))
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(surface_chrome::CONTROL_RADIUS)))
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .when(open, |el| el.bg(crate::theme::wash(0.10)))
+        .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
+        .child(label)
+        .child(icons::icon(icons::ALT_ARROW_DOWN).size(px(9.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().when(open, |el| el.bg(theme.accent_wash))
+        });
+    super::segmented_key(button, theme, open)
+}

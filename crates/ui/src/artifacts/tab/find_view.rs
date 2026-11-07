@@ -754,23 +754,7 @@ impl ArtifactTab {
         let find = &self.nav.find;
         let has_matches = find.count() > 0;
         let button = |id: &'static str, glyph: &'static str, enabled: bool| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .size(px(20.0))
-                .flex_none()
-                .rounded(px(surface_chrome::CONTROL_RADIUS))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .when(!enabled, |el| el.opacity(0.35))
-                .hover(|el| el.bg(crate::theme::wash(0.14)))
-                .child(
-                    icons::icon(glyph)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted),
-                )
+            crate::components::browser_parts::artifact_find_button(id, glyph, enabled, theme)
         };
         Some(
             div()

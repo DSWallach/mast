@@ -1067,23 +1067,7 @@ impl ArtifactTab {
         };
         let (previous_revision, next_revision) = adjacent_revisions(artifact.revisions.iter().map(|revision| revision.id), shown);
         let picker_button = |id: &'static str, label: SharedString, open: bool| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .h(px(surface_chrome::CONTROL_SIZE))
-                .px(px(6.0))
-                .rounded(px(surface_chrome::CONTROL_RADIUS))
-                .flex()
-                .items_center()
-                .gap(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .when(open, |el| el.bg(crate::theme::wash(0.10)))
-                .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
-                .child(label)
-                .child(icons::icon(icons::ALT_ARROW_DOWN).size(px(9.0)))
+            crate::components::browser_parts::artifact_picker_button(id, label, open, theme)
         };
         let pinned = artifact.pinned_as_plan;
         surface_chrome::toolbar(theme)

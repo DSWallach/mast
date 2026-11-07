@@ -430,23 +430,7 @@ fn status_button(
     label: &'static str,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(28.0))
-        .px(px(10.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised)
-        .cursor_pointer()
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .hover(|style| style.bg(crate::theme::wash(0.10)))
-        .flex()
-        .items_center()
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text)
-        .child(label)
+    crate::components::browser_parts::browser_status_button(id, label, theme)
 }
 
 #[cfg(test)]
