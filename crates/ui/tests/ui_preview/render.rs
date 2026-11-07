@@ -191,13 +191,13 @@ fn chat(data_dir: PathBuf, cx: &mut App) -> AnyView {
         workos_client_id: None,
         default_harness: mast_proto::HarnessId::Mock,
     };
-    cx.new(|cx| {
+    let shell = cx.new(|cx| {
         let mut shell = mast_ui::shell::Shell::new(state, boot, cx);
         shell.fixture_snapshot_ready();
-        shell.fixture_snapshot_item_panel(cx);
         shell
-    })
-    .into()
+    });
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_item_panel(cx));
+    shell.into()
 }
 
 pub fn render(
