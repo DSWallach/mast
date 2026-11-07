@@ -1205,3 +1205,25 @@ pub(crate) fn settings_report_panel(
             )))
         }))
 }
+
+/// Dismiss action on the theme import dialog.
+pub(crate) fn settings_import_close(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("theme-import-close")
+        .size(px(28.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .when(super::is_industrial(theme), |el| el.border_b_2())
+        .border_color(theme.border)
+        .bg(if super::is_area(theme) {
+            theme.accent.opacity(0.1)
+        } else {
+            theme.surface_raised.opacity(0.28)
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.surface_raised_hover))
+}

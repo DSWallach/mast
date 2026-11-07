@@ -2125,18 +2125,7 @@ impl AppearancePage {
                     ),
             )
             .child(
-                div()
-                    .id("theme-import-close")
-                    .size(px(28.0))
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.surface_raised.opacity(0.28))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.surface_raised_hover))
+                crate::components::settings_import_close(theme)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.import_dialog = None;
                         cx.notify();
