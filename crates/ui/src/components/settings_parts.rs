@@ -863,3 +863,70 @@ pub(crate) fn settings_send_behavior_option(
             .when(super::is_industrial(theme), |el| el.border_b_2())
         })
 }
+
+/// Archived session row, glyph, and restore action.
+pub(crate) fn settings_archived_row(theme: &Theme, index: usize) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("archived-row", index))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(8.0)))
+        .px(px(12.0))
+        .py(px(8.0))
+        .hover(|s| s.bg(ink(0.03)))
+}
+pub(crate) fn settings_archive_tile(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(32.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent.opacity(0.1))
+        })
+        .border_1()
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.surface_raised).border_b_2()
+        })
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(crate::icons::ARCHIVE_MINIMALISTIC)
+                .size(px(16.0))
+                .text_color(theme.text_muted.opacity(0.6)),
+        )
+}
+pub(crate) fn settings_unarchive_action(
+    theme: &Theme,
+    index: usize,
+    hovered: bool,
+    busy: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("unarchive", index))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(10.0))
+        .py(px(4.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent.opacity(0.1))
+        })
+        .border_1()
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.surface_raised).border_b_2()
+        })
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted)
+        .opacity(if hovered || busy { 1.0 } else { 0.0 })
+        .when(busy, |el| el.opacity(0.4))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
+}
