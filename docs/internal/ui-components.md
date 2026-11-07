@@ -1120,6 +1120,21 @@ and indirect `surface_chrome` calls also require migration. Default diff code
 geometry and data-specific status colors need separate review before deciding
 which literals stay in the baseline.
 
+At `e02f7bfa2`, the indexed direct style and layout references have moved into
+`components/changes_parts.rs`; a direct search of these owned files for
+`theme.ui_style`, `UiStyleId::`, and `UiLayout::` returns no matches. Remaining
+literal `ui_rems` calls in production, pending the rest of this audit:
+
+- `changes/explanation.rs` trigger and answer text: stays literal, in baseline:
+  fixed explanatory text size across the current styles.
+- `changes/walkthrough.rs` note body and root text: stays literal, in baseline:
+  fixed review text and line geometry, including the note-height calculation.
+- `changes/walkthrough.rs` highlights and questions labels: stays literal, in
+  baseline: fixed secondary text size; label case is component-owned.
+
+The remaining inline surfaces still require manual audit; this list is not a
+claim that every fixed pixel measurement has been reviewed.
+
 ### Shell and sidebar audit (in progress)
 
 Locations refer to `d68928981`. This is a starting index, not a complete
