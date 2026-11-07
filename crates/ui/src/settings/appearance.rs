@@ -2783,31 +2783,7 @@ impl Render for AppearancePage {
             .copied()
             .map(|id| {
                 let label = id.label();
-                let description = id.description();
-                let gap = id.preview_gap();
-                let preview = div()
-                    .size_full()
-                    .rounded(px(widgets::OPTION_CARD_RADIUS))
-                    .bg(theme.surface)
-                    .p(px(16.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(gap))
-                    .children((0..4).map(|_| {
-                        div()
-                            .h(px(12.0))
-                            .w_full()
-                            .rounded(px(3.0))
-                            .bg(theme.surface_raised)
-                    }))
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(description),
-                    )
-                    .into_any_element();
+                let preview = crate::components::settings_style_preview(&theme, id);
                 widgets::option_card(
                     &theme,
                     icons::MONITOR,

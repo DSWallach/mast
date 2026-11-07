@@ -61,7 +61,11 @@ pub(crate) fn settings_layout_preview(
     };
     div()
         .size_full()
-        .rounded(px(crate::settings::widgets::OPTION_CARD_RADIUS))
+        .rounded(px(theme
+            .ui_style
+            .radius_roles()
+            .panel
+            .unwrap_or(crate::settings::widgets::OPTION_CARD_RADIUS)))
         .bg(theme.surface)
         .p(px(16.0))
         .flex()
@@ -483,4 +487,35 @@ pub(crate) fn settings_appearance_preview(
             radius,
         ),
     }
+}
+
+/// Illustration of a style choice inside the appearance picker.
+pub(crate) fn settings_style_preview(theme: &Theme, id: crate::ui_style::UiStyleId) -> AnyElement {
+    div()
+        .size_full()
+        .rounded(px(theme
+            .ui_style
+            .radius_roles()
+            .panel
+            .unwrap_or(crate::settings::widgets::OPTION_CARD_RADIUS)))
+        .bg(theme.surface)
+        .p(px(16.0))
+        .flex()
+        .flex_col()
+        .gap(px(id.preview_gap()))
+        .children((0..4).map(|_| {
+            div()
+                .h(px(12.0))
+                .w_full()
+                .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(3.0)))
+                .bg(theme.surface_raised)
+        }))
+        .child(
+            div()
+                .mt(px(8.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(id.description()),
+        )
+        .into_any_element()
 }
