@@ -1133,7 +1133,7 @@ impl AgentAccounts {
             }
         }
 
-        self.write_slot(&Slot {
+        let slot = Slot {
             id: slot_id_for(HarnessId::ClaudeCode, &account_uuid),
             harness: HarnessId::ClaudeCode,
             account_key: account_uuid.clone(),
@@ -1149,10 +1149,30 @@ impl AgentAccounts {
             saved_at: now_ms(),
             created_at: None,
             promoted_to: None,
-        })?;
+        };
+        self.save_claude_login(&slot).await?;
         lock(&self.inner.flows).remove(login_id);
         self.invalidate_local_sign_in_status();
         self.list(false).await
+    }
+
+    /// Reauthentication of the active account must update the live login first:
+    /// the next list snapshots live credentials into the matching slot.
+    async fn save_claude_login(&self, slot: &Slot) -> Result<(), EngineError> {
+        let (active, warning) = self.detect_claude().await;
+        if let Some(active) = active.filter(|active| active.account_key == slot.account_key) {
+            let live = active.credentials.ok_or_else(|| {
+                EngineError::Other(warning.unwrap_or_else(||
+                    "Cannot read the active Claude credentials; sign-in was not applied.".into()))
+            })?;
+            let oauth = slot.credentials.get("claudeAiOauth").cloned().ok_or_else(||
+                EngineError::Other("The Claude sign-in returned no OAuth credentials.".into()))?;
+            self.write_claude_credentials(&with_claude_ai_oauth(&live, oauth)).await?;
+        } else {
+            // Adding a different account must not change the active login.
+            self.write_slot(slot)?;
+        }
+        Ok(())
     }
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
@@ -2475,6 +2495,78 @@ mod tests {
         std::fs::write(config.claude_creds_file(), r#"{"claudeAiOauth":{"accessToken":"fixture"}}"#).unwrap();
         accounts.invalidate_local_sign_in_status();
         assert_eq!(accounts.local_sign_in_status(HarnessId::ClaudeCode).await, LocalSignInStatus::SignedIn);
+    }
+
+    fn claude_test_accounts() -> (tempfile::TempDir, AgentAccounts, AgentAccountsConfig) {
+        let home = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: home.path().join("data"),
+            claude_config_dir: home.path().join("claude"),
+            claude_config_file: home.path().join("claude.json"),
+            codex_home: home.path().join("codex"),
+            cursor_sdk_auth_file: home.path().join("cursor.json"),
+        };
+        std::fs::create_dir_all(&config.claude_config_dir).unwrap();
+        std::fs::write(&config.claude_config_file, serde_json::json!({
+            "oauthAccount": {"accountUuid": "active", "emailAddress": "active@example.test"},
+            "userID": "fixture-user", "other": "preserved"
+        }).to_string()).unwrap();
+        std::fs::write(config.claude_creds_file(), serde_json::json!({
+            "claudeAiOauth": {"accessToken": "expired"},
+            "trustedDeviceToken": "device", "mcpOAuth": {"server": "shared"}
+        }).to_string()).unwrap();
+        let accounts = AgentAccounts::new(config.clone());
+        (home, accounts, config)
+    }
+
+    fn claude_test_slot(key: &str, token: &str) -> Slot {
+        Slot {
+            id: slot_id_for(HarnessId::ClaudeCode, key),
+            harness: HarnessId::ClaudeCode,
+            account_key: key.into(),
+            profile: SlotProfile {
+                email: format!("{key}@example.test"), display_name: None,
+                organization: None, plan: None, auth_kind: AgentAuthKind::Oauth,
+            },
+            credentials: serde_json::json!({"claudeAiOauth": {"accessToken": token}}),
+            claude_config: None, saved_at: now_ms(), created_at: None, promoted_to: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_reauthentication_updates_live_login_and_snapshot() {
+        let (_home, accounts, config) = claude_test_accounts();
+        accounts.list(false).await.unwrap();
+        accounts.save_claude_login(&claude_test_slot("active", "renewed")).await.unwrap();
+        let snapshot = accounts.list(false).await.unwrap();
+        assert!(snapshot.accounts.iter().any(|account| account.active && account.id == slot_id_for(HarnessId::ClaudeCode, "active")));
+        let live = read_json(&config.claude_creds_file()).unwrap();
+        assert_eq!(live["claudeAiOauth"]["accessToken"], "renewed");
+        assert_eq!(live["trustedDeviceToken"], "device");
+        assert_eq!(live["mcpOAuth"]["server"], "shared");
+        let slot = accounts.read_slots(HarnessId::ClaudeCode).pop().unwrap();
+        assert_eq!(slot.credentials, live);
+        let identity = read_json(&config.claude_config_file).unwrap();
+        assert_eq!(identity["userID"], "fixture-user");
+        assert_eq!(identity["other"], "preserved");
+    }
+
+    #[tokio::test]
+    async fn claude_sign_in_for_another_account_preserves_switching() {
+        let (_home, accounts, config) = claude_test_accounts();
+        accounts.list(false).await.unwrap();
+        accounts.save_claude_login(&claude_test_slot("other", "other-token")).await.unwrap();
+        accounts.list(false).await.unwrap();
+        assert_eq!(read_json(&config.claude_creds_file()).unwrap()["claudeAiOauth"]["accessToken"], "expired");
+        accounts.activate(HarnessId::ClaudeCode, &slot_id_for(HarnessId::ClaudeCode, "other")).await.unwrap();
+        let live = read_json(&config.claude_creds_file()).unwrap();
+        assert_eq!(live["claudeAiOauth"]["accessToken"], "other-token");
+        assert_eq!(live["mcpOAuth"]["server"], "shared");
+        accounts.activate(HarnessId::ClaudeCode, &slot_id_for(HarnessId::ClaudeCode, "active")).await.unwrap();
+        let live = read_json(&config.claude_creds_file()).unwrap();
+        assert_eq!(live["claudeAiOauth"]["accessToken"], "expired");
+        assert_eq!(live["mcpOAuth"]["server"], "shared");
+        assert_eq!(live["trustedDeviceToken"], "device");
     }
 
     #[test]
