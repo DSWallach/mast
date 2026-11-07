@@ -1006,7 +1006,42 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-06 evening; coordinator 1d22a4b9 handing off)
+## In flight (snapshot 2026-11-06 night; coordinator e81de680)
+
+- **Installed and current: release 64** (f44b65c5, 19:09): the first three component MIGRATIONS on top of the
+  release-63 foundation. Release tests passed (UI 2580/0/13). Backup of release 63:
+  `~/zeron-dev-app-backups/mast-20261106-1909-pre-migrations`. Mikey needs to restart to see it.
+  - `migrate-conversation` (e335e22e): transcript, composer*, markdown/, composer-facing chips in pickers.rs →
+    components/conversation_parts.rs. Area composer/SEND/tab follow the theme accent; SEND sits in the footer row;
+    Industrial square send/attach/code panels; MODEL caption no longer clipped. Default+Minimal 1.000.
+  - `migrate-shell` (f476d58e): shell.rs, shell/, rail.rs → components/shell_parts.rs. Area sidebar row keeps
+    status/queued/failed/archive/jump/PR; Industrial square titlebar keys and rows. Compact snapshots were stale and
+    were regenerated (Compact dark from the merged head, Compact light from the foundation).
+  - `migrate-outline` (f44b65c5): work_outline/, overview*.rs → components/outline_parts.rs. Default+Minimal
+    details 1.000.
+  - Ratchet after all three: 486/322/7/5 (was 772/446/29/14).
+- **Follow-ups from the coordinator's preview review** (fold into the Industrial/Area polish slice): Industrial
+  static detail headings (Chats, Items, Project, Child template) use wider tracking than the collapsible ones and
+  wrap the count to a second line ("C H A T S / (2)"); Area date input in details shows a red outline; Area sidebar
+  row omits project/branch/remote metadata; regenerate the Compact light chat snapshot from the current head; the
+  shell audit ledger and the conversation tool/markdown child elements are untriaged (listed in
+  docs/internal/ui-components.md).
+- **Next slices (not started):** changes/walkthrough (changes.rs, changes/, files/), settings/appearance,
+  browser/artifacts, linear/team, menus/remaining (popover, pickers menu bodies, app_menus, menu_bar). Then Area
+  and Industrial polish as component skins.
+- **Preview review tips:** previews are 4 themes × 9 style/layout rows; crop cells with `sips -c 455 728
+  --cropOffset <row*455> <col*728>`. The rich fixture (`offscreen_snapshot render_style_theme_matrix`) shows code
+  and tool panels per style. Comparisons must render the foundation and the branch with the same renderer;
+  checked-in snapshots can be stale. A shared CARGO_TARGET_DIR between two worktrees can render the wrong commit:
+  check the log says "Compiling mast-ui" from the right path.
+- **Disk:** Codex workers' `perl alarm` kills leave orphaned `*.rcgu.o` in `target-clean/debug/deps` (6–11 GB per
+  worktree); `find … -name '*.rcgu.o' -links 1 -mmin +15 -delete` is safe mid-run.
+- **Waiting on Mikey:** unchanged from the snapshot below (UI preview approval rule 26af0df6, workflow pack draft,
+  coworker readiness findings, active-checkout design, enabling suggested approval rules). Hand-off menu for
+  worker-less chats: Mikey said leave as is (the agent can still call `hand_off_orchestrator` if the chat has a
+  work item). Phase 0 go/no-go on 2026-11-12.
+
+## In flight (older snapshot 2026-11-06 evening; coordinator 1d22a4b9 handing off)
 
 **State at hand-off (read this first):**
 - Installed and current: release 63, the component foundation (`ui-components`), which gives Style {Default,
