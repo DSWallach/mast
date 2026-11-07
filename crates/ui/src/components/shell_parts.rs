@@ -777,7 +777,7 @@ pub(crate) fn area_sidebar_chat_row(
     row_id: String,
     chat_id: &str,
     title: SharedString,
-    status: crate::status_style::Status,
+    _status: crate::status_style::Status,
     status_label: &'static str,
     selected: bool,
     searching: bool,
@@ -849,8 +849,10 @@ pub(crate) fn area_sidebar_chat_row(
             .flex()
             .items_center()
             .gap(px(4.0))
-            .when(status != crate::status_style::Status::Idle, |el| {
-                el.child(crate::status_style::indicator_for_theme(status, theme))
+            .text_color(if selected {
+                foreground
+            } else {
+                theme.text_muted
             })
             .when(theme.ui_style.behavior.status_words, |el| {
                 el.child(
