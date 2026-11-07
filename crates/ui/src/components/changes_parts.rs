@@ -3,6 +3,30 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) enum ChangesWarning {
+    Dirty,
+    Partial,
+}
+
+pub(crate) fn changes_warning_badge<T: Styled + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    warning: ChangesWarning,
+) -> T {
+    let (radius, opacity) = match warning {
+        ChangesWarning::Dirty => (3.0, 0.85),
+        ChangesWarning::Partial => (4.0, 0.75),
+    };
+    element
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(radius)))
+        .bg(theme.warning.opacity(0.08))
+        .text_color(theme.warning.opacity(opacity))
+        .when(super::is_industrial(theme), |element| {
+            element.border_1().border_color(theme.border)
+        })
+        .when(super::is_area(theme), |element| element.rounded_full())
+}
+
 pub(crate) fn changes_suggested_badge<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element
         .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))

@@ -4766,9 +4766,7 @@ impl Changes {
                         .text_size(px(9.0))
                         .px(px(5.0))
                         .py(px(1.0))
-                        .rounded(px(3.0))
-                        .bg(theme.warning.opacity(0.08))
-                        .text_color(theme.warning.opacity(0.85))
+                        .when(true, |el| crate::components::changes_warning_badge(el, theme, crate::components::ChangesWarning::Dirty))
                         .child("DIRTY"),
                 )
             })
@@ -5921,9 +5919,7 @@ impl Changes {
                             .text_size(px(10.0))
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(4.0))
-                            .bg(theme.warning.opacity(0.08))
-                            .text_color(theme.warning.opacity(0.75))
+                            .when(true, |el| crate::components::changes_warning_badge(el, theme, crate::components::ChangesWarning::Partial))
                             .child(SharedString::from("Partial snapshot")),
                     )
                 })
