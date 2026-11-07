@@ -25,3 +25,14 @@ pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
         .text_color(theme.text_muted)
         .cursor_pointer()
 }
+
+pub(crate) fn settings_effective_surface(
+    surface: mast_theme::SurfacePreference,
+    style: crate::ui_style::UiStyle,
+) -> mast_theme::SurfacePreference {
+    match style.surface {
+        crate::ui_style::SurfaceModel::ThemeDefault => surface,
+        crate::ui_style::SurfaceModel::Opaque => mast_theme::SurfacePreference::Opaque,
+        crate::ui_style::SurfaceModel::Glass => mast_theme::SurfacePreference::Frosted,
+    }
+}

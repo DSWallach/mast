@@ -109,7 +109,7 @@ pub fn init(
         appearance,
         effective_variant(&themes, appearance, style),
         effective_accent(accent, style),
-        effective_surface(surface, style),
+        crate::components::settings_effective_surface(surface, style),
         cx,
     );
 }
@@ -151,16 +151,6 @@ fn effective_accent(accent: AccentSelection, _style: crate::ui_style::UiStyle) -
     accent
 }
 
-fn effective_surface(
-    surface: SurfacePreference,
-    style: crate::ui_style::UiStyle,
-) -> SurfacePreference {
-    match style.surface {
-        crate::ui_style::SurfaceModel::ThemeDefault => surface,
-        crate::ui_style::SurfaceModel::Opaque => SurfacePreference::Opaque,
-        crate::ui_style::SurfaceModel::Glass => SurfacePreference::Frosted,
-    }
-}
 
 pub(crate) fn effective_selection(
     cx: &App,
@@ -170,7 +160,7 @@ pub(crate) fn effective_selection(
     (
         effective_variant(&themes(cx), appearance, style).to_owned(),
         effective_accent(accent(cx), style),
-        effective_surface(surface(cx), style),
+        crate::components::settings_effective_surface(surface(cx), style),
     )
 }
 
