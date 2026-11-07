@@ -918,3 +918,12 @@ pub(crate) fn artifact_picker_row(
         });
     super::segmented_key(row, theme, selected)
 }
+
+/// Style-specific label for a browser action.
+pub(crate) fn browser_action_label(label: &'static str, theme: &Theme) -> SharedString {
+    if super::is_industrial(theme) {
+        crate::popover::tracked_upper(label).into()
+    } else {
+        label.into()
+    }
+}

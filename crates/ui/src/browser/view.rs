@@ -289,11 +289,9 @@ impl BrowserSurface {
                                     this.focus_address(window, cx);
                                 }
                             }))
-                            .child(if has_error {
-                                "Try again"
-                            } else {
-                                "Enter an address"
-                            })
+                            .child(crate::components::browser_parts::browser_action_label(
+                                if has_error { "Try again" } else { "Enter an address" }, theme,
+                            ))
                             .when(!has_error, |el| {
                                 el.child(
                                     div()
