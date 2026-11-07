@@ -9,15 +9,17 @@ pub enum Screen {
     Overview,
     Walkthrough,
     Appearance,
+    Design,
     Browser,
 }
 
-pub const SCREENS: [(Screen, &str); 6] = [
+pub const SCREENS: [(Screen, &str); 7] = [
     (Screen::Chat, "Chat and sidebar"),
     (Screen::Details, "Item details"),
     (Screen::Overview, "Overview and outline"),
     (Screen::Walkthrough, "Changes and walkthrough"),
     (Screen::Appearance, "Appearance"),
+    (Screen::Design, "Developer → Design"),
     (Screen::Browser, "Browser"),
 ];
 
@@ -29,6 +31,9 @@ pub fn build(screen: Screen, data_dir: PathBuf, window: &mut Window, cx: &mut Ap
         Screen::Walkthrough => mast_ui::snapshot::populated_walkthrough_fixture(cx).into(),
         Screen::Appearance => cx
             .new(mast_ui::settings::appearance::AppearancePage::new)
+            .into(),
+        Screen::Design => cx
+            .new(mast_ui::settings::design_panel::DesignPanel::new)
             .into(),
         Screen::Browser => cx
             .new(|cx| {

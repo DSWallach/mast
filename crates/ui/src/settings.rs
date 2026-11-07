@@ -21,6 +21,7 @@ pub mod appearance;
 pub mod archived;
 pub mod composer;
 pub mod devices;
+pub mod design_panel;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
@@ -755,6 +756,7 @@ pub struct UiSettings {
     pub ui_font_size: crate::typography::UiFontSize,
     pub ui_style: crate::ui_style::UiStyleId,
     pub ui_layout: crate::ui_style::UiLayout,
+    pub developer_design_enabled: bool,
     /// Help cards dismissed on this device.
     pub dismissed_help_cards: Vec<String>,
     /// Terminal family and absolute pixel size. Only fixed-width families
@@ -873,6 +875,7 @@ impl Default for UiSettings {
             ui_font_size: crate::typography::UiFontSize::default(),
             ui_style: crate::ui_style::UiStyleId::default(),
             ui_layout: crate::ui_style::UiLayout::default(),
+            developer_design_enabled: false,
             dismissed_help_cards: Vec::new(),
             terminal_font_family: crate::typography::UiFontFamily::GeistMono,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
@@ -3016,6 +3019,7 @@ mod tests {
             ui_font_size: crate::typography::UiFontSize::ALL[5],
             ui_style: crate::ui_style::UiStyleId::Default,
             ui_layout: crate::ui_style::UiLayout::Compact,
+            developer_design_enabled: false,
             dismissed_help_cards: vec!["outline".into()],
             theme_selection: mast_theme::ThemeSelection {
                 light: "catppuccin-latte".into(),

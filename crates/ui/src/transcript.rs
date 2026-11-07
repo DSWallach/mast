@@ -8285,7 +8285,7 @@ fn tool_chip(
             ))
         })
         .child(
-            crate::components::conversation_tool_chip_frame(rail, row_height, CHIP_CARD_HEIGHT, ACTIVITY_TEXT_GAP, content_reveal)
+            crate::components::conversation_tool_chip_frame(rail, row_height, CHIP_CARD_HEIGHT, ACTIVITY_TEXT_GAP, content_reveal, theme)
                 .child(chip_header_row(tool, None, theme, view, cx)),
         )
         .into_any_element()

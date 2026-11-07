@@ -201,6 +201,7 @@ pub struct UiStyle {
     pub conversation: ConversationVariant,
     pub status_indicator: StatusIndicator,
     pub font_preference: FontPreference,
+    pub design_roles: crate::style_overrides::DesignRoles,
 }
 
 impl UiStyle {
@@ -231,6 +232,7 @@ impl UiStyle {
         conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
             reveal: Reveal::Hover,
@@ -270,6 +272,7 @@ impl UiStyle {
         conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
             reveal: Reveal::Always,
@@ -309,6 +312,7 @@ impl UiStyle {
         conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             labels: LabelMode::All,
             reveal: Reveal::Always,
@@ -345,6 +349,7 @@ impl UiStyle {
         conversation: ConversationVariant::Industrial,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             motion: Motion::Instant,
             ..Self::MINIMAL.behavior
@@ -374,6 +379,7 @@ impl UiStyle {
         conversation: ConversationVariant::Area,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             motion: Motion::Soft,
             ..Self::MINIMAL.behavior
@@ -406,7 +412,7 @@ impl UiStyle {
             UiLayout::Guided => 1.25,
         };
         SpacingScale {
-            small: base * factor,
+            small: self.design_roles.spacing_small.unwrap_or(base * factor),
             medium: base * 2.0 * factor,
             large: base * 4.0 * factor,
         }
@@ -493,7 +499,7 @@ pub fn current(cx: &gpui::App) -> UiStyle {
         .try_global::<UiStyleState>()
         .map(|state| (state.0, state.1))
         .unwrap_or_default();
-    UiStyle::resolve(id, layout)
+    crate::style_overrides::current(cx).apply(UiStyle::resolve(id, layout))
 }
 
 /// Resolve a style for a single view without changing the application's choice.
@@ -503,8 +509,9 @@ pub fn theme_for_view(
     theme: &crate::theme::Theme,
     id: UiStyleId,
     layout: UiLayout,
+    overrides: &crate::style_overrides::Overrides,
 ) -> crate::theme::Theme {
-    theme.clone().with_ui_style(UiStyle::resolve(id, layout))
+    theme.clone().with_ui_style(overrides.apply(UiStyle::resolve(id, layout)))
 }
 
 pub fn set_layout(layout: UiLayout, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {

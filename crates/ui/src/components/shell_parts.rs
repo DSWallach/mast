@@ -8,11 +8,9 @@ use gpui::{
 
 pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
     div()
-        .h(px(if super::is_area(theme) {
-            0.0
-        } else {
+        .h(px(if theme.ui_style.design_roles.sidebar_border.unwrap_or_else(|| !super::is_area(theme)) {
             theme.ui_style.tokens.rule_width.unwrap_or(1.0)
-        }))
+        } else { 0.0 }))
         .bg(if theme.ui_style.tokens.rule_width.is_some() {
             theme.border
         } else {
@@ -156,7 +154,7 @@ pub(crate) fn connection_line(theme: &Theme, label: SharedString, glyph: AnyElem
 
 pub(crate) fn sidebar_section_label(theme: &Theme, label: SharedString) -> gpui::Div {
     let emphasized = super::is_industrial(theme) || super::is_area(theme);
-    let label = if emphasized {
+    let label = if theme.ui_style.design_roles.tracked_caps.unwrap_or(emphasized) {
         SharedString::from(crate::popover::tracked_upper(&label))
     } else {
         label
@@ -182,7 +180,7 @@ pub(crate) fn chat_header_chip(
     text: gpui::Hsla,
     model: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    let chip = div()
         .id(id)
         .debug_selector(move || selector.clone())
         .max_w(px(230.0))
@@ -218,6 +216,9 @@ pub(crate) fn chat_header_chip(
                 .font_family(theme.font_mono.clone())
                 .text_color(if dark { theme.text } else { theme.on_solid })
         })
+        .when_some(theme.ui_style.design_roles.chip_radius, |el, radius| el.rounded(px(radius)))
+        .when_some(theme.ui_style.design_roles.secondary_colour, |el, role| { let colour = role.colour(theme); el.border_color(colour).text_color(colour) });
+    super::design_surface(chip, theme, crate::style_overrides::DesignSurface::HeaderChip)
 }
 
 pub(crate) fn chat_header_chip_icon_color(
@@ -837,8 +838,10 @@ pub(crate) fn area_sidebar_chat_row(
         return None;
     }
     let identity = theme.identity_color(chat_id);
-    let foreground = if selected {
-        theme.identity_text(identity)
+    let foreground = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
+        theme.text
+    } else if selected {
+        theme.identity_text(theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(identity))
     } else {
         theme.text
     };
@@ -907,7 +910,7 @@ pub(crate) fn area_sidebar_chat_row(
             })
             .into_any_element()
     };
-    Some(
+    Some(super::design_surface(
         div()
             .id(SharedString::from(row_id))
             .aria_label(SharedString::from(format!("{title} · {status_label}")))
@@ -921,6 +924,8 @@ pub(crate) fn area_sidebar_chat_row(
             .text_color(foreground)
             .when(archived && !selected && !hovered, |el| el.opacity(0.4))
             .when(selected, |el| el.bg(identity))
+            .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
+            .when_some(theme.ui_style.design_roles.primary_colour.filter(|_| selected), |el, role| { let colour = role.colour(theme); el.bg(colour).text_color(theme.identity_text(colour)) })
             .when(!selected, |el| {
                 el.hover(|style| style.bg(theme.element_hover))
             })
@@ -939,7 +944,8 @@ pub(crate) fn area_sidebar_chat_row(
             .children(badge)
             .children(jump_label.map(|label| super::badge(theme, label)))
             .child(corner),
-    )
+        theme, crate::style_overrides::DesignSurface::SidebarRow,
+    ))
 }
 
 pub(crate) fn awaiting_input_label(theme: &Theme) -> &'static str {
@@ -1147,12 +1153,16 @@ pub(crate) fn sidebar_row_colors(
 ) -> (gpui::Hsla, gpui::Hsla, Option<gpui::Div>) {
     let identity = theme.identity_color(id);
     let area = super::is_area(theme);
-    let text = if area && selected {
-        theme.identity_text(identity)
+    let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
+        theme.text
+    } else if area && selected {
+        theme.identity_text(theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(identity))
     } else {
         theme.text
     };
-    let selected_wash = if area {
+    let selected_wash = if selected && theme.ui_style.design_roles.primary_colour.is_some() {
+        theme.ui_style.design_roles.primary_colour.unwrap().colour(theme)
+    } else if area {
         identity
     } else if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque {
         theme.element_active
@@ -1165,7 +1175,7 @@ pub(crate) fn sidebar_row_colors(
             .size(px(8.0))
             .rounded_full()
             .bg(if selected {
-                theme.identity_text(identity)
+                theme.identity_text(theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(identity))
             } else {
                 identity
             })
@@ -1185,7 +1195,7 @@ pub(crate) fn sidebar_row_frame(
     rest_bg: gpui::Hsla,
     hover_bg: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    let row = div()
         .id(SharedString::from(row_id.clone()))
         .group("sidebar-session-row")
         .debug_selector(move || row_id.clone())
@@ -1203,7 +1213,8 @@ pub(crate) fn sidebar_row_frame(
         .px(px(Theme::SPACE_SM))
         .py(px(6.0))
         .text_color(motion::hover_blend(fade_key, rest_text, hover_text))
-        .bg(motion::hover_blend(fade_key, rest_bg, hover_bg))
+        .bg(motion::hover_blend(fade_key, rest_bg, hover_bg));
+    super::design_surface(row, theme, crate::style_overrides::DesignSurface::SidebarRow)
 }
 
 pub(crate) fn sidebar_context_text(
