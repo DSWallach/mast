@@ -12,7 +12,7 @@ snapshot = ["mast-ui/snapshot"]
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-base.workspace = true
-mast-ui.workspace = true
+mast-ui = { workspace = true, features = ["dev-inspector", "snapshot"] }
 mast-theme.workspace = true
 mast-doc.workspace = true
 mast-proto.workspace = true

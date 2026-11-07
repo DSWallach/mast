@@ -3291,6 +3291,14 @@ pub enum TranscriptEvent {
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_expand_tool_group(&mut self, cx: &mut Context<Self>) {
+        self.sync(cx);
+        self.folds.insert("assistant#g0".into(), FoldState {
+            open: Some(true),
+            ..Default::default()
+        });
+    }
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
     }

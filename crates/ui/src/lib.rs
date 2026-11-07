@@ -39,7 +39,7 @@ mod composer_dock;
 mod context_usage;
 mod diff_targets;
 #[cfg(feature = "dev-inspector")]
-mod dev_inspector;
+pub mod dev_inspector;
 pub mod edge_fade;
 mod error_notice;
 pub mod file_icons;

@@ -19,6 +19,8 @@ pub enum Story {
     Code,
     Card,
     Input,
+    Question,
+    Request,
 }
 
 pub const STORIES: &[(Story, &str)] = &[
@@ -33,6 +35,8 @@ pub const STORIES: &[(Story, &str)] = &[
     (Story::Code, "Code panel"),
     (Story::Card, "Card"),
     (Story::Input, "Input"),
+    (Story::Question, "Question card"),
+    (Story::Request, "Required action"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +142,85 @@ fn fixture(story: Story, state: State, theme: &Theme, id: String) -> AnyElement 
         Story::Input => {
             c::text_input(theme, div().child(text).into_any_element()).into_any_element()
         }
+        Story::Question => {
+            c::conversation_question_card(theme, id.clone().into(), theme.accent, disabled)
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(c::conversation_question_id(theme, "Q-1".into()))
+                        .child(c::conversation_question_pill(
+                            theme,
+                            "Open",
+                            theme.accent,
+                            true,
+                        )),
+                )
+                .child(text)
+                .child(c::conversation_question_chip(
+                    "Which layout?".into(),
+                    selected,
+                    theme,
+                ))
+                .child(
+                    c::conversation_answer_input(theme, format!("{id}-input")).child("Your answer"),
+                )
+                .child(c::conversation_answer_button(
+                    format!("{id}-answer").into(),
+                    format!("{id}-answer"),
+                    "Answer",
+                    true,
+                    theme,
+                ))
+                .into_any_element()
+        }
+        Story::Request => c::outline_required_action_row(id.clone().into(), theme)
+            .flex_col()
+            .gap(px(6.))
+            .p(px(8.))
+            .child(c::outline_needs_heading(
+                "Blocking",
+                2,
+                theme.warning,
+                theme,
+            ))
+            .child(c::outline_required_text(
+                format!("{id}-text"),
+                text.to_owned(),
+                true,
+                selected,
+                theme,
+            ))
+            .child(c::outline_action_metadata(theme).child("Project · Review"))
+            .child(c::outline_required_lifecycle(
+                format!("{id}-lifecycle"),
+                "Open".into(),
+                theme,
+            ))
+            .child(c::outline_required_fact(
+                format!("{id}-fact"),
+                "Branch: gallery-screens".into(),
+                selected,
+                theme,
+            ))
+            .child(c::outline_request_link(
+                format!("{id}-link").into(),
+                "Review".into(),
+                theme,
+            ))
+            .child(c::outline_artifact_link(
+                format!("{id}-artifact").into(),
+                "Plan".into(),
+                theme,
+            ))
+            .child(
+                c::outline_approval_card(format!("{id}-approval"), theme)
+                    .child("Approve this change"),
+            )
+            .into_any_element(),
     };
     div()
         .when(disabled, |el| el.opacity(0.45))

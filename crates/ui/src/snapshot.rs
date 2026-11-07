@@ -72,6 +72,63 @@ pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)
 }
 
+/// Construct the walkthrough with the populated diff used by the preview.
+pub fn populated_walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    crate::changes::walkthrough::snapshot_fixture_with_changes(true, cx)
+}
+
+/// Construct the offline shell used by the chat preview and gallery.
+pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.connection = mast_proto::view::ConnectionStatus::Ready;
+        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+        state.local_device_id = Some("local".into());
+        state.selected_chat = Some("fixture-chat".into());
+        state.selected_space = Some("fixture-space".into());
+        state.auto_selected = true;
+        state.chats_synced = true;
+        state.spaces_synced = true;
+        state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state.chats = [
+            ("fixture-chat", "Review the workspace"),
+            ("fixture-design", "Design review"),
+            ("fixture-tests", "Verify the changes"),
+        ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"Claude Opus 5.5 — Extended reasoning","reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
+        preview_chat_outline(&mut state);
+        state
+    });
+    state.update(cx, |state, cx| {
+        state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
+            {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+            {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I inspected the layout.\n\nThe controls now align with their captions.\n\n- The model name stays visible.\n- The attachment has one border.\n\n```rust\nfn validate_layout() {\n    assert!(controls_align());\n}\n```"},{"id":"tool","kind":"tool","call":{"kind":"exec","command":"cargo test"},"resolved":true,"output":"Tests passed"},{"id":"tool2","kind":"tool","call":{"kind":"exec","command":"git diff --stat"},"resolved":true,"output":"Three files changed"},{"id":"next","kind":"text","text":"I checked the resulting changes."},{"id":"tool3","kind":"tool","call":{"kind":"exec","command":"cargo check"},"resolved":true,"output":"Check passed"},{"id":"tool4","kind":"tool","call":{"kind":"exec","command":"cargo fmt --check"},"resolved":true,"output":"Formatting passed"}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
+        ])).unwrap() }, cx).unwrap();
+    });
+    let boot = crate::EngineBootConfig {
+        data_dir,
+        ipc_port: 0,
+        edge_url: String::new(),
+        edge_token: None,
+        org_id: None,
+        workos_client_id: None,
+        default_harness: mast_proto::HarnessId::Mock,
+    };
+    let shell = cx.new(|cx| {
+        let mut shell = crate::shell::Shell::new(state, boot, cx);
+        shell.fixture_snapshot_ready();
+        shell.fixture_snapshot_attachment(
+            include_bytes!("../assets/dock/mast-icon-ready.png").to_vec(),
+            cx,
+        );
+        shell
+    });
+    shell.update(cx, |shell, cx| {
+        shell.fixture_snapshot_item_panel(cx);
+        shell.fixture_snapshot_expand_tool_group(cx);
+    });
+    shell
+}
+
 /// Construct an artifact pane with local, in-memory fixture content.
 pub fn artifact_fixture(window: &mut Window, cx: &mut App) -> Entity<impl Render + use<>> {
     crate::artifacts::tab::snapshot_fixture(window, cx)
@@ -120,11 +177,11 @@ impl gpui::Render for OutlineFixture {
 }
 
 /// Construct the existing Work Outline fixture with an item details panel.
-pub fn preview_chat_outline(state: &mut crate::state::AppState) {
+fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
     use crate::work_outline::store::{fixture_ids, fixture_snapshot};
     use mast_proto::{UserActionRequestState, UserActionRequestView};
 
-    let mut snapshot = fixture_snapshot("fixture-space");
+    let mut snapshot = fixture_snapshot(space);
     snapshot.external_references.clear();
     let item = snapshot
         .items
@@ -138,7 +195,7 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
     ] {
         snapshot.user_action_requests.push(UserActionRequestView {
             id: id.into(),
-            space_id: "fixture-space".into(),
+            space_id: space.into(),
             work_item_id: fixture_ids::API.into(),
             chat_id: "fixture-chat".into(),
             text: text.into(),
@@ -160,21 +217,25 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
             origin_chat_available: true,
         });
     }
-    state.set_work_outline_for_test(snapshot);
+    snapshot
+}
+
+pub fn preview_chat_outline(state: &mut crate::state::AppState) {
+    state.set_work_outline_for_test(outline_with_requests("fixture-space"));
 }
 
 pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::work_outline::{
         model::OutlineSpace,
         outline_view::{OutlineInputs, OutlineView},
-        store::{WorkOutlineLoad, fixture_ids, fixture_snapshot},
+        store::{WorkOutlineLoad, fixture_ids},
     };
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
         state.connection = mast_proto::view::ConnectionStatus::Ready;
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
         state.selected_space = Some("s1".into());
-        state.set_work_outline_for_test(fixture_snapshot("s1"));
+        state.set_work_outline_for_test(outline_with_requests("s1"));
         state
     });
     let boot = crate::EngineBootConfig {
@@ -194,7 +255,7 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
                 spaces: vec![OutlineSpace {
                     id: "s1".into(),
                     label: "Project".into(),
-                    load: WorkOutlineLoad::Ready(Arc::new(fixture_snapshot("s1"))),
+                    load: WorkOutlineLoad::Ready(Arc::new(outline_with_requests("s1"))),
                     hidden: false,
                 }],
                 ..Default::default()
@@ -212,7 +273,10 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         )
     });
     details.update(cx, |details, _| {
-        details.set_data(Some(Arc::new(fixture_snapshot("s1"))), Arc::new(Vec::new()))
+        details.set_data(
+            Some(Arc::new(outline_with_requests("s1"))),
+            Arc::new(Vec::new()),
+        )
     });
     cx.new(|_| OutlineFixture {
         outline,
