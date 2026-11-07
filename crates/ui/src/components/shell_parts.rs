@@ -187,6 +187,9 @@ pub(crate) fn chat_header_chip(
         .debug_selector(move || selector.clone())
         .max_w(px(230.0))
         .h(px(20.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .px(px(7.0))
         .flex()
         .items_center()
@@ -223,7 +226,9 @@ pub(crate) fn chat_header_chip_icon_color(
     model: bool,
     link: bool,
 ) -> gpui::Hsla {
-    if model && super::is_industrial(theme) {
+    if super::is_area(theme) {
+        theme.text_muted
+    } else if model && super::is_industrial(theme) {
         if theme.appearance.is_dark() {
             theme.text
         } else {
@@ -249,6 +254,9 @@ pub(crate) fn right_surface_tab(
         .debug_selector(move || format!("right-surface-tab-{index}"))
         .group(group)
         .h(px(24.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .w(px(width))
         .flex_none()
         .pl(px(4.0))
@@ -440,6 +448,9 @@ pub(crate) fn header_attention_badge(
         .debug_selector(move || id.into())
         .flex_none()
         .h(px(18.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .px(px(5.0))
         .flex()
         .items_center()
@@ -516,7 +527,11 @@ pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .debug_selector(|| "chat-header-menu".into())
         .cursor_pointer()
         .when(super::is_area(theme), |el| {
-            el.rounded_full().bg(theme.identity_color("").opacity(0.12))
+            el.size(px(theme.ui_style.tokens.control_size))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
         })
         .child(
             icon(crate::icons::MORE_HORIZONTAL)
@@ -1295,6 +1310,9 @@ pub(crate) fn window_control_button(
     div()
         .id(id)
         .size(px(24.0))
+        .when(super::is_area(theme), |el| {
+            el.size(px(theme.ui_style.tokens.control_size))
+        })
         .flex_none()
         .flex()
         .items_center()
@@ -1308,7 +1326,7 @@ pub(crate) fn window_control_button(
             theme.glass_hover(),
         ))
         .when(super::is_area(theme), |el| {
-            el.rounded_full().bg(theme.identity_color("").opacity(0.12))
+            el.rounded_full().bg(gpui::transparent_black())
         })
         .when(true, |el| super::segmented_key(el, theme, false))
         .on_hover(motion::hover_listener(fade_key))
@@ -1346,6 +1364,9 @@ pub(crate) fn nav_history_button(
     if !enabled {
         return div()
             .size(px(24.0))
+            .when(super::is_area(theme), |el| {
+                el.size(px(theme.ui_style.tokens.control_size))
+            })
             .flex_none()
             .flex()
             .items_center()
@@ -1530,6 +1551,9 @@ pub(crate) fn panel_tab(
         .id(id)
         .debug_selector(move || id.into())
         .h(px(24.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .flex_none()
         .px(px(8.0))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
@@ -2734,6 +2758,9 @@ pub(crate) fn chat_identity_button(
     div()
         .id("chat-identity-copy")
         .h(px(22.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .px(px(6.0))
         .flex_none()
         .flex()
@@ -2868,6 +2895,9 @@ pub(crate) fn action_control(theme: &Theme) -> gpui::Div {
         .flex_row()
         .items_center()
         .h(px(24.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .rounded(px(6.0))
         .border_1()
         .border_color(theme.border)

@@ -876,7 +876,7 @@ impl Overview {
         }
         let active = self.column_shown();
         Some(
-            div()
+            crate::components::area_toolbar_control(div()
                 .id("outline-linear")
                 .debug_selector(|| "outline-linear".into())
                 .px(gpui::px(8.0))
@@ -889,7 +889,7 @@ impl Overview {
                     el.bg(theme.element_active).text_color(theme.text)
                 })
                 .when(!active, |el| el.text_color(theme.text_muted))
-                .hover(|el| el.text_color(theme.text))
+                .hover(|el| el.text_color(theme.text)), theme, false)
                 .child("Inbox")
                 .hint(
                     if active {

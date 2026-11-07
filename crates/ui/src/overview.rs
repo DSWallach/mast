@@ -4622,10 +4622,10 @@ impl Render for Overview {
                                 },
                             ))
                             .hint("Search", HintKey::Find)
-                            .child(popover::search_input_frame(
+                            .child(crate::components::area_toolbar_control(popover::search_input_frame(
                                 &theme,
                                 self.search.clone().into_any_element(),
-                            )),
+                            ), &theme, false)),
                     ),
             )
             .child(
@@ -4637,7 +4637,7 @@ impl Render for Overview {
                     // one clearly-primary button (see `render_new_chat_button`).
                     .child(new_chat_button)
                     .child(
-                        div()
+                        crate::components::area_toolbar_control(div()
                             .id("overview-pull-requests")
                             .debug_selector(|| "overview-pull-requests".into())
                             .px(px(8.0))
@@ -4646,7 +4646,7 @@ impl Render for Overview {
                             .cursor_pointer()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
-                            .hover(|el| el.text_color(theme.text))
+                            .hover(|el| el.text_color(theme.text)), &theme, false)
                             .child("Pull requests")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(shell) = this.shell.upgrade() {
@@ -4688,7 +4688,7 @@ impl Render for Overview {
                     Some(ix) => format!("{label} {}", ix + 1),
                     None => label.to_string(),
                 };
-                div()
+                crate::components::area_toolbar_control(div()
                     .id(SharedString::from(format!("overview-group-{label}")))
                     .px(px(7.0))
                     .py(px(2.0))
@@ -4698,7 +4698,7 @@ impl Render for Overview {
                     .when(active, |el| {
                         el.bg(theme.element_active).text_color(theme.text)
                     })
-                    .when(!active, |el| el.text_color(theme.text_muted))
+                    .when(!active, |el| el.text_color(theme.text_muted)), &theme, false)
                     .child(SharedString::from(text))
                     .on_mouse_up(
                         MouseButton::Left,
@@ -4709,13 +4709,13 @@ impl Render for Overview {
                     )
             });
             toolbar = toolbar.child(
-                div()
+                crate::components::area_toolbar_control(div()
                     .flex()
                     .items_center()
                     .gap(px(2.0))
                     .p(px(2.0))
                     .rounded(px(6.0))
-                    .bg(theme.element_hover.opacity(0.3))
+                    .bg(theme.element_hover.opacity(0.3)), &theme, false)
                     .child(
                         div()
                             .px(px(5.0))
@@ -4885,7 +4885,7 @@ impl Overview {
             Some(combo) => format!("Start a new chat ({combo})").into(),
             None => "Start a new chat".into(),
         };
-        popover::btn_primary(theme, "+ New chat")
+        crate::components::area_toolbar_control(popover::btn_primary(theme, "+ New chat"), theme, true)
             .id("overview-new-chat")
             .on_click(cx.listener(|this, _, _, cx| {
                 let _ = this.shell.update(cx, |shell, cx| {
@@ -4936,6 +4936,7 @@ impl Overview {
                     cx.notify();
                 }
             }));
+        let trigger = crate::components::area_toolbar_control(trigger, theme, false);
         if self.repo_filter.get().is_none() {
             return trigger.into_any_element();
         }
@@ -5927,6 +5928,7 @@ impl Overview {
                     cx.notify();
                 }
             }));
+        let trigger = crate::components::area_toolbar_control(trigger, theme, false);
         if self.work_item_filter_popup.get().is_none() {
             return trigger.into_any_element();
         }
@@ -6908,6 +6910,17 @@ impl Overview {
         self.set_mode(OverviewMode::Outline, cx);
         let handle = gpui::Focusable::focus_handle(self.outline.read(cx), cx);
         window.focus(&handle, cx);
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn show_snapshot_outline(&mut self, cx: &mut Context<Self>) {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
+        snapshot.external_references.clear();
+        self.set_outline_loads(
+            [("fixture-space".into(), WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)))].into_iter().collect(),
+            cx,
+        );
+        self.set_mode(OverviewMode::Outline, cx);
     }
 
     /// Outline navigation bindings for fixtures that run without a Shell.

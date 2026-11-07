@@ -1412,7 +1412,7 @@ impl Render for WorkItemDetails {
             .when_some(attention, |el, attention| el.child(attention))
             .when_some(self.pinned_plan_id(&item.id, cx), |el, plan_id| {
                 el.child(
-                    crate::work_outline::hints::details_button("work-item-open-plan", "Open plan", &theme)
+                    crate::components::area_toolbar_control(crate::work_outline::hints::details_button("work-item-open-plan", "Open plan", &theme), &theme, false)
                         .debug_selector(|| "work-item-open-plan".into())
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_artifact(plan_id.clone(), window, cx)
@@ -1421,7 +1421,7 @@ impl Render for WorkItemDetails {
             })
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
-                el.child(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
+                el.child(crate::components::area_toolbar_control(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme), &theme, false)
                     .debug_selector(|| "work-item-review-work".into())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.shell.update(cx, |shell, cx| shell.open_branch_review_for_chat(chat_id.clone(), cx)).ok();
@@ -1431,7 +1431,7 @@ impl Render for WorkItemDetails {
                 let space_id = self.space_id.clone();
                 let item_id = item.id.clone();
                 el.child(
-                    crate::work_outline::hints::details_button("work-item-start-chat", "Start Chat", &theme)
+                    crate::components::area_toolbar_control(crate::work_outline::hints::details_button("work-item-start-chat", "Start Chat", &theme), &theme, true)
                         .debug_selector(|| "work-item-start-chat".into())
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(DetailsEvent::StartChat {

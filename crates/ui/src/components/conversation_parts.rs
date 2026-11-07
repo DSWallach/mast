@@ -128,7 +128,11 @@ pub fn conversation_picker_trigger(
                 )
             },
         );
-    super::segmented_key(chip, theme, open)
+    super::segmented_key(chip, theme, open).when(super::is_area(theme), |el| {
+        el.h(px(theme.ui_style.tokens.control_size))
+            .bg(gpui::transparent_black())
+            .text_color(theme.text_muted)
+    })
 }
 
 pub fn conversation_picker_footer_chip(
@@ -162,7 +166,11 @@ pub fn conversation_picker_footer_chip(
         })
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer();
-    super::segmented_key(chip, theme, open)
+    super::segmented_key(chip, theme, open).when(super::is_area(theme), |el| {
+        el.h(px(theme.ui_style.tokens.control_size))
+            .bg(gpui::transparent_black())
+            .text_color(theme.text_muted)
+    })
 }
 
 pub fn conversation_picker_approval(
@@ -212,7 +220,11 @@ pub fn conversation_picker_approval(
             crate::icons::icon(icon)
                 .size(px(12.0))
                 .flex_none()
-                .text_color(icon_color),
+                .text_color(if super::is_area(theme) {
+                    theme.text_muted
+                } else {
+                    icon_color
+                }),
         )
         .child(
             if theme.ui_style.layout == crate::ui_style::UiLayout::Guided {
@@ -221,7 +233,11 @@ pub fn conversation_picker_approval(
                 label.to_string()
             },
         );
-    super::segmented_key(chip, theme, auto)
+    super::segmented_key(chip, theme, auto).when(super::is_area(theme), |el| {
+        el.h(px(theme.ui_style.tokens.control_size))
+            .bg(gpui::transparent_black())
+            .text_color(theme.text_muted)
+    })
 }
 
 pub fn conversation_picker_footer_label(
@@ -231,6 +247,9 @@ pub fn conversation_picker_footer_label(
 ) -> Div {
     div()
         .h(px(20.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .max_w(px(160.0))
         .min_w_0()
         .flex()
@@ -983,7 +1002,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
             )
             .child(
                 div()
-                    .h(px(40.0))
+                    .h(px(theme.ui_style.tokens.control_size + 8.0))
                     .w_full()
                     .relative()
                     .flex()
@@ -1263,6 +1282,9 @@ pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
     div()
         .id("composer-attach")
         .size(px(28.0))
+        .when(super::is_area(theme), |el| {
+            el.size(px(theme.ui_style.tokens.control_size))
+        })
         .flex_none()
         .flex()
         .items_center()
@@ -1381,7 +1403,7 @@ mod tests {
 /// Send, queue, and interrupt control; callers attach the corresponding action.
 pub fn conversation_send_key(
     theme: &Theme,
-    identity: Hsla,
+    _identity: Hsla,
     stop: bool,
     queue: bool,
 ) -> gpui::Stateful<Div> {
@@ -1389,11 +1411,7 @@ pub fn conversation_send_key(
     let area = theme.ui_style.conversation == ConversationVariant::Area;
     let key = theme.ui_style.conversation == ConversationVariant::Industrial;
     let guided = theme.ui_style.layout == UiLayout::Guided;
-    let fill = if area {
-        crate::theme::flatten(theme.text_muted.opacity(0.28), identity)
-    } else {
-        theme.text
-    };
+    let fill = if area { theme.accent } else { theme.text };
     let text = if area {
         theme.identity_text(fill)
     } else if key {
@@ -1430,12 +1448,17 @@ pub fn conversation_send_key(
         .when(guided, |el| {
             el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0))
         })
-        .when(area, |el| el.h(px(32.0)).w(px(96.0)).gap(px(6.0)))
+        .when(area, |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+                .w(px(96.0))
+                .gap(px(6.0))
+        })
         .flex_none()
         .rounded_full()
         .when_some(theme.ui_style.tokens.control_radius, |el, radius| {
             el.rounded(px(radius))
         })
+        .when(area, |el| el.rounded_full())
         .bg(fill)
         .when(key, |el| conversation_industrial_icon_key(el, theme, true))
         .flex()

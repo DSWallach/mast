@@ -3,6 +3,32 @@
 use crate::theme::Theme;
 use gpui::{Div, SharedString, Stateful, div, prelude::*, px};
 
+/// Apply the Area toolbar treatment while preserving other styles.
+pub fn area_toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
+    if !super::is_area(theme) {
+        return element;
+    }
+    let fill = if primary {
+        theme.accent
+    } else {
+        gpui::transparent_black()
+    };
+    element
+        .h(px(theme.ui_style.tokens.control_size))
+        .py_0()
+        .mb_0()
+        .flex()
+        .items_center()
+        .rounded_full()
+        .bg(fill)
+        .border_color(gpui::transparent_black())
+        .text_color(if primary {
+            theme.identity_text(fill)
+        } else {
+            theme.text_muted
+        })
+}
+
 fn section_label(label: String, industrial: bool) -> (String, Option<String>) {
     if !industrial {
         return (label, None);
@@ -205,9 +231,13 @@ pub fn outline_toolbar_button(
         })
         .when(!active, |el| el.text_color(theme.text_muted))
         .hover(|el| el.text_color(theme.text));
-    crate::surface_chrome::segmented_key(button, theme, active)
-        .when(super::is_area(theme), |el| el.rounded_full())
-        .child(SharedString::from(label))
+    area_toolbar_control(
+        crate::surface_chrome::segmented_key(button, theme, active),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .child(SharedString::from(label))
 }
 
 /// Keyboard shortcut action in the outline toolbar.
@@ -226,10 +256,14 @@ pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
         .bg(theme.element_hover.opacity(0.5))
         .text_color(theme.text_muted)
         .hover(|el| el.text_color(theme.text));
-    crate::surface_chrome::segmented_key(button, theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
-        .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
-        .child("?")
+    area_toolbar_control(
+        crate::surface_chrome::segmented_key(button, theme, false),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
+    .child("?")
 }
 
 /// Container for descendant status totals.
@@ -290,6 +324,9 @@ pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
         .size(px(22.0))
         .when(labels, |el| {
             el.h(px(32.0)).w_auto().px(px(6.0)).gap(px(4.0))
+        })
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
         })
         .flex()
         .items_center()
@@ -388,24 +425,28 @@ pub fn outline_status_segment(
         })
         .when(!active, |el| el.text_color(theme.text_muted))
         .when(key, |el| el.flex().items_center().gap(px(8.0)));
-    crate::surface_chrome::segmented_key(button, theme, active)
-        .when(active && completed && key, |el| {
-            let foreground = if crate::theme::contrast_ratio(theme.text, theme.success)
-                >= crate::theme::contrast_ratio(theme.bg, theme.success)
-            {
-                theme.text
-            } else {
-                theme.bg
-            };
-            el.bg(theme.success).text_color(foreground)
-        })
-        .when(super::is_area(theme), |el| el.rounded_full())
-        .children(crate::surface_chrome::active_key_dot(
-            theme,
-            active && !completed,
-        ))
-        .hover(|el| el.text_color(theme.text))
-        .child(label)
+    area_toolbar_control(
+        crate::surface_chrome::segmented_key(button, theme, active),
+        theme,
+        false,
+    )
+    .when(active && completed && key, |el| {
+        let foreground = if crate::theme::contrast_ratio(theme.text, theme.success)
+            >= crate::theme::contrast_ratio(theme.bg, theme.success)
+        {
+            theme.text
+        } else {
+            theme.bg
+        };
+        el.bg(theme.success).text_color(foreground)
+    })
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .children(crate::surface_chrome::active_key_dot(
+        theme,
+        active && !completed,
+    ))
+    .hover(|el| el.text_color(theme.text))
+    .child(label)
 }
 
 /// Group surface for the status segments.
@@ -420,6 +461,9 @@ pub fn outline_status_group(theme: &Theme) -> Div {
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface),
         )
+        .when(super::is_area(theme), |el| {
+            el.p_0().bg(gpui::transparent_black())
+        })
 }
 
 /// Optional Industrial status readout.
@@ -575,9 +619,13 @@ pub fn outline_filter_trigger(theme: &Theme) -> Stateful<Div> {
         .cursor_pointer()
         .text_color(theme.text_muted)
         .bg(theme.element_hover.opacity(0.5));
-    crate::surface_chrome::segmented_key(trigger, theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
-        .child("⋯")
+    area_toolbar_control(
+        crate::surface_chrome::segmented_key(trigger, theme, false),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| el.rounded_full())
+    .child("⋯")
 }
 
 /// Checkable overview filter menu row.
@@ -2147,6 +2195,9 @@ pub fn outline_required_close(theme: &Theme) -> Stateful<Div> {
         .debug_selector(|| "required-actions-close".into())
         .flex_none()
         .size(px(22.0))
+        .when(super::is_area(theme), |el| {
+            el.h(px(theme.ui_style.tokens.control_size))
+        })
         .flex()
         .items_center()
         .justify_center()
@@ -2924,9 +2975,17 @@ pub fn outline_details_attention(
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
-        .text_color(color)
+        .text_color(if super::is_area(theme) {
+            theme.accent
+        } else {
+            color
+        })
+        .when(super::is_area(theme), |el| {
+            el.child(SharedString::from(suffix.clone()))
+        })
         .when(
-            theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot,
+            !super::is_area(theme)
+                && theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot,
             |el| {
                 el.flex()
                     .items_center()
@@ -2939,7 +2998,8 @@ pub fn outline_details_attention(
             },
         )
         .when(
-            theme.ui_style.status_indicator != crate::ui_style::StatusIndicator::Dot,
+            !super::is_area(theme)
+                && theme.ui_style.status_indicator != crate::ui_style::StatusIndicator::Dot,
             |el| el.child(SharedString::from(format!("{glyph} {suffix}"))),
         )
 }
