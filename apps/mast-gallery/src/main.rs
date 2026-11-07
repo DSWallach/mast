@@ -294,6 +294,7 @@ impl Render for Gallery {
                     .flex()
                     .flex_col()
                     .gap(px(12.))
+                    .child("Inspector: ⌘⌥⇧I")
                     .children(
                         STORIES
                             .into_iter()
@@ -606,6 +607,8 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
 
 fn init(cx: &mut App, data_dir: &std::path::Path) {
     gpui_base::init(cx);
+    mast_ui::dev_inspector::init(cx);
+    mast_ui::app_menus::bind_keys(cx);
     let settings = settings::UiSettings::default();
     let saved = GalleryState::load();
     settings::init(settings.clone(), data_dir, cx);
