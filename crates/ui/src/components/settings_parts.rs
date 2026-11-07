@@ -1277,3 +1277,26 @@ pub(crate) fn settings_meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> g
     }
     line
 }
+
+/// Reset the send-key setting.
+pub(crate) fn settings_send_behavior_reset(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("composer-send-reset")
+        .size(px(26.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent.opacity(0.08))
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.surface_raised)
+                .border_1()
+                .border_b_2()
+                .border_color(theme.border)
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(|s| s.bg(ink(0.04)).text_color(theme.text))
+}

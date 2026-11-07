@@ -651,16 +651,7 @@ impl Render for ShortcutsPage {
             .gap(px(10.0))
             .when(send_behavior != ComposerSendBehavior::Enter, |el| {
                 el.child(
-                    div()
-                        .id("composer-send-reset")
-                        .size(px(26.0))
-                        .rounded(px(7.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(crate::theme::ink(0.04)).text_color(theme.text))
+                    crate::components::settings_send_behavior_reset(&theme)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_composer_send_behavior(ComposerSendBehavior::Enter, cx)
                         }))
