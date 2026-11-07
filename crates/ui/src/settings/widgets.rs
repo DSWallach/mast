@@ -167,26 +167,7 @@ pub fn page_column() -> gpui::Div {
 /// Page headline row: `flex items-baseline gap-2.5` — `text-base font-semibold`
 /// title + `text-[13px]` count sharing a baseline (zeron settings.devices.tsx).
 pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .gap(px(10.0))
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(16.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(SharedString::from(title.to_string())),
-        )
-        .when_some(count, |el, count| {
-            el.child(
-                div()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(format!("{count}"))),
-            )
-        })
+    crate::components::settings_page_header(theme, title, count)
 }
 
 /// Subtitle under the headline: `mt-1 text-[13px] text-muted-foreground`.
@@ -241,43 +222,7 @@ pub fn option_card(
     selected: bool,
     preview: AnyElement,
 ) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(8.0))
-        .cursor_pointer()
-        .child(
-            div()
-                .h(px(OPTION_CARD_HEIGHT))
-                .w_full()
-                .rounded(px(OPTION_CARD_RADIUS))
-                .overflow_hidden()
-                .border_1()
-                .border_color(if selected { theme.accent } else { theme.border })
-                .child(preview),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(13.0))
-                .font_weight(if selected {
-                    gpui::FontWeight::MEDIUM
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(if selected {
-                    theme.accent
-                } else {
-                    theme.text_muted
-                })
-                .child(crate::icons::icon(icon_path).size(px(16.0)).flex_none())
-                .child(label.into()),
-        )
+    crate::components::settings_option_card(theme, icon_path, label, selected, preview)
 }
 
 /// Section card: `mt-6 overflow-hidden rounded-xl border border-border bg-card`
@@ -296,21 +241,7 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
 /// The identity tile on a row: `size-9 rounded-[10px] border bg-white/[0.03]`
 /// around a 16px icon.
 pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
-    div()
-        .flex_none()
-        .size(px(36.0))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(ink(0.03))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            crate::icons::icon(icon_path)
-                .size(px(16.0))
-                .text_color(theme.text_muted),
-        )
+    crate::components::settings_row_tile(theme, icon_path)
 }
 
 /// Row title. These metrics intentionally match the Shortcuts rows, whose

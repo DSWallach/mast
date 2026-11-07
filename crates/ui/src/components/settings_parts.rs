@@ -1,7 +1,8 @@
 //! Presentation primitives for settings pages.
 
 use crate::theme::Theme;
-use gpui::{div, prelude::*, px};
+use crate::theme::ink;
+use gpui::{AnyElement, SharedString, div, prelude::*, px};
 
 pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
     div()
@@ -10,6 +11,11 @@ pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
         .items_center()
         .gap(px(6.0))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full()
+                .bg(theme.accent.opacity(0.12))
+                .text_color(theme.accent)
+        })
         .when(
             theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
             |el| {
@@ -22,7 +28,11 @@ pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
         .px(px(10.0))
         .py(px(6.0))
         .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text_muted)
+        .text_color(if super::is_area(theme) {
+            theme.accent
+        } else {
+            theme.text_muted
+        })
         .cursor_pointer()
 }
 
@@ -38,15 +48,140 @@ pub(crate) fn settings_effective_surface(
 }
 
 /// Illustrates the spacing and guidance selected by a layout.
-pub(crate) fn settings_layout_preview(theme: &Theme, layout: crate::ui_style::UiLayout) -> gpui::AnyElement {
+pub(crate) fn settings_layout_preview(
+    theme: &Theme,
+    layout: crate::ui_style::UiLayout,
+) -> gpui::AnyElement {
     let (description, gap) = match layout {
         crate::ui_style::UiLayout::Minimal => ("Current spacing", 4.0),
         crate::ui_style::UiLayout::Compact => ("More on screen", 2.0),
         crate::ui_style::UiLayout::Guided => ("More labels and guidance", 6.0),
     };
-    div().size_full().rounded(px(crate::settings::widgets::OPTION_CARD_RADIUS))
-        .bg(theme.surface).p(px(16.0)).flex().flex_col().gap(px(gap))
-        .children((0..4).map(|_| div().h(px(12.0)).w_full().rounded(px(3.0)).bg(theme.surface_raised)))
-        .child(div().mt(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(description))
+    div()
+        .size_full()
+        .rounded(px(crate::settings::widgets::OPTION_CARD_RADIUS))
+        .bg(theme.surface)
+        .p(px(16.0))
+        .flex()
+        .flex_col()
+        .gap(px(gap))
+        .children((0..4).map(|_| {
+            div()
+                .h(px(12.0))
+                .w_full()
+                .rounded(px(3.0))
+                .bg(theme.surface_raised)
+        }))
+        .child(
+            div()
+                .mt(px(8.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(description),
+        )
         .into_any_element()
+}
+
+pub(crate) fn settings_page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .gap(px(10.0))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(16.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(SharedString::from(title.to_string())),
+        )
+        .when_some(count, |el, count| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .child(SharedString::from(format!("{count}"))),
+            )
+        })
+}
+
+pub(crate) fn settings_option_card(
+    theme: &Theme,
+    icon_path: &'static str,
+    label: impl Into<SharedString>,
+    selected: bool,
+    preview: AnyElement,
+) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .child(
+            div()
+                .h(px(crate::settings::widgets::OPTION_CARD_HEIGHT))
+                .w_full()
+                .rounded(px(theme
+                    .ui_style
+                    .radius_roles()
+                    .panel
+                    .unwrap_or(crate::settings::widgets::OPTION_CARD_RADIUS)))
+                .overflow_hidden()
+                .border_1()
+                .border_color(if selected { theme.accent } else { theme.border })
+                .when(super::is_industrial(theme), |el| el.border_b_2())
+                .child(preview),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .font_weight(if selected {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if selected {
+                    theme.accent
+                } else {
+                    theme.text_muted
+                })
+                .child(crate::icons::icon(icon_path).size(px(16.0)).flex_none())
+                .child(label.into()),
+        )
+}
+
+pub(crate) fn settings_row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(36.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(10.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .border_color(theme.border)
+        .bg(if super::is_area(theme) {
+            theme.accent.opacity(0.12)
+        } else {
+            ink(0.03)
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.surface_raised).border_b_2()
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(icon_path)
+                .size(px(16.0))
+                .text_color(if super::is_area(theme) {
+                    theme.accent
+                } else {
+                    theme.text_muted
+                }),
+        )
 }
