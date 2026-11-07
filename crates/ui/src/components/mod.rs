@@ -19,6 +19,8 @@ pub(crate) use settings_parts::{
 };
 
 mod outline_parts;
+mod changes_parts;
+pub(crate) use changes_parts::*;
 pub use outline_parts::*;
 pub(crate) use outline_parts::{outline_proposal_diff, outline_revision_line};
 pub(crate) mod shell_parts;
@@ -605,6 +607,15 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             } else {
                 theme.text_muted
             })
+    } else {
+        element
+    }
+}
+
+/// Apply the Industrial panel radius to a shared error notice.
+pub(crate) fn error_notice_panel<T: gpui::Styled>(element: T, theme: &Theme) -> T {
+    if is_industrial(theme) {
+        element.rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(10.0)))
     } else {
         element
     }

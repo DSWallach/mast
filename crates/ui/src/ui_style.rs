@@ -20,6 +20,13 @@ impl UiStyleId {
             Self::Area => "Area",
         }
     }
+    pub const fn recommended_themes(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Default => ("mast-light", "mast-dark"),
+            Self::Industrial => ("industrial-light", "industrial-dark"),
+            Self::Area => ("area-light", "area-dark"),
+        }
+    }
     pub const fn description(self) -> &'static str {
         match self {
             Self::Default => "Standard controls",
@@ -648,6 +655,13 @@ mod tests {
                 UiLayout::Guided
             );
         }
+    }
+
+    #[test]
+    fn styles_recommend_their_theme_pairs() {
+        assert_eq!(UiStyleId::Default.recommended_themes(), ("mast-light", "mast-dark"));
+        assert_eq!(UiStyleId::Industrial.recommended_themes(), ("industrial-light", "industrial-dark"));
+        assert_eq!(UiStyleId::Area.recommended_themes(), ("area-light", "area-dark"));
     }
 
     #[test]
