@@ -742,8 +742,9 @@ pub fn conversation_tool_chip_frame(
     card_height: f32,
     gap: f32,
     reveal: f32,
+    theme: &Theme,
 ) -> Div {
-    div()
+    let card = div()
         .when(rail, |el| el.ml(px(gap)))
         .my(px((row_height - card_height) / 2.0))
         .h(px(card_height))
@@ -763,6 +764,8 @@ pub fn conversation_tool_chip_frame(
                 .top(px(4.0 * (1.0 - reveal)))
                 .opacity(reveal)
         })
+        .when_some(theme.ui_style.design_roles.panel_radius, |el, radius| el.rounded(px(radius)));
+    super::design_surface(card, theme, crate::style_overrides::DesignSurface::Tool)
 }
 
 pub fn conversation_code_icon_action(

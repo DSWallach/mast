@@ -907,6 +907,9 @@ pub fn agent_message_bubble(
                     .when(!continued_by_next, |el| el.border_b_1())
                     .border_color(theme.industrial_colors().rule)
                     .bg(theme.industrial_colors().panel)
+                    .when_some(theme.ui_style.design_roles.bubble_radius, |el, radius| el.rounded(px(radius)))
+                    .when_some(theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).border, |el, visible| if visible { el.border_1().border_color(theme.border) } else { el.border_color(gpui::transparent_black()) })
+                    .when_some(theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
                     .child(content),
             )
             .into_any_element()
