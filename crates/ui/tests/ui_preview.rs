@@ -3,11 +3,60 @@ mod matrix;
 #[cfg(all(target_os = "macos", feature = "snapshot"))]
 #[path = "ui_preview/render.rs"]
 mod render;
+#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[path = "ui_preview/warm_renderer.rs"]
+mod warm_renderer;
+
+#[cfg(all(target_os = "macos", feature = "snapshot"))]
+fn snapshot<V: gpui::Render + 'static>(
+    name: &str,
+    size: gpui::Size<gpui::Pixels>,
+    style: mast_ui::ui_style::UiStyleId,
+    layout: mast_ui::ui_style::UiLayout,
+    appearance: mast_ui::theme::Appearance,
+    build: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> gpui::Entity<V>,
+) -> anyhow::Result<std::path::PathBuf> {
+    if std::env::var_os("MAST_PREVIEW_WARM").is_some() {
+        warm_renderer::render(name, size, style, layout, appearance, build)
+    } else {
+        mast_ui::snapshot::render_to_png_with_layout(name, size, style, layout, appearance, build)
+    }
+}
 
 #[cfg(all(target_os = "macos", feature = "snapshot"))]
 #[test]
 #[ignore = "requires macOS Metal and access to macOS services"]
 fn render_ui_preview() -> anyhow::Result<()> {
+    if std::env::var_os("MAST_PREVIEW_SERVE").is_some() {
+        use std::io::{BufRead, Write};
+        for line in std::io::stdin().lock().lines() {
+            let response = (|| -> anyhow::Result<_> {
+                let request: serde_json::Value = serde_json::from_str(&line?)?;
+                let manifest = render_preview(Some(&request))?;
+                Ok(serde_json::json!({"manifest": manifest}))
+            })()
+            .unwrap_or_else(|error| serde_json::json!({"error": format!("{error:#}")}));
+            println!("MAST_PREVIEW_RESPONSE={response}");
+            std::io::stdout().flush()?;
+        }
+        return Ok(());
+    }
+    render_preview(None).map(|_| ())
+}
+
+#[cfg(all(target_os = "macos", feature = "snapshot"))]
+fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(request) = request {
+        let object = request
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("request must be an object"))?;
+        anyhow::ensure!(
+            object
+                .keys()
+                .all(|key| matches!(key.as_str(), "screens" | "styles" | "layouts" | "themes")),
+            "unknown request field"
+        );
+    }
     use image::{RgbaImage, imageops};
     use mast_ui::{
         theme::Appearance,
@@ -15,8 +64,25 @@ fn render_ui_preview() -> anyhow::Result<()> {
     };
     use std::path::PathBuf;
 
-    fn selection(variable: &str, defaults: &[&str]) -> Vec<String> {
-        std::env::var(variable)
+    fn selection(
+        request: Option<&serde_json::Value>,
+        key: &str,
+        variable: &str,
+        defaults: &[&str],
+    ) -> anyhow::Result<Vec<String>> {
+        if let Some(value) = request.and_then(|request| request.get(key)) {
+            return value
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("{key} must be an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow::anyhow!("{key} must contain strings"))
+                })
+                .collect();
+        }
+        Ok(std::env::var(variable)
             .ok()
             .map(|value| {
                 value
@@ -26,12 +92,14 @@ fn render_ui_preview() -> anyhow::Result<()> {
                     .map(str::to_owned)
                     .collect()
             })
-            .unwrap_or_else(|| defaults.iter().map(|value| (*value).to_owned()).collect())
+            .unwrap_or_else(|| defaults.iter().map(|value| (*value).to_owned()).collect()))
     }
     let screens = selection(
+        request,
+        "screens",
         "MAST_PREVIEW_SCREENS",
         &["chat", "details", "walkthrough", "appearance", "controls"],
-    );
+    )?;
     let all_screens = [
         "chat",
         "overview",
@@ -51,7 +119,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
         .map(|s| s.label().to_ascii_lowercase())
         .collect();
     let defaults: Vec<&str> = style_names.iter().map(String::as_str).collect();
-    let styles = selection("MAST_PREVIEW_STYLES", &defaults);
+    let styles = selection(request, "styles", "MAST_PREVIEW_STYLES", &defaults)?;
     anyhow::ensure!(
         !styles.is_empty() && styles.iter().all(|s| style_names.contains(s)),
         "invalid or empty style selection"
@@ -61,13 +129,13 @@ fn render_ui_preview() -> anyhow::Result<()> {
         .map(|layout| layout.label().to_ascii_lowercase())
         .collect();
     let layout_defaults: Vec<&str> = layout_names.iter().map(String::as_str).collect();
-    let layouts = selection("MAST_PREVIEW_LAYOUTS", &layout_defaults);
+    let layouts = selection(request, "layouts", "MAST_PREVIEW_LAYOUTS", &layout_defaults)?;
     anyhow::ensure!(
         !layouts.is_empty() && layouts.iter().all(|layout| layout_names.contains(layout)),
         "invalid or empty layout selection"
     );
     let mut themes = vec!["mast-light".to_string(), "mast-dark".to_string()];
-    for theme in selection("MAST_PREVIEW_THEMES", &[]) {
+    for theme in selection(request, "themes", "MAST_PREVIEW_THEMES", &[])? {
         if !themes.contains(&theme) {
             themes.push(theme);
         }
@@ -100,6 +168,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
     )
     .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
     let mut sheets = Vec::new();
+    let mut sheet_paths = Vec::new();
     for (screen_index, screen) in screens.iter().enumerate() {
         if screen == "components" {
             for (theme_index, theme) in themes.iter().enumerate() {
@@ -119,6 +188,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
                 let path = directory.join(format!("components-{theme}.png"));
                 sheet.save(&path)?;
                 println!("{}", path.display());
+                sheet_paths.push(path);
                 sheets.push(sheet);
             }
             continue;
@@ -178,6 +248,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
         let path = directory.join(format!("{screen}.png"));
         sheet.save(&path)?;
         println!("{}", path.display());
+        sheet_paths.push(path);
         sheets.push(sheet);
     }
     let columns = 2_u32.min(sheets.len() as u32);
@@ -199,7 +270,20 @@ fn render_ui_preview() -> anyhow::Result<()> {
     let path = directory.join("index.png");
     index.save(&path)?;
     println!("{}", path.display());
-    Ok(())
+    let manifest = serde_json::json!({
+        "screens": screens,
+        "styles": styles,
+        "layouts": layouts,
+        "themes": themes,
+        "cellWidth": cell_width,
+        "cellHeight": cell_height,
+        "sheets": sheet_paths,
+        "index": path,
+    });
+    let manifest_path = directory.join("manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    println!("{}", manifest_path.display());
+    Ok(manifest_path)
 }
 
 /// Compare Minimal-only contact sheets while excluding the preview's label bar.
@@ -273,7 +357,7 @@ fn render_browser(
         }
     }
     let theme_id = theme_id.to_owned();
-    mast_ui::snapshot::render_to_png_with_layout(
+    snapshot(
         name,
         size(px(1440.), px(900.)),
         style,

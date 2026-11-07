@@ -134,6 +134,8 @@ fn close_active_window(cx: &mut App) {
 /// window/application lifecycle shortcuts remain macOS-only.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(app_key_bindings(cfg!(target_os = "macos")));
+    #[cfg(feature = "dev-inspector")]
+    cx.bind_keys([KeyBinding::new("cmd-alt-shift-i", crate::dev_inspector::ToggleInspector, None)]);
 }
 
 /// The binding table behind [`bind_keys`] — `KeyBinding` construction is pure
