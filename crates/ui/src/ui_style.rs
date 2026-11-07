@@ -543,7 +543,7 @@ pub fn help_card(
             .p(px(8.0))
             .rounded(px(6.0))
             .when(
-                theme.ui_style.id != UiStyleId::Area || id != "sidebar",
+                theme.ui_style.id != UiStyleId::Area,
                 |el| el.bg(theme.surface_raised),
             )
             .text_size(crate::typography::ui_rems(11.0))

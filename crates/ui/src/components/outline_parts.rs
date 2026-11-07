@@ -657,6 +657,7 @@ pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
 pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selected: bool) -> T {
     if super::is_area(theme) && selected {
         element
+            .max_w(px(400.0))
             .rounded_full()
             .bg(theme.accent)
             .border_color(theme.accent)
