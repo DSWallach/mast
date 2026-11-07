@@ -100,6 +100,7 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
     use mast_proto::{UserActionRequestState, UserActionRequestView};
 
     let mut snapshot = fixture_snapshot("fixture-space");
+    snapshot.external_references.clear();
     let item = snapshot
         .items
         .iter_mut()
