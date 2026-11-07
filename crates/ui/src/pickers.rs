@@ -3777,9 +3777,9 @@ impl Pickers {
                 (!icon_loading).then_some(chip_icon).flatten(),
                 |el, (path, tint)| {
                     el.child(
-                        crate::icons::icon(path)
+                        crate::components::conversation_picker_icon(theme, crate::icons::icon(path)
                             .size(px(16.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
+                            .text_color(tint.unwrap_or(theme.text_muted))),
                     )
                 },
             )
@@ -6149,6 +6149,8 @@ impl Render for Pickers {
                 traits_active.then(|| theme.text.opacity(0.85)),
             )
         });
+        let (model_label, chip_suffix) =
+            crate::components::conversation_model_label(&theme, model_label, chip_suffix);
         let model_chip = self.trigger_chip(
             PickerKind::HarnessModel,
             model_label,

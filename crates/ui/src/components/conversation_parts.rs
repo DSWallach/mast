@@ -41,6 +41,10 @@ pub fn conversation_picker_label(label: SharedString) -> Div {
     div().min_w_0().truncate().child(label)
 }
 
+pub fn conversation_picker_icon<T: gpui::Styled>(theme: &Theme, icon: T) -> T {
+    icon.when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| el.flex_none())
+}
+
 pub fn conversation_picker_suffix(theme: &Theme, label: SharedString, tint: Option<Hsla>) -> Div {
     div()
         .flex_shrink(1000.0)
@@ -48,6 +52,19 @@ pub fn conversation_picker_suffix(theme: &Theme, label: SharedString, tint: Opti
         .truncate()
         .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7)))
         .child(label)
+}
+
+pub fn conversation_model_label(
+    theme: &Theme,
+    label: SharedString,
+    suffix: Option<(SharedString, Option<Hsla>)>,
+) -> (SharedString, Option<(SharedString, Option<Hsla>)>) {
+    if theme.ui_style.conversation == ConversationVariant::Industrial {
+        if let Some((suffix, _)) = suffix {
+            return (format!("{label} {suffix}").into(), None);
+        }
+    }
+    (label, suffix)
 }
 
 pub fn conversation_picker_footer_content(
@@ -89,7 +106,7 @@ pub fn conversation_picker_trigger(
     let chip = div()
         .id(id)
         .h(px(32.0))
-        .max_w(px(248.0))
+        .when(theme.ui_style.conversation != ConversationVariant::Industrial, |el| el.max_w(px(248.0)))
         .min_w_0()
         .flex()
         .flex_row()
@@ -118,7 +135,8 @@ pub fn conversation_picker_trigger(
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer()
         .when(
-            theme.ui_style.layout == crate::ui_style::UiLayout::Guided,
+            theme.ui_style.layout == crate::ui_style::UiLayout::Guided
+                && theme.ui_style.conversation != ConversationVariant::Industrial,
             |el| {
                 el.child(
                     div()
@@ -1091,7 +1109,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
                     .child(
                         div()
                             .min_w_0()
-                            .max_w(px(surface_width * 0.45))
+                            .max_w(px(surface_width * if theme.ui_style.conversation == ConversationVariant::Industrial { 0.75 } else { 0.45 }))
                             .relative()
                             .top(px(-cluster_offset))
                             .children(model),
@@ -1149,7 +1167,7 @@ pub fn conversation_model_picker(
     let area = theme.ui_style.conversation == ConversationVariant::Area;
     let picker = div()
         .min_w_0()
-        .max_w(px(width * if area { 0.55 } else { 0.45 }))
+        .max_w(px(width * if area { 0.55 } else if theme.ui_style.conversation == ConversationVariant::Industrial { 1.0 } else { 0.45 }))
         .relative()
         .left(px(if area { 0.0 } else { offset }))
         .opacity(if area { 1.0 } else { opacity })
