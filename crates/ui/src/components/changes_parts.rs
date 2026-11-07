@@ -3,6 +3,58 @@
 use crate::theme::Theme;
 use gpui::{prelude::*, px};
 
+pub(crate) fn file_toolbar_button(
+    id: &'static str,
+    label: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
+    gpui::div()
+        .id(id)
+        .size(px(crate::surface_chrome::CONTROL_SIZE))
+        .when(super::is_industrial(theme), |element| {
+            element.size(px(theme.ui_style.tokens.control_size))
+        })
+        .flex_none()
+        .when(guided, |element| {
+            element
+                .h(px(theme.ui_style.tokens.control_size))
+                .w_auto()
+                .min_w(px(theme.ui_style.tokens.control_size))
+                .flex_shrink_1()
+                .px(px(6.0))
+                .gap(px(4.0))
+                .flex_row_reverse()
+                .child(
+                    gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(label),
+                )
+        })
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(crate::surface_chrome::CONTROL_RADIUS)))
+        .when(true, |element| {
+            crate::surface_chrome::icon_key(element, theme, false)
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        .hover(|style| style.bg(crate::theme::wash(0.14)))
+}
+
 pub(crate) fn changes_loading(
     theme: &Theme,
     id: &'static str,
