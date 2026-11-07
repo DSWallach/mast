@@ -41,7 +41,7 @@ pub use conversation_parts::{
     conversation_composer_expanded, conversation_composer_text_size, conversation_composer_width,
     conversation_error_chip, conversation_footer_slot, conversation_harness_tab,
     conversation_harness_tabs, conversation_input_surface, conversation_input_text_color,
-    conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
+    conversation_markdown_bullet_size, conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
     conversation_message_expander, conversation_model_label, conversation_model_picker,
     conversation_panel_radius, conversation_picker_approval, conversation_picker_footer_chip,
     conversation_picker_footer_content, conversation_picker_footer_label,

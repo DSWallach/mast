@@ -1023,11 +1023,7 @@ pub fn render_block(
                                 div()
                                     .ml(px(1.0))
                                     .size(crate::typography::ui_rems(
-                                        if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area {
-                                            3.0
-                                        } else {
-                                            5.0
-                                        },
+                                        crate::components::conversation_markdown_bullet_size(theme),
                                     ))
                                     .rounded_full()
                                     .bg(theme.accent),
