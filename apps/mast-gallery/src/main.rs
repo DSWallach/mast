@@ -1,3 +1,4 @@
+mod area_outline;
 mod screen_stubs;
 #[cfg(target_os = "macos")]
 mod screens;
@@ -32,18 +33,20 @@ enum Story {
     Walkthrough,
     Appearance,
     Board,
+    AreaOutline,
     Component(stories::Story),
     #[cfg(target_os = "macos")]
     Screen(screens::Screen),
 }
 
-const STORIES: [(Story, &str); 6] = [
+const STORIES: [(Story, &str); 7] = [
     (Story::Controls, "Controls"),
     (Story::Chat, "Chat"),
     (Story::Outline, "Work outline"),
     (Story::Walkthrough, "PR walkthrough"),
     (Story::Appearance, "Settings → Appearance"),
     (Story::Board, "Board"),
+    (Story::AreaOutline, "Area outline tree"),
 ];
 
 struct GalleryState {
@@ -515,6 +518,36 @@ impl Render for Gallery {
                     .when(self.story == Story::Appearance, |el| {
                         el.child(self.appearance_page.clone())
                     })
+                    .when(self.story == Story::AreaOutline, |el| {
+                        el.child(
+                            div().flex().gap(px(8.)).pb(px(16.)).children(
+                                area_outline::LABELS.into_iter().enumerate().map(
+                                    |(index, label)| {
+                                        div()
+                                            .id(("area-outline-option", index))
+                                            .cursor_pointer()
+                                            .px(px(12.))
+                                            .py(px(8.))
+                                            .rounded_full()
+                                            .when(self.tab == index, |el| {
+                                                el.bg(theme.accent)
+                                                    .text_color(theme.identity_text(theme.accent))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.tab = index;
+                                                cx.notify();
+                                            }))
+                                            .child(label)
+                                    },
+                                ),
+                            ),
+                        )
+                        .child(area_outline::tree(
+                            theme,
+                            &overrides,
+                            self.tab.min(2),
+                        ))
+                    })
                     .when(self.story == Story::Board, |el| {
                         el.child(stories::board(theme, &overrides))
                     })
@@ -787,6 +820,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "macos", feature = "snapshot"))]
+    #[test]
+    #[ignore = "requires Metal and macOS services"]
+    fn render_area_outline_options() {
+        struct Snapshot(usize);
+        impl Render for Snapshot {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx);
+                let overrides = mast_ui::style_overrides::current(cx);
+                div().size_full().bg(theme.bg).child(area_outline::tree(theme, &overrides, self.0))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for (appearance_name, appearance) in [("light", mast_ui::theme::Appearance::Light), ("dark", mast_ui::theme::Appearance::Dark)] {
+            for option in 0..3 {
+                mast_ui::snapshot::render_to_png(
+                    &format!("area-outline-{}-{appearance_name}", ["a", "b", "c"][option]),
+                    gpui::size(px(900.), px(650.)), ui_style::UiStyleId::Area, appearance,
+                    |_, cx| { init(cx, dir.path(), dir.path()); cx.new(|_| Snapshot(option)) },
+                ).unwrap();
+            }
+        }
+    }
 
     #[cfg(all(target_os = "macos", feature = "snapshot"))]
     #[test]
