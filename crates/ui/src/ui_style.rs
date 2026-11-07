@@ -542,7 +542,10 @@ pub fn help_card(
             .gap(px(8.0))
             .p(px(8.0))
             .rounded(px(6.0))
-            .bg(theme.surface_raised)
+            .when(
+                theme.ui_style.id != UiStyleId::Area || id != "sidebar",
+                |el| el.bg(theme.surface_raised),
+            )
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text_muted)
             .child(div().flex_1().min_w_0().child(message))
