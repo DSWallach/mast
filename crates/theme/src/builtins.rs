@@ -330,6 +330,9 @@ fn area(dark: bool) -> ThemeVariant {
             "MIT",
         ),
     });
+    // Diff counts and markers use the reference hues at readable contrast.
+    result.colors.diff_add = c("#1DCB43").ensure_contrast(c(background), 4.5);
+    result.colors.diff_delete = c("#FF7759").ensure_contrast(c(background), 4.5);
     // Identity colours sampled from the Area character-tag reference.
     for (index, color) in [
         (4, "#0BA7FF"),

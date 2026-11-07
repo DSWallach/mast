@@ -880,6 +880,19 @@ mod tests {
     }
 
     #[test]
+    fn area_diff_colours_are_distinct_and_readable() {
+        for id in ["area-light", "area-dark"] {
+            let variant = ThemeRegistry::builtin().variant(id).unwrap();
+            let add = variant.colors.diff_add;
+            let delete = variant.colors.diff_delete;
+            assert!(add.g > add.r && add.g > add.b, "{id}: {add:?}");
+            assert!(delete.r > delete.g && delete.r > delete.b, "{id}: {delete:?}");
+            assert!(add.contrast(variant.colors.background) >= 4.5);
+            assert!(delete.contrast(variant.colors.background) >= 4.5);
+        }
+    }
+
+    #[test]
     fn visual_fixture_matrix_covers_every_variant_and_scene() {
         let registry = ThemeRegistry::builtin();
         let variants = registry
