@@ -1,8 +1,10 @@
 //! Presentation primitives for settings pages.
 
-use crate::theme::Theme;
+use crate::appearance::AppearanceMode;
 use crate::theme::ink;
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use crate::theme::{Appearance, Theme};
+use gpui::{AnyElement, Hsla, SharedString, div, prelude::*, px};
+use mast_theme::{AccentSelection, SurfacePreference, ThemeSelection};
 
 pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
     div()
@@ -364,5 +366,121 @@ pub(crate) fn settings_picker(
         control.hover(|style| style.bg(theme.surface_raised_hover))
     } else {
         control
+    }
+}
+
+fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
+    div()
+        .h(px(5.0))
+        .w(gpui::relative(fraction))
+        .rounded(px(3.0))
+        .bg(tone)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Corners {
+    All,
+    Left,
+    Right,
+}
+
+fn miniature(theme: &Theme, corners: Corners, radius: f32) -> AnyElement {
+    let line = theme.text.opacity(0.22);
+    let strong = theme.text.opacity(0.34);
+    let r = px(radius);
+    let root = div().size_full().flex().flex_row().bg(theme.surface);
+    let root = match corners {
+        Corners::All => root.rounded(r),
+        Corners::Left => root.rounded_tl(r).rounded_bl(r),
+        Corners::Right => root.rounded_tr(r).rounded_br(r),
+    };
+    root.child(
+        div()
+            .w(px(44.0))
+            .h_full()
+            .flex_none()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .px(px(8.0))
+            .pt(px(14.0))
+            .child(bar(0.70, strong))
+            .child(bar(1.0, line))
+            .child(bar(0.85, line))
+            .child(bar(1.0, line)),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .my(px(8.0))
+            .mr(px(8.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .p(px(10.0))
+            .child(bar(0.62, strong))
+            .child(bar(0.88, line))
+            .child(bar(0.76, line))
+            .child(bar(0.52, line)),
+    )
+    .into_any_element()
+}
+
+fn miniature_split(
+    themes: &ThemeSelection,
+    accent: AccentSelection,
+    surface: SurfacePreference,
+    radius: f32,
+) -> AnyElement {
+    let light = Theme::for_selection(Appearance::Light, &themes.light, accent, surface);
+    let dark = Theme::for_selection(Appearance::Dark, &themes.dark, accent, surface);
+    div()
+        .size_full()
+        .flex()
+        .flex_row()
+        .child(div().w_1_2().h_full().overflow_hidden().child(miniature(
+            &light,
+            Corners::Left,
+            radius,
+        )))
+        .child(div().w_1_2().h_full().overflow_hidden().child(miniature(
+            &dark,
+            Corners::Right,
+            radius,
+        )))
+        .into_any_element()
+}
+
+pub(crate) fn settings_appearance_preview(
+    active_theme: &Theme,
+    mode: AppearanceMode,
+    themes: &ThemeSelection,
+    accent: AccentSelection,
+    surface: SurfacePreference,
+) -> AnyElement {
+    let radius = active_theme
+        .ui_style
+        .radius_roles()
+        .panel
+        .unwrap_or(crate::settings::widgets::OPTION_CARD_RADIUS);
+    match mode {
+        AppearanceMode::System => miniature_split(themes, accent, surface, radius),
+        AppearanceMode::Light => miniature(
+            &Theme::for_selection(Appearance::Light, &themes.light, accent, surface),
+            Corners::All,
+            radius,
+        ),
+        AppearanceMode::Dark => miniature(
+            &Theme::for_selection(Appearance::Dark, &themes.dark, accent, surface),
+            Corners::All,
+            radius,
+        ),
     }
 }

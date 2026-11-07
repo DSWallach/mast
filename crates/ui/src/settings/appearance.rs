@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
+    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, ObjectFit, Render, SharedString, StyledImage as _, Subscription, Window, div,
     img, prelude::*, px,
 };
@@ -1212,13 +1212,6 @@ fn format_px(size: f32) -> String {
     }
 }
 
-fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
-    div()
-        .h(px(5.0))
-        .w(gpui::relative(fraction))
-        .rounded(px(3.0))
-        .bg(tone)
-}
 
 fn accent_helper(accent: AccentSelection) -> String {
     match accent {
@@ -1283,108 +1276,6 @@ fn background_effect_choice(
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Corners {
-    All,
-    Left,
-    Right,
-}
-
-fn miniature(theme: &Theme, corners: Corners) -> AnyElement {
-    let line = theme.text.opacity(0.22);
-    let strong = theme.text.opacity(0.34);
-    let r = px(widgets::OPTION_CARD_RADIUS);
-    let root = div().size_full().flex().flex_row().bg(theme.surface);
-    let root = match corners {
-        Corners::All => root.rounded(r),
-        Corners::Left => root.rounded_tl(r).rounded_bl(r),
-        Corners::Right => root.rounded_tr(r).rounded_br(r),
-    };
-    root.child(
-        div()
-            .w(px(44.0))
-            .h_full()
-            .flex_none()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .gap(px(7.0))
-            .px(px(8.0))
-            .pt(px(14.0))
-            .child(bar(0.70, strong))
-            .child(bar(1.0, line))
-            .child(bar(0.85, line))
-            .child(bar(1.0, line)),
-    )
-    .child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .my(px(8.0))
-            .mr(px(8.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg)
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .gap(px(7.0))
-            .p(px(10.0))
-            .child(bar(0.62, strong))
-            .child(bar(0.88, line))
-            .child(bar(0.76, line))
-            .child(bar(0.52, line)),
-    )
-    .into_any_element()
-}
-
-fn miniature_split(
-    themes: &ThemeSelection,
-    accent: AccentSelection,
-    surface: SurfacePreference,
-) -> AnyElement {
-    let light = Theme::for_selection(Appearance::Light, &themes.light, accent, surface);
-    let dark = Theme::for_selection(Appearance::Dark, &themes.dark, accent, surface);
-    div()
-        .size_full()
-        .flex()
-        .flex_row()
-        .child(
-            div()
-                .w_1_2()
-                .h_full()
-                .overflow_hidden()
-                .child(miniature(&light, Corners::Left)),
-        )
-        .child(
-            div()
-                .w_1_2()
-                .h_full()
-                .overflow_hidden()
-                .child(miniature(&dark, Corners::Right)),
-        )
-        .into_any_element()
-}
-
-fn preview(
-    mode: AppearanceMode,
-    themes: &ThemeSelection,
-    accent: AccentSelection,
-    surface: SurfacePreference,
-) -> AnyElement {
-    match mode {
-        AppearanceMode::System => miniature_split(themes, accent, surface),
-        AppearanceMode::Light => miniature(
-            &Theme::for_selection(Appearance::Light, &themes.light, accent, surface),
-            Corners::All,
-        ),
-        AppearanceMode::Dark => miniature(
-            &Theme::for_selection(Appearance::Dark, &themes.dark, accent, surface),
-            Corners::All,
-        ),
-    }
-}
 
 fn model_appearance(appearance: Appearance) -> mast_theme::Appearance {
     match appearance {
@@ -2877,7 +2768,7 @@ impl Render for AppearancePage {
                     mode.icon(),
                     mode.label(),
                     mode == current_mode,
-                    preview(mode, &current_themes, current_accent, current_surface),
+                    crate::components::settings_appearance_preview(&theme, mode, &current_themes, current_accent, current_surface),
                 )
                 .id(SharedString::from(format!("appearance-{}", mode.label())))
                 .on_click(cx.listener(move |_, _, _, cx| {
