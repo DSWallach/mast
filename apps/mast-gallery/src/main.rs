@@ -834,8 +834,11 @@ mod tests {
         }
         for (name, screen) in [
             ("gallery-screen-chat", screens::Screen::Chat),
+            ("gallery-screen-details", screens::Screen::Details),
             ("gallery-screen-overview", screens::Screen::Overview),
             ("gallery-screen-walkthrough", screens::Screen::Walkthrough),
+            ("gallery-screen-appearance", screens::Screen::Appearance),
+            ("gallery-screen-browser", screens::Screen::Browser),
         ] {
             mast_ui::snapshot::render_to_png(
                 name,
@@ -878,9 +881,35 @@ mod tests {
         assert_eq!(restored.themes.dark, state.themes.dark);
         #[cfg(target_os = "macos")]
         for (screen, _) in screens::SCREENS {
-            state.story = Story::Screen(screen);
-            state.save_to(&path).unwrap();
-            assert!(GalleryState::load_from(Some(&path)).story == state.story);
+            for &style in ui_style::UiStyleId::ALL {
+                for &layout in ui_style::UiLayout::ALL {
+                    state.story = Story::Screen(screen);
+                    state.style = style;
+                    state.layout = layout;
+                    state.save_to(&path).unwrap();
+                    let restored = GalleryState::load_from(Some(&path));
+                    assert!(restored.story == state.story);
+                    assert_eq!(restored.style, style);
+                    assert_eq!(restored.layout, layout);
+                    assert!(restored.dark);
+                    assert_eq!(restored.themes.light, "github-light");
+                    assert_eq!(restored.themes.dark, "github-dark");
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn saved_selection_labels_are_unique() {
+        let mut labels = std::collections::HashSet::new();
+        for label in STORIES
+            .iter()
+            .map(|(_, label)| *label)
+            .chain(stories::STORIES.iter().map(|(_, label)| *label))
+            .chain(screens::SCREENS.iter().map(|(_, label)| *label))
+        {
+            assert!(labels.insert(label), "duplicate saved selection: {label}");
         }
     }
 
