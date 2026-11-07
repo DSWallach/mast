@@ -185,3 +185,58 @@ pub(crate) fn settings_row_tile(theme: &Theme, icon_path: &'static str) -> gpui:
                 }),
         )
 }
+
+/// Selection control for a surface or background effect.
+pub(crate) fn settings_choice(
+    theme: &Theme,
+    id: SharedString,
+    label: &'static str,
+    selected: bool,
+    compact: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let industrial = super::is_industrial(theme);
+    let area = super::is_area(theme);
+    let label = if industrial {
+        crate::popover::tracked_upper(label)
+    } else {
+        label.to_owned()
+    };
+    div()
+        .id(id)
+        .h(px(if compact { 28.0 } else { 30.0 }))
+        .px(px(if compact { 9.0 } else { 10.0 }))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
+        .when(area, |el| el.rounded_full())
+        .border_1()
+        .when(industrial, |el| el.border_b_2())
+        .border_color(if selected { theme.accent } else { theme.border })
+        .bg(if selected {
+            theme.accent_wash
+        } else if area {
+            theme.accent.opacity(0.08)
+        } else {
+            theme.surface_raised.opacity(0.28)
+        })
+        .text_size(crate::typography::ui_rems(if compact {
+            11.0
+        } else {
+            11.5
+        }))
+        .font_weight(if selected {
+            gpui::FontWeight::MEDIUM
+        } else {
+            gpui::FontWeight::NORMAL
+        })
+        .text_color(if selected {
+            theme.accent
+        } else {
+            theme.text_muted
+        })
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .when(!selected, |control| {
+            control.hover(|style| style.bg(theme.surface_raised_hover))
+        })
+        .child(SharedString::from(label))
+}
