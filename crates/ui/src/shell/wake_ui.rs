@@ -190,29 +190,7 @@ impl Shell {
         } else {
             toggle.label().to_owned()
         };
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .flex_none()
-            .h(px(20.0))
-            .px(px(7.0))
-            .flex()
-            .items_center()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(border)
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(text)
-            .when(dimmed, |el| el.opacity(0.5))
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
-            .role(gpui::Role::Button)
-            .aria_label(SharedString::from(format!(
-                "{}: {}",
-                toggle.label(),
-                if on { "on" } else { "off" }
-            )))
-            .child(SharedString::from(label))
+        crate::components::shell_parts::wake_toggle(theme, selector, label, format!("{}: {}", toggle.label(), if on { "on" } else { "off" }), border, text, on, dimmed)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.toggle_wake(&chat_id, toggle, cx);
@@ -240,48 +218,13 @@ impl Shell {
                 .items_center()
                 .gap(px(6.0))
                 .child(
-                    div()
-                        .debug_selector({
-                            let selector = format!("{prefix}-held");
-                            move || selector.clone()
-                        })
-                        .flex_none()
-                        .h(px(18.0))
-                        .px(px(6.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(border)
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(text)
-                        .child(SharedString::from(chip.text.clone())),
+                    crate::components::shell_parts::held_wake_badge(theme, format!("{prefix}-held"), chip.text.clone(), border, text),
                 )
                 .children(chip.reason.map(|reason| {
-                    div()
-                        .debug_selector({
-                            let selector = format!("{prefix}-held-reason");
-                            move || selector.clone()
-                        })
-                        .min_w_0()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(reason))
+                    crate::components::shell_parts::held_wake_reason(theme, format!("{prefix}-held-reason"), reason)
                 }))
                 .child(
-                    div()
-                        .id(SharedString::from(deliver.clone()))
-                        .debug_selector(move || deliver.clone())
-                        .flex_none()
-                        .px(px(6.0))
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(theme.accent.opacity(0.5))
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.accent)
-                        .cursor_pointer()
-                        .hover(|el| el.bg(theme.accent.opacity(0.12)))
-                        .child("Deliver now")
+                    crate::components::shell_parts::deliver_wake_button(theme, deliver)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.deliver_wake_now(&chat_id, cx);

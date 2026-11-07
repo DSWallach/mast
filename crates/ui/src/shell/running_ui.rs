@@ -6,7 +6,8 @@
 //! Keys while it is open: ↑/↓ move, ↩ opens the chat, ⌘↩ opens it in the
 //! Overview's side pane, I interrupts, →/← unfold/fold, Esc closes.
 use super::*;
-use gpui::{Div, ElementId, ScrollHandle, point};
+use crate::components::shell_parts::{interrupted_label, running_button};
+use gpui::{ScrollHandle, point};
 
 use crate::build_watch::{self, BuildStamp, Pending, RestartAction, RestartPlan, RestartState};
 use crate::running_chats::{self, Entry, Input, Row, RunState, Section, SectionKind, Snapshot};
@@ -1040,14 +1041,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let status = crate::status_style::Status::from(row.state);
-        let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-            crate::status_style::indicator_for_theme(status, &theme).into_any_element()
-        } else if status == crate::status_style::Status::Working {
-            let color = crate::status_style::status_style(status, theme.appearance).color;
-            crate::loaders::mini_mono_spinner(format!("running-status-{}", row.chat_id), 1.5, color, cx.entity_id(), cx).into_any_element()
-        } else {
-            crate::status_style::indicator_for_theme(status, &theme).into_any_element()
-        };
+        let indicator = crate::components::shell_parts::activity_indicator(status, format!("running-status-{}", row.chat_id), theme, cx.entity_id(), cx);
         let meta = [
             row.item_path.clone(),
             row.account.clone(),
@@ -1192,43 +1186,6 @@ fn running_key_hints(theme: &Theme) -> AnyElement {
         .child(hint("\u{2318}\u{21a9}", "in pane"))
         .child(hint("I", "interrupt"))
         .into_any_element()
-}
-
-fn interrupted_label(label: &'static str, count: usize, theme: &Theme) -> Div {
-    div()
-        .px(px(8.0))
-        .pt(px(4.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_faint)
-        .child(SharedString::from(format!("{label} \u{b7} {count}")))
-}
-
-fn running_button(
-    id: impl Into<ElementId>,
-    label: &'static str,
-    primary: bool,
-    theme: &Theme,
-) -> gpui::Stateful<Div> {
-    let button = div()
-        .id(id)
-        .px(px(10.0))
-        .py(px(4.0))
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .border_1()
-        .text_size(crate::typography::ui_rems(12.0));
-    if primary {
-        button
-            .border_color(theme.accent)
-            .bg(theme.accent)
-            .text_color(theme.on_accent)
-    } else {
-        button
-            .border_color(theme.border_strong)
-            .hover(|el| el.bg(theme.glass_hover()))
-    }
-    .child(SharedString::from(label))
 }
 
 #[cfg(test)]

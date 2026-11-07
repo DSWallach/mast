@@ -27,6 +27,7 @@ use mast_proto::{
 };
 
 use crate::composer::skill_completion::{SkillCompletion, SkillInsertion, SkillSource};
+use crate::components::shell_parts::{start_chat_note as note, start_chat_section_label as section_label};
 use crate::pickers::{Pickers, ReturnComposerFocus};
 use crate::work_outline::actions::OperationSlot;
 use crate::work_outline::execution::{self as exec, ValidationHeadline, ValidationState};
@@ -1031,14 +1032,6 @@ impl Shell {
     }
 }
 
-fn note(selector: &'static str, text: impl Into<SharedString>, color: gpui::Hsla) -> gpui::Div {
-    div()
-        .debug_selector(move || selector.into())
-        .text_size(crate::typography::ui_rems(11.5))
-        .text_color(color)
-        .child(text.into())
-}
-
 /// The shared persistent, copyable error card, tagged for tests.
 fn error_card(
     selector: &'static str,
@@ -1052,15 +1045,6 @@ fn error_card(
         .child(crate::error_notice::ErrorNotice::new(
             selector, theme, title, detail,
         ))
-}
-
-fn section_label(text: &'static str, theme: &Theme) -> gpui::Div {
-    div()
-        .mt(px(10.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted)
-        .child(text)
 }
 
 fn device_name(shell: &Shell, device_id: &str, cx: &App) -> String {
@@ -1109,27 +1093,8 @@ fn start_chat_account_chip(
         .flex_col()
         .gap(px(2.0))
         .child(
-            div()
-                .id("start-chat-account-chip")
-                .debug_selector(|| "start-chat-account-chip".into())
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .hover(|el| el.text_color(theme.text))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_start_chat_account(cx)))
-                .child(
-                    icon(if dialog.account_open {
-                        icons::ALT_ARROW_DOWN
-                    } else {
-                        icons::ALT_ARROW_RIGHT
-                    })
-                    .size(px(10.0))
-                    .text_color(theme.text_muted),
-                )
-                .child(SharedString::from(label)),
+            crate::components::shell_parts::start_chat_account_toggle(theme, dialog.account_open, label)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_start_chat_account(cx))),
         );
     if dialog.account_open {
         for (ix, entry) in chip.entries.into_iter().enumerate() {
@@ -1280,22 +1245,7 @@ pub(super) fn start_chat_card(
             execution = execution.child(note(selector, text, color));
             for (ix, issue) in exec::validation_issues(reply).into_iter().enumerate() {
                 execution = execution.child(
-                    div()
-                        .debug_selector(move || format!("start-chat-issue-{ix}"))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(11.5))
-                                .text_color(theme.text)
-                                .child(SharedString::from(issue.message)),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(issue.remediation)),
-                        ),
+                    crate::components::shell_parts::start_chat_validation_issue(theme, ix, issue.message, issue.remediation),
                 );
             }
             if !reply.ok {
@@ -1414,14 +1364,7 @@ pub(super) fn start_chat_card(
             ));
             if dialog.pick == WorktreePick::CreateNew {
                 list = list.child(
-                    div()
-                        .ml(px(22.0))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.input_bg)
+                    crate::components::shell_parts::start_chat_worktree_input(theme)
                         .child(dialog.worktree_name.clone()),
                 );
             }
@@ -1435,30 +1378,7 @@ pub(super) fn start_chat_card(
         .flex_col()
         .gap(px(2.0))
         .child(
-            div()
-                .id("start-chat-instructions-toggle")
-                .debug_selector(|| "start-chat-instructions-toggle".into())
-                .mt(px(10.0))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .hover(|el| el.text_color(theme.text))
-                .child(
-                    icon(if dialog.instructions_open {
-                        icons::ALT_ARROW_DOWN
-                    } else {
-                        icons::ALT_ARROW_RIGHT
-                    })
-                    .size(px(10.0))
-                    .text_color(theme.text_muted),
-                )
-                .child(SharedString::from(format!(
-                    "Effective instructions ({count})"
-                )))
+            crate::components::shell_parts::start_chat_instructions_toggle(theme, dialog.instructions_open, count)
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_start_chat_instructions(cx))),
         )
         .when(dialog.instructions_changed, |el| {
@@ -1483,26 +1403,7 @@ pub(super) fn start_chat_card(
                         ))
                     })
                     .children(dialog.effective.iter().map(|entry| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from(format!(
-                                        "{}. {}{}",
-                                        entry.order + 1,
-                                        entry.scope_title,
-                                        if entry.inherited { " (inherited)" } else { "" }
-                                    ))),
-                            )
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.5))
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(entry.text.clone())),
-                            )
+                        crate::components::shell_parts::start_chat_instruction(theme, entry.order, &entry.scope_title, entry.inherited, &entry.text)
                     })),
             )
         });
@@ -1576,18 +1477,7 @@ pub(super) fn start_chat_card(
                 .child(
                     // Auto-grows with the prompt (the input owns the cap and
                     // scrolls past it); no height cap here, which would clip.
-                    div()
-                        .relative()
-                        .debug_selector(|| "start-chat-prompt".into())
-                        .flex_none()
-                        .mt(px(8.0))
-                        .w_full()
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.input_bg)
+                    crate::components::shell_parts::start_chat_prompt(theme)
                         .child(dialog.input.clone())
                         .child(dialog.skills.clone()),
                 )
@@ -1702,17 +1592,7 @@ fn pr_start_chat_card(
         format!("{label} \u{b7} {}", dialog.item_path)
     };
     let monospace_line = |selector: &'static str, text: String| {
-        div()
-            .debug_selector(move || selector.into())
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.input_bg)
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text)
-            .child(SharedString::from(text))
+        crate::components::shell_parts::start_chat_readout(theme, selector, text)
     };
     let agents = div()
         .debug_selector(|| "start-chat-agent".into())
