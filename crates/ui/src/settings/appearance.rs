@@ -2048,13 +2048,7 @@ impl AppearancePage {
             }
             for failure in &compilation.failures {
                 main = main.child(
-                    div()
-                        .mt(px(8.0))
-                        .p(px(10.0))
-                        .rounded(px(8.0))
-                        .bg(theme.warning.opacity(0.08))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.warning)
+                    crate::components::settings_import_warning(theme)
                         .child(SharedString::from(format!(
                             "{} could not be compiled · {}",
                             failure.name, failure.message
@@ -2083,23 +2077,7 @@ impl AppearancePage {
 
         if let Some(error) = error {
             main = main.child(
-                div()
-                    .mt(px(12.0))
-                    .p(px(10.0))
-                    .rounded(px(8.0))
-                    .bg(theme.danger.opacity(0.08))
-                    .flex()
-                    .items_start()
-                    .gap(px(7.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .line_height(px(16.0))
-                    .text_color(theme.danger)
-                    .child(
-                        icons::icon(icons::DANGER_TRIANGLE)
-                            .size(px(13.0))
-                            .flex_none()
-                            .mt(px(1.0)),
-                    )
+                crate::components::settings_import_error(theme)
                     .child(div().flex_1().min_w_0().truncate().child(error)),
             );
         }

@@ -1300,3 +1300,33 @@ pub(crate) fn settings_send_behavior_reset(theme: &Theme) -> gpui::Stateful<gpui
         .cursor_pointer()
         .hover(|s| s.bg(ink(0.04)).text_color(theme.text))
 }
+
+/// Theme import warning and error surfaces.
+pub(crate) fn settings_import_warning(theme: &Theme) -> gpui::Div {
+    div()
+        .mt(px(8.0))
+        .p(px(10.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(8.0)))
+        .bg(theme.warning.opacity(0.08))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.warning)
+}
+pub(crate) fn settings_import_error(theme: &Theme) -> gpui::Div {
+    div()
+        .mt(px(12.0))
+        .p(px(10.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(8.0)))
+        .bg(theme.danger.opacity(0.08))
+        .flex()
+        .items_start()
+        .gap(px(7.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .line_height(px(16.0))
+        .text_color(theme.danger)
+        .child(
+            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                .size(px(13.0))
+                .flex_none()
+                .mt(px(1.0)),
+        )
+}
