@@ -646,18 +646,7 @@ impl ArtifactTab {
                             .child(SharedString::from(comment.id.clone())),
                     )
                     .child(
-                        div()
-                            .px(px(6.0))
-                            .h(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(color.opacity(0.5))
-                            .bg(color.opacity(0.10))
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(color)
-                            .child(row.state.label()),
+                        crate::components::browser_parts::artifact_comment_badge(row.state.label(), color, theme)
                     )
                     .child(
                         div()

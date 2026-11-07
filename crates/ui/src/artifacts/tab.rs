@@ -1489,16 +1489,7 @@ impl ArtifactTab {
                     .enumerate()
                     .map(|(index, highlight)| {
                         let selector = format!("review-highlight-{index}");
-                        div()
-                            .id(SharedString::from(selector.clone()))
-                            .debug_selector(move || selector.clone())
-                            .p(px(10.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
+                        crate::components::browser_parts::artifact_review_card(SharedString::from(selector), theme)
                             .child(
                                 div()
                                     .text_size(crate::typography::ui_rems(11.0))
@@ -1526,14 +1517,7 @@ impl ArtifactTab {
                     .gap(px(8.0))
                     .when_some(stale_head, |el, head| {
                         el.child(
-                            div()
-                                .debug_selector(|| "review-stale".into())
-                                .p(px(8.0))
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(theme.warning)
-                                .text_color(theme.warning)
-                                .text_size(crate::typography::ui_rems(12.0))
+                            crate::components::browser_parts::artifact_review_warning(theme)
                                 .child(SharedString::from(format!(
                                     "Stale · head moved {} → {}",
                                     review.pr.head_sha, head

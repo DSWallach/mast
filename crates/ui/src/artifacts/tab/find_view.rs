@@ -848,22 +848,8 @@ impl ArtifactTab {
                 .border_r_1()
                 .border_color(theme.border)
                 .child(
-                    div()
-                        .id("artifact-index-toggle")
-                        .debug_selector(|| "artifact-index-toggle".into())
-                        .size(px(20.0))
-                        .rounded(px(surface_chrome::CONTROL_RADIUS))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|el| el.bg(crate::theme::wash(0.14)))
-                        .child(
-                            icons::icon(icons::LIST)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_index(cx))),
+                    crate::components::browser_parts::artifact_index_toggle(icons::LIST, 12.0, theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_index(cx))),
                 )
                 .into_any_element();
         }
@@ -931,21 +917,7 @@ impl ArtifactTab {
                     .text_color(theme.text_faint)
                     .child("Sections")
                     .child(
-                        div()
-                            .id("artifact-index-toggle")
-                            .debug_selector(|| "artifact-index-toggle".into())
-                            .size(px(20.0))
-                            .rounded(px(surface_chrome::CONTROL_RADIUS))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|el| el.bg(crate::theme::wash(0.14)))
-                            .child(
-                                icons::icon(icons::ALT_ARROW_LEFT)
-                                    .size(px(11.0))
-                                    .text_color(theme.text_muted),
-                            )
+                        crate::components::browser_parts::artifact_index_toggle(icons::ALT_ARROW_LEFT, 11.0, theme)
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_index(cx))),
                     ),
             )

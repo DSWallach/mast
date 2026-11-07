@@ -722,3 +722,173 @@ pub(crate) fn browser_empty_notice(theme: &Theme) -> Div {
                 .border_color(theme.industrial_colors().rule)
         })
 }
+
+pub(crate) fn artifact_index_toggle(
+    glyph: &'static str,
+    icon_size: f32,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = div()
+        .id("artifact-index-toggle")
+        .debug_selector(|| "artifact-index-toggle".into())
+        .size(px(20.0))
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(surface_chrome::CONTROL_RADIUS)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|el| el.bg(crate::theme::wash(0.14)))
+        .child(
+            icons::icon(glyph)
+                .size(px(icon_size))
+                .text_color(theme.text_muted),
+        )
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn artifact_question_badge(
+    id: &'static str,
+    label: String,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let badge = div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex_none()
+        .px(px(7.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(9.0)))
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .bg(color.opacity(0.10))
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(color)
+        .child(SharedString::from(label))
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(badge, theme, false)
+}
+
+pub(crate) fn artifact_comment_badge(label: &'static str, color: gpui::Hsla, theme: &Theme) -> Div {
+    let badge = div()
+        .px(px(6.0))
+        .h(px(16.0))
+        .flex()
+        .items_center()
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(8.0)))
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .bg(color.opacity(0.10))
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(color)
+        .child(label)
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(badge, theme, false)
+}
+
+pub(crate) fn artifact_review_card(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .p(px(10.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .when(super::is_area(theme), |el| el.bg(theme.accent_wash))
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.industrial_colors().key)
+                .border_color(theme.industrial_colors().rule)
+        })
+}
+
+pub(crate) fn artifact_review_warning(theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "review-stale".into())
+        .p(px(8.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.warning)
+        .text_color(theme.warning)
+        .text_size(crate::typography::ui_rems(12.0))
+        .when(super::is_area(theme), |el| {
+            el.bg(theme.warning.opacity(0.1))
+        })
+}
+
+pub(crate) fn artifact_plan_state(
+    id: SharedString,
+    label: String,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> Div {
+    div()
+        .debug_selector(move || id.to_string())
+        .flex_none()
+        .px(px(5.0))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(color)
+        .child(SharedString::from(label))
+        .when(super::is_area(theme), |el| el.rounded_full())
+}
+
+pub(crate) fn artifact_progress(fraction: f32, theme: &Theme) -> Div {
+    let radius = theme.ui_style.tokens.control_radius.unwrap_or(2.0);
+    div()
+        .flex_1()
+        .h(px(4.0))
+        .rounded(px(radius))
+        .bg(crate::theme::wash(0.12))
+        .child(
+            div()
+                .h_full()
+                .rounded(px(radius))
+                .bg(theme.accent)
+                .w(gpui::relative(fraction.clamp(0.0, 1.0))),
+        )
+}
+
+pub(crate) fn artifact_picked_chip(label: String, theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "artifact-picked-chip".into())
+        .flex_none()
+        .px(px(6.0))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.accent)
+        .text_color(theme.accent)
+        .child(SharedString::from(label))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent_wash)
+        })
+}
+
+pub(crate) fn artifact_pick_note(theme: &Theme) -> Div {
+    div()
+        .debug_selector(|| "artifact-pick-note".into())
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(5.0)))
+        .border_1()
+        .border_color(theme.border)
+        .px(px(6.0))
+        .py(px(2.0))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent_wash)
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.industrial_colors().key)
+                .border_color(theme.industrial_colors().rule)
+        })
+}

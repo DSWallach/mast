@@ -650,15 +650,7 @@ impl ArtifactTab {
                                 ),
                             )
                             .children(picked.clone().map(|pick| {
-                                div()
-                                    .debug_selector(|| "artifact-picked-chip".into())
-                                    .flex_none()
-                                    .px(px(6.0))
-                                    .rounded(px(4.0))
-                                    .border_1()
-                                    .border_color(theme.accent)
-                                    .text_color(theme.accent)
-                                    .child(SharedString::from(Self::pick_label(&pick)))
+                                crate::components::browser_parts::artifact_picked_chip(Self::pick_label(&pick), theme)
                             }))
                             .child(div().flex_1())
                             .child(layout_controls)
@@ -675,13 +667,7 @@ impl ArtifactTab {
                             ),
                     )
                     .child(
-                        div()
-                            .debug_selector(|| "artifact-pick-note".into())
-                            .rounded(px(5.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .px(px(6.0))
-                            .py(px(2.0))
+                        crate::components::browser_parts::artifact_pick_note(theme)
                             .children(note),
                     ),
             )
