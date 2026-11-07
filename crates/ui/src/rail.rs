@@ -7,13 +7,12 @@
 //! in free functions with unit tests; rendering is an `impl Transcript`
 //! extension since the rail shares the transcript's rows and `ListState`.
 
-use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, ListOffset, div, prelude::*, px};
 use std::time::{Duration, Instant};
 
 use mast_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
 use crate::motion;
-use crate::popover;
 use crate::theme::Theme;
 use crate::transcript::Transcript;
 
@@ -523,63 +522,13 @@ impl Transcript {
                 let bucket_len = end - start;
                 let is_active = active_bucket == Some(ix);
                 let is_hovered = hover == Some(ix);
-                // Only hover grows the tick; the active one just reads brighter
-                // (message-rail.tsx: w-3 rest, w-5 hovered).
-                let bar_width = if is_hovered { 20.0 } else { 12.0 };
-                let bar_color = if is_active || is_hovered {
-                    theme.text.opacity(0.8)
-                } else {
-                    crate::theme::ink(0.16)
-                };
                 let prompt = truncate_preview(&tick.prompt, PREVIEW_PROMPT_CHARS);
                 let reply = tick
                     .reply
                     .as_deref()
                     .map(|r| truncate_preview(r, PREVIEW_REPLY_CHARS));
-                let card: Option<AnyElement> = is_hovered.then(|| {
-                    let theme = theme.for_popup();
-                    let card = popover::popover_card(&theme)
-                        .w(px(280.0))
-                        .p(px(Theme::SPACE_SM))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from(prompt.clone())),
-                        )
-                        .when_some(reply.clone(), |el, reply| {
-                            el.child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(reply)),
-                            )
-                        })
-                        // Condensed bucket: say how many prompts it stands for
-                        // (the outline still spans the whole conversation).
-                        .when(bucket_len > 1, |el| {
-                            el.child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.0))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!("{bucket_len} prompts"))),
-                            )
-                        });
-                    // Mounted straight through deferred/anchored (not a popover
-                    // mount helper), so the frost wrap happens here.
-                    crate::frost::frosted(12.0, crate::frost::MENU_BLUR, card).into_any_element()
-                });
-                div()
-                    .id(("rail-tick", ix))
-                    .relative()
-                    .h(px(TICK_SLOT))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
+                let card = is_hovered.then(|| crate::components::shell_parts::rail_preview(&theme, prompt, reply, bucket_len));
+                crate::components::shell_parts::rail_tick(&theme, ix, TICK_SLOT, is_active, is_hovered)
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         this.set_rail_hover(if *hovered { Some(ix) } else { None });
                         cx.notify();
@@ -587,13 +536,6 @@ impl Transcript {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.scroll_to_row(row, cx);
                     }))
-                    .child(
-                        div()
-                            .h(px(2.0))
-                            .w(px(bar_width))
-                            .rounded(px(1.0))
-                            .bg(bar_color),
-                    )
                     .when_some(card, |el, card| {
                         el.child(gpui::deferred(
                             gpui::anchored()

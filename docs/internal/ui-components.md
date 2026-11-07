@@ -1098,6 +1098,69 @@ foundation owner before concurrent screen migrations begin.
 | Linear and Team | `linear/`, `team/`, `team.rs` |
 | Menus and remaining surfaces | `popover.rs`, `pickers.rs`, `app_menus.rs`, `menu_bar.rs`, other paths not owned above |
 
+### Shell and sidebar audit (in progress)
+
+Locations refer to `d68928981`. This is a starting index, not a complete
+inventory of inline controls; the remaining shell submodules and every inline
+control still need manual review before the audit is complete.
+
+| Surface | Candidate locations |
+| --- | --- |
+| Titlebar, window controls and navigation | `shell.rs:6491`, `shell.rs:6609`, `shell.rs:6773`, `shell.rs:6892`, `shell.rs:11928`, `shell.rs:11992`, `shell.rs:12038`, `shell.rs:12083` |
+| Sidebar and chat rows | `shell.rs:7098`, `shell.rs:7263`, `shell.rs:7899`, `shell.rs:8000`, `shell.rs:8049`; `shell/spaces.rs:2066`, `shell/spaces.rs:2070`, `shell/spaces.rs:4330`, `shell/spaces.rs:4856`, `shell/spaces.rs:4931`, `shell/spaces.rs:5011` |
+| Chat header and side panel | `shell/chat_item_ui.rs:66`, `shell/chat_item_ui.rs:245`, `shell/chat_item_ui.rs:338`, `shell/chat_item_ui.rs:401`, `shell/chat_item_ui.rs:469`, `shell/chat_item_ui.rs:651`, `shell/chat_item_ui.rs:704`, `shell/chat_item_ui.rs:754` |
+| Tabs and header buttons | `shell.rs:10960`, `shell.rs:12112`, `shell/tabs.rs:226`, `shell/tabs.rs:575` |
+| Team and running controls | `shell/team_ui.rs:83`, `shell/team_ui.rs:148`, `shell/team_ui.rs:276`, `shell/team_ui.rs:306`, `shell/team_ui.rs:729`; `shell/running_ui.rs:540`, `shell/running_ui.rs:575`, `shell/running_ui.rs:1035`, `shell/running_ui.rs:1197`, `shell/running_ui.rs:1207` |
+| Other controls requiring review | `shell/start_chat_ui.rs:1057`, `shell/start_chat_ui.rs:1080`, `shell/wake_ui.rs:174`, `shell/actions_ui.rs:1060`, `shell/workspace_search.rs:845`, `rail.rs:419` |
+
+Known production style/layout branches: `shell.rs:7118`, `7119`, `7120`,
+`7299`, `7377`, `7387`, `7416`, `7423`, `7508`, `7549`, `7550`, `7602`,
+`7605`, `7841`, `8462`, `10192`, `12754`, `12764`, `12765`, `12833`,
+`12873`, `12874`; `shell/chat_item_ui.rs:295`, `501`, `504`, `520`, `632`,
+`673`; `shell/spaces.rs:2067`, `2071`; `shell/team_ui.rs:326`;
+`shell/running_ui.rs:1043`. Further review must include indirect style and
+layout decisions and inline literals, not just these textual matches.
+
+The titlebar's sidebar toggle and new-conversation action use
+`window_control_button` (`shell.rs:11928`); back and forward use
+`nav_history_button` (`shell.rs:12083`). Rename, expand, files and changes
+use `header_icon_button` (`shell.rs:12112`, `shell/tabs.rs:393`, `426`,
+`446`, `517`). Windows and Linux captions have separate button builders at
+`shell.rs:11992` and `12038`. The title and target text are built inline at
+`shell/tabs.rs:474` and `535`. The sidebar has an Area-only wordmark and
+new-conversation button at `shell.rs:7122` and `7123`; settings navigation
+rows and Back are inline at `shell.rs:7180` and `7234`.
+
+Area chat rows take an early return at `shell.rs:7299`; this omits the normal
+status, account and change-request elements built later in the function.
+The normal row contains status glyph/word (`shell.rs:7387`, `7508`), jump
+badge (`shell.rs:7435`), archive action (`shell.rs:7454`), selected fill
+(`shell.rs:7605`), account badge (`shell.rs:7784`) and change-request badge
+(`shell.rs:7810`). Preserve their behavior when consolidating the row.
+
+The shell branch has since moved titlebar controls, sidebar frame and section
+chrome, Area row, chat-header frame and chips, Item/Team tabs, right-surface
+tab frame, activity indicators, account trigger and rail into
+`components/shell_parts.rs`. Area rows now show send-status overrides, account
+and pull-request badges, jump hints and an archive action. The separate Area
+row still needs a complete comparison with the normal row for project, branch,
+remote and other metadata. Remaining inline controls in the shell and its
+submodules are not yet inventoried or migrated; this slice is not complete.
+
+Additional Item/Team candidates on shell branch `731363824` (locations move as
+the migration proceeds):
+
+| Control | Location |
+| --- | --- |
+| Chat title, breadcrumb and breadcrumb buttons | `shell/chat_item_ui.rs:241`, `312`, `338` |
+| Attention badges | `shell/chat_item_ui.rs:370` |
+| Item accordion header and toggle | `shell/chat_item_ui.rs:736`, `742` |
+| Item links, path segments and identifier buttons | `shell/chat_item_ui.rs:815`, `1711`, `1745`, `1850`, `1937` |
+| Item team roll-up and open-Team action | `shell/team_ui.rs:218`, `236` |
+| Team row status, unseen badge, activity, report toggle and jump action | `shell/team_ui.rs:328`, `343`, `382`, `404`, `417`, `645` |
+| Team archive confirmation and show-archived toggle | `shell/team_ui.rs:690`, `773`, `816`, `842` |
+| Wake toggle chip and held-event delivery action | `shell/wake_ui.rs:194`, `273` |
+
 Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
@@ -1159,6 +1222,50 @@ all inline expressions were eliminated; future migrations can reduce the
 ratchet further. A direct scan of the owned production files found no branches
 on `UiStyleId`, `UiLayout`, or the appearance control, surface, status,
 conversation, and behavior variants.
+
+### Shell follow-ups
+
+- Restore project, branch and remote metadata parity in Area sidebar rows.
+- Triage the remaining mechanical candidate ledger below; Item/Team panels were not visually checked in the chat preview.
+
+### Shell mechanical candidate ledger (untriaged)
+
+Untriaged; no per-style rendering difference observed for the remaining visible candidates in preview `target-clean/ui-preview/20261106-181557-290/chat.png`. The sheet does not cover every candidate or open the Item/Team panels.
+
+Locations refer to shell branch `d311aee00`. This index includes tests and already migrated code, and can miss inline elements without these patterns. It is a navigation aid, not a completed manual audit. Interaction includes click, mouse-down and key-down sites; Label covers explicit text sizes; Radius covers explicit rounded shapes; ID covers element IDs.
+
+**Stays literal, in baseline:** event handlers and element IDs preserve control
+identity and behavior; drag, scroll, viewport and window-hit-test geometry is
+structural rather than a style choice. Test fixtures retain explicit setup and
+assertion values. The remaining label/radius candidates have not all been
+individually triaged, so this ledger must not be read as a completed audit.
+
+| File | Interaction lines | Label lines | Radius lines | ID lines |
+| --- | --- | --- | --- | --- |
+| `shell.rs` | 6567, 6589, 7010, 7204, 7233, 7341, 7342, 7527, 7528, 7615, 7618, 8420, 8465, 8562, 8566, 8602, 8626, 8638, 8653, 8731, 8738, 8780, 8789, 8796, 8804, 8902, 8936, 8943, 8984, 8994, 9018, 9026, 9267, 9276, 9286, 9295, 9304, 9317, 9331, 9345, 9364, 9385, 9399, 9412, 9430, 9463, 9480, 9498, 9517, 9545, 9568, 9576, 9631, 9639, 9730, 9966, 10217, 10320, 10660, 10665, 10674, 10680, 10751, 10939, 10942, 10948, 10976, 10980, 11079, 11086, 11113, 11127, 11142, 11156, 11291, 11349, 11426, 11462, 11548, 11575, 11956, 15353 | 1106, 1128, 6519, 6539, 7163, 7190, 7229, 7407, 7445, 7480, 7663, 7708, 7789, 8264, 8283, 8417, 8592, 8851, 8920, 8968, 9948, 9956, 10137, 10234, 10240, 10401, 10447, 10640, 10719, 10728, 10739, 11275, 11287, 11318, 11327, 11344, 11439, 11457, 11499, 11508, 11530, 11542, 11561, 11571, 11934 | 1102, 1124, 6668, 6981, 7187, 7226, 7405, 7424, 7583, 8414, 8864, 8869, 10210, 10225, 10627, 10702, 11284, 11301, 11342, 11420, 11453, 11488, 11526, 11540, 11930 | 909, 6560, 6787, 7179, 7221, 7498, 7567, 7835, 8195, 8208, 8304, 8379, 8409, 8601, 8613, 8625, 8637, 8652, 8730, 8737, 8779, 8788, 8795, 8803, 8901, 8935, 8942, 8983, 8990, 9017, 9025, 9265, 9275, 9285, 9294, 9303, 9316, 9330, 9344, 9363, 9384, 9398, 9411, 9428, 9462, 9479, 9497, 9516, 9567, 9575, 9630, 9638, 9698, 9964, 9985, 10108, 10129, 10208, 10305, 10623, 10747, 10817, 11112, 11126, 11141, 11155, 11281, 11336, 11417, 11450, 11535, 11570, 11916 |
+| `rail.rs` | 536 | — | — | — |
+| `shell/actions_ui.rs` | 567, 589, 599, 605, 618, 634, 685, 701, 733, 755, 781, 824, 834, 853, 896, 919, 964, 979, 991, 1030, 1048, 1049, 1110 | 677, 772, 948, 1027, 1064 | 556, 731, 883, 928 | 26, 684, 699, 723, 754, 780, 823, 833, 878, 913, 962, 978, 989, 1021, 1038, 1092, 1102, 1108, 1120 |
+| `shell/admin_ui.rs` | 161, 199, 214, 220, 286, 319 | 148, 187, 265, 315 | 146, 185, 262, 280, 313 | 139, 177, 212, 218, 249, 276, 309 |
+| `shell/chat_item_ui.rs` | 254, 275, 322, 341, 419, 505, 529, 560, 692, 727, 851, 993, 1004, 1050, 1105, 1144, 1238, 1327, 1338, 1386, 1427, 1471, 1489, 1585, 1623 | 536, 798, 844, 951, 1305, 1558, 1615, 1737, 1747, 1766, 1803 | 776, 947, 1086, 1301, 1452, 1580, 1612, 1757 | 1576, 1610 |
+| `shell/closeout_ui.rs` | 368, 480, 537, 585, 647, 666, 693 | 381, 534, 582 | 356, 458, 476, 512, 529, 573 | 367, 470, 525, 570, 641, 665, 674, 692 |
+| `shell/command_palette.rs` | 322, 438 | 415, 507, 565 | 317, 432 | 272, 316, 396, 427 |
+| `shell/files_panel.rs` | — | — | — | 312 |
+| `shell/hand_off_ui.rs` | 145, 150, 151 | — | — | 144, 145, 150, 151 |
+| `shell/instructions_ui.rs` | 419, 444, 479, 492, 499, 1165, 1183, 1198, 1206, 1231, 1254, 1355, 1370 | 392, 1053 | 373, 1335 | 369, 426, 1114, 1163, 1180, 1196, 1204, 1214, 1228, 1250, 1353, 1368 |
+| `shell/outside_file_ui.rs` | 211, 217 | 197 | 169, 193 | 165, 179 |
+| `shell/project_icon.rs` | — | 124, 245, 255 | 107, 235 | 273 |
+| `shell/required_actions_ui.rs` | 124 | 105 | 119 | 115 |
+| `shell/review_ui.rs` | 53 | — | — | 50 |
+| `shell/running_ui.rs` | 565, 616, 767, 771, 777, 789, 793, 806, 813, 817, 865, 893, 906, 947, 958, 1022, 1070 | 626, 729, 750, 876, 1003, 1115, 1130, 1150, 1157, 1182 | 557, 709, 920 | 549, 592, 858, 1019, 1067 |
+| `shell/sidebar_sections.rs` | 288, 322, 437, 476, 499, 523, 554, 566 | 308, 352 | 320 | 277, 315, 367, 475, 517, 553, 564 |
+| `shell/spaces.rs` | 3445, 3531, 3638, 3679, 3695, 3742, 3746, 3840, 3844, 3851, 3906, 4028, 4032, 4074, 4112, 4754, 4850, 4929, 5043, 5115, 5930, 5955, 5976, 6030, 6117, 6135, 6157, 6173, 6199, 6276, 6297, 6478, 6500, 6512, 6539, 6562, 6570, 6614, 6623 | 1959, 1983, 3782, 4047, 5111, 6052, 6186, 6232, 6279 | 1954, 1978, 2669, 3828, 3898, 5110, 5912, 5936, 6062, 6195, 6291 | 3441, 3530, 3582, 3607, 3635, 3654, 3678, 4027, 4111, 4636, 4753, 4825, 4876, 4905, 4949, 5042, 5100, 5911, 6008, 6029, 6059, 6189, 6265, 6286, 6475, 6499, 6510, 6561, 6569, 6612, 6621 |
+| `shell/start_chat_ui.rs` | 1114, 1139, 1204, 1299, 1331, 1454, 1533, 1550, 1616, 1625, 1655, 1666, 1670, 1739, 1789, 1798 | 1038, 1111, 1281, 1287, 1438, 1483, 1494, 1705 | 1413, 1579, 1701 | 1105, 1135, 1203, 1297, 1327, 1431, 1531, 1561, 1614, 1622, 1665, 1668, 1746, 1787, 1795 |
+| `shell/tabs.rs` | — | — | — | 349 |
+| `shell/team_ui.rs` | 95, 224, 241, 298, 305, 360, 420, 440, 624, 711, 722, 756, 780, 806 | 139, 148, 156, 217, 235, 354, 373, 387, 460, 486, 595, 619, 664, 683, 696, 740, 801 | 616, 659 | 214, 232, 346, 609 |
+| `shell/wake_ui.rs` | 194, 228 | 293 | — | — |
+| `shell/work_outline_menu_ui.rs` | 643, 721 | — | — | 694 |
+| `shell/work_outline_ui.rs` | 609, 1232, 1240, 1270, 1295, 1339, 1390, 1419, 1442, 1456 | 536, 548, 636, 646, 676, 1217 | 632 | 564, 607, 1230, 1238, 1268, 1293, 1335, 1375, 1389, 1417, 1426, 1440 |
+| `shell/workspace_search.rs` | 758, 809, 919 | 912 | 755, 806 | 748, 801, 898 |
 ### Conversation and composer: initial audit (incomplete)
 
 Line numbers refer to integration commit `d68928981`. This is a starting map,

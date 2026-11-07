@@ -493,20 +493,7 @@ impl Shell {
                                 )
                             },
                         )
-                        .child(
-                            div()
-                                .debug_selector(|| "titlebar-title".into())
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on_canvas {
-                                    theme.text_muted.opacity(0.7)
-                                } else {
-                                    theme.text.opacity(0.85)
-                                })
-                                .child(title),
-                        ),
+                        .child(crate::components::shell_parts::titlebar_title(&theme, title, on_canvas)),
                 )
                 // Keep the action OUTSIDE the clipped title/target text.
                 // Putting a 20px icon inside that overflow-hidden flex group
@@ -530,8 +517,9 @@ impl Shell {
                 })
                 .when_some(chat_id, |el, chat_id| {
                     let copied = self.copied_chat_identity.as_deref() == Some(chat_id.as_str());
-                    el.child(chat_identity_button(
+                    el.child(crate::components::shell_parts::chat_identity_button(
                         copied,
+                        chat_identity_button_label(copied),
                         &theme,
                         cx.listener(move |this, _, _, cx| {
                             this.copy_chat_identity(&chat_id, false, cx)
@@ -540,13 +528,7 @@ impl Shell {
                 })
                 .when_some(target, |el, target| {
                     el.child(
-                        div()
-                            .min_w_0()
-                            .flex_shrink(1.0)
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted.opacity(0.5))
-                            .child(target),
+                        crate::components::shell_parts::titlebar_target(&theme, target),
                     )
                 })
             })
@@ -565,62 +547,6 @@ impl Shell {
 
 fn chat_identity_button_label(copied: bool) -> &'static str {
     if copied { "Copied" } else { "Copy name + IDs" }
-}
-
-/// Persistent copy-identity button beside the titlebar's chat name. The text
-/// label and quiet border make the action discoverable without hover; it is
-/// kept outside the title's overflow clipping above. Like
-/// [`header_icon_button`], it is occluded out of the drag strip and swallows
-/// the click. The label flips to `Copied` with the icon while `copied`.
-fn chat_identity_button(
-    copied: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let fade_key = "chat-identity-copy".to_string();
-    let label = chat_identity_button_label(copied);
-    div()
-        .id("chat-identity-copy")
-        .h(px(22.0))
-        .px(px(6.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(4.0))
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(theme.border)
-        .cursor_pointer()
-        .bg(motion::hover_blend(
-            &fade_key,
-            crate::theme::wash(0.05),
-            crate::theme::wash(0.13),
-        ))
-        .on_hover(motion::hover_listener(fade_key))
-        .occlude()
-        .role(gpui::Role::Button)
-        .aria_label(if copied {
-            "Chat name and IDs copied"
-        } else {
-            "Copy chat name and IDs"
-        })
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_click(event, window, cx)
-        })
-        .child(
-            icon(if copied { icons::CHECK } else { icons::COPY })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-        )
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(label)),
-        )
 }
 
 #[cfg(test)]

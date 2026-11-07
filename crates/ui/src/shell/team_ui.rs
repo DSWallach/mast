@@ -6,10 +6,11 @@
 //! panel itself (not a text field inside it) holds focus. Both do nothing for
 //! a chat without workers.
 use super::*;
+use crate::components::shell_parts::team_button;
 
 use crate::shell::chat_item_ui::{ChipTone, chip_palette};
 use crate::team::{
-    ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr, WorkerState,
+    ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr,
     team,
 };
 
@@ -90,37 +91,11 @@ impl Shell {
         let active = self.resolved_right_active(cx) == RightSurface::Team;
         let waiting = team.waiting() > 0;
         Some(
-            div()
-                .id("right-surface-team-tab")
-                .debug_selector(|| "right-surface-team-tab".into())
-                .h(px(24.0))
-                .flex_none()
-                .px(px(8.0))
-                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label("Team")
-                .block_mouse_except_scroll()
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                    window.prevent_default()
-                })
-                .when(active, |el| el.bg(crate::theme::wash(0.10)))
-                .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
-                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
-                .children(crate::surface_chrome::active_key_dot(&theme, active))
+            crate::components::shell_parts::panel_tab(&theme, "right-surface-team-tab", "Team", format!("Team {}", team.live().count()), active)
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.set_right_active(RightSurface::Team, cx);
                 }))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(if active { theme.text } else { theme.text_muted })
-                        .child(SharedString::from(format!("Team {}", team.live().count()))),
-                )
                 .when(waiting, |el| {
                     el.child(
                         div()
@@ -159,28 +134,16 @@ impl Shell {
             .any(|chat| chat.id == chat_id && chat.archived)
         {
             col = col.child(
-                div()
-                    .debug_selector(|| "team-coordinator-archived".into())
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .child("Coordinator archived — hand off or unarchive"),
+                crate::components::shell_parts::team_notice(&theme, "team-coordinator-archived", "Coordinator archived — hand off or unarchive"),
             );
         }
         if team.is_empty() {
             col = col.child(
-                div()
-                    .debug_selector(|| "team-empty".into())
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .child("This chat has no workers."),
+                crate::components::shell_parts::team_notice(&theme, "team-empty", "This chat has no workers."),
             );
         } else {
             col = col.child(
-                div()
-                    .debug_selector(|| "team-rollup".into())
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                crate::components::shell_parts::team_rollup(&theme)
                     .child(Self::render_team_summary(&team, &theme, cx)),
             );
             col = col.child(self.render_team_wake_header(&chat_id, &theme, cx));
@@ -202,13 +165,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tracked = focus.clone();
-        div()
-            .id(id)
-            .debug_selector(move || id.into())
+        let theme = Theme::of(cx).clone();
+        crate::components::shell_parts::panel_root(&theme, id)
             .track_focus(&focus)
-            .size_full()
-            .overflow_y_scroll()
-            .p(px(14.0))
             .key_context("TeamPanel")
             .on_action(
                 cx.listener(move |this, _: &OpenTeamTabFromPanel, window, cx| {
@@ -239,16 +198,7 @@ impl Shell {
             .flex_col()
             .gap(px(4.0))
             .child(
-                div()
-                    .id("chat-item-team-rollup")
-                    .debug_selector(|| "chat-item-team-rollup".into())
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .hover(|el| el.text_color(theme.accent))
-                    .flex().items_center().gap(px(4.0))
-                    .child("Team ·")
+                crate::components::shell_parts::item_team_rollup(theme)
                     .child(Self::render_team_summary(team, theme, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
@@ -257,16 +207,7 @@ impl Shell {
         }
         if team.live().count() > ITEM_TAB_WORKERS {
             block = block.child(
-                div()
-                    .id("chat-item-team-all")
-                    .debug_selector(|| "chat-item-team-all".into())
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.accent)
-                    .child(SharedString::from(format!(
-                        "All {} workers \u{2192} Team",
-                        team.live().count()
-                    )))
+                crate::components::shell_parts::item_team_all(theme, team.live().count())
                     .on_click(cx.listener(|this, _, _, cx| this.open_team_tab(cx))),
             );
         }
@@ -275,21 +216,7 @@ impl Shell {
 
     fn chip(theme: &Theme, id: String, label: String, tone: ChipTone) -> gpui::Stateful<gpui::Div> {
         let (border, text) = chip_palette(theme, tone);
-        let selector = id.clone();
-        div()
-            .id(SharedString::from(id))
-            .debug_selector(move || selector.clone())
-            .flex_none()
-            .h(px(18.0))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(border)
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(text)
-            .child(SharedString::from(label))
+        crate::components::shell_parts::panel_chip(theme, id, label, border, text)
     }
 
     fn pr_tone(pr: &WorkerPr) -> ChipTone {
@@ -323,13 +250,7 @@ impl Shell {
             .map(|at| mast_proto::view::format_time_ago(at, now))
             .unwrap_or_default();
         let status = crate::status_style::status_style(worker.state.into(), theme.appearance);
-        let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-            crate::status_style::indicator_for_theme(worker.state.into(), &theme).into_any_element()
-        } else if worker.state == WorkerState::Working {
-            crate::loaders::mini_mono_spinner(format!("{prefix}-status-{id}"), 1.5, status.color, cx.entity_id(), cx).into_any_element()
-        } else {
-            crate::status_style::indicator_for_theme(worker.state.into(), &theme).into_any_element()
-        };
+        let indicator = crate::components::shell_parts::activity_indicator(worker.state.into(), format!("{prefix}-status-{id}"), theme, cx.entity_id(), cx);
         let open_id = id.clone();
         let menu_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
@@ -343,19 +264,7 @@ impl Shell {
                     .map(|failure| (format!("{} tool calls failed", failure.count), theme.danger))
             }
         });
-        let mut row = div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .px(px(6.0))
-            .py(px(5.0))
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+        let mut row = crate::components::shell_parts::worker_row(theme, selector)
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
                     .find(|chat| chat.id == menu_id).and_then(|chat| chat.cwd.as_deref()));
@@ -371,62 +280,30 @@ impl Shell {
                     .gap(px(6.0))
                     .child(div().flex_none().child(indicator))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(SharedString::from(worker.title.clone())),
+                        crate::components::shell_parts::worker_title(theme, worker.title.clone()),
                     )
                     .children(stalled.map(|(label, color)| {
-                        div()
+                        crate::components::shell_parts::worker_metadata(theme, label, color)
                             .debug_selector({
                                 let selector = format!("{prefix}-stalled-{id}");
                                 move || selector.clone()
                             })
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(color)
-                            .child(SharedString::from(label))
                     }))
                     .children((!unseen.is_empty()).then(|| {
                         let tip = SharedString::from(format!(
                             "Unseen by the orchestrator:\n{}",
                             unseen.join("\n")
                         ));
-                        div()
-                            .id(SharedString::from(format!("{prefix}-unseen-{id}")))
-                            .debug_selector({
-                                let selector = format!("{prefix}-unseen-{id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(3.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.warning)
-                            .child(div().size(px(5.0)).rounded_full().bg(theme.warning))
-                            .child("unseen")
+                        crate::components::shell_parts::worker_unseen_badge(theme, format!("{prefix}-unseen-{id}"))
                             .tooltip(move |_, cx| {
                                 cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()
                             })
                     }))
                     .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(status.color)
-                            .child(SharedString::from(worker.state.label())),
+                        crate::components::shell_parts::worker_metadata(theme, worker.state.label().to_owned(), status.color),
                     )
                     .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(age)),
+                        crate::components::shell_parts::worker_metadata(theme, age, theme.text_faint),
                     ),
             );
         if let Some(report) = self.latest_report_for_worker(&id) {
@@ -435,21 +312,10 @@ impl Shell {
             let line = crate::team::activity_line(&report).unwrap_or_default();
             let toggle_id = id.clone();
             row = row.child(
-                div()
-                    .id(SharedString::from(format!("{prefix}-report-toggle-{id}")))
-                    .debug_selector({
-                        let selector = format!("{prefix}-activity-{id}");
-                        move || selector.clone()
-                    })
-                    .pl(px(13.0))
-                    .truncate()
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format!(
+                crate::components::shell_parts::worker_report_toggle(theme, format!("{prefix}-report-toggle-{id}"), format!("{prefix}-activity-{id}"), format!(
                         "{} Report: {line}",
                         if expanded { "\u{25be}" } else { "\u{25b8}" }
-                    )))
+                    ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.toggle_report_expanded(&toggle_id, cx);
@@ -457,29 +323,12 @@ impl Shell {
             );
             if expanded {
                 row = row.child(
-                    div()
-                        .debug_selector({
-                            let selector = format!("{prefix}-report-{id}");
-                            move || selector.clone()
-                        })
-                        .pl(px(13.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text)
-                        .child(SharedString::from(report)),
+                    crate::components::shell_parts::worker_activity(theme, format!("{prefix}-report-{id}"), report, true),
                 );
             }
         } else if let Some(activity) = &worker.activity {
             row = row.child(
-                div()
-                    .debug_selector({
-                        let selector = format!("{prefix}-activity-{id}");
-                        move || selector.clone()
-                    })
-                    .pl(px(13.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(activity.clone())),
+                crate::components::shell_parts::worker_activity(theme, format!("{prefix}-activity-{id}"), activity.clone(), false),
             );
         }
         if !compact {
@@ -542,25 +391,7 @@ impl Shell {
             if let Some((added, removed)) = worker.diff {
                 any = true;
                 chips = chips.child(
-                    div()
-                        .debug_selector({
-                            let selector = format!("team-diff-{id}");
-                            move || selector.clone()
-                        })
-                        .flex_none()
-                        .flex()
-                        .gap(px(4.0))
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(SharedString::from(format!("+{added}"))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(SharedString::from(format!("\u{2212}{removed}"))),
-                        ),
+                    crate::components::shell_parts::worker_diff(theme, format!("team-diff-{id}"), added, removed),
                 );
             }
             if any {
@@ -569,19 +400,7 @@ impl Shell {
         }
         if !compact && let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(
-                div()
-                    .debug_selector({
-                        let selector = format!("team-archivable-{id}");
-                        move || selector.clone()
-                    })
-                    .pl(px(13.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!(
-                        "can archive \u{b7} {}",
-                        verdict.reason
-                    ))),
+                crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason),
             );
         }
         if let Some(ready) = &worker.ready {
@@ -681,13 +500,7 @@ impl Shell {
                     .items_center()
                     .gap(px(6.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(ready_color)
-                            .child(SharedString::from(format!("→ {text}"))),
+                        crate::components::shell_parts::worker_ready_label(text, ready_color),
                     )
                     .when_some(lifecycle, |el, lifecycle| {
                         el.child(Self::chip(
@@ -698,22 +511,7 @@ impl Shell {
                         ))
                     })
                     .child(
-                        div()
-                            .id(SharedString::from(format!("{prefix}-jump-{id}")))
-                            .debug_selector({
-                                let selector = format!("{prefix}-jump-{id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(ready_color.opacity(0.5))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(ready_color)
-                            .cursor_pointer()
-                            .hover(|el| el.bg(ready_color.opacity(0.12)))
-                            .child("Jump")
+                        crate::components::shell_parts::worker_jump_button(theme, format!("{prefix}-jump-{id}"), ready_color)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.open_item_tab(cx);
@@ -726,35 +524,6 @@ impl Shell {
 }
 
 /// Small text button used by the Team tab's archive controls.
-fn team_button(
-    theme: &Theme,
-    id: impl Into<String>,
-    label: String,
-    primary: bool,
-) -> gpui::Stateful<gpui::Div> {
-    let color = if primary {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
-    let id: String = id.into();
-    let selector = id.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .px(px(7.0))
-        .py(px(2.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(color)
-        .cursor_pointer()
-        .hover(|el| el.bg(color.opacity(0.12)))
-        .child(SharedString::from(label))
-}
-
 impl Shell {
     /// "Archive finished (N)", the N >= 3 suggestion, and the confirmation.
     fn render_team_archive_block(
@@ -772,25 +541,7 @@ impl Shell {
             return block.into_any_element();
         }
         if self.wakes.archive_confirm.contains(chat_id) {
-            let mut confirm = div()
-                .debug_selector(|| "team-archive-confirm".into())
-                .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .p(px(6.0))
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(SharedString::from(format!(
-                            "Archive {n} finished {}?",
-                            if n == 1 { "worker" } else { "workers" }
-                        ))),
-                );
+            let mut confirm = crate::components::shell_parts::archive_confirmation(theme, n);
             for worker in &finished {
                 let selector = format!("team-archive-confirm-row-{}", worker.chat_id);
                 let reason = worker
@@ -799,25 +550,14 @@ impl Shell {
                     .map(|a| a.reason.clone())
                     .unwrap_or_default();
                 confirm = confirm.child(
-                    div()
-                        .debug_selector(move || selector.clone())
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
-                            "{} \u{b7} {reason}",
-                            worker.title
-                        ))),
+                    crate::components::shell_parts::archive_confirmation_worker(theme, selector, &worker.title, &reason),
                 );
             }
             let go_chat = chat_id.to_owned();
             let cancel_chat = chat_id.to_owned();
             confirm = confirm
                 .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_faint)
-                        .child("They move to Show archived; Unarchive brings one back."),
+                    crate::components::shell_parts::archive_confirmation_note(theme),
                 )
                 .child(
                     div()
@@ -855,15 +595,7 @@ impl Shell {
         let mut line = div().flex().items_center().gap(px(8.0));
         if n >= SUGGEST_ARCHIVE_AT {
             line = line.child(
-                div()
-                    .debug_selector(|| "team-archive-suggest".into())
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format!(
-                        "{n} finished workers can be archived"
-                    ))),
+                crate::components::shell_parts::archive_suggestion(theme, n),
             );
         } else {
             line = line.child(div().flex_1());
@@ -898,17 +630,7 @@ impl Shell {
         let shown = self.wakes.show_archived.contains(chat_id);
         let toggle_chat = chat_id.to_owned();
         let mut out = vec![
-            div()
-                .id("team-show-archived")
-                .debug_selector(|| "team-show-archived".into())
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .hover(|el| el.text_color(theme.text))
-                .child(SharedString::from(format!(
-                    "{} archived ({count})",
-                    if shown { "Hide" } else { "Show" }
-                )))
+            crate::components::shell_parts::archived_worker_toggle(theme, shown, count)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.wakes.show_archived.remove(&toggle_chat) {
                         this.wakes.show_archived.insert(toggle_chat.clone());
@@ -924,22 +646,9 @@ impl Shell {
                 let restore_id = id.clone();
                 let button_id = format!("team-unarchive-{id}");
                 out.push(
-                    div()
-                        .id(SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(6.0))
-                        .py(px(3.0))
+                    crate::components::shell_parts::archived_worker_row(theme, selector)
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(11.5))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(worker.title.clone())),
+                            crate::components::shell_parts::archived_worker_title(theme, worker.title.clone()),
                         )
                         .child(
                             team_button(theme, button_id, "Unarchive".into(), false).on_click(

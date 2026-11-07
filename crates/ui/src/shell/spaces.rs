@@ -2062,14 +2062,9 @@ fn promote_local_device_group<T>(
     }
 }
 
-/// Shared quiet rule for sidebar groups and palette sections.
-pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
-    div().h(px(if theme.ui_style.id == crate::ui_style::UiStyleId::Area { 0.0 } else { theme.ui_style.tokens.rule_width.unwrap_or(1.0) })).bg(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { theme.border.opacity(0.6) })
-}
+pub(super) use crate::components::shell_parts::sidebar_separator;
 
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
-    let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key || theme.ui_style.id == crate::ui_style::UiStyleId::Area;
-    let label = if key { SharedString::from(popover::tracked_upper(&label)) } else { label };
     div()
         .flex()
         .flex_row()
@@ -2081,11 +2076,7 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
         .child(super::sidebar_faded_label(
             "sidebar-disclosure-label".into(),
             false,
-            div()
-                .text_size(crate::typography::ui_rems(theme.ui_style.tokens.label_size.unwrap_or(12.0)))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(if key { theme.text_muted } else { theme.text_muted.opacity(0.5) })
-                .child(label),
+            crate::components::shell_parts::sidebar_section_label(theme, label),
         ))
         .child(div().flex_1())
         .child(chevron)
@@ -3747,35 +3738,7 @@ impl Shell {
         };
         let open = self.spaces_menu.is_open();
 
-        let trigger = div()
-            .id("spaces-filter")
-            .flex_1()
-            .min_w_0()
-            .h(px(29.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .text_size(crate::typography::ui_rems(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                "spaces-filter",
-                theme.text.opacity(0.8),
-                theme.text,
-            ))
-            .bg(if open {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "spaces-filter",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                )
-            })
-            .on_hover(motion::hover_listener("spaces-filter"))
-            .cursor_pointer()
+        let trigger = crate::components::shell_parts::spaces_filter(theme, open)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
@@ -3851,18 +3814,13 @@ impl Shell {
         };
 
         let view_open = self.sidebar_view_menu.is_open();
-        let guided = theme.ui_style.behavior.labels == crate::ui_style::LabelMode::All;
-        let guided_labels_fit = guided && self.sidebar_shown_width() >= 400.0;
+        let sidebar_width = self.sidebar_shown_width();
         let view_focus = self.sidebar_view_trigger_focus.clone();
-        let view_trigger = div()
-            .id("sidebar-view-options")
+        let view_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-view-options", theme, sidebar_width)
             .role(gpui::Role::Button)
             .aria_label("Sidebar view options")
             .aria_expanded(view_open)
             .track_focus(&view_focus)
-            .size(px(29.0))
-            .when(guided, |el| el.size(px(32.0)))
-            .when(guided_labels_fit, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
             .flex_none()
             .flex()
             .items_center()
@@ -3912,7 +3870,7 @@ impl Shell {
                     .size(px(16.0))
                     .text_color(theme.text_muted.opacity(0.6)),
             )
-            .when(guided_labels_fit, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).child("View options")));
+            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "View options", None));
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
@@ -3930,13 +3888,9 @@ impl Shell {
         // Same 29px glass-hover button idiom; lit while the overview is the
         // current route.
         let overview_active = self.is_overview_route();
-        let overview_trigger = div()
-            .id("sidebar-open-overview")
+        let overview_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-open-overview", theme, sidebar_width)
             .role(gpui::Role::Button)
             .aria_label("Open overview")
-            .size(px(29.0))
-            .when(guided, |el| el.size(px(32.0)))
-            .when(guided_labels_fit, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
             .flex_none()
             .flex()
             .items_center()
@@ -3961,7 +3915,7 @@ impl Shell {
                         theme.text_muted.opacity(0.6)
                     }),
             )
-            .when(guided_labels_fit, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child("Overview")));
+            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "Overview", Some(theme.text_muted)));
 
         div()
             .flex_none()

@@ -7,6 +7,7 @@
 //! the keyboard), and the facts come from the same state slices the old header
 //! already read, so the Shell's observer gating stays as it was.
 use super::*;
+use crate::components::shell_parts::section_label;
 
 use crate::chat_item::{CardTimer, ChatItemFacts, FactsInput, ItemSection, PathSegment, facts};
 use crate::work_outline::hints::{HintKey, WithHint};
@@ -60,36 +61,6 @@ fn section_icon(name: &str) -> &'static str {
         "work-item" => crate::icons::PLUS,
         _ => crate::icons::TAG,
     }
-}
-
-/// A section label: icon, then the name in small muted semibold caps.
-fn section_label(
-    theme: &Theme,
-    icon_path: &'static str,
-    label: &str,
-    icon_selector: String,
-) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(5.0))
-        .child(
-            div()
-                .debug_selector(move || icon_selector.clone())
-                .flex_none()
-                .child(
-                    crate::icons::icon(icon_path)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted),
-                ),
-        )
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(10.5))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .child(SharedString::from(label.to_uppercase())),
-        )
 }
 
 /// The Item tab's embedded Needs-you list (the Details panel's Required
@@ -266,14 +237,7 @@ impl Shell {
         let admin_badge = self.render_admin_badge(&chat_id, "chat-header", theme, cx);
         let chips = self.render_header_chips(&facts, theme, cx);
         let menu_chat_id = chat_id.clone();
-        let title = div()
-            .debug_selector(|| "chat-header-title".into())
-            .min_w_0()
-            .truncate()
-            .text_size(crate::typography::ui_rems(theme.ui_style.tokens.title_size.unwrap_or(15.0)))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text)
-            .child(SharedString::from(facts.title.clone()));
+        let title = crate::components::shell_parts::chat_header_title(theme, facts.title.clone());
         let stacked = crumbs.is_some();
         self.chat_header_extra_clearance = if stacked {
             CHAT_HEADER_STACKED_CLEARANCE
@@ -281,18 +245,7 @@ impl Shell {
             CHAT_HEADER_TITLE_ROW_CLEARANCE
         };
         Some(
-            div()
-                .id("full-chat-header-metadata-wrap")
-                .debug_selector(|| "chat-header".into())
-                .relative()
-                .flex_none()
-                .mt(px(Theme::TITLEBAR_HEIGHT))
-                .px(px(12.0))
-                .py(px(4.0))
-                .border_b_1()
-                .border_color(theme.border.opacity(0.7))
-                .bg(theme.surface.opacity(0.94))
-                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface).border_color(theme.border).px(px(16.0)))
+            crate::components::shell_parts::chat_header_frame(theme)
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     this.chat_item_header_hover(*hovered, cx)
                 }))
@@ -318,16 +271,14 @@ impl Shell {
                         )
                         .children(admin_badge)
                         .children(badges)
-                        .child(div().id("chat-header-menu").debug_selector(|| "chat-header-menu".into())
-                            .cursor_pointer()
+                        .child(crate::components::shell_parts::chat_header_menu(theme)
                             .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                 let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
                                     .find(|chat| chat.id == menu_chat_id).and_then(|chat| chat.cwd.as_deref()));
                                 this.chat_menu.open(ChatMenuState { chat_id: menu_chat_id.clone(), position: event.position, page: ChatMenuPage::Root, closeable });
                                 this.load_branch_review_target(menu_chat_id.clone(), cx);
                                 cx.notify();
-                            }))
-                            .child(icon(icons::MORE_HORIZONTAL).size(px(16.0)).text_color(theme.text_muted))),
+                            }))),
                 )
                 .child(chips)
                 .children(card)
@@ -350,16 +301,7 @@ impl Shell {
             .collect::<Vec<_>>()
             .join(" \u{203a} ")
             .into();
-        let mut row = div()
-            .id("chat-header-breadcrumb")
-            .debug_selector(|| "chat-header-breadcrumb".into())
-            .flex_none()
-            .max_w(px(280.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
+        let mut row = crate::components::shell_parts::breadcrumb_frame(theme)
             .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: full.clone() }).into());
         if trimmed {
             row = row.child(
@@ -376,20 +318,7 @@ impl Shell {
                 row = row.child(div().text_color(theme.text_faint).child("\u{203a}"));
             }
             row = row.child(
-                div()
-                    .id(("chat-header-crumb", ix))
-                    .debug_selector(move || format!("chat-header-crumb-{ix}"))
-                    .min_w_0()
-                    .truncate()
-                    .rounded(px(3.0))
-                    .px(px(2.0))
-                    .cursor_pointer()
-                    .when(ix == last, |el| {
-                        el.font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                    })
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .child(SharedString::from(segment.title.clone()))
+                crate::components::shell_parts::breadcrumb_segment(theme, ix, segment.title.clone(), ix == last)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reveal_work_item_in_outline(&space_id, &item_id, window, cx)
                     })),
@@ -408,26 +337,7 @@ impl Shell {
             return Vec::new();
         };
         let badge = |id: &'static str, glyph: &'static str, count: usize, color: gpui::Hsla| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .h(px(18.0))
-                .px(px(5.0))
-                .flex()
-                .items_center()
-                .gap(px(3.0))
-                .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
-                .border_1()
-                .border_color(color)
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(color)
-                .hover(|el| el.bg(theme.element_hover))
-                .child(glyph)
-                .when(count > 0, |el| {
-                    el.child(SharedString::from(count.to_string()))
-                })
+            crate::components::shell_parts::header_attention_badge(theme, id, glyph, count, color)
                 .on_click(cx.listener(|this, _, _, cx| this.open_item_tab(cx)))
         };
         let mut out = Vec::new();
@@ -485,29 +395,7 @@ impl Shell {
             let icon_selector = format!("{selector}-icon");
             let clickable = url.is_some();
             let (border, text) = chip_palette(theme, tone);
-            div()
-                .id(id)
-                .debug_selector(move || selector.clone())
-                .max_w(px(230.0))
-                .h(px(20.0))
-                .px(px(7.0))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(border)
-                .bg(theme.element_hover.opacity(0.55))
-                .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface_raised))
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(text)
-                .when(is_model && theme.ui_style.controls == crate::ui_style::ControlVariant::Key && tone == ChipTone::Plain, |chip| {
-                    let dark = theme.appearance.is_dark();
-                    chip.rounded(px(0.0)).bg(if dark { theme.bg } else { theme.solid })
-                        .border_color(theme.industrial_colors().rule)
-                        .font_family(theme.font_mono.clone())
-                        .text_color(if dark { theme.text } else { theme.on_solid })
-                })
+            crate::components::shell_parts::chat_header_chip(id, selector, theme, border, text, is_model && tone == ChipTone::Plain)
                 .when(clickable, |chip| {
                     chip.cursor_pointer()
                         .hover(|chip| chip.bg(theme.element_hover))
@@ -517,13 +405,7 @@ impl Shell {
                         .debug_selector(move || icon_selector.clone())
                         .flex_none()
                         .child(crate::icons::icon(icon_path).size(px(11.0)).text_color(
-                            if is_model && theme.ui_style.controls == crate::ui_style::ControlVariant::Key && tone == ChipTone::Plain {
-                                if theme.appearance.is_dark() { theme.text } else { theme.on_solid }
-                            } else if tone == ChipTone::Link {
-                                theme.accent
-                            } else {
-                                text
-                            },
+                            crate::components::shell_parts::chat_header_chip_icon_color(theme, text, is_model && tone == ChipTone::Plain, tone == ChipTone::Link),
                         )),
                 )
                 .child(div().min_w_0().truncate().child(SharedString::from(label)))
@@ -617,23 +499,7 @@ impl Shell {
             let id = review.artifact_id.clone();
             let selector = format!("chat-header-review-{id}");
             row = row.child(
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .h(px(20.0))
-                    .px(px(7.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.element_hover.opacity(0.55))
-                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface_raised))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.accent)
+                crate::components::shell_parts::review_chip(theme, selector)
                     .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(11.0)))
                     .child(SharedString::from(review.title.clone()))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -656,25 +522,7 @@ impl Shell {
     ) -> AnyElement {
         let pinned = self.chat_item_card.pinned();
         let body = self.render_item_sections(facts, Surface::Card, theme, cx);
-        div()
-            .id("chat-item-card")
-            .debug_selector(|| "chat-item-card".into())
-            .absolute()
-            .top_full()
-            .left(px(12.0))
-            .w(px(CARD_WIDTH))
-            .max_w_full()
-            .mt(px(4.0))
-            .p(px(10.0))
-            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_md())
-            .occlude()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
+        crate::components::shell_parts::item_hover_card(theme, CARD_WIDTH)
             .on_hover(
                 cx.listener(|this, hovered: &bool, _, cx| this.chat_item_card_hover(*hovered, cx)),
             )
@@ -683,15 +531,7 @@ impl Shell {
             })
             .child(body)
             .child(
-                div()
-                    .debug_selector(|| "chat-item-card-footer".into())
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child(if pinned {
-                        "\u{2325}\u{2318}I unpins \u{b7} pinned open"
-                    } else {
-                        "\u{2325}\u{2318}I pins this card open"
-                    }),
+                crate::components::shell_parts::item_card_footer(theme, pinned),
             )
             .into_any_element()
     }
@@ -708,37 +548,11 @@ impl Shell {
             .chat_item_facts(&self.active_chat.clone(), cx)
             .and_then(|facts| facts.item)
             .is_some_and(|item| item.attention_count() + item.question_count() > 0);
-        div()
-            .id("right-surface-item-tab")
-            .debug_selector(|| "right-surface-item-tab".into())
-            .h(px(24.0))
-            .flex_none()
-            .px(px(8.0))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label("Item")
-            .block_mouse_except_scroll()
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                window.prevent_default()
-            })
-            .when(active, |el| el.bg(crate::theme::wash(0.10)))
-            .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
-            .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, active))
-            .children(crate::surface_chrome::active_key_dot(&theme, active))
+        crate::components::shell_parts::panel_tab(&theme, "right-surface-item-tab", "Item", "Item".into(), active)
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
                 this.set_right_active(RightSurface::Item, cx);
             }))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(if active { theme.text } else { theme.text_muted })
-                    .child("Item"),
-            )
             .when(needs_you, |el| {
                 el.child(
                     div()
@@ -860,52 +674,13 @@ impl Shell {
     ) -> AnyElement {
         let open = self.item_tab_open.contains(name);
         let selector = format!("chat-item-{name}");
-        let icon_selector = format!("chat-item-{name}-icon");
-        let toggle = format!("chat-item-{name}-toggle");
         div()
             .debug_selector(move || selector.clone())
             .flex()
             .flex_col()
             .gap(px(4.0))
             .child(
-                div()
-                    .id(SharedString::from(toggle.clone()))
-                    .debug_selector(move || toggle.clone())
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_pointer()
-                    .rounded(px(4.0))
-                    .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
-                    .child(
-                        crate::icons::icon(if open {
-                            crate::icons::ALT_ARROW_DOWN
-                        } else {
-                            crate::icons::ALT_ARROW_RIGHT
-                        })
-                        .size(px(10.0))
-                        .text_color(theme.text_muted),
-                    )
-                    .child(section_label(
-                        theme,
-                        section_icon(name),
-                        label,
-                        icon_selector,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(if warn {
-                                theme.warning
-                            } else {
-                                theme.text_muted
-                            })
-                            .child(SharedString::from(summary)),
-                    )
+                crate::components::shell_parts::item_accordion_header(theme, name, label, summary, warn, open, section_icon(name))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.item_tab_open.remove(name) {
                             this.item_tab_open.insert(name);
@@ -925,34 +700,9 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let text = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text)
-                .child(SharedString::from(value))
-        };
-        let muted = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(value))
-        };
-        let link = |id: String, color: gpui::Hsla, underline: bool| {
-            let selector = id.clone();
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(color)
-                .when(underline, |el| el.underline())
-                .hover(|el| el.bg(theme.element_hover))
-        };
+        let text = |value: String| crate::components::shell_parts::panel_text(theme, value, false);
+        let muted = |value: String| crate::components::shell_parts::panel_text(theme, value, true);
+        let link = |id: String, color: gpui::Hsla, underline: bool| crate::components::shell_parts::panel_link(theme, id, color, underline);
         let mut col = div().flex().flex_col().gap(px(10.0));
         let review_chat = self.branch_review_target(&facts.chat_id).map(|_| facts.chat_id.clone()).or_else(|| {
             let item = facts.item.as_ref()?;
@@ -1009,19 +759,7 @@ impl Shell {
             let list = self.item_needs_list(&item.space_id, &item.item_id, cx);
             let open = list.read(cx).rows().open.len();
             col = col.child(
-                div()
-                    .debug_selector(|| "chat-item-needs-you".into())
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .p(px(8.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(if open > 0 {
-                        theme.warning.opacity(0.6)
-                    } else {
-                        theme.border
-                    })
+                crate::components::shell_parts::item_needs_card(theme, open)
                     .child(
                         div()
                             .flex()
@@ -1035,12 +773,7 @@ impl Shell {
                             ))
                             .when(open > 0, |el| {
                                 el.child(
-                                    div()
-                                        .debug_selector(|| "chat-item-needs-you-count".into())
-                                        .text_size(crate::typography::ui_rems(11.0))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.warning)
-                                        .child(SharedString::from(open.to_string())),
+                                    crate::components::shell_parts::item_needs_count(theme, open),
                                 )
                             }),
                     )
@@ -1081,11 +814,7 @@ impl Shell {
                     .flex_col()
                     .gap(px(3.0))
                     .children(item.instructions.entries.iter().map(|entry| {
-                        div()
-                            .line_clamp(2)
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(format!("\u{2022} {entry}")))
+                        crate::components::shell_parts::instruction_entry(theme, entry)
                     }))
                     .child(
                         link("chat-item-instructions-edit".into(), theme.success, false)
@@ -1178,27 +907,7 @@ impl Shell {
             .item_tab_open
             .contains("account")
             .then(|| match &facts.account {
-                Some(account) => div()
-                    .debug_selector(|| "chat-item-account-badge".into())
-                    .flex_none()
-                    .h(px(20.0))
-                    .px(px(7.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .rounded(px(5.0))
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .bg(theme.element_hover.opacity(0.55))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text)
-                    .child(
-                        crate::icons::icon(crate::icons::KEY_MINIMALISTIC)
-                            .size(px(11.0))
-                            .text_color(theme.text),
-                    )
-                    .child(SharedString::from(account.clone()))
-                    .into_any_element(),
+                Some(account) => crate::components::shell_parts::item_account_badge(theme, account.clone()).into_any_element(),
                 None => muted("Default login".into()).into_any_element(),
             });
         col = col.child(self.item_accordion(
@@ -1431,35 +1140,12 @@ impl Shell {
                 .gap(px(2.0))
                 .child(section_label(theme, icon_path, label, icon_selector))
         };
-        let text = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text)
-                .child(SharedString::from(value))
-        };
-        let muted = |value: String| {
-            div()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(value))
-        };
+        let text = |value: String| crate::components::shell_parts::panel_text(theme, value, false);
+        let muted = |value: String| crate::components::shell_parts::panel_text(theme, value, true);
         // Content links read as primary text with an underline; actions
         // (Edit, Answer, Add to outline) take the success tone.
         let link_with = |id: String, label: &'static str, color: gpui::Hsla, underline: bool| {
-            let selector = id.clone();
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(color)
-                .when(underline, |el| el.underline())
-                .hover(|el| el.bg(theme.element_hover))
+            crate::components::shell_parts::panel_link(theme, id, color, underline)
                 .when(!label.is_empty(), |el| el.child(label))
         };
         let link = |id: String, label: &'static str| link_with(id, label, theme.text, true);
@@ -1555,26 +1241,7 @@ impl Shell {
             );
             col = col.child(
                 section("account", "Account").child(match &facts.account {
-                    Some(account) => div()
-                        .debug_selector(|| "chat-item-account-badge".into())
-                        .flex_none()
-                        .h(px(20.0))
-                        .px(px(7.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.element_hover.opacity(0.55))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text)
-                        .child(
-                            crate::icons::icon(crate::icons::KEY_MINIMALISTIC)
-                                .size(px(11.0))
-                                .text_color(theme.text),
-                        )
-                        .child(SharedString::from(account.clone())),
+                    Some(account) => crate::components::shell_parts::item_account_badge(theme, account.clone()),
                     None => muted("Default login".into()),
                 }),
             );
@@ -1813,14 +1480,9 @@ impl Shell {
             let Some(value) = value else { continue };
             let copied = self.copied_chat_identity.as_deref() == Some(key);
             let id: SharedString = format!("chat-item-id-{key}").into();
-            let selector = id.to_string();
             let copy_value = value.clone();
             block = block.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(11.0))
+                crate::components::shell_parts::identifier_row(theme)
                     .child(
                         div()
                             .flex_none()
@@ -1837,16 +1499,7 @@ impl Shell {
                             .child(SharedString::from(value)),
                     )
                     .child(
-                        div()
-                            .id(id)
-                            .debug_selector(move || selector.clone())
-                            .flex_none()
-                            .px(px(4.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .text_color(theme.accent)
-                            .hover(|el| el.bg(theme.element_hover))
-                            .child(if copied { "Copied" } else { "Copy" })
+                        crate::components::shell_parts::identifier_copy_button(theme, id, copied)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.copy_identifier(key, copy_value.clone(), cx)
                             })),
@@ -1871,20 +1524,11 @@ impl Shell {
                 row = row.child(div().text_color(theme.text_faint).child("\u{203a}"));
             }
             row = row.child(
-                div()
-                    .id(("chat-item-path-segment", ix))
-                    .debug_selector(move || format!("chat-item-path-segment-{ix}"))
-                    .rounded(px(3.0))
-                    .px(px(2.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text)
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(SharedString::from(if title.trim().is_empty() {
+                crate::components::shell_parts::item_path_segment(theme, ix, if title.trim().is_empty() {
                         "Untitled".to_owned()
                     } else {
                         title.clone()
-                    }))
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reveal_work_item_in_outline(&space_id, &item_id, window, cx)
                     })),
@@ -1976,20 +1620,7 @@ pub(super) fn pr_link_row(
         }
     }
     let tip: SharedString = tip.join("\n").into();
-    let mut row = div()
-        .id(SharedString::from(id.clone()))
-        .debug_selector(selector(""))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(11.5))
-        .text_color(theme.text)
-        .hover(|el| el.bg(theme.element_hover))
+    let mut row = crate::components::shell_parts::panel_reference_row(theme, id.clone())
         .tooltip(move |_, cx| {
             cx.new(|_| crate::work_outline::chips::TextTooltip(tip.clone()))
                 .into()
@@ -2010,40 +1641,24 @@ pub(super) fn pr_link_row(
         );
     if title.is_some() && !repo_ref.is_empty() {
         row = row.child(
-            div()
-                .flex_none()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(repo_ref)),
+            crate::components::shell_parts::reference_label(theme, SharedString::from(repo_ref), theme.text_faint),
         );
     }
     if let Some(status) = pr.status {
         row = row.child(
-            div()
-                .debug_selector(selector("-state"))
-                .flex_none()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(chip::state_color(status.state, theme))
-                .child(chip::state_label(status.state)),
+            crate::components::shell_parts::reference_label(theme, chip::state_label(status.state).into(), chip::state_color(status.state, theme))
+                .debug_selector(selector("-state")),
         );
         if let Some(ci) = status.checks.filter(|ci| chip::ci_glyph(*ci).is_some()) {
             row = row.child(
-                div()
-                    .debug_selector(selector("-checks"))
-                    .flex_none()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(chip::ci_color(ci, theme)),
+                crate::components::shell_parts::reference_status_dot(chip::ci_color(ci, theme))
+                    .debug_selector(selector("-checks")),
             );
         }
         if let Some(label) = chip::review_decision_label(status.review) {
             row = row.child(
-                div()
-                    .debug_selector(selector("-review"))
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_muted)
-                    .child(label),
+                crate::components::shell_parts::reference_label(theme, label.into(), theme.text_muted)
+                    .debug_selector(selector("-review")),
             );
         }
     }
@@ -2056,27 +1671,13 @@ pub(super) fn ticket_link_row(
     ticket: &crate::chat_metadata::HeaderTicket,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let selector = id.clone();
     let tip: SharedString = match &ticket.title {
         Some(title) => format!("{} {title}", ticket.identifier),
         None => ticket.identifier.clone(),
     }
     .into();
     let text = tip.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(11.5))
-        .text_color(theme.text)
-        .hover(|el| el.bg(theme.element_hover))
+    crate::components::shell_parts::panel_reference_row(theme, id)
         .tooltip(move |_, cx| {
             cx.new(|_| crate::work_outline::chips::TextTooltip(tip.clone()))
                 .into()
@@ -2090,11 +1691,7 @@ pub(super) fn ticket_link_row(
         .child(div().flex_1().min_w_0().truncate().child(text))
         .when_some(ticket.state.clone(), |el, state| {
             el.child(
-                div()
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(state)),
+                crate::components::shell_parts::reference_label(theme, SharedString::from(state), theme.text_muted),
             )
         })
 }

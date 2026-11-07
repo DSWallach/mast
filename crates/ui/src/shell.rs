@@ -28,6 +28,12 @@ use mast_proto::{AuthState, WorkspaceScope};
 use mast_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
+#[cfg(test)]
+use crate::components::shell_parts::chat_row_height;
+use crate::components::shell_parts::{
+    header_icon_button, linux_caption_button, nav_history_button, sidebar_faded_label,
+    sidebar_row_height, window_control_button, windows_caption_button,
+};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
 use crate::icons::{self, icon};
@@ -854,34 +860,6 @@ fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bo
             .any(|((old_key, _), (new_key, _))| old_key != new_key)
 }
 
-/// Exact active-session row height. Harness identity lives on the title line
-/// and the Working glyph lives in the status corner, so neither adds a third
-/// line. Compact rows omit the metadata line and its preceding gap entirely;
-/// branch / pull-request rows add the exact height of their tallest child.
-/// Keeping this calculation beside the renderer's metrics prevents disclosure
-/// clips when view options alter the row structure.
-pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
-    let mut metadata_height: f32 = 0.0;
-    if shows_branch {
-        metadata_height = metadata_height.max(14.0);
-    }
-    if shows_pull_request {
-        metadata_height = metadata_height.max(16.0);
-    }
-    if metadata_height == 0.0 {
-        45.0
-    } else {
-        47.0 + metadata_height
-    }
-}
-fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool, tokens: crate::ui_style::StyleTokens) -> f32 {
-    if compact {
-        tokens.sidebar_row_compact_h
-    } else {
-        chat_row_height(branch, pr) - (if show_label { 0.0 } else { 16.0 }) + tokens.sidebar_row_extra_h
-    }
-}
-
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
 /// Fixed vertical slot occupied by one active sidebar card.
@@ -895,28 +873,6 @@ const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-
-/// Keep the fade short so only the last few glyphs recede. Tracking clipped
-/// content lets the shared paint-time overflow gate leave fitting labels intact.
-fn sidebar_faded_label(id: SharedString, fill: bool, label: impl IntoElement) -> impl IntoElement {
-    let overflow = gpui::ScrollHandle::new();
-    crate::edge_fade::edge_faded(
-        20.0,
-        false,
-        false,
-        div()
-            .id(id.clone())
-            .debug_selector(move || id.to_string())
-            .when(fill, |el| el.flex_1())
-            .min_w_0()
-            .overflow_hidden()
-            .track_scroll(&overflow)
-            .flex()
-            .child(div().flex_none().whitespace_nowrap().child(label)),
-    )
-    .fade_right(true)
-    .fade_label_overflow(&overflow)
-}
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
@@ -6513,11 +6469,7 @@ impl Shell {
                     .pl(px(self.title_bar_content_start()))
                     .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
                     .child(
-                        div()
-                            .debug_selector(|| "titlebar-title".into())
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from("Overview")),
+                        crate::components::shell_parts::titlebar_route_label(&theme, "Overview"),
                     );
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("overview-header-titlebar", bar, cx)
@@ -6533,11 +6485,7 @@ impl Shell {
                     .pl(px(self.title_bar_content_start()))
                     .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
                     .child(
-                        div()
-                            .debug_selector(|| "titlebar-title".into())
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from("Pull requests")),
+                        crate::components::shell_parts::titlebar_route_label(&theme, "Pull requests"),
                     );
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("pr-review-chats-header-titlebar", bar, cx)
@@ -7110,25 +7058,12 @@ impl Shell {
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
         // itself below the chrome.
-        div()
-            .h_full()
-            .flex_none()
-            .overflow_hidden()
-            .w(px(self.sidebar_now()))
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_r_1().border_color(theme.border))
-            .child(if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-                div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).flex().flex_col()
-                    .child(div().px(px(16.0)).pb(px(12.0)).font_family("EB Garamond").text_size(crate::typography::ui_rems(26.0)).text_color(theme.text_muted).child("Mast"))
-                    .child(div().id("area-new-session").mx(px(12.0)).mb(px(12.0)).px(px(12.0)).py(px(8.0))
-                        .rounded(px(12.0)).border_1().border_color(theme.border_strong).text_color(theme.text_muted)
-                        .cursor_pointer().child("+  New conversation")
-                        .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx))))
-                    .child(div().flex_1().min_h_0().overflow_hidden().child(inner))
-            } else {
-                div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner)
-            })
-            .into_any_element()
+        crate::components::shell_parts::sidebar_frame(
+            &theme,
+            self.sidebar_now(),
+            inner.into_any_element(),
+            cx.listener(|this, _, _, cx| this.open_new_session(cx)),
+        )
     }
 
     /// Settings-mode sidebar (zeron settings-sidebar.tsx): window-control
@@ -7168,14 +7103,7 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .child(
-                        div()
-                            .px(px(Theme::SPACE_SM))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from("Settings")),
+                        crate::components::shell_parts::settings_sidebar_heading(theme),
                     )
                     .child(
                         div().flex().flex_col().gap(px(2.0)).children(
@@ -7187,32 +7115,7 @@ impl Shell {
                                 })
                                 .map(|item| {
                                     let selected = item == section;
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "settings-nav-{}",
-                                            item.label()
-                                        )))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .rounded(px(8.0))
-                                        .px(px(Theme::SPACE_SM))
-                                        .py(px(6.0))
-                                        .text_size(crate::typography::ui_rems(13.0))
-                                        .when(selected, |el| {
-                                            // Same tokens as the main sidebar's session
-                                            // rows — the two sidebars must feel alike.
-                                            el.bg(crate::theme::glass_selected_bg())
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                        })
-                                        .text_color(if selected {
-                                            theme.text
-                                        } else {
-                                            theme.text_muted
-                                        })
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                                    crate::components::shell_parts::settings_sidebar_row(theme, SharedString::from(format!("settings-nav-{}", item.label())), selected)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.open_settings(item, cx)
                                         }))
@@ -7229,19 +7132,7 @@ impl Shell {
             // Back pinned to the bottom (zeron settings-sidebar.tsx).
             .child(
                 div().px(px(Theme::SPACE_SM)).pb(px(12.0)).child(
-                    div()
-                        .id("settings-back")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded(px(8.0))
-                        .px(px(Theme::SPACE_SM))
-                        .py(px(6.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                    crate::components::shell_parts::settings_sidebar_back(theme)
                         .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
                         .child(
                             // AltArrowLeft chevron (zeron settings-sidebar.tsx),
@@ -7296,19 +7187,60 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
-        if theme.ui_style.id == crate::ui_style::UiStyleId::Area && search_query.is_none() {
-            let identity = theme.identity_color(&id);
-            let foreground = if selected { theme.identity_text(identity) } else { theme.text };
+        // Send-truth overrides: a send unadopted past the grace window is
+        // FAILED (explicit, with the transcript's retry affordance); a send
+        // whose delivery path is degraded is QUEUED, not Working — the
+        // pending pill tells the truth instead of faking a spinner.
+        let (queued, undelivered) = {
+            let now = Utc::now();
+            let state = self.state.read(cx);
+            (
+                state.send_queued(&id, now),
+                state.send_undelivered(&id, now),
+            )
+        };
+        let status_color = if undelivered {
+            theme.danger
+        } else if queued {
+            theme.warning
+        } else {
+            spaces::status_dot_color(status, theme)
+        };
+        let status_label: Option<&'static str> = if undelivered {
+            Some("Failed")
+        } else if queued {
+            Some("Queued")
+        } else {
+            match status {
+                mast_proto::ChatIndicator::Working => Some("Working"),
+                mast_proto::ChatIndicator::AwaitingInput => Some(crate::components::shell_parts::awaiting_input_label(theme)),
+                mast_proto::ChatIndicator::Errored => Some("Failed"),
+                mast_proto::ChatIndicator::Completed => Some("Done"),
+                mast_proto::ChatIndicator::Idle => None,
+            }
+        };
+        let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+        let area_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let archive_id = id.clone();
+        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), jump_label.clone(), preview, area_hovered, archived, cx.listener(move |this, _, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))) {
             let select_id = id.clone();
             let menu_id = id.clone();
-            return div().id(SharedString::from(row_id)).aria_label(SharedString::from(format!("{title} · {status:?}"))).debug_selector({ let id = id.clone(); move || format!("chat-{id}") })
-                .h(px(theme.ui_style.tokens.sidebar_row_compact_h)).px(px(10.0)).flex().items_center().gap(px(8.0))
-                .rounded(px(12.0)).text_color(foreground)
-                .when(selected, |el| el.bg(identity))
-                .when(!selected, |el| el.hover(|style| style.bg(theme.element_hover)))
-                .child(div().flex_none().size(px(8.0)).rounded_full().bg(if selected { foreground } else { identity }))
-                .child(div().flex_1().min_w_0().truncate().child(title))
+            return row
                 .when(!preview, |el| el.cursor_pointer()
+                    .on_hover({
+                        let hover_id = row_id.clone();
+                        cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                                    this.chat_status_hover = Some(hover_id.clone());
+                                    cx.notify();
+                                }
+                            } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                                this.chat_status_hover = None;
+                                cx.notify();
+                            }
+                        })
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.open_chat(select_id.clone(), cx)))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter().find(|chat| chat.id == menu_id).and_then(|chat| chat.cwd.as_deref()));
@@ -7348,80 +7280,13 @@ impl Shell {
                 .into_any_element()
         });
         let content_id = id.clone();
-        // Send-truth overrides: a send unadopted past the grace window is
-        // FAILED (explicit, with the transcript's retry affordance); a send
-        // whose delivery path is degraded is QUEUED, not Working — the
-        // pending pill tells the truth instead of faking a spinner.
-        let (queued, undelivered) = {
-            let now = Utc::now();
-            let state = self.state.read(cx);
-            (
-                state.send_queued(&id, now),
-                state.send_undelivered(&id, now),
-            )
-        };
-        let status_color = if undelivered {
-            theme.danger
-        } else if queued {
-            theme.warning
-        } else {
-            spaces::status_dot_color(status, theme)
-        };
-        let status_label: Option<&'static str> = if undelivered {
-            Some("Failed")
-        } else if queued {
-            Some("Queued")
-        } else {
-            match status {
-                mast_proto::ChatIndicator::Working => Some("Working"),
-                mast_proto::ChatIndicator::AwaitingInput => Some(if theme.ui_style.layout == crate::ui_style::UiLayout::Guided { "Needs you" } else { "Input" }),
-                mast_proto::ChatIndicator::Errored => Some("Failed"),
-                mast_proto::ChatIndicator::Completed => Some("Done"),
-                mast_proto::ChatIndicator::Idle => None,
-            }
-        };
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let glyph = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-                crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
-            } else if working {
-                loaders::mini_mono_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    status_color,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else if status == mast_proto::ChatIndicator::Completed && !queued && !undelivered {
-                icon(icons::CHECK)
-                    .size(px(11.0))
-                    .text_color(status_color)
-                    .into_any_element()
-            } else {
-                crate::status_style::indicator_for_theme(
-                    if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                    &theme,
-                ).into_any_element()
-            };
-            div()
-                .id(SharedString::from(format!("{row_id}-status")))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("chat-status-{id}")
-                })
-                .size(px(13.0))
-                .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| el.w_auto().gap(px(4.0)))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
-                .child(glyph)
-                .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| el.child(div().text_size(crate::typography::ui_rems(10.0)).text_color(status_color).child(status_label.unwrap_or("Idle"))))
-                .into_any_element()
+            let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+            let glyph = crate::components::shell_parts::sidebar_status_glyph(theme, resolved_status, working, status == mast_proto::ChatIndicator::Completed && !queued && !undelivered, format!("{row_id}-working"), status_color, self.sidebar_pane.entity_id(), cx);
+            crate::components::shell_parts::compact_sidebar_status(theme, format!("{row_id}-status"), format!("chat-status-{id}"), status_label.unwrap_or("Idle"), status_color, glyph)
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
@@ -7431,65 +7296,9 @@ impl Shell {
             // rounded 4, borderless 0.08-fill with 0.85 text of one tone —
             // neutral here — and the label in the badge's mono at 10 MEDIUM.
             // Any other geometry reads as a second badge system on the row.
-            {
-                let tone = theme.text_muted;
-                div()
-                    .h(px(16.0))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(tone.opacity(0.08))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(tone.opacity(0.85))
-                    .font_family(theme.font_mono.clone())
-                    .child(label)
-                    .into_any_element()
-            }
+            crate::components::shell_parts::sidebar_jump_badge(theme, label)
         } else if corner_hovered {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(18.0))
-                .when(!compact, |el| {
-                    el.px(px(4.0))
-                        .mr(px(-4.0))
-                        .rounded(px(5.0))
-                        .bg(crate::theme::wash(0.10))
-                        .hover(|s| s.bg(crate::theme::wash(0.18)))
-                })
-                .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(if compact {
-                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
-                    } else {
-                        11.0
-                    }))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-                )
-                .when(!compact, |el| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
-                                "Unarchive"
-                            } else {
-                                "Archive"
-                            })),
-                    )
-                })
-                .into_any_element()
+            crate::components::shell_parts::sidebar_archive_glyph(theme, compact, archived, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)
         } else if compact {
             if remote {
                 icon(icons::REMOTE_SERVER)
@@ -7505,51 +7314,11 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-                        crate::status_style::indicator_for_theme(if working { crate::status_style::Status::Working } else { crate::status_style::Status::Idle }, &theme).into_any_element()
-                    } else if status == mast_proto::ChatIndicator::Completed {
-                        icon(icons::CHECK)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(status_color)
-                            .into_any_element()
-                    } else if working {
-                        loaders::mini_mono_spinner(
-                            format!("{row_id}-working"),
-                            2.0,
-                            status_color,
-                            self.sidebar_pane.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        crate::status_style::indicator_for_theme(
-                            if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() },
-                            &theme,
-                        ).into_any_element()
-                    };
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(glyph)
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(status_color)
-                                .child(SharedString::from(label)),
-                        )
-                        .into_any_element()
+                    let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+                    let glyph = crate::components::shell_parts::sidebar_status_glyph(theme, resolved_status, working, status == mast_proto::ChatIndicator::Completed, format!("{row_id}-working"), status_color, self.sidebar_pane.entity_id(), cx);
+                    crate::components::shell_parts::sidebar_status_word(label, status_color, glyph)
                 }
-                None => div()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .when(theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot, |el| el.flex().items_center().gap(px(8.0)).child(crate::status_style::indicator_for_theme(crate::status_style::Status::Idle, &theme)))
-                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
-                    .child(time_ago.clone())
-                    .into_any_element(),
+                None => crate::components::shell_parts::sidebar_idle_time(theme, time_ago.clone()),
             }
         };
         // One stable wrapper across both states (identity keeps the hover
@@ -7599,10 +7368,8 @@ impl Shell {
                 .into_any_element()
         };
         let mut corner = Some(corner);
-        let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
-        let identity = theme.identity_color(&id);
-        let (hover, text) = (theme.glass_hover(), if area && selected { theme.identity_text(identity) } else { theme.text });
-        let selected_wash = if area { identity } else if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque { theme.element_active } else { crate::theme::glass_selected_bg() };
+        let (text, selected_wash, identity_dot) = crate::components::shell_parts::sidebar_row_colors(theme, &id, selected);
+        let hover = theme.glass_hover();
         let subline = if search_query.is_some() {
             theme.text_muted
         } else {
@@ -7630,32 +7397,13 @@ impl Shell {
         } else {
             text.opacity(0.8)
         };
-        div()
-            .id(SharedString::from(row_id.clone()))
-            .group("sidebar-session-row")
-            .debug_selector({
-                let row_id = row_id.clone();
-                move || row_id.clone()
-            })
-            .h(px(sidebar_row_height(
+        crate::components::shell_parts::sidebar_row_frame(theme, row_id.clone(), sidebar_row_height(
                 compact,
                 show_label,
                 branch.is_some(),
                 change_request.is_some(),
                 theme.ui_style.tokens,
-            )))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(if search_query.is_some() {
-                popover::PALETTE_ITEM_RADIUS
-            } else {
-                8.0
-            })))
-            .px(px(Theme::SPACE_SM))
-            .py(px(6.0))
-            .text_color(motion::hover_blend(&fade_key, rest_text, text))
-            .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
+            ), search_query.is_some(), &fade_key, rest_text, text, rest_bg, hover_bg)
             // No selection ring (user request) — the wash alone marks the
             // active row.
             // Row hover drives BOTH the wash blend and the corner's
@@ -7726,11 +7474,7 @@ impl Shell {
                         .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .line_height(px(14.0))
-                                .text_color(subline)
-                                .child(popover::search_highlight(space_name, search_query, theme)),
+                            crate::components::shell_parts::sidebar_context_text(theme, subline, popover::search_highlight(space_name, search_query, theme)),
                         ))
                         .child(div().text_color(subline).children(corner.take())),
                 )
@@ -7748,7 +7492,7 @@ impl Shell {
                     } else {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
-                    .when(area, |el| el.child(div().flex_none().size(px(8.0)).rounded_full().bg(if selected { theme.identity_text(identity) } else { identity })))
+                    .children(identity_dot)
                     .children(compact_status)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
@@ -7771,10 +7515,7 @@ impl Shell {
                     .child(sidebar_faded_label(
                         format!("chat-title-{content_id}").into(),
                         true,
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .line_height(px(17.0))
-                            .child(popover::search_highlight(title, search_query, theme)),
+                        crate::components::shell_parts::sidebar_title_text(theme, popover::search_highlight(title, search_query, theme)),
                     ))
                     .when_some(self.state.read(cx).chat_account_badge(&id), |el, label| {
                         el.child(
@@ -7828,18 +7569,7 @@ impl Shell {
                     })
                     .when(compact, |el| {
                         el.child(
-                            div()
-                                .debug_selector({
-                                    let id = id.clone();
-                                    move || format!("chat-time-{id}")
-                                })
-                                .w(px(30.0))
-                                .flex_none()
-                                .text_right()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(subline)
-                                .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))
-                                .child(compact_jump_label.unwrap_or(time_ago)),
+                            crate::components::shell_parts::sidebar_compact_time(theme, id.clone(), subline, compact_jump_label.unwrap_or(time_ago)),
                         )
                     }),
             )
@@ -7863,11 +7593,7 @@ impl Shell {
                             .child(sidebar_faded_label(
                                 format!("chat-branch-{content_id}").into(),
                                 false,
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .line_height(px(14.0))
-                                    .text_color(subline)
-                                    .child(popover::search_highlight(branch, search_query, theme)),
+                                crate::components::shell_parts::sidebar_context_text(theme, subline, popover::search_highlight(branch, search_query, theme)),
                             ))
                         })
                         // Stable invisible spring keeps the optional PR badge
@@ -8004,11 +7730,7 @@ impl Shell {
             S::Disabled | S::Connected => return None,
             S::Offline => (
                 "Offline — sends are saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
+                crate::components::shell_parts::offline_indicator(theme),
             ),
             S::Reconnecting => (
                 "Reconnecting…".into(),
@@ -8022,28 +7744,7 @@ impl Shell {
                 .into_any_element(),
             ),
         };
-        Some(
-            crate::motion::fade_in(
-                "connection-pill",
-                div()
-                    .id("connection-pill")
-                    .mx(px(Theme::SPACE_SM + 4.0))
-                    .mb(px(Theme::SPACE_SM))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(glyph)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_faint)
-                            .child(label),
-                    ),
-            )
-            .into_any_element(),
-        )
+        Some(crate::components::shell_parts::connection_line(theme, label, glyph))
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -8459,9 +8160,7 @@ impl Shell {
             .child(filter_row)
             .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                div().px(px(12.0)).pb(px(8.0)).child(crate::surface_chrome::grille(theme))
-            ))
+            .children(crate::components::shell_parts::sidebar_grille(theme))
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
@@ -8564,35 +8263,9 @@ impl Shell {
             )
         };
         let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
-        let tone = if failed { theme.danger } else { theme.accent };
-        // Follow the selected spectrum with a low-emphasis glass tint rather
-        // than painting the bright text accent as a solid slab.
-        let (chip_bg, chip_bg_hover) = if failed {
-            (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
-        } else {
-            (theme.accent_wash, theme.accent.opacity(0.16))
-        };
-
-        let mut strip = div()
-            .id("update-strip")
-            .mx(px(Theme::SPACE_SM))
-            // No bottom margin: the user-menu block below carries its own
-            // SPACE_SM padding — doubling it read as a hole (user report).
-            .px(px(Theme::SPACE_SM))
-            .py(px(6.0))
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .bg(chip_bg)
-            .flex()
-            .flex_row()
-            .items_center()
-            .text_size(crate::typography::ui_rems(11.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(tone)
-            .child(div().flex_1().min_w_0().child(label));
+        let mut strip = crate::components::shell_parts::update_strip(theme, label, failed, clickable);
         if clickable {
             strip = strip
-                .cursor_pointer()
-                .hover(move |s| s.bg(chip_bg_hover))
                 .on_click(cx.listener(move |this, _, _, cx| this.on_update_strip_click(cx)));
         }
         Some(strip.into_any_element())
@@ -8689,34 +8362,7 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "?".into())
             .into();
-        let mut trigger = div()
-            .id("user-menu")
-            .debug_selector(|| "user-menu".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("Account menu: {user_line}"))
-            .relative()
-            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE + 8.0))
-            .flex_none()
-            .rounded_full()
-            .p(px(4.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            // user-menu.tsx trigger: hover `bg-white/[0.04]`, open state
-            // (`data-[state=open]`) the slightly stronger `bg-white/[0.06]`;
-            // the hover wash fades over `transition-colors`.
-            .bg(if open {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "user-menu-trigger",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover().opacity(0.8),
-                )
-            })
-            .on_hover(motion::hover_listener("user-menu-trigger"))
+        let mut trigger = crate::components::shell_parts::account_menu_trigger(theme, &user_line, initial, open, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
@@ -8731,23 +8377,7 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(
-                // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
-                div()
-                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(9.0))
-                    .line_height(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(div().w_full().text_center().child(initial)),
-            );
+;
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
             let menu = popover::popover_card(theme)
@@ -10189,9 +9819,7 @@ impl Shell {
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
             .children(new_thread_background_layer)
-            .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(
-                crate::surface_chrome::grille(theme).absolute().right(px(32.0)).top(px(110.0))
-            ))
+            .children(crate::components::shell_parts::main_grille(theme))
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -11094,23 +10722,7 @@ impl Shell {
             } else {
                 accessible_name.to_string()
             };
-            let chip = div()
-                .id(("right-surface-tab", ix))
-                .debug_selector(|| format!("right-surface-tab-{ix}"))
-                .group(group.clone())
-                .h(px(24.0))
-                .w(px(CHIP_W))
-                .flex_none()
-                .pl(px(4.0))
-                .pr(px(8.0))
-                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(3.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label(accessible_label)
+            let chip = crate::components::shell_parts::right_surface_tab(ix, group.clone(), CHIP_W, accessible_label, is_active, &theme)
                 .when_some(detail, |chip, detail| {
                     chip.tooltip(move |_, cx| {
                         cx.new(|_| SurfaceTabTooltip {
@@ -11131,12 +10743,6 @@ impl Shell {
                 .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                     window.prevent_default()
                 })
-                .when(is_active, |el| el.bg(crate::theme::wash(0.10)))
-                .when(!is_active, |el| {
-                    el.hover(|s| s.bg(crate::theme::wash(0.06)))
-                })
-                .when(true, |el| crate::surface_chrome::segmented_key(el, &theme, is_active))
-                .children(crate::surface_chrome::active_key_dot(&theme, is_active))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.set_right_active(surface, cx);
@@ -11167,14 +10773,7 @@ impl Shell {
                 .child(
                     // Leading slot: icon normally, ✕ on tab hover — two
                     // stacked layers opacity-swapped by the group hover.
-                    div()
-                        .id(("right-surface-close", ix))
-                        .debug_selector(|| format!("right-surface-close-{ix}"))
-                        .flex_none()
-                        .size(px(18.0))
-                        .rounded(px(4.0))
-                        .relative()
-                        .hover(|s| s.bg(crate::theme::wash(0.12)))
+                    crate::components::shell_parts::surface_close_slot(&theme, ix)
                         // The tab owns a drag payload. Claim the close press
                         // before it reaches that parent or GPUI starts a tab
                         // drag instead of delivering the close click.
@@ -11243,24 +10842,11 @@ impl Shell {
                         ),
                 )
                 .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(if is_active {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        })
-                        .child(title),
+                    crate::components::shell_parts::surface_tab_title(&theme, title, is_active),
                 )
                 .when(dirty, |chip| {
                     chip.child(
-                        div()
-                            .flex_none()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme.text_muted),
+                        crate::components::shell_parts::surface_dirty_indicator(&theme),
                     )
                 });
             // Sliding transform while a sibling drags over (the terminal
@@ -11293,23 +10879,7 @@ impl Shell {
         // The `+` — a small menu offering the available surfaces (t3 "Add panel
         // surface"); mirrors the picker cards.
         let plus_open = self.right_plus.get().is_some();
-        let plus_fade = "right-surface-add-fade";
-        let mut plus = div()
-            .id("right-surface-add")
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                plus_fade,
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.11),
-            ))
-            .on_hover(motion::hover_listener(plus_fade))
-            .block_mouse_except_scroll()
+        let mut plus = crate::components::shell_parts::surface_add_button(&theme)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, _| {
@@ -11923,54 +11493,6 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
-/// `grid size-6 place-items-center rounded-md text-muted-foreground`).
-fn window_control_button(
-    id: &'static str,
-    icon_path: &'static str,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let muted = theme.text_muted;
-    let fade_key = format!("window-control-{id}");
-    div()
-        .id(id)
-        .size(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .cursor_pointer()
-        // zeron window-controls.tsx: `transition-colors` — the wash fades.
-        .bg(motion::hover_blend(
-            &fade_key,
-            theme.glass_hover().opacity(0.0),
-            theme.glass_hover(),
-        ))
-        .when(true, |el| crate::surface_chrome::icon_key(el, theme, false))
-        .on_hover(motion::hover_listener(fade_key))
-        // Buttons in/over a titlebar drag strip must be EXCLUDED from the
-        // strip's event surface entirely. `.occlude()` (gpui
-        // `HitboxBehavior::BlockMouse`) makes the window hit-test STOP at the
-        // button, so every `is_hovered`-guarded strip listener — the
-        // mouse-down that arms the drag, the mouse-move that hands AppKit a
-        // native drag session (`performWindowDragWithEvent:`, whose second
-        // quick click zooms NATIVELY on macOS), and the `click_count == 2`
-        // zoom handler — never fires with the pointer over a button. It also
-        // removes the button's rect from the native Drag control-area
-        // hit-test on Windows/Linux. The click-level stop_propagation is
-        // zed's ButtonLike belt on top. Double-click on EMPTY strip space
-        // still zooms — nothing occludes it there.
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_click(event, window, cx)
-        })
-        .child(icon(icon_path).size(px(16.0)).text_color(muted))
-}
-
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
 const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
 
@@ -11985,171 +11507,6 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
     } else {
         0.0
     }
-}
-
-/// A Windows-owned caption target using the same system glyphs and native
-/// non-client hit-test areas as GPUI/Zed's platform titlebar.
-fn windows_caption_button(
-    id: &'static str,
-    glyph: &'static str,
-    area: WindowControlArea,
-    theme: &Theme,
-    close: bool,
-) -> impl IntoElement {
-    let (hover_bg, hover_fg, active_bg, active_fg) = if close {
-        let red: gpui::Hsla = gpui::rgb(0xe81123).into();
-        (
-            red,
-            gpui::white(),
-            red.opacity(0.8),
-            gpui::white().opacity(0.8),
-        )
-    } else {
-        (
-            theme.glass_hover(),
-            theme.text,
-            theme.glass_hover().opacity(0.7),
-            theme.text,
-        )
-    };
-    div()
-        .id(id)
-        .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text)
-        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
-        .active(move |style| style.bg(active_bg).text_color(active_fg))
-        .occlude()
-        .window_control_area(area)
-        .child(glyph)
-}
-
-/// A Linux caption button in zeron's own cluster style (24px, rounded-6,
-/// 16px linear icon). gpui's `WindowControlArea` hit-testing is inert on
-/// Linux, so unlike the Windows cluster these carry explicit click handlers
-/// (`minimize_window` / `zoom_window` / `remove_window`), the same calls
-/// zed's Linux titlebar makes. `occlude` + `prevent_default` keep them out
-/// of the drag strip's event surface (see [`window_control_button`]).
-fn linux_caption_button(
-    id: &'static str,
-    icon_path: &'static str,
-    close: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let (muted, hover_bg, hover_fg) = if close {
-        let red: gpui::Hsla = gpui::rgb(0xe81123).into();
-        (theme.text_muted, red, gpui::white())
-    } else {
-        (theme.text_muted, theme.glass_hover(), theme.text)
-    };
-    div()
-        .id(id)
-        // gpui svgs don't inherit the div's text color — recolor the glyph
-        // on hover through the group instead (zed's WindowControl idiom).
-        .group("linux-caption-button")
-        .size(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover_bg))
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_click(event, window, cx)
-        })
-        .child(
-            icon(icon_path)
-                .size(px(16.0))
-                .text_color(muted)
-                .group_hover("linux-caption-button", move |style| {
-                    style.text_color(hover_fg)
-                }),
-        )
-}
-
-/// A titlebar history button (zeron window-controls.tsx): enabled it is a
-/// normal window-control button; disabled it dims to 35% opacity and ignores
-/// the pointer (`disabled:pointer-events-none disabled:opacity-35`).
-fn nav_history_button(
-    id: &'static str,
-    icon_path: &'static str,
-    enabled: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    if !enabled {
-        return div()
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            // Even disabled it reads as a control — occlude so double-clicks
-            // on it don't fall through to the titlebar strip's zoom handler.
-            .occlude()
-            .child(
-                icon(icon_path)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.35)),
-            )
-            .into_any_element();
-    }
-    window_control_button(id, icon_path, theme, on_click).into_any_element()
-}
-
-/// A size-7 icon button for the main-panel header (zeron __root.tsx:
-/// `grid size-7 place-items-center rounded-md text-muted-foreground`).
-fn header_icon_button(
-    id: &'static str,
-    icon_path: &'static str,
-    label: &'static str,
-    labels_fit: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let muted = theme.text_muted;
-    let show_label = labels_fit && theme.ui_style.behavior.labels != crate::ui_style::LabelMode::IconOnly;
-    let fade_key = format!("header-icon-{id}");
-    div()
-        .id(id)
-        .size(px(theme.ui_style.tokens.control_size))
-        .when(show_label, |el| el.w_auto().px(px(6.0)).gap(px(4.0)))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(true, |el| crate::surface_chrome::icon_key(el, theme, false))
-        .cursor_pointer()
-        // zeron __root.tsx header buttons: `transition-colors`.
-        .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Soft, |el| {
-            el.bg(motion::hover_blend(&fade_key, crate::theme::wash(0.0), crate::theme::wash(0.11)))
-                .on_hover(motion::hover_listener(fade_key))
-        })
-        .when(theme.ui_style.behavior.motion == crate::ui_style::Motion::Instant, |el| {
-            el.hover(|el| el.bg(crate::theme::wash(0.11)))
-        })
-        // Same occlusion + click-swallowing as [`window_control_button`]: this
-        // button sits inside the chat header's titlebar drag region, so its
-        // rect must be carved out of the strip's drag/double-click surface.
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_click(event, window, cx)
-        })
-        .child(icon(icon_path).size(px(theme.ui_style.tokens.control_icon_size)).text_color(muted))
-        .when(show_label, |el| el.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(muted).child(label)))
 }
 
 impl Render for Shell {
@@ -12735,7 +12092,6 @@ impl Render for Shell {
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let theme = Theme::of(cx).clone();
-                let border_color = theme.border;
                 // No inset cards (user request): the conversation column sits
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
@@ -12751,20 +12107,7 @@ impl Render for Shell {
                 } else {
                     main
                 };
-                let main = if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
-                    div().flex_1().min_w_0().overflow_hidden().border_1()
-                        .border_color(theme.industrial_colors().rule).bg(theme.bg).child(main).into_any_element()
-                } else { main };
-                let card: AnyElement = div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .overflow_hidden()
-                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.bg))
-                    .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.p(px(8.0)).rounded(px(12.0)).bg(theme.surface))
-                    .child(main)
-                    .into_any_element();
+                let card = crate::components::shell_parts::main_panel(&theme, main);
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
                 // arriving from the splash or any gate fades the page in; the
@@ -12815,24 +12158,7 @@ impl Render for Shell {
                 // sliver vertically to where the curve begins, so its tips
                 // never float over the transparent corner cutouts.
                 let window_corner = Self::window_corner_radius(window);
-                let sidebar_tone = div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(sidebar_now))
-                    .when(window_corner > 0.0, |el| {
-                        if sidebar_now >= 2.0 * window_corner {
-                            el.rounded_tl(px(window_corner))
-                                .rounded_bl(px(window_corner))
-                        } else {
-                            el.top(px(window_corner)).bottom(px(window_corner))
-                        }
-                    })
-                    .bg(crate::theme::wash(0.05))
-                    .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-                    .border_r_1()
-                    .border_color(border_color);
+                let sidebar_tone = crate::components::shell_parts::sidebar_tone(&theme, sidebar_now, window_corner);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -12869,10 +12195,7 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
-                    .child(div().absolute().top_0().left_0().right_0()
-                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-                        .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_b_1().border_color(theme.border))
-                        .child(title_bar))
+                    .child(crate::components::shell_parts::titlebar_overlay(&theme, title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
                 root.child(sidebar_tone)
