@@ -11,6 +11,10 @@ The command renders the chat shell, outline and item details, walkthrough, Setti
 
 The command prints a contact sheet for each screen and an index under `$CARGO_TARGET_DIR/ui-preview/<timestamp>/` (default: the checkout's `target`). Rows are style/layout combinations, columns are themes, and each cell has a GPUI-rendered label. Sheets are capped at 4096 pixels per side. The render is offscreen and does not open an app window or capture the screen.
 
+Each output directory also contains `manifest.json`, listing the selected axes,
+sheet paths, index path, and regular cell dimensions. Component matrix sheets
+have their own layout and do not use the regular cell dimensions.
+
 The command must run **outside the Codex sandbox**: Metal and macOS services are unavailable inside it. Codex workers should prepare the command and request one escaped run; Claude Code workers and the coordinator can run it directly.
 
 ## UI changes: preview before handoff

@@ -100,6 +100,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
     )
     .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
     let mut sheets = Vec::new();
+    let mut sheet_paths = Vec::new();
     for (screen_index, screen) in screens.iter().enumerate() {
         if screen == "components" {
             for (theme_index, theme) in themes.iter().enumerate() {
@@ -119,6 +120,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
                 let path = directory.join(format!("components-{theme}.png"));
                 sheet.save(&path)?;
                 println!("{}", path.display());
+                sheet_paths.push(path);
                 sheets.push(sheet);
             }
             continue;
@@ -178,6 +180,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
         let path = directory.join(format!("{screen}.png"));
         sheet.save(&path)?;
         println!("{}", path.display());
+        sheet_paths.push(path);
         sheets.push(sheet);
     }
     let columns = 2_u32.min(sheets.len() as u32);
@@ -199,6 +202,19 @@ fn render_ui_preview() -> anyhow::Result<()> {
     let path = directory.join("index.png");
     index.save(&path)?;
     println!("{}", path.display());
+    let manifest = serde_json::json!({
+        "screens": screens,
+        "styles": styles,
+        "layouts": layouts,
+        "themes": themes,
+        "cellWidth": cell_width,
+        "cellHeight": cell_height,
+        "sheets": sheet_paths,
+        "index": path,
+    });
+    let manifest_path = directory.join("manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    println!("{}", manifest_path.display());
     Ok(())
 }
 
