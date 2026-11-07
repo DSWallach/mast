@@ -219,7 +219,7 @@ pub fn render(
 ) -> anyhow::Result<PathBuf> {
     let screen = screen.to_owned();
     let theme_id = theme_id.to_owned();
-    mast_ui::snapshot::render_to_png_with_layout(
+    super::snapshot(
         name,
         size(px(1440.), px(900.)),
         style,
@@ -394,10 +394,11 @@ pub fn render_component_matrix(
     name: &str,
 ) -> anyhow::Result<PathBuf> {
     let theme_id = theme_id.to_owned();
-    mast_ui::snapshot::render_to_png(
+    super::snapshot(
         name,
         size(px(1680.), px(1200.)),
         UiStyleId::Default,
+        UiLayout::Minimal,
         appearance,
         move |_, cx| {
             initialize(

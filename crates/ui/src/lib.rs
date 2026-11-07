@@ -38,6 +38,8 @@ mod component_lint;
 mod composer_dock;
 mod context_usage;
 mod diff_targets;
+#[cfg(feature = "dev-inspector")]
+mod dev_inspector;
 pub mod edge_fade;
 mod error_notice;
 pub mod file_icons;
@@ -205,6 +207,8 @@ pub fn run_app(config: UiConfig) {
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
+        #[cfg(feature = "dev-inspector")]
+        dev_inspector::init(cx);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
         let font_availability = tracing::info_span!("startup_register_fonts")
             .in_scope(|| typography::register_fonts(cx));

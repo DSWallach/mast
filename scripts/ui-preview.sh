@@ -3,6 +3,15 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+if [ "${1:-}" = "--serve" ]; then
+    if [ "$#" -ne 2 ] || [ -z "$2" ]; then
+        echo 'Usage: scripts/ui-preview.sh --serve REQUEST_DIRECTORY' >&2
+        exit 2
+    fi
+    ulimit -n 4096
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
+    exec python3 scripts/ui-preview-server.py "$2"
+fi
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --themes|--screens|--styles|--layouts)
@@ -20,7 +29,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         -h|--help)
-            echo 'Usage: scripts/ui-preview.sh [--themes a,b] [--screens chat,details,...] [--styles default,...] [--layouts minimal,...]'
+            echo 'Usage: scripts/ui-preview.sh [--themes a,b] [--screens chat,details,...] [--styles default,...] [--layouts minimal,...] | --serve REQUEST_DIRECTORY'
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;

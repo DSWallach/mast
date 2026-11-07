@@ -9,6 +9,7 @@ publish.workspace = true
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [features]
+dev-inspector = ["gpui/inspector"]
 snapshot = ["gpui/test-support", "gpui_platform/test-support"]
 startup-bench = ["mast-engine/startup-bench", "mast-rpc/startup-bench"]
 project-palette-fixture = []
