@@ -451,13 +451,13 @@ impl Overview {
                 });
             }
             LinearPanelEvent::CreateProjectItem { space_id, project } => {
-                let mut flow = crate::work_outline::outline_view::templates::TemplateFlow::new(
-                    space_id, None,
-                );
+                let mut flow =
+                    crate::work_outline::outline_view::templates::TemplateFlow::new(space_id, None);
                 flow.ask_parent = true;
                 flow.linear = Some(project);
-                self.outline
-                    .update(cx, |outline, cx| outline.request_new_from_template(flow, cx));
+                self.outline.update(cx, |outline, cx| {
+                    outline.request_new_from_template(flow, cx)
+                });
             }
             LinearPanelEvent::OpenSettings => {
                 if let Some(shell) = self.shell.upgrade() {
@@ -876,7 +876,7 @@ impl Overview {
         }
         let active = self.column_shown();
         Some(
-            crate::components::area_toolbar_control(div()
+            div()
                 .id("outline-linear")
                 .debug_selector(|| "outline-linear".into())
                 .px(gpui::px(8.0))
@@ -889,7 +889,10 @@ impl Overview {
                     el.bg(theme.element_active).text_color(theme.text)
                 })
                 .when(!active, |el| el.text_color(theme.text_muted))
-                .hover(|el| el.text_color(theme.text)), theme, false)
+                .hover(|el| el.text_color(theme.text))
+                .when(true, |el| {
+                    crate::components::toolbar_control(el, theme, false)
+                })
                 .child("Inbox")
                 .hint(
                     if active {

@@ -4570,6 +4570,11 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_attachment(&mut self, bytes: Vec<u8>) {
+        let attachment = attachments::stage_png_bytes("preview.png".into(), bytes);
+        self.attachments.entry(self.current_key.clone()).or_default().push(attachment);
+    }
     fn refresh_sign_in_status(&mut self, cx: &mut Context<Self>) -> Option<(String, mast_proto::HarnessId, Option<String>, mast_proto::ManagedAccountsSnapshot)> {
         let state = self.state.read(cx);
         if state.selected_chat.is_some() { self.sign_in_check = None; return None; }
@@ -8184,7 +8189,11 @@ impl Render for Composer {
                     route_snap,
                 )
             };
-        let expanded = crate::components::conversation_composer_expanded(&theme, self.expanded_mode);
+        let expanded = crate::components::conversation_composer_expanded(
+            &theme,
+            self.expanded_mode,
+            self.surface_bounds.get().map(|bounds| f32::from(bounds.size.width)),
+        );
 
         // Chat-scoped failures render only under their own chat; a global
         // failure (no key) renders everywhere.

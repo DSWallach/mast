@@ -5,28 +5,11 @@ use gpui::{Div, SharedString, Stateful, div, prelude::*, px};
 
 /// Apply the Area toolbar treatment while preserving other styles.
 pub fn area_toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
-    if !super::is_area(theme) {
-        return element;
-    }
-    let fill = if primary {
-        theme.accent
+    if super::is_area(theme) {
+        super::toolbar_control(element, theme, primary)
     } else {
-        gpui::transparent_black()
-    };
-    element
-        .h(px(theme.ui_style.tokens.control_size))
-        .py_0()
-        .mb_0()
-        .flex()
-        .items_center()
-        .rounded_full()
-        .bg(fill)
-        .border_color(gpui::transparent_black())
-        .text_color(if primary {
-            theme.identity_text(fill)
-        } else {
-            theme.text_muted
-        })
+        element
+    }
 }
 
 fn section_label(label: String, industrial: bool) -> (String, Option<String>) {
@@ -231,7 +214,7 @@ pub fn outline_toolbar_button(
         })
         .when(!active, |el| el.text_color(theme.text_muted))
         .hover(|el| el.text_color(theme.text));
-    area_toolbar_control(
+    super::toolbar_control(
         crate::surface_chrome::segmented_key(button, theme, active),
         theme,
         false,
@@ -256,7 +239,7 @@ pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
         .bg(theme.element_hover.opacity(0.5))
         .text_color(theme.text_muted)
         .hover(|el| el.text_color(theme.text));
-    area_toolbar_control(
+    super::toolbar_control(
         crate::surface_chrome::segmented_key(button, theme, false),
         theme,
         false,
@@ -334,6 +317,7 @@ pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
         .rounded(px(4.0))
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover))
+        .when(true, |el| super::toolbar_control(el, theme, false))
         .child(
             crate::icons::icon(crate::icons::CLOSE)
                 .size(px(12.0))
@@ -384,20 +368,24 @@ pub fn outline_action_button(
         .when(!enabled, |el| {
             el.border_color(theme.border).text_color(theme.text_faint)
         });
-    crate::surface_chrome::segmented_key(button, theme, primary && enabled)
-        .when(super::is_area(theme), |el| {
-            if enabled && (primary || matches!(label, "Approve" | "Accept rule" | "Send")) {
-                el.rounded_full()
-                    .bg(theme.accent)
-                    .border_color(theme.accent)
-                    .text_color(theme.identity_text(theme.accent))
-            } else {
-                el.rounded_full()
-                    .border_color(theme.bg)
-                    .text_color(theme.text_muted)
-            }
-        })
-        .child(label)
+    super::toolbar_control(
+        crate::surface_chrome::segmented_key(button, theme, primary && enabled),
+        theme,
+        false,
+    )
+    .when(super::is_area(theme), |el| {
+        if enabled && (primary || matches!(label, "Approve" | "Accept rule" | "Send")) {
+            el.rounded_full()
+                .bg(theme.accent)
+                .border_color(theme.accent)
+                .text_color(theme.identity_text(theme.accent))
+        } else {
+            el.rounded_full()
+                .border_color(theme.bg)
+                .text_color(theme.text_muted)
+        }
+    })
+    .child(label)
 }
 
 /// A work-item status segment; the caller attaches its action.
@@ -425,28 +413,28 @@ pub fn outline_status_segment(
         })
         .when(!active, |el| el.text_color(theme.text_muted))
         .when(key, |el| el.flex().items_center().gap(px(8.0)));
-    area_toolbar_control(
-        crate::surface_chrome::segmented_key(button, theme, active),
-        theme,
-        false,
-    )
-    .when(active && completed && key, |el| {
-        let foreground = if crate::theme::contrast_ratio(theme.text, theme.success)
-            >= crate::theme::contrast_ratio(theme.bg, theme.success)
-        {
-            theme.text
-        } else {
-            theme.bg
-        };
-        el.bg(theme.success).text_color(foreground)
-    })
-    .when(super::is_area(theme), |el| el.rounded_full())
-    .children(crate::surface_chrome::active_key_dot(
-        theme,
-        active && !completed,
-    ))
-    .hover(|el| el.text_color(theme.text))
-    .child(label)
+    crate::surface_chrome::segmented_key(button, theme, active)
+        .when(active && completed && key, |el| {
+            let foreground = if crate::theme::contrast_ratio(theme.text, theme.success)
+                >= crate::theme::contrast_ratio(theme.bg, theme.success)
+            {
+                theme.text
+            } else {
+                theme.bg
+            };
+            el.bg(theme.success).text_color(foreground)
+        })
+        .when(true, |el| super::toolbar_control(el, theme, false))
+        .when(active && completed && key, |el| {
+            el.text_color(theme.success)
+        })
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .children(crate::surface_chrome::active_key_dot(
+            theme,
+            active && !completed,
+        ))
+        .hover(|el| el.text_color(theme.text))
+        .child(label)
 }
 
 /// Group surface for the status segments.
@@ -619,7 +607,7 @@ pub fn outline_filter_trigger(theme: &Theme) -> Stateful<Div> {
         .cursor_pointer()
         .text_color(theme.text_muted)
         .bg(theme.element_hover.opacity(0.5));
-    area_toolbar_control(
+    super::toolbar_control(
         crate::surface_chrome::segmented_key(trigger, theme, false),
         theme,
         false,

@@ -15289,6 +15289,14 @@ impl Shell {
         self.splash = SplashPhase::Gone;
     }
 
+    pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
+    }
+
+    pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
+        self.open_overview(cx);
+    }
+
     pub fn fixture_snapshot_item_panel(&mut self, cx: &mut Context<Self>) {
         self.active_chat = "fixture-chat".into();
         let key = self.panel_key(cx);
