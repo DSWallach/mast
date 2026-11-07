@@ -791,23 +791,7 @@ impl HarnessesPage {
         let open = self.device_menu_open;
 
         let mut trigger =
-            div()
-                .id("harnesses-device-switcher")
-                .flex_none()
-                .h(px(28.0))
-                .px(px(8.0))
-                .rounded(px(6.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .cursor_pointer()
-                .bg(if open {
-                    crate::theme::ink(0.06)
-                } else {
-                    gpui::transparent_black()
-                })
-                .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
+            crate::components::settings_device_switcher(theme, "harnesses-device-switcher", open)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _, _, _| {
@@ -998,21 +982,7 @@ impl HarnessesPage {
                 }
                 // widgets::row_tile with the brand tint honored (the Claude
                 // mark keeps its orange, like the picker rail).
-                let tile = div()
-                    .flex_none()
-                    .size(px(36.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.03))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::icons::icon(icon_path)
-                            .size(px(16.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    );
+                let tile = crate::components::settings_row_tile_tinted(&theme, icon_path, tint);
                 widgets::card_row(&theme, ix == 0)
                     .id(("harness-row", ix))
                     .when(!installed, |el| el.opacity(0.55))

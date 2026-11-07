@@ -362,8 +362,7 @@ impl ShortcutsPage {
                 )
             })
             .child(
-                div()
-                    .id(("shortcut-combo", ix))
+                crate::components::settings_shortcut_key(theme, ix, is_recording)
                     .role(gpui::Role::Button)
                     .aria_label(format!(
                         "Change {} shortcut: {}",
@@ -372,33 +371,6 @@ impl ShortcutsPage {
                     ))
                     .tab_index(0)
                     .focus_visible(move |style| style.border_2().border_color(accent))
-                    .min_w(px(96.0))
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .flex()
-                    .justify_center()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .cursor_pointer()
-                    .map(|el| {
-                        if is_recording {
-                            el.border_color(theme.text.opacity(0.3))
-                                .bg(theme.text)
-                                .text_color(theme.on_solid)
-                        } else {
-                            el.border_color(theme.border)
-                                .bg(theme.bg)
-                                .text_color(theme.text)
-                                .hover(|s| {
-                                    // `hover:border-foreground/20` — the
-                                    // neutral foreground, not pure white.
-                                    s.border_color(theme.text.opacity(0.2))
-                                        .bg(crate::theme::ink(0.03))
-                                })
-                        }
-                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.start_recording(id, window, cx);
                     }))
@@ -679,16 +651,7 @@ impl Render for ShortcutsPage {
             .gap(px(10.0))
             .when(send_behavior != ComposerSendBehavior::Enter, |el| {
                 el.child(
-                    div()
-                        .id("composer-send-reset")
-                        .size(px(26.0))
-                        .rounded(px(7.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(crate::theme::ink(0.04)).text_color(theme.text))
+                    crate::components::settings_send_behavior_reset(&theme)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_composer_send_behavior(ComposerSendBehavior::Enter, cx)
                         }))
@@ -700,13 +663,7 @@ impl Render for ShortcutsPage {
                 )
             })
             .child(
-                div()
-                    .id("composer-send-behavior")
-                    .flex()
-                    .flex_row()
-                    .rounded(px(9.0))
-                    .p(px(2.0))
-                    .bg(crate::theme::ink(0.04))
+                crate::components::settings_send_behavior_group(&theme)
                     .children(
                         [
                             (ComposerSendBehavior::Enter, "Enter"),
@@ -716,27 +673,7 @@ impl Render for ShortcutsPage {
                         .enumerate()
                         .map(|(ix, (behavior, label))| {
                             let selected = send_behavior == behavior;
-                            div()
-                                .id(("composer-send-option", ix))
-                                .min_w(px(72.0))
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded(px(7.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(12.0))
-                                .text_color(if selected {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                })
-                                .when(selected, |el| {
-                                    el.bg(theme.bg)
-                                        .border_1()
-                                        .border_color(theme.border.opacity(0.8))
-                                })
+                            crate::components::settings_send_behavior_option(&theme, ix, selected)
                                 .when(!selected, |el| {
                                     el.cursor_pointer()
                                         .hover(|s| s.text_color(theme.text))
