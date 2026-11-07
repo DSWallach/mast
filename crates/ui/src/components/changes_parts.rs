@@ -3,6 +3,24 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn file_save_status<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(crate::surface_chrome::CONTROL_RADIUS)))
+        .when(super::is_industrial(theme), |element| {
+            element
+                .bg(theme.surface_raised)
+                .border_1()
+                .border_color(theme.border)
+        })
+        .when(super::is_area(theme), |element| {
+            element.rounded_full().bg(theme.accent.opacity(0.08))
+        })
+}
+
 pub(crate) enum ChangesWarning {
     Dirty,
     Partial,

@@ -2312,7 +2312,7 @@ impl FilesSurface {
                         .id("files-save-status")
                         .h(px(crate::surface_chrome::CONTROL_SIZE))
                         .px(px(6.0))
-                        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+                        .when(true, |element| crate::components::file_save_status(element, theme))
                         .flex()
                         .items_center()
                         .flex_none()
