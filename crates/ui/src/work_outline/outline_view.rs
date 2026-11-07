@@ -2989,7 +2989,7 @@ impl OutlineView {
         // Row action: Start Chat on the selected, live work item.
         let start_chat = row
             .item()
-            .filter(|item| selected && !renaming && !item.archived)
+            .filter(|item| selected && !renaming && !item.archived && crate::components::outline_row_extras(theme))
             .map(|item| {
                 let space_id = item.space_id.clone();
                 let item_id = item.item_id.clone();
