@@ -892,3 +892,29 @@ pub(crate) fn artifact_pick_note(theme: &Theme) -> Div {
                 .border_color(theme.industrial_colors().rule)
         })
 }
+
+pub(crate) fn artifact_picker_row(
+    id: SharedString,
+    selected: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = id.to_string();
+    let row = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .px(px(10.0))
+        .py(px(4.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text)
+        .hover(|el| el.bg(theme.element_hover))
+        .when(selected, |el| el.bg(crate::theme::wash(0.08)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full()
+                .when(selected, |el| el.bg(theme.accent_wash))
+        });
+    super::segmented_key(row, theme, selected)
+}

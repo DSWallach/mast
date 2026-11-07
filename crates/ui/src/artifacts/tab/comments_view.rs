@@ -24,7 +24,7 @@ use crate::artifacts::model::ArtifactBody;
 use crate::artifacts::questions_ui;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::theme::Theme;
-use crate::{icons, surface_chrome};
+use crate::icons;
 
 /// A comment being written: where it points and what it quotes.
 #[derive(Debug, Clone, PartialEq, Eq)]

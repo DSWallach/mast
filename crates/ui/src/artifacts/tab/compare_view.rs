@@ -1257,19 +1257,7 @@ impl ArtifactTab {
         let rows = entries
             .into_iter()
             .map(|(target, selector, label, age, selected)| {
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text)
-                    .hover(|el| el.bg(theme.element_hover))
-                    .when(selected, |el| el.bg(crate::theme::wash(0.08)))
+                crate::components::browser_parts::artifact_picker_row(SharedString::from(selector), selected, theme)
                     .child(
                         div()
                             .flex_1()

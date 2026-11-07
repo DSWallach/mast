@@ -1330,9 +1330,9 @@ function or its first inline element, rather than every child `div`.
   picker popover and menu bodies remain outside this slice. No direct style or
   layout comparisons were present in these picker sites before migration.
 
-## Browser and artifacts audit (mechanical index; triage pending)
+## Browser and artifacts audit
 
-This index includes presentation candidates and style references; each still needs semantic triage. Line numbers refer to the integration base.
+This historical index records presentation candidates and style references at the integration base. Shared browser parts now own the direct style branches, toolbar, picker and navigation controls, cards, badges, and preview surfaces. Separators and native web-page backing remain theme-colored structural boundaries. The current fixed text-size literals are listed below the historical index.
 
 - `crates/ui/src/browser/fragment.rs:118`: `("--input", css(theme.border_strong)),`
 - `crates/ui/src/browser/fragment_view.rs:253`: `crate::files::toolbar_button(id, text, theme)`
@@ -1526,3 +1526,62 @@ This index includes presentation candidates and style references; each still nee
 - `crates/ui/src/artifacts/tab.rs:1758`: `.rounded(px(3.0))`
 - `crates/ui/src/artifacts/tab.rs:1759`: `.border_1()`
 - `crates/ui/src/artifacts/tab.rs:1760`: `.border_color(theme.border)`
+
+### Browser and artifacts remaining fixed typography
+
+- `crates/ui/src/browser/fragment_view.rs:279`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:287`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:365`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:373`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/fragment_view.rs:414`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:115`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:143`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:151`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:200`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:210`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:270`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:278`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:300`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:573`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:575`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/browser/view.rs:579`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/cards.rs:119`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/cards.rs:126`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/plan_linear.rs:207`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:513`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:551`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:577`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:644`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:654`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:663`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/comments_view.rs:670`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1077`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1306`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1375`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1427`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1470`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/compare_view.rs:1511`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/find_view.rs:793`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/find_view.rs:916`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/options_view.rs:642`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/options_view.rs:695`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab/plan_view.rs:67`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:968`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:996`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1211`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1283`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1307`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1348`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1384`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1393`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1404`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1424`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1432`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1441`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1483`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1492`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1517`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1523`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1531`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1582`: stays literal, in baseline: fixed content text size, shared across styles and layouts.
+- `crates/ui/src/artifacts/tab.rs:1604`: stays literal, in baseline: fixed content text size, shared across styles and layouts.

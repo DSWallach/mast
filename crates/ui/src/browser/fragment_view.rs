@@ -250,13 +250,7 @@ impl BrowserSurface {
         let local = view.source.local_root.is_some();
         let preview = view.source.local_preview().is_some();
         let label = |id: &'static str, text: &'static str, glyph: &'static str, enabled: bool| {
-            crate::files::toolbar_button(id, text, theme)
-                .when(!enabled, |el| el.cursor_default().opacity(0.35))
-                .child(
-                    icons::icon(glyph)
-                        .size(px(surface_chrome::ICON_SIZE))
-                        .text_color(theme.text_muted),
-                )
+            crate::components::browser_parts::browser_toolbar_button(id, text, glyph, enabled, theme)
         };
         let title: SharedString = view.source.title.clone().into();
         let path: SharedString = view.source.path.clone().into();
