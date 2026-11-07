@@ -1752,11 +1752,11 @@ impl AppearancePage {
 
         if self.theme_menu(appearance_kind).get().is_some() {
             let closing = self.theme_menu(appearance_kind).closing_since();
-            let heading = if appearance_kind.is_light() {
-                "Light themes"
-            } else {
-                "Dark themes"
-            };
+            let style = crate::settings::current(cx).ui_style;
+            let pair = style.recommended_themes();
+            let recommended = if appearance_kind.is_light() { pair.0 } else { pair.1 };
+            let mut variants = registry.variants_for(model_appearance(appearance_kind)).collect::<Vec<_>>();
+            variants.sort_by_key(|variant| variant.id != recommended);
             let menu = popover::popover_card(theme)
                 .w(px(260.0))
                 .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
@@ -1766,10 +1766,9 @@ impl AppearancePage {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(popover::menu_heading(theme, heading))
+                .child(popover::menu_heading(theme, &format!("Recommended for {}", style.label())))
                 .children(
-                    registry
-                        .variants_for(model_appearance(appearance_kind))
+                    variants.into_iter()
                         .enumerate()
                         .map(|(index, variant)| {
                             let id = variant.id.clone();
@@ -1781,7 +1780,7 @@ impl AppearancePage {
                                 AccentSelection::ThemeDefault,
                                 theme.surface_preference,
                             );
-                            popover::menu_row(
+                            let row = popover::menu_row(
                                 theme,
                                 active,
                                 SharedString::from(format!(
@@ -1804,7 +1803,14 @@ impl AppearancePage {
                                         .size(px(14.0))
                                         .text_color(theme.accent),
                                 )
-                            })
+                            });
+                            if index == 1 {
+                                div().flex().flex_col()
+                                    .child(popover::menu_heading(theme, "Other themes"))
+                                    .child(row).into_any_element()
+                            } else {
+                                row.into_any_element()
+                            }
                         }),
                 )
                 .into_any_element();
@@ -2547,6 +2553,9 @@ impl Render for AppearancePage {
                 }))
         }).collect::<Vec<_>>();
 
+        let style = ui_settings.ui_style;
+        let recommended = style.recommended_themes();
+        let show_recommended_action = theme.variant_id.as_ref() != recommended.0 && theme.variant_id.as_ref() != recommended.1;
         let mut theme_rows = Vec::new();
         for (index, appearance_kind) in [Appearance::Light, Appearance::Dark]
             .into_iter()
@@ -2999,7 +3008,18 @@ impl Render for AppearancePage {
                                     .flex()
                                     .flex_col()
                                     .gap(px(12.0))
-                                    .child(widgets::field_label(&theme, "Style"))
+                                    .child(div().flex().items_center().justify_between()
+                                        .child(widgets::field_label(&theme, "Style"))
+                                        .when(show_recommended_action, |row| row.child(
+                                            crate::components::settings_ghost_action(&theme)
+                                                .id("use-style-colours")
+                                                .child(SharedString::from(format!("Use {} colours", style.label())))
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    appearance::set_theme(Appearance::Light, recommended.0, cx);
+                                                    appearance::set_theme(Appearance::Dark, recommended.1, cx);
+                                                    cx.notify();
+                                                }))
+                                        )))
                                     .child(widgets::option_card_row().children(style_cards))
                                     .child(widgets::meta_line(&theme, vec![div().child("Style, layout and theme combine independently.").into_any_element()])),
                             )
