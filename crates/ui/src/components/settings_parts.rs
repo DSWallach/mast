@@ -559,7 +559,12 @@ pub(crate) fn settings_accent_swatch(
     let sample = match selection {
         AccentSelection::ThemeDefault => div()
             .size_full()
-            .rounded(px(6.0))
+            .rounded(px(page_theme
+                .ui_style
+                .radius_roles()
+                .control
+                .unwrap_or(6.0)))
+            .when(super::is_area(page_theme), |el| el.rounded_full())
             .bg(swatch_theme.accent_wash)
             .flex()
             .items_center()
@@ -586,7 +591,15 @@ pub(crate) fn settings_accent_swatch(
                     .rounded(px(2.0))
                     .bg(swatch_theme.glyph.deep),
             ),
-        AccentSelection::Preset(_) => div().size_full().rounded(px(6.0)).bg(swatch_theme.accent),
+        AccentSelection::Preset(_) => div()
+            .size_full()
+            .rounded(px(page_theme
+                .ui_style
+                .radius_roles()
+                .control
+                .unwrap_or(6.0)))
+            .when(super::is_area(page_theme), |el| el.rounded_full())
+            .bg(swatch_theme.accent),
     };
     div()
         .id(SharedString::from(format!("accent-{}", selection.label())))
@@ -605,8 +618,14 @@ pub(crate) fn settings_accent_swatch(
             div()
                 .size(px(30.0))
                 .p(px(2.0))
-                .rounded(px(8.0))
+                .rounded(px(page_theme
+                    .ui_style
+                    .radius_roles()
+                    .control
+                    .unwrap_or(8.0)))
+                .when(super::is_area(page_theme), |el| el.rounded_full())
                 .border_1()
+                .when(super::is_industrial(page_theme), |el| el.border_b_2())
                 .border_color(if selected {
                     page_theme.border_strong
                 } else {
