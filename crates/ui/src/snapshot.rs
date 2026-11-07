@@ -95,6 +95,48 @@ impl gpui::Render for OutlineFixture {
 }
 
 /// Construct the existing Work Outline fixture with an item details panel.
+pub fn preview_chat_outline(state: &mut crate::state::AppState) {
+    use crate::work_outline::store::{fixture_ids, fixture_snapshot};
+    use mast_proto::{UserActionRequestState, UserActionRequestView};
+
+    let mut snapshot = fixture_snapshot("fixture-space");
+    let item = snapshot
+        .items
+        .iter_mut()
+        .find(|item| item.id == fixture_ids::API)
+        .unwrap();
+    item.chat_ids.push("fixture-chat".into());
+    for (id, text) in [
+        ("preview-approve", "Approve the proposed layout"),
+        ("preview-review", "Review the implementation"),
+    ] {
+        snapshot.user_action_requests.push(UserActionRequestView {
+            id: id.into(),
+            space_id: "fixture-space".into(),
+            work_item_id: fixture_ids::API.into(),
+            chat_id: "fixture-chat".into(),
+            text: text.into(),
+            state: UserActionRequestState::Open,
+            options: Vec::new(),
+            kind: None,
+            priority: None,
+            origin_kind: Default::default(),
+            message_id: None,
+            tool_call_id: None,
+            info: None,
+            links: Vec::new(),
+            facts: Vec::new(),
+            dedupe_key: None,
+            created_by: None,
+            created_at: 1_760_000_000_000,
+            resolution: None,
+            deduped: false,
+            origin_chat_available: true,
+        });
+    }
+    state.set_work_outline_for_test(snapshot);
+}
+
 pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::work_outline::{
         model::OutlineSpace,

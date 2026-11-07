@@ -15299,6 +15299,11 @@ impl Shell {
     pub fn fixture_snapshot_ready(&mut self) {
         self.splash = SplashPhase::Gone;
     }
+
+    pub fn fixture_snapshot_item_panel(&mut self, cx: &mut Context<Self>) {
+        self.active_chat = "fixture-chat".into();
+        self.open_item_tab(cx);
+    }
 }
 
 /// Native visual QA uses the production shell with isolated fixture data.
