@@ -1006,7 +1006,32 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-06 night; coordinator e81de680)
+## In flight (snapshot 2026-11-06 23:30; coordinator e81de680)
+
+- **Installed and current: release 65** (cf711028, 23:31). Tests: UI 2581/0/13, nextest 28/28. Backup of release 64:
+  `~/zeron-dev-app-backups/mast-20261106-2331-pre-release65`. Mikey must restart to see it.
+  - Migrations: `migrate-settings` (settings_parts), `migrate-browser` (browser_parts, browser preview screen),
+    `migrate-changes` (changes_parts, `MAST_SNAPSHOT_POPULATED_CHANGES=1` gives the walkthrough fixture 3 files + diffs).
+  - `industrial-composer`: composer footer (Model chip sizes to content, captions over their controls, one key
+    treatment, muted meter), one frame per reply, shared `toolbar_control` / `toolbar_search_frame` in
+    components/mod.rs at the layout control height (Overview, outline/details, chat header, titlebar; an `overview`
+    preview screen now exists). `changes-industrial-radius`: Changes header keys + square notice.
+  - `area-quiet-chrome` parts 1–2 (Mikey: Area should be "all white, no dividing lines", like area.tech
+    Character_Tag_Demo): one surface, no pane rules, quiet sidebar/Needs-you/header chips, inline tool groups and light
+    code panels, Area arm of toolbar_control (borderless muted, one filled primary), quiet outline (no guides, fixed
+    disclosure slot, selected pill, muted counts, hover chevrons) and details, slate SEND.
+  - `style-themes`: "Recommended for <Style>" + opt-in "Use <Style> colours" (never auto-switches); Area Light/Dark
+    sampled from the reference (#FFFFFF, #0BA7FF, #FFB800, #FF7759, #B388E4, #1DCB43, slate #8EA4B8); green/red diffs.
+  - Ratchet 442/227/3/2.
+- **Running:** Area v2 worker (chat 2ce22eab, branch area-quiet-chrome): details section headings (collapsible ones
+  are bigger and indented ~8px vs static ones), small toolbar-wrapper cleanup. Next release.
+- **Follow-ups:** Area Light marks the selected Style/Layout cards grey, not accent; hover-only chevrons not visually
+  verified; Linear/team and menus slices not migrated; shell audit ledger + conversation tool/markdown children
+  untriaged; Compact light chat snapshot stale.
+- Mikey accepted the "UI preview sheets" approval rule (scripts/ui-preview.sh only); snapshot `cargo test` renders
+  still ask.
+
+## In flight (earlier snapshot 2026-11-06 night; coordinator e81de680)
 
 - **Installed and current: release 64** (f44b65c5, 19:09): the first three component MIGRATIONS on top of the
   release-63 foundation. Release tests passed (UI 2580/0/13). Backup of release 63:
