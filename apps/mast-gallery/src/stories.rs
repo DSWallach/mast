@@ -46,7 +46,7 @@ pub enum State {
 }
 pub const STATES: &[(State, &str)] = &[
     (State::Default, "Default"),
-    (State::Selected, "Selected"),
+    (State::Selected, "Hover / selected"),
     (State::Disabled, "Disabled"),
     (State::LongText, "Long text"),
     (State::Empty, "Empty"),
@@ -87,7 +87,11 @@ fn fixture(story: Story, state: State, theme: &Theme, id: String) -> AnyElement 
         .into_any_element(),
         Story::SidebarRow => mast_ui::stories::sidebar_row(theme, id, text, selected),
         Story::OutlineRow => {
-            let row = c::outline_row(id.into(), 30., 8., theme).child(text);
+            let row_theme = c::outline_row_theme(theme, selected);
+            let row = c::outline_row(id.into(), 30., 8., theme)
+                .when(selected, |row| row.bg(theme.element_active))
+                .text_color(row_theme.text)
+                .child(text);
             c::outline_row_selection(row, theme, selected).into_any_element()
         }
         Story::ComposerFooter => c::conversation_footer_slot(
@@ -162,7 +166,7 @@ pub fn grid(story: Story, theme: &Theme) -> impl IntoElement {
                 .child(div().w(px(92.)).child(label))
                 .children(UiStyleId::ALL.iter().enumerate().map(|(column, &style)| {
                     let view_theme = ui_style::theme_for_view(theme, style, layout);
-                    div().flex_1().min_w_0().p(px(8.)).child(fixture(
+                    div().flex_1().min_w_0().p(px(8.)).flex().child(fixture(
                         story,
                         state,
                         &view_theme,
