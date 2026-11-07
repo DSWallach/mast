@@ -1369,3 +1369,19 @@ Locations are line numbers at the audit commit; each includes a numeric text siz
 - `crates/ui/src/settings/harnesses.rs`: 799, 834, 890, 1004, 1005
 - `crates/ui/src/settings/shortcuts.rs`: 298, 306, 352, 378, 379, 383, 656, 685, 707, 724, 729, 737, 767, 912
 - `crates/ui/src/settings/widgets.rs`: 177, 185, 196, 256, 258, 267, 302, 303, 322, 339, 398, 399, 402, 428, 429, 432
+
+### Settings migration status
+
+The original candidate index above records audit-commit locations. Explicit style and layout presentation decisions now reside in `components/settings_parts.rs`; the remaining `UiStyleId` / `UiLayout` uses in screens enumerate choices or persist settings, and the test constants are fixtures. Navigation remains in `shell_parts.rs`.
+
+The following remaining ratchet hits are fixed-content typography or miniature artwork, not interactive control geometry. Line numbers below refer to this migration revision.
+
+- `crates/ui/src/settings/accounts.rs` text sizes at 375, 430, 627, 685, 705, 1023, 1170, 1190, 1243, 1290, 1297, 1376, 1388, 1601, 1643, 1691, 1711, 1773, 1815: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/appearance.rs` text sizes at 1346, 1358, 1742, 1869, 1940, 1996, 2003, 2065, 2238, 2310, 2450, 2470, 3017: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/appshots.rs` text sizes at 26: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/archived.rs` text sizes at 195, 203, 218, 275, 281: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/devices.rs` text sizes at 351, 427: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/harnesses.rs` text sizes at 818, 874: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/shortcuts.rs` text sizes at 298, 306, 352, 628, 849: stays literal, in baseline: content and status text retain the same metrics across styles.
+- `crates/ui/src/settings/accounts.rs` radii at 1436: stays literal, in baseline: loading skeleton placeholders preserve their geometry.
+- `crates/ui/src/settings/appearance.rs` radii at 1292, 1326, 1336, 1368, 1384, 1395, 1401, 1404: stays literal, in baseline: thumbnail artwork models the selected theme.
