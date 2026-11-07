@@ -1806,25 +1806,9 @@ impl AppearancePage {
 
         let open = self.font_menu(kind).is_open();
         let closing = self.font_menu(kind).closing_since();
-        div()
-            .id(SharedString::from(format!("{slug}-font-dropdown")))
-            .relative()
-            .w(px(220.0))
-            .h(px(36.0))
-            .px(px(11.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(if open {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(crate::theme::ink(0.025))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
+        crate::components::settings_picker(
+            theme, SharedString::from(format!("{slug}-font-dropdown")), 220.0, open, false,
+        )
             .track_focus(self.font_focus(kind))
             // Only the closed state: once open, the card above owns these keys
             // and stops their propagation before they reach us.
@@ -1913,25 +1897,9 @@ impl AppearancePage {
 
         let open = self.size_menu(kind).is_open();
         let closing = self.size_menu(kind).closing_since();
-        div()
-            .id(SharedString::from(format!("{slug}-font-size-dropdown")))
-            .relative()
-            .w(px(128.0))
-            .h(px(36.0))
-            .px(px(11.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(if open {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(crate::theme::ink(0.025))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
+        crate::components::settings_picker(
+            theme, SharedString::from(format!("{slug}-font-size-dropdown")), 128.0, open, false,
+        )
             .track_focus(self.size_focus(kind))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 this.on_size_key_down(kind, event, window, cx)
@@ -1984,35 +1952,11 @@ impl AppearancePage {
         );
         let open = self.theme_menu(appearance_kind).is_open();
 
-        let mut trigger = div()
-            .id(SharedString::from(format!(
-                "{}-theme-selector",
-                if appearance_kind.is_light() {
-                    "light"
-                } else {
-                    "dark"
-                }
-            )))
-            .relative()
-            .flex_none()
-            .w(px(218.0))
-            .h(px(34.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(if open {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(theme.surface_raised.opacity(if open { 0.75 } else { 0.42 }))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .when(!open, |el| {
-                el.hover(|style| style.bg(theme.surface_raised_hover))
-            })
+        let mut trigger = crate::components::settings_picker(
+            theme,
+            SharedString::from(format!("{}-theme-selector", if appearance_kind.is_light() { "light" } else { "dark" })),
+            218.0, open, true,
+        )
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, _, _| {

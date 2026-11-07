@@ -317,3 +317,52 @@ pub(crate) fn settings_destination(
         })
         .cursor_pointer()
 }
+
+/// Picker chrome, leaving focus and menu behavior to its owner.
+pub(crate) fn settings_picker(
+    theme: &Theme,
+    id: SharedString,
+    width: f32,
+    open: bool,
+    palette: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let area = super::is_area(theme);
+    let industrial = super::is_industrial(theme);
+    let control = div()
+        .id(id)
+        .relative()
+        .when(palette, |el| el.flex_none())
+        .w(px(width))
+        .h(px(if palette { 34.0 } else { 36.0 }))
+        .px(px(if palette { 10.0 } else { 11.0 }))
+        .rounded(px(theme
+            .ui_style
+            .radius_roles()
+            .control
+            .unwrap_or(if palette { 8.0 } else { 9.0 })))
+        .when(area, |el| el.rounded_full())
+        .border_1()
+        .when(industrial, |el| el.border_b_2())
+        .border_color(if open {
+            theme.border_strong
+        } else {
+            theme.border
+        })
+        .bg(if area {
+            theme.accent.opacity(if open { 0.16 } else { 0.08 })
+        } else if palette {
+            theme.surface_raised.opacity(if open { 0.75 } else { 0.42 })
+        } else {
+            ink(0.025)
+        })
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer();
+    if palette && !open {
+        control.hover(|style| style.bg(theme.surface_raised_hover))
+    } else {
+        control
+    }
+}
