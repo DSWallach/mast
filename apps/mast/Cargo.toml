@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-dev-inspector = ["gpui/inspector"]
+dev-inspector = ["gpui/inspector", "mast-ui/dev-inspector"]
 
 [[bin]]
 name = "mast"

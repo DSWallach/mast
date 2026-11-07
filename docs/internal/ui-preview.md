@@ -30,7 +30,7 @@ Do not share one target directory between worktrees: Cargo can reuse or overwrit
 
 ## Inspector spike
 
-Build a separate development executable with `cargo build -p mast --features dev-inspector`. Mikey can launch it with `target/debug/mast` from the checkout; do not launch it alongside the installed Mast against the same live profile. The feature enables GPUI's inspector instrumentation, but it does **not** currently produce a usable inspector in Mast: GPUI's `Inspector::render` returns an empty element unless the application registers an inspector renderer, and Mast registers neither that renderer nor a toggle action. The fork has picking and element-state infrastructure, but there is currently no inspector panel or shortcut to show or edit a selected element. Adding the feature alone does not demonstrate live editing or source locations. The executable has not been launched for this spike.
+Build a separate development executable with `cargo build -p mast --features dev-inspector`. Mikey can launch it with `target/debug/mast` from the checkout; do not launch it alongside the installed Mast against the same live profile. Press ⌘⌥⇧I to open the inspector, hover and click an element to select it, and toggle twice to pick another. It shows the element ID and construction location; for div elements it also shows bounds and the size, padding, corner, background and border style refinements. These are specified refinements, not necessarily computed values. It is read-only and does not persist changes. This feature and interaction have not been checked in a real window.
 
 ## Rust hot-patching spike
 
