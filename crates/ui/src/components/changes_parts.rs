@@ -3,6 +3,41 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn file_reveal<T: Styled + InteractiveElement>(
+    element: T,
+    theme: &Theme,
+    group: impl Into<gpui::SharedString>,
+) -> T {
+    crate::ui_style::reveal_on_hover(element, group, theme.ui_style, false)
+}
+
+pub(crate) fn file_tree_row<T: Styled + StatefulInteractiveElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    selected: bool,
+    focused: bool,
+) -> T {
+    let element = element
+        .when(selected, |element| {
+            element.bg(crate::theme::wash(if focused { 0.12 } else { 0.08 }))
+        })
+        .when(!selected, |element| {
+            element.hover(|style| style.bg(crate::theme::wash(0.055)))
+        });
+    element
+        .when(super::is_industrial(theme) && selected, |element| {
+            element
+                .bg(theme.surface_raised)
+                .border_l_2()
+                .border_color(theme.accent)
+        })
+        .when(super::is_area(theme), |element| {
+            element
+                .rounded_full()
+                .when(selected, |element| element.bg(theme.accent.opacity(0.16)))
+        })
+}
+
 pub(crate) fn file_toolbar_button(
     id: &'static str,
     label: &'static str,
@@ -41,6 +76,9 @@ pub(crate) fn file_toolbar_button(
             .unwrap_or(crate::surface_chrome::CONTROL_RADIUS)))
         .when(true, |element| {
             crate::surface_chrome::icon_key(element, theme, false)
+        })
+        .when(super::is_area(theme), |element| {
+            element.rounded_full().bg(theme.accent.opacity(0.08))
         })
         .flex()
         .items_center()

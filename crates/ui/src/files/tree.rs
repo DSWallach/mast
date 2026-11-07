@@ -262,12 +262,7 @@ impl FilesSurface {
                     .when(node.entry.ignored && decoration.is_none(), |element| {
                         element.opacity(0.52)
                     })
-                    .when(selected, |element| {
-                        element.bg(crate::theme::wash(if focused { 0.12 } else { 0.08 }))
-                    })
-                    .when(!selected, |element| {
-                        element.hover(|style| style.bg(crate::theme::wash(0.055)))
-                    })
+                    .when(true, |element| crate::components::file_tree_row(element, &theme, selected, focused))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.tree_focus.focus(window, cx);
                         this.activate_tree_path(path.clone(), cx);
