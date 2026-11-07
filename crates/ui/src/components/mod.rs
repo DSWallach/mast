@@ -2,7 +2,48 @@
 //! appearance determines their treatment.
 
 mod settings_parts;
-pub(crate) use settings_parts::{settings_background_thumbnail, settings_theme_import_checkbox, settings_report_panel, settings_account_forget, settings_account_switch, settings_archive_tile, settings_archived_row, settings_unarchive_action, settings_accent_swatch, settings_autosave_choice, settings_compact_action, settings_appearance_preview, settings_choice, settings_destination, settings_device_switcher, settings_effective_surface, settings_error_strip, settings_warning_strip, settings_ghost_action, settings_import_mode, settings_import_close, settings_import_warning, settings_import_error, settings_layout_preview, settings_page_header, settings_page_subtitle, settings_picker, settings_option_card, settings_row_title, settings_meta_line, settings_row_tile, settings_row_tile_tinted, settings_shortcut_key, settings_send_behavior_reset, settings_send_behavior_group, settings_send_behavior_option, settings_style_preview, settings_theme_miniature, settings_team_visibility, settings_theme_import_row};
+pub(crate) use settings_parts::{
+    settings_accent_swatch,
+    settings_account_forget,
+    settings_account_switch,
+    settings_appearance_preview,
+    settings_archive_tile,
+    settings_archived_row,
+    settings_autosave_choice,
+    settings_background_thumbnail,
+    settings_choice,
+    settings_compact_action,
+    settings_destination,
+    settings_device_switcher,
+    settings_effective_surface,
+    settings_error_strip,
+    settings_ghost_action,
+    settings_import_close,
+    settings_import_error,
+    settings_import_mode,
+    settings_import_warning,
+    settings_layout_preview,
+    settings_meta_line,
+    settings_option_card,
+    settings_page_header,
+    settings_page_subtitle,
+    settings_picker,
+    settings_report_panel,
+    settings_row_tile,
+    settings_row_tile_tinted,
+    settings_row_title,
+    settings_send_behavior_group,
+    settings_send_behavior_option,
+    settings_send_behavior_reset,
+    settings_shortcut_key,
+    settings_style_preview,
+    settings_team_visibility,
+    settings_theme_import_checkbox,
+    settings_theme_import_row,
+    settings_theme_miniature,
+    settings_unarchive_action,
+    settings_warning_strip,
+};
 
 mod outline_parts;
 pub use outline_parts::*;
