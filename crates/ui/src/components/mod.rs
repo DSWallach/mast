@@ -632,7 +632,8 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
         if primary { element.bg(colour).border_color(colour).text_color(theme.identity_text(colour)) }
         else { element.border_color(colour).text_color(colour) }
     } else { element };
-    design_surface(element, theme, crate::style_overrides::DesignSurface::Toolbar)
+    let element = design_surface(element, theme, crate::style_overrides::DesignSurface::Toolbar);
+    if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Toolbar).page_colour.is_some() { element.text_color(theme.text) } else { element }
 }
 
 /// Apply the Industrial panel radius to a shared error notice.
@@ -801,7 +802,9 @@ pub fn user_message_bubble(
     use crate::ui_style::ConversationVariant;
     let variant = theme.ui_style.conversation;
     let area = variant == ConversationVariant::Area;
-    let text = if area {
+    let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour.is_some() {
+        theme.text
+    } else if area {
         theme.identity_text(identity)
     } else {
         theme.text
@@ -920,7 +923,7 @@ pub fn agent_message_bubble(
             .text_size(crate::typography::ui_rems(
                 16.0 + layout_type_adjustment(theme),
             ))
-            .text_color(identity_foreground_on(theme, identity, theme.surface))
+            .text_color(if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour.is_some() { theme.text } else { identity_foreground_on(theme, identity, theme.surface) })
             .child(content)
             .into_any_element()
     } else {

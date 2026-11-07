@@ -728,7 +728,7 @@ pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
     let mut result = theme.clone();
     if selected && (super::is_area(theme) || theme.ui_style.design_roles.primary_colour.is_some()) {
         let colour = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(theme.accent);
-        result.text = theme.identity_text(colour);
+        result.text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::OutlineRow).page_colour.is_some() { theme.text } else { theme.identity_text(colour) };
         result.text_muted = result.text;
         result.text_faint = result.text.opacity(0.8);
     }

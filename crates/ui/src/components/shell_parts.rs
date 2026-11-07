@@ -838,7 +838,9 @@ pub(crate) fn area_sidebar_chat_row(
         return None;
     }
     let identity = theme.identity_color(chat_id);
-    let foreground = if selected {
+    let foreground = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
+        theme.text
+    } else if selected {
         theme.identity_text(theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(identity))
     } else {
         theme.text
@@ -1151,7 +1153,9 @@ pub(crate) fn sidebar_row_colors(
 ) -> (gpui::Hsla, gpui::Hsla, Option<gpui::Div>) {
     let identity = theme.identity_color(id);
     let area = super::is_area(theme);
-    let text = if area && selected {
+    let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
+        theme.text
+    } else if area && selected {
         theme.identity_text(theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(identity))
     } else {
         theme.text
