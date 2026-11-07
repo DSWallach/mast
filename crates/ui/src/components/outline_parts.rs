@@ -96,7 +96,7 @@ pub fn outline_section_header(
     div()
         .id(id)
         .group("outline-section")
-        .when(super::is_area(theme), |el| el.relative())
+        .when(super::is_area(theme), |el| el.relative().ml(px(-14.0)).pl(px(14.0)))
         .flex()
         .items_center()
         .gap(px(4.0 * super::layout_spacing(theme)))
@@ -122,7 +122,7 @@ pub fn outline_section_header(
             .text_color(theme.text_muted)
             .when(super::is_area(theme), |el| {
                 el.absolute()
-                    .left(px(-14.0))
+                    .left(px(0.0))
                     .top(px(2.0))
                     .opacity(0.0)
                     .group_hover("outline-section", |el| el.opacity(1.0))
