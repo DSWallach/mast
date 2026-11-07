@@ -493,7 +493,7 @@ pub fn current(cx: &gpui::App) -> UiStyle {
         .try_global::<UiStyleState>()
         .map(|state| (state.0, state.1))
         .unwrap_or_default();
-    UiStyle::resolve(id, layout)
+    crate::style_overrides::current(cx).apply(UiStyle::resolve(id, layout))
 }
 
 pub fn set_layout(layout: UiLayout, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
