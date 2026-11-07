@@ -3,6 +3,54 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn changes_tooltip<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .when(super::is_industrial(theme), |element| {
+            element.bg(theme.surface_raised).border_color(theme.border)
+        })
+        .when(super::is_area(theme), |element| {
+            element.rounded_full().bg(crate::theme::flatten(
+                theme.accent.opacity(0.10),
+                theme.surface_raised,
+            ))
+        })
+}
+
+pub(crate) fn file_drag_ghost<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .when(super::is_area(theme), |element| {
+            element.rounded_full().bg(crate::theme::flatten(
+                theme.accent.opacity(0.10),
+                theme.surface_raised,
+            ))
+        })
+}
+
+pub(crate) fn file_editor_tooltip(label: gpui::SharedString, theme: &Theme) -> impl IntoElement {
+    let radius = theme.ui_style.tokens.control_radius.unwrap_or(6.0);
+    let card = div()
+        .max_w(px(360.0))
+        .px(px(9.0))
+        .py(px(6.0))
+        .rounded(px(radius))
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::popover::surface_bg(theme))
+        .font_family(theme.font_sans.clone())
+        .text_size(px(10.5))
+        .text_color(theme.text_muted)
+        .child(label)
+        .when(super::is_area(theme), |element| {
+            element.bg(crate::theme::flatten(
+                theme.accent.opacity(0.10),
+                theme.surface_raised,
+            ))
+        });
+    crate::frost::frosted(radius, crate::frost::MENU_BLUR, card)
+}
+
 pub(crate) fn walkthrough_heading(label: &str, theme: &Theme) -> gpui::SharedString {
     if super::is_industrial(theme) {
         crate::popover::tracked_upper(label).into()
