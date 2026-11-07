@@ -871,10 +871,24 @@ mod tests {
         for id in ["area-light", "area-dark"] {
             let variant = registry.variant(id).unwrap();
             let palette = variant.identity_palette();
-            assert_eq!(palette[0], "#3F69CC".parse().unwrap());
-            assert_eq!(palette[1], "#DFBE1B".parse().unwrap());
-            assert_eq!(palette[3], "#38D059".parse().unwrap());
-            assert_eq!(palette[4], "#FE4B25".parse().unwrap());
+            assert_eq!(palette[0], "#0BA7FF".parse().unwrap());
+            assert_eq!(palette[1], "#FFB800".parse().unwrap());
+            assert_eq!(palette[2], "#B388E4".parse().unwrap());
+            assert_eq!(palette[3], "#1DCB43".parse().unwrap());
+            assert_eq!(palette[4], "#FF7759".parse().unwrap());
+        }
+    }
+
+    #[test]
+    fn area_diff_colours_are_distinct_and_readable() {
+        for id in ["area-light", "area-dark"] {
+            let variant = ThemeRegistry::builtin().variant(id).unwrap();
+            let add = variant.colors.diff_add;
+            let delete = variant.colors.diff_delete;
+            assert!(add.g > add.r && add.g > add.b, "{id}: {add:?}");
+            assert!(delete.r > delete.g && delete.r > delete.b, "{id}: {delete:?}");
+            assert!(add.contrast(variant.colors.background) >= 4.5);
+            assert!(delete.contrast(variant.colors.background) >= 4.5);
         }
     }
 
