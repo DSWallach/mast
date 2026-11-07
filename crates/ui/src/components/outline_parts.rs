@@ -538,6 +538,7 @@ pub fn outline_tree(theme: &Theme) -> Stateful<Div> {
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface),
         )
+        .when(super::is_area(theme), |el| el.bg(theme.bg))
 }
 
 /// Row chrome; selection, drag handling and content remain with the caller.
