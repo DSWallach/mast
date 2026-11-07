@@ -417,25 +417,7 @@ impl ArtifactTab {
                      on: bool,
                      enabled: bool|
          -> gpui::Stateful<gpui::Div> {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .h(px(surface_chrome::CONTROL_SIZE))
-                .px(px(6.0))
-                .rounded(px(surface_chrome::CONTROL_RADIUS))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .when(enabled, |el| el.cursor_pointer())
-                .when(!enabled, |el| el.cursor_default().opacity(0.35))
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .when(on, |el| el.bg(crate::theme::wash(0.10)))
-                .when(enabled, |el| {
-                    el.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
-                })
-                .child(text)
+            crate::components::browser_parts::artifact_comment_control(id, text, on, enabled, theme)
         };
         let mut out = Vec::new();
         if self.comments.selection.is_some() && can {

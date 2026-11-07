@@ -286,20 +286,7 @@ impl BrowserSurface {
                     .items_center()
                     .gap(px(12.0))
                     .child(
-                        div()
-                            .size(px(44.0))
-                            .rounded(px(12.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.surface_raised.opacity(0.5))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                icons::icon(icons::GLOBE)
-                                    .size(px(22.0))
-                                    .text_color(theme.text_muted),
-                            ),
+                        crate::components::browser_parts::browser_empty_icon(theme)
                     )
                     .child(
                         div()
@@ -318,28 +305,7 @@ impl BrowserSurface {
                             .child(description),
                     )
                     .child(
-                        div()
-                            .mt(px(6.0))
-                            .id("browser-empty-action")
-                            .h(px(28.0))
-                            .px(px(10.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.surface_raised)
-                            .cursor_pointer()
-                            .role(gpui::Role::Button)
-                            .aria_label(if has_error {
-                                "Retry page"
-                            } else {
-                                "Enter an address"
-                            })
-                            .hover(|style| style.bg(crate::theme::wash(0.10)))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text)
+                        crate::components::browser_parts::browser_empty_action(has_error, theme)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if has_error {
                                     this.reload(cx);
@@ -441,18 +407,7 @@ impl Render for BrowserSurface {
             )
             .when(focused || self.address_edited, |el| {
                 el.child(
-                    div()
-                        .id("browser-go")
-                        .size(px(18.0))
-                        .flex_none()
-                        .rounded(px(4.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .role(gpui::Role::Button)
-                        .aria_label("Go to address")
-                        .hover(|s| s.bg(crate::theme::wash(0.10)))
+                    crate::components::browser_parts::browser_go_button(&theme)
                         .on_mouse_down(MouseButton::Left, |_, w, _| w.prevent_default())
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
                         .child(

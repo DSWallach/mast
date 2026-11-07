@@ -388,3 +388,200 @@ pub(crate) fn artifact_picker_button(
         });
     super::segmented_key(button, theme, open)
 }
+
+pub(crate) fn artifact_card_frame(id: SharedString, label: String, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    let card = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(10.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .px(px(10.0))
+        .py(px(9.0))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .hover(|card| card.bg(theme.element_hover))
+        .when(super::is_area(theme), |el| el.bg(theme.accent_wash));
+    super::segmented_key(card, theme, false)
+}
+
+pub(crate) fn artifact_card_icon(glyph: &'static str, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .size(px(28.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(7.0)))
+        .bg(theme.accent.opacity(0.10))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icons::icon(glyph).size(px(15.0)).text_color(theme.accent))
+        .when(super::is_area(theme), |el| el.rounded_full())
+}
+
+pub(crate) fn artifact_card_open(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .flex_none()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text)
+        .hover(|el| el.bg(theme.element_hover))
+        .child("Open")
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn browser_empty_icon(theme: &Theme) -> Div {
+    div()
+        .size(px(44.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(12.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised.opacity(0.5))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            icons::icon(icons::GLOBE)
+                .size(px(22.0))
+                .text_color(theme.text_muted),
+        )
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent_wash)
+        })
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.industrial_colors().key)
+                .border_color(theme.industrial_colors().rule)
+        })
+}
+
+pub(crate) fn browser_empty_action(has_error: bool, theme: &Theme) -> Stateful<Div> {
+    let label = if has_error {
+        "Retry page"
+    } else {
+        "Enter an address"
+    };
+    let button = div()
+        .mt(px(6.0))
+        .id("browser-empty-action")
+        .h(px(28.0))
+        .px(px(10.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .hover(|style| style.bg(crate::theme::wash(0.10)))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text)
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent_wash)
+        });
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn browser_go_button(theme: &Theme) -> Stateful<Div> {
+    let button = div()
+        .id("browser-go")
+        .size(px(18.0))
+        .flex_none()
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label("Go to address")
+        .hover(|s| s.bg(crate::theme::wash(0.10)))
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn artifact_comment_control(
+    id: &'static str,
+    text: SharedString,
+    active: bool,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_none()
+        .h(px(surface_chrome::CONTROL_SIZE))
+        .px(px(6.0))
+        .rounded(px(theme
+            .ui_style
+            .tokens
+            .control_radius
+            .unwrap_or(surface_chrome::CONTROL_RADIUS)))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .when(enabled, |el| el.cursor_pointer())
+        .when(!enabled, |el| el.cursor_default().opacity(0.35))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .when(active, |el| el.bg(crate::theme::wash(0.10)))
+        .when(enabled, |el| {
+            el.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
+        })
+        .child(text)
+        .when(super::is_area(theme), |el| {
+            el.rounded_full()
+                .when(active, |el| el.bg(theme.accent_wash))
+        });
+    super::segmented_key(button, theme, active)
+}
+
+pub(crate) fn artifact_option_row(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    let row = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .px(px(10.0))
+        .py(px(6.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full().bg(theme.accent_wash)
+        });
+    super::segmented_key(row, theme, false)
+}
+
+pub(crate) fn artifact_metadata_chip(text: String, color: gpui::Hsla, theme: &Theme) -> AnyElement {
+    let chip = div()
+        .flex_none()
+        .px(px(5.0))
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(3.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(color)
+        .child(SharedString::from(text))
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(chip, theme, false).into_any_element()
+}

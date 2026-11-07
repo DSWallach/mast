@@ -20,7 +20,6 @@ use gpui::{
 use super::{ArtifactTab, Presenter};
 use crate::artifacts::find::{FrameCommand, command_script};
 use crate::artifacts::zoom::{self, ZoomInput, ZoomMemory};
-use crate::surface_chrome;
 use crate::theme::Theme;
 
 /// Padding around a zoomed image.

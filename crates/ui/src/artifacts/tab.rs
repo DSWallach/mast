@@ -1389,19 +1389,7 @@ impl ArtifactTab {
                 let rows = manifest.options.iter().map(|option| {
                     let path = option.path.clone();
                     let selector = format!("artifact-option-{}", option.id);
-                    div()
-                        .id(SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .cursor_pointer()
-                        .hover(|el| el.bg(theme.element_hover))
+                    crate::components::browser_parts::artifact_option_row(SharedString::from(selector), theme)
                         .child(
                             div()
                                 .flex_none()
@@ -1727,16 +1715,7 @@ fn default_renderer() -> Option<Rc<dyn ArtifactRenderer>> {
 }
 
 fn chip(text: String, color: gpui::Hsla, theme: &Theme) -> AnyElement {
-    div()
-        .flex_none()
-        .px(px(5.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(theme.border)
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(color)
-        .child(SharedString::from(text))
-        .into_any_element()
+    crate::components::browser_parts::artifact_metadata_chip(text, color, theme)
 }
 
 fn render_key(cx: &App) -> (FragmentTheme, bool) {
