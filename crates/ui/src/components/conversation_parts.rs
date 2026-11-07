@@ -1459,15 +1459,8 @@ pub fn conversation_send_key(
 pub fn conversation_code_theme(theme: &Theme) -> Theme {
     let mut result = theme.clone();
     if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-        let panel = if theme.appearance.is_dark() {
-            theme.surface_raised
-        } else {
-            theme.solid
-        };
-        result.bg = panel;
-        result.text = theme.identity_text(panel);
-        result.text_muted = result.text;
-        result.text_faint = result.text;
+        result.bg = theme.surface_raised;
+        result.text = theme.text_muted;
     }
     result
 }
