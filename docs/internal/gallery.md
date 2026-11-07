@@ -1,25 +1,30 @@
 # Mast gallery
 
-From the Mast repository, run `cargo run -p mast-gallery`. The gallery starts
-with default settings in a temporary directory and does not bootstrap an engine.
-It does not load the installed app's settings or data. The temporary directory
-is removed when the process exits.
+From the Mast repository, start the watcher with:
 
-Choose a style in the toolbar or press 1–9; press L or D for light or dark, and T to cycle through every built-in theme for that appearance (e.g. Industrial Light/Dark).
-The left rail selects the story. Controls uses Mast button, toggle, badge and
-menu primitives, the composer input, and a message badge. Chat mounts the real
-transcript and composer on an in-memory app state with fixture messages.
-Settings → Appearance mounts the real Appearance page.
+```sh
+./scripts/gallery-watch.sh
+```
 
-The chat sidebar, Work outline with item details, and PR walkthrough are static
-fixture stubs: their real views are coupled to shell state and RPC-backed review
-loading. Their controls do not implement the real views' behavior. The icon button, tabs, status dots, sidebar rows and outline rows are
-illustrative fixtures rather than the actual production controls.
+It builds `mast-gallery`, opens it, and watches `crates/ui/src` and
+`apps/mast-gallery`. After a successful incremental rebuild it restarts the
+window. A failed build leaves the previous window running and retries on the
+next edit. Press Ctrl-C in the terminal to stop the watcher and gallery. Python
+3 and the Rust toolchain are required. `CARGO_TARGET_DIR` is respected.
 
-The style list comes from the shared registry;
-`gallery_styles()` returns `UiStyleId::ALL`, so new looks appear automatically.
-Side-by-side comparison is deferred: Mast's style is a process-global value, so
-it needs a scoped style override to render multiple styles at once.
+The watcher keeps the selected story, style, layout, light/dark mode and theme
+in a temporary file for the lifetime of the watcher. The gallery uses temporary
+settings and fixture data; it does not connect to the engine or read the
+installed app's data. Running `cargo run -p mast-gallery` directly also works,
+but does not retain selections between launches unless `MAST_GALLERY_STATE`
+points to a writable state file.
 
-Agents must not run the gallery. Build with `cargo build -p mast-gallery` and
-run `cargo test -p mast-gallery -- --test-threads=1` for headless story rendering.
+Select a component in the left rail to compare its states in Default,
+Industrial and Area columns. Layout buttons (or Shift-1 through Shift-3)
+select Minimal, Compact and Guided. L and D choose light and dark, and T cycles
+through built-in themes. The 1–3 keys select the style for the full-screen
+fixtures. The chat story mounts the real transcript and composer with in-memory
+messages; the work outline and walkthrough remain fixture compositions.
+
+Agents must not launch the gallery. Run `cargo test -p mast-gallery --
+--test-threads=1` to exercise the stories headlessly.

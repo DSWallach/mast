@@ -37,6 +37,109 @@ const STORIES: [(Story, &str); 5] = [
     (Story::Appearance, "Settings → Appearance"),
 ];
 
+struct GalleryState {
+    story: Story,
+    style: ui_style::UiStyleId,
+    layout: ui_style::UiLayout,
+    dark: bool,
+    themes: mast_theme::ThemeSelection,
+}
+
+impl GalleryState {
+    fn load() -> Self {
+        Self::load_from(
+            std::env::var_os("MAST_GALLERY_STATE")
+                .as_deref()
+                .map(std::path::Path::new),
+        )
+    }
+
+    fn load_from(path: Option<&std::path::Path>) -> Self {
+        let settings = settings::UiSettings::default();
+        let mut result = Self {
+            story: Story::Controls,
+            style: settings.ui_style,
+            layout: settings.ui_layout,
+            dark: false,
+            themes: settings.theme_selection,
+        };
+        let Some(path) = path else {
+            return result;
+        };
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return result;
+        };
+        for line in contents.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "story" => {
+                    if let Some(&(story, _)) = STORIES.iter().find(|(_, label)| *label == value) {
+                        result.story = story;
+                    }
+                    if let Some(&(story, _)) =
+                        stories::STORIES.iter().find(|(_, label)| *label == value)
+                    {
+                        result.story = Story::Component(story);
+                    }
+                }
+                "style" => {
+                    if let Some(&style) =
+                        ui_style::UiStyleId::ALL.iter().find(|s| s.label() == value)
+                    {
+                        result.style = style;
+                    }
+                }
+                "layout" => {
+                    if let Some(&layout) =
+                        ui_style::UiLayout::ALL.iter().find(|l| l.label() == value)
+                    {
+                        result.layout = layout;
+                    }
+                }
+                "dark" => result.dark = value == "true",
+                "light_theme" => result.themes.light = value.to_owned(),
+                "dark_theme" => result.themes.dark = value.to_owned(),
+                _ => {}
+            }
+        }
+        result
+    }
+
+    fn save(&self) {
+        let Some(path) = std::env::var_os("MAST_GALLERY_STATE") else {
+            return;
+        };
+        if let Err(error) = self.save_to(std::path::Path::new(&path)) {
+            eprintln!("Cannot save gallery state: {error}");
+        }
+    }
+
+    fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let label = match self.story {
+            Story::Component(story) => stories::STORIES
+                .iter()
+                .find(|(s, _)| *s == story)
+                .map(|(_, label)| *label),
+            story => STORIES
+                .iter()
+                .find(|(s, _)| *s == story)
+                .map(|(_, label)| *label),
+        }
+        .unwrap_or("Controls");
+        let contents = format!(
+            "story={label}\nstyle={}\nlayout={}\ndark={}\nlight_theme={}\ndark_theme={}\n",
+            self.style.label(),
+            self.layout.label(),
+            self.dark,
+            self.themes.light,
+            self.themes.dark
+        );
+        std::fs::write(path, contents)
+    }
+}
+
 fn gallery_styles() -> &'static [ui_style::UiStyleId] {
     ui_style::UiStyleId::ALL
 }
@@ -63,6 +166,17 @@ fn apply_themes(
 }
 
 impl Gallery {
+    fn save_state(&self, cx: &App) {
+        let style = ui_style::current(cx);
+        GalleryState {
+            story: self.story,
+            style: style.id,
+            layout: style.layout,
+            dark: self.dark,
+            themes: self.themes.clone(),
+        }
+        .save();
+    }
     fn mode(&self) -> appearance::AppearanceMode {
         if self.dark {
             appearance::AppearanceMode::Dark
@@ -74,6 +188,7 @@ impl Gallery {
     fn set_dark(&mut self, dark: bool, cx: &mut App) {
         self.dark = dark;
         apply_themes(self.mode(), self.themes.clone(), cx);
+        self.save_state(cx);
     }
 
     /// Cycles the active appearance through every built-in theme variant.
@@ -97,6 +212,7 @@ impl Gallery {
             .map_or(0, |ix| (ix + 1) % ids.len());
         self.themes.set_variant(appearance, ids[next].clone());
         apply_themes(self.mode(), self.themes.clone(), cx);
+        self.save_state(cx);
     }
 
     fn theme_label(&self) -> String {
@@ -161,6 +277,7 @@ impl Render for Gallery {
                         }
                     }
                 }
+                this.save_state(cx);
                 cx.notify();
             }))
             .child(
@@ -190,6 +307,7 @@ impl Render for Gallery {
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.story = story;
+                                        this.save_state(cx);
                                         cx.notify();
                                     }))
                                     .child(label)
@@ -207,6 +325,7 @@ impl Render for Gallery {
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.story = Story::Component(story);
+                                    this.save_state(cx);
                                     cx.notify();
                                 }))
                                 .child(label)
@@ -235,8 +354,9 @@ impl Render for Gallery {
                                         .rounded(px(4.))
                                         .bg(theme.surface_raised)
                                         .cursor_pointer()
-                                        .on_click(cx.listener(move |_, _, window, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             switch_style(id, window, cx);
+                                            this.save_state(cx);
                                             cx.notify();
                                         }))
                                         .child(format!("{} {:?}", index + 1, id))
@@ -247,10 +367,11 @@ impl Render for Gallery {
                                     div()
                                         .id(("layout", index))
                                         .cursor_pointer()
-                                        .on_click(cx.listener(move |_, _, window, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             ui_style::set_layout_in_memory(layout, cx);
                                             window
                                                 .set_rem_size(px(typography::effective_rem_px(cx)));
+                                            this.save_state(cx);
                                             cx.notify();
                                         }))
                                         .child(format!("⇧{} {}", index + 1, layout.label()))
@@ -448,6 +569,7 @@ impl Render for Gallery {
 
 fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
     use mast_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+    let saved = GalleryState::load();
     let state = cx.new(|_| {
         let mut state = mast_ui::state::AppState::new();
         let entry = |id: &str, role, text: &str| SessionMessageEntry {
@@ -467,22 +589,23 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
             mast_ui::transcript::Transcript::for_doc(state.clone(), "gallery".into(), false, cx)
         }),
         composer: cx.new(|cx| mast_ui::composer::Composer::new(state.clone(), cx)),
-        story: Story::Controls,
+        story: saved.story,
         appearance_page: cx.new(settings::appearance::AppearancePage::new),
         toggled: false,
         menu_open: false,
         tab: 0,
-        dark: false,
-        themes: settings::current(cx).theme_selection,
+        dark: saved.dark,
+        themes: saved.themes,
     }
 }
 
 fn init(cx: &mut App, data_dir: &std::path::Path) {
     gpui_base::init(cx);
     let settings = settings::UiSettings::default();
+    let saved = GalleryState::load();
     settings::init(settings.clone(), data_dir, cx);
     let fonts = typography::register_fonts(cx);
-    ui_style::init(settings.ui_style, cx);
+    ui_style::init_with_layout(saved.style, saved.layout, cx);
     mast_ui::composer::init(cx, settings.composer_send_behavior);
     typography::init(
         settings.ui_font_family,
@@ -495,8 +618,12 @@ fn init(cx: &mut App, data_dir: &std::path::Path) {
         cx,
     );
     appearance::init(
-        settings.appearance,
-        settings.theme_selection,
+        if saved.dark {
+            appearance::AppearanceMode::Dark
+        } else {
+            appearance::AppearanceMode::Light
+        },
+        saved.themes,
         settings.accent,
         settings.surface,
         cx,
@@ -524,6 +651,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gallery_state_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let mut state = GalleryState::load_from(None);
+        state.story = Story::Component(stories::Story::Code);
+        state.style = ui_style::UiStyleId::Area;
+        state.layout = ui_style::UiLayout::Guided;
+        state.dark = true;
+        state.themes.light = "github-light".into();
+        state.themes.dark = "github-dark".into();
+        state.save_to(&path).unwrap();
+        let restored = GalleryState::load_from(Some(&path));
+        assert!(restored.story == state.story);
+        assert_eq!(restored.style, state.style);
+        assert_eq!(restored.layout, state.layout);
+        assert_eq!(restored.dark, state.dark);
+        assert_eq!(restored.themes.light, state.themes.light);
+        assert_eq!(restored.themes.dark, state.themes.dark);
+    }
 
     #[gpui::test]
     fn views_render_independent_styles(cx: &mut gpui::TestAppContext) {
