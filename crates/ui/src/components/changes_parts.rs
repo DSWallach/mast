@@ -3,6 +3,63 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn changes_selector<T: Styled + ParentElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+) -> T {
+    let element = super::segmented_key(element, theme, false);
+    element.when(super::is_area(theme), |element| {
+        element.rounded_full().bg(theme.accent.opacity(0.10))
+    })
+}
+
+pub(crate) fn file_search_row<T: Styled + StatefulInteractiveElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    selected: bool,
+) -> T {
+    let element = element
+        .when(selected, |element| element.bg(crate::theme::wash(0.1)))
+        .when(!selected, |element| {
+            element.hover(|style| style.bg(crate::theme::wash(0.055)))
+        });
+    element
+        .when(super::is_industrial(theme) && selected, |element| {
+            element
+                .bg(theme.surface_raised)
+                .border_l_2()
+                .border_color(theme.accent)
+        })
+        .when(super::is_area(theme), |element| {
+            element
+                .rounded_full()
+                .when(selected, |element| element.bg(theme.accent.opacity(0.16)))
+        })
+}
+
+pub(crate) fn changes_file_row<T: Styled + StatefulInteractiveElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+) -> T {
+    let hover = theme.element_hover;
+    element
+        .hover(move |style| style.bg(hover))
+        .when(super::is_industrial(theme), |element| {
+            element.border_b_1().border_color(theme.border)
+        })
+        .when(super::is_area(theme), |element| element.rounded_full())
+}
+
+pub(crate) fn changes_file_list<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .when(super::is_industrial(theme), |element| {
+            element.bg(theme.surface)
+        })
+        .when(super::is_area(theme), |element| {
+            element.bg(theme.accent.opacity(0.06))
+        })
+}
+
 pub(crate) fn file_reveal<T: Styled + InteractiveElement>(
     element: T,
     theme: &Theme,

@@ -493,7 +493,7 @@ impl Changes {
                                 .px(px(6.0))
                                 .py(px(4.0))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(theme.element_hover))
+                                .when(true, |element| crate::components::changes_file_row(element, theme))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.jump_to_file(index, cx);
                                     window.focus(&this.diff_focus, cx);
@@ -552,6 +552,7 @@ impl Changes {
             .flex_col()
             .border_r_1()
             .border_color(theme.border)
+            .when(true, |element| crate::components::changes_file_list(element, theme))
             .child(popover::search_input_frame(
                 theme,
                 self.file_filter.clone().into_any_element(),

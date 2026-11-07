@@ -5177,6 +5177,7 @@ impl Changes {
                 crate::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("changes-scope-trigger"))
+            .when(true, |element| crate::components::changes_selector(element, &theme))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -5434,6 +5435,7 @@ impl Changes {
                 crate::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-ref-trigger"))
+            .when(true, |element| crate::components::changes_selector(element, theme))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
