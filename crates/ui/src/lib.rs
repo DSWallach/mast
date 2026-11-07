@@ -32,6 +32,7 @@ mod comment_ui;
 pub mod comments;
 pub mod composer;
 pub mod components;
+pub mod stories;
 #[cfg(test)]
 mod component_lint;
 mod composer_dock;
