@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, ObjectFit, Render, SharedString, StyledImage as _, Subscription, Window, div,
+    KeyDownEvent,  Render, SharedString, StyledImage as _, Subscription, Window, div,
     img, prelude::*, px,
 };
 use mast_theme::vscode::{ImportReport, SourceCompilation};
@@ -2032,30 +2032,7 @@ impl AppearancePage {
                                 .items_center()
                                 .gap(px(9.0))
                                 .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "theme-import-select-{variant_id}"
-                                        )))
-                                        .size(px(18.0))
-                                        .rounded(px(5.0))
-                                        .border_1()
-                                        .border_color(if selected_now {
-                                            theme.accent
-                                        } else {
-                                            theme.border_strong
-                                        })
-                                        .bg(if selected_now { theme.accent } else { theme.bg })
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .when(selected_now, |item| {
-                                            item.child(
-                                                icons::icon(icons::CHECK)
-                                                    .size(px(12.0))
-                                                    .text_color(theme.on_accent),
-                                            )
-                                        })
+                                    crate::components::settings_theme_import_checkbox(theme, SharedString::from(format!("theme-import-select-{variant_id}")), selected_now)
                                         .on_click(cx.listener({
                                             let variant_id = variant_id.clone();
                                             move |this, _, _, cx| {
@@ -2832,20 +2809,7 @@ impl Render for AppearancePage {
         let background_tile: AnyElement = if let Some(background) =
             current_background.as_ref().filter(|_| background_available)
         {
-            div()
-                .flex_none()
-                .size(px(36.0))
-                .rounded(px(10.0))
-                .overflow_hidden()
-                .border_1()
-                .border_color(crate::theme::hairline(0.10))
-                .child(
-                    img(PathBuf::from(background.path.clone()))
-                        .size(px(34.0))
-                        .rounded(px(9.0))
-                        .object_fit(ObjectFit::Cover),
-                )
-                .into_any_element()
+            crate::components::settings_background_thumbnail(&theme, PathBuf::from(background.path.clone())).into_any_element()
         } else {
             widgets::row_tile(&theme, icons::FILE_IMAGE).into_any_element()
         };

@@ -1088,3 +1088,54 @@ pub(crate) fn settings_warning_strip(theme: &Theme, message: impl Into<SharedStr
         )
         .child(div().min_w_0().child(message.into()))
 }
+
+/// Theme import selection checkbox.
+pub(crate) fn settings_theme_import_checkbox(
+    theme: &Theme,
+    id: SharedString,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .size(px(18.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(5.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .border_1()
+        .when(super::is_industrial(theme), |el| el.border_b_2())
+        .border_color(if selected {
+            theme.accent
+        } else {
+            theme.border_strong
+        })
+        .bg(if selected { theme.accent } else { theme.bg })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .when(selected, |item| {
+            item.child(
+                crate::icons::icon(crate::icons::CHECK)
+                    .size(px(12.0))
+                    .text_color(theme.on_accent),
+            )
+        })
+}
+/// Thumbnail of the selected composer background.
+pub(crate) fn settings_background_thumbnail(theme: &Theme, path: std::path::PathBuf) -> gpui::Div {
+    let radius = theme.ui_style.radius_roles().control;
+    div()
+        .flex_none()
+        .size(px(36.0))
+        .rounded(px(radius.unwrap_or(10.0)))
+        .when(super::is_area(theme), |el| el.rounded_full())
+        .overflow_hidden()
+        .border_1()
+        .border_color(crate::theme::hairline(0.10))
+        .child(
+            gpui::img(path)
+                .size(px(34.0))
+                .rounded(px(radius.unwrap_or(9.0)))
+                .when(super::is_area(theme), |el| el.rounded_full())
+                .object_fit(gpui::ObjectFit::Cover),
+        )
+}
