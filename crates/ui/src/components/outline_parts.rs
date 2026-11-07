@@ -446,7 +446,12 @@ pub fn outline_details_frame(theme: &Theme) -> Stateful<Div> {
         .when(super::is_industrial(theme), |el| {
             el.border_l_2().border_color(theme.industrial_colors().rule)
         })
-        .bg(theme.surface)
+        .bg(if super::is_area(theme) {
+            theme.bg
+        } else {
+            theme.surface
+        })
+        .when(super::is_area(theme), |el| el.border_color(theme.bg))
 }
 
 /// Scrollable item-details body.
@@ -2098,7 +2103,12 @@ pub fn outline_required_panel(theme: &Theme) -> Stateful<Div> {
         .flex_col()
         .border_l_1()
         .border_color(theme.border)
-        .bg(theme.surface)
+        .bg(if super::is_area(theme) {
+            theme.bg
+        } else {
+            theme.surface
+        })
+        .when(super::is_area(theme), |el| el.border_color(theme.bg))
         .when(super::is_industrial(theme), |el| {
             el.border_l_2().border_color(theme.industrial_colors().rule)
         })

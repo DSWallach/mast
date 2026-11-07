@@ -356,6 +356,9 @@ pub(crate) fn chat_header_title(theme: &Theme, title: String) -> gpui::Div {
     div()
         .debug_selector(|| "chat-header-title".into())
         .min_w_0()
+        .when(super::is_area(theme), |el| {
+            el.bg(theme.bg).border_color(theme.bg)
+        })
         .truncate()
         .text_size(crate::typography::ui_rems(
             theme.ui_style.tokens.title_size.unwrap_or(15.0),
@@ -536,7 +539,13 @@ pub(crate) fn sidebar_frame(
         .w(px(width))
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
-            |el| el.bg(theme.surface),
+            |el| {
+                el.bg(if super::is_area(theme) {
+                    theme.bg
+                } else {
+                    theme.surface
+                })
+            },
         )
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
@@ -730,7 +739,12 @@ pub(crate) fn sidebar_tone(theme: &Theme, width: f32, corner: f32) -> gpui::Div 
             |el| el.bg(theme.surface),
         )
         .border_r_1()
-        .border_color(theme.border)
+        .border_color(if super::is_area(theme) {
+            theme.bg
+        } else {
+            theme.border
+        })
+        .when(super::is_area(theme), |el| el.bg(theme.bg))
 }
 
 pub(crate) fn titlebar_overlay(theme: &Theme, title_bar: AnyElement) -> gpui::Div {
@@ -741,7 +755,13 @@ pub(crate) fn titlebar_overlay(theme: &Theme, title_bar: AnyElement) -> gpui::Di
         .right_0()
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
-            |el| el.bg(theme.surface),
+            |el| {
+                el.bg(if super::is_area(theme) {
+                    theme.bg
+                } else {
+                    theme.surface
+                })
+            },
         )
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
