@@ -845,6 +845,7 @@ impl Render for Walkthrough {
                                 div()
                                     .id("review-previous-step")
                                     .cursor_pointer()
+                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                     .child("Previous")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.move_step(false, cx)),
@@ -854,6 +855,7 @@ impl Render for Walkthrough {
                                 div()
                                     .id("review-next-step")
                                     .cursor_pointer()
+                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                     .child("Next")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.move_step(true, cx)),
@@ -961,6 +963,7 @@ impl Render for Walkthrough {
                                 div()
                                     .id("review-step-ask")
                                     .cursor_pointer()
+                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                     .child("Ask")
                                     .on_click(cx.listener(|this, _, _, cx| this.ask_step(cx))),
                             ),
@@ -999,6 +1002,7 @@ impl Render for Walkthrough {
                             div()
                                 .id("review-step-open-chat")
                                 .cursor_pointer()
+                                .when(true, |el| crate::components::review_text_action(el, &theme))
                                 .child("Open in chat")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(changes) = &this.changes {
@@ -1013,6 +1017,7 @@ impl Render for Walkthrough {
                         div()
                             .id("review-step-close")
                             .cursor_pointer()
+                            .when(true, |el| crate::components::review_text_action(el, &theme))
                             .child(if waiting { "Cancel" } else { "Close" })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.cancel_step_question();

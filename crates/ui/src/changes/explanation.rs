@@ -491,6 +491,7 @@ impl Changes {
                         div()
                             .id("explanation-open-chat")
                             .cursor_pointer()
+                            .when(true, |el| crate::components::review_text_action(el, theme))
                             .child("Open in chat")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_explanation_chat(chat_id.clone(), cx);
@@ -501,6 +502,7 @@ impl Changes {
                     div()
                         .id("explanation-close")
                         .cursor_pointer()
+                        .when(true, |el| crate::components::review_text_action(el, theme))
                         .child(if matches!(status, ExplanationPanel::Waiting { .. }) {
                             "Cancel"
                         } else {

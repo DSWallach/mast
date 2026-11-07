@@ -3,6 +3,23 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn review_text_action<T: Styled + ParentElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+) -> T {
+    let element = element.when(super::is_industrial(theme), |element| {
+        element.px(px(8.0)).py(px(4.0))
+    });
+    let element = super::segmented_key(element, theme, false);
+    element.when(super::is_area(theme), |element| {
+        element
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded_full()
+            .bg(theme.accent.opacity(0.10))
+    })
+}
+
 pub(crate) fn changes_revision_label<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element
         .rounded(px(theme

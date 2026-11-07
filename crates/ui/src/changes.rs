@@ -4384,6 +4384,7 @@ impl Changes {
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
                         .text_size(px(10.0)).text_color(theme.text_muted)
+                        .when(true, |el| crate::components::review_text_action(el, &theme))
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
                         .child(label))
                     .into_any_element()

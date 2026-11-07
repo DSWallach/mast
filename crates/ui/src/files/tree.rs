@@ -333,7 +333,7 @@ impl FilesSurface {
                 .items_center()
                 .gap(px(6.0))
                 .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::wash(0.055)))
+                .when(true, |element| crate::components::file_tree_row(element, &theme, false, false))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let cursor = this
                         .tree
@@ -363,7 +363,7 @@ impl FilesSurface {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::wash(0.055)))
+                .when(true, |element| crate::components::file_tree_row(element, &theme, false, false))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.load_directory(directory.clone(), Some(cursor.clone()), cx);
                 }))
