@@ -26,15 +26,17 @@ enum Story {
     Outline,
     Walkthrough,
     Appearance,
+    Board,
     Component(stories::Story),
 }
 
-const STORIES: [(Story, &str); 5] = [
+const STORIES: [(Story, &str); 6] = [
     (Story::Controls, "Controls"),
     (Story::Chat, "Chat"),
     (Story::Outline, "Work outline"),
     (Story::Walkthrough, "PR walkthrough"),
     (Story::Appearance, "Settings → Appearance"),
+    (Story::Board, "Board"),
 ];
 
 struct GalleryState {
@@ -429,6 +431,9 @@ impl Render for Gallery {
                     .when(self.story == Story::Appearance, |el| {
                         el.child(self.appearance_page.clone())
                     })
+                    .when(self.story == Story::Board, |el| {
+                        el.child(stories::board(theme))
+                    })
                     .when_some(
                         match self.story {
                             Story::Component(story) => Some(story),
@@ -651,6 +656,49 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "macos", feature = "snapshot"))]
+    #[test]
+    #[ignore = "requires Metal and macOS services"]
+    fn render_gallery_snapshots() {
+        struct Snapshot(Story);
+        impl Render for Snapshot {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx);
+                div()
+                    .size_full()
+                    .p(px(16.))
+                    .bg(theme.surface)
+                    .text_color(theme.text)
+                    .child(match self.0 {
+                        Story::Component(story) => stories::grid(story, theme).into_any_element(),
+                        Story::Board => stories::board(theme).into_any_element(),
+                        _ => div().into_any_element(),
+                    })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for (name, story) in [
+            ("gallery-buttons", Story::Component(stories::Story::Button)),
+            (
+                "gallery-outline",
+                Story::Component(stories::Story::OutlineRow),
+            ),
+            ("gallery-board", Story::Board),
+        ] {
+            mast_ui::snapshot::render_to_png(
+                name,
+                gpui::size(px(2200.), px(800.)),
+                ui_style::UiStyleId::Default,
+                mast_ui::theme::Appearance::Light,
+                |_, cx| {
+                    init(cx, dir.path());
+                    cx.new(|_| Snapshot(story))
+                },
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn gallery_state_survives_restart() {

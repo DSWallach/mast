@@ -172,6 +172,67 @@ pub fn grid(story: Story, theme: &Theme) -> impl IntoElement {
         }))
 }
 
+/// A fixture-only status board composed from the outline's actual row and card chrome.
+pub fn board(theme: &Theme) -> impl IntoElement {
+    let layout = theme.ui_style.layout;
+    div()
+        .id("board-comparison")
+        .overflow_x_scroll()
+        .flex()
+        .gap(px(16.))
+        .children(
+            UiStyleId::ALL
+                .iter()
+                .enumerate()
+                .map(|(style_index, &style)| {
+                    let view = ui_style::theme_for_view(theme, style, layout);
+                    let lanes: [(&str, &[&str]); 4] = [
+                        ("Needs you", &["Review the design", "Choose a theme"]),
+                        ("Running", &["Build the gallery", "Check component states"]),
+                        ("Ready", &["Review the watcher"]),
+                        ("Done", &["Audit shared controls", "Add fixtures"]),
+                    ];
+                    div()
+                        .w(px(700.))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.))
+                        .child(div().text_color(view.text).child(style.label()))
+                        .child(div().flex().gap(px(8.)).children(
+                            lanes.into_iter().enumerate().map(|(lane, (name, items))| {
+                                let color = match lane {
+                                    0 => view.warning,
+                                    1 => view.accent,
+                                    2 => view.success,
+                                    _ => view.text_muted,
+                                };
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.))
+                                    .child(c::outline_lane_heading(
+                                        name.to_owned(),
+                                        color,
+                                        0,
+                                        &view,
+                                    ))
+                                    .children(items.iter().enumerate().map(|(index, title)| {
+                                        let id = format!("board-{style_index}-{lane}-{index}");
+                                        c::outline_approval_card(id.clone(), &view).p(px(6.)).child(
+                                            c::outline_row(id.into(), 38., 4., &view).child(
+                                                div().min_w_0().overflow_hidden().child(*title),
+                                            ),
+                                        )
+                                    }))
+                            }),
+                        ))
+                }),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
