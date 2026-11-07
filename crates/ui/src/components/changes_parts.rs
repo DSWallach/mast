@@ -398,15 +398,24 @@ pub(crate) fn walkthrough_hints<T: FluentBuilder>(
 }
 
 pub(crate) fn walkthrough_note_more<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    element.when(super::is_industrial(theme), |element| {
-        element
-            .px(px(8.0))
-            .py(px(4.0))
-            .bg(theme.surface_raised)
-            .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
-            .border_1()
-            .border_color(theme.border)
-    })
+    element
+        .when(super::is_industrial(theme), |element| {
+            element
+                .px(px(8.0))
+                .py(px(4.0))
+                .bg(theme.surface_raised)
+                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+                .border_1()
+                .border_color(theme.border)
+        })
+        .when(super::is_area(theme), |element| {
+            element
+                .self_start()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded_full()
+                .bg(theme.accent.opacity(0.10))
+        })
 }
 
 pub(crate) fn walkthrough_note_more_visible(
@@ -504,14 +513,14 @@ pub(crate) fn walkthrough_review_action<T: Styled + ParentElement + FluentBuilde
     let element = crate::surface_chrome::segmented_key(element, theme, reviewed);
     element
         .when(!reviewed && industrial, |element| {
-            let foreground = if crate::theme::contrast_ratio(theme.text, theme.success)
-                >= crate::theme::contrast_ratio(theme.bg, theme.success)
+            let foreground = if crate::theme::contrast_ratio(theme.text, theme.accent)
+                >= crate::theme::contrast_ratio(theme.bg, theme.accent)
             {
                 theme.text
             } else {
                 theme.bg
             };
-            element.bg(theme.success).text_color(foreground)
+            element.bg(theme.accent).text_color(foreground)
         })
         .when(super::is_area(theme), |element| {
             element
