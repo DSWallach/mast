@@ -744,20 +744,15 @@ mod tests {
             settings::init(Default::default(), directory.path(), cx);
         });
         let window = cx.add_window(|_, cx| DesignPanel::new(cx));
-        window
-            .update(cx, |panel, window, cx| {
-                let _ = panel.render(window, cx).into_any_element();
-            })
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
         cx.update(|cx| {
             settings::update(SavePolicy::Immediate, cx, |settings| {
                 settings.developer_design_enabled = true
             });
         });
-        window
-            .update(cx, |panel, window, cx| {
-                let _ = panel.render(window, cx).into_any_element();
-            })
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
     }
 }
