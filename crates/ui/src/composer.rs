@@ -8189,7 +8189,11 @@ impl Render for Composer {
                     route_snap,
                 )
             };
-        let expanded = crate::components::conversation_composer_expanded(&theme, self.expanded_mode);
+        let expanded = crate::components::conversation_composer_expanded(
+            &theme,
+            self.expanded_mode,
+            self.surface_bounds.get().map(|bounds| f32::from(bounds.size.width)),
+        );
 
         // Chat-scoped failures render only under their own chat; a global
         // failure (no key) renders everywhere.

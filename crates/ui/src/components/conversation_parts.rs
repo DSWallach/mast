@@ -1322,8 +1322,10 @@ pub fn conversation_composer_content_height(theme: &Theme, content: f32, line: f
     }
 }
 
-pub fn conversation_composer_expanded(theme: &Theme, expanded: bool) -> bool {
+pub fn conversation_composer_expanded(theme: &Theme, expanded: bool, width: Option<f32>) -> bool {
     expanded || theme.ui_style.conversation == ConversationVariant::Area
+        || (theme.ui_style.conversation == ConversationVariant::Industrial
+            && width.is_some_and(|width| width < 500.0))
 }
 
 pub fn conversation_composer_text_size(theme: &Theme, size: f32) -> f32 {
@@ -1388,14 +1390,17 @@ mod tests {
     fn area_composer_has_three_lines_and_matches_conversation_width() {
         let mut theme = Theme::light();
         theme.ui_style = crate::ui_style::UiStyle::AREA;
-        assert!(conversation_composer_expanded(&theme, false));
+        assert!(conversation_composer_expanded(&theme, false, None));
         assert_eq!(
             conversation_composer_content_height(&theme, 22.0, 22.0),
             66.0
         );
         assert_eq!(conversation_composer_width(&theme, 768.0, 16.0), 752.0);
         theme.ui_style = crate::ui_style::UiStyle::MINIMAL;
-        assert!(!conversation_composer_expanded(&theme, false));
+        assert!(!conversation_composer_expanded(&theme, false, Some(400.0)));
+        theme.ui_style = crate::ui_style::UiStyle::INDUSTRIAL;
+        assert!(conversation_composer_expanded(&theme, false, Some(400.0)));
+        assert!(!conversation_composer_expanded(&theme, false, Some(600.0)));
         assert_eq!(
             conversation_composer_content_height(&theme, 22.0, 22.0),
             22.0
