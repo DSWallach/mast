@@ -370,10 +370,8 @@ impl Changes {
                                             div()
                                                 .flex_none()
                                                 .px(px(5.0))
-                                                .rounded(px(4.0))
-                                                .bg(theme.accent.opacity(0.14))
+                                                .when(true, |el| crate::components::changes_suggested_badge(el, theme))
                                                 .text_size(px(9.5))
-                                                .text_color(theme.accent)
                                                 .child("suggested"),
                                         )
                                     })

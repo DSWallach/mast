@@ -3,6 +3,17 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn changes_suggested_badge<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))
+        .bg(theme.accent.opacity(0.14))
+        .text_color(theme.accent)
+        .when(super::is_industrial(theme), |element| {
+            element.border_1().border_color(theme.border)
+        })
+        .when(super::is_area(theme), |element| element.rounded_full())
+}
+
 pub(crate) enum FileCommentAction {
     Add,
     Remove,
