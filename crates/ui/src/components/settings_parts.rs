@@ -1034,3 +1034,57 @@ pub(crate) fn settings_theme_import_row(
         .flex()
         .flex_col()
 }
+
+pub(crate) fn settings_error_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div {
+    let red = theme.danger; // red-400
+    let red_text = theme.danger_muted; // red-300
+    div()
+        .mt(px(16.0))
+        .px(px(16.0))
+        .py(px(12.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(12.0)))
+        .border_1()
+        .border_color(red.opacity(0.2))
+        .bg(red.opacity(0.06))
+        .text_size(crate::typography::ui_rems(12.5))
+        .text_color(red_text.opacity(0.9))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(8.0))
+        .child(
+            div().flex_none().mt(px(2.0)).child(
+                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                    .size(px(16.0))
+                    .text_color(red_text.opacity(0.9)),
+            ),
+        )
+        .child(div().min_w_0().child(message.into()))
+}
+
+pub(crate) fn settings_warning_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div {
+    let amber = theme.warning; // amber-400
+    let amber_text = theme.warning_muted; // amber-200
+    div()
+        .mt(px(8.0))
+        .px(px(16.0))
+        .py(px(10.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(12.0)))
+        .border_1()
+        .border_color(amber.opacity(0.2))
+        .bg(amber.opacity(0.06))
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(amber_text.opacity(0.9))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(8.0))
+        .child(
+            div().flex_none().mt(px(2.0)).child(
+                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                    .size(px(14.0))
+                    .text_color(amber_text.opacity(0.9)),
+            ),
+        )
+        .child(div().min_w_0().child(message.into()))
+}
