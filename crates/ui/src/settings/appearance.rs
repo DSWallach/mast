@@ -1304,19 +1304,7 @@ fn compact_action(
     label: &str,
     id: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
-    let id = id.into();
-    popover::btn_ghost(theme, label, id.clone())
-        .id(id)
-        .h(px(28.0))
-        .px(px(9.0))
-        .py(px(0.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised.opacity(0.34))
-        .flex()
-        .items_center()
-        .text_size(crate::typography::ui_rems(11.5))
+    crate::components::settings_compact_action(theme, label, id)
 }
 
 fn import_scene_preview(variant: &mast_theme::ThemeVariant) -> AnyElement {
@@ -1486,71 +1474,7 @@ fn accent_swatch(
     selection: AccentSelection,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let swatch_theme = Theme::for_selection(
-        page_theme.appearance,
-        page_theme.variant_id.as_ref(),
-        selection,
-        page_theme.surface_preference,
-    );
-    let sample = match selection {
-        AccentSelection::ThemeDefault => div()
-            .size_full()
-            .rounded(px(6.0))
-            .bg(swatch_theme.accent_wash)
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(2.0))
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(13.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.light),
-            )
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(16.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.mid),
-            )
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(11.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.deep),
-            ),
-        AccentSelection::Preset(_) => div().size_full().rounded(px(6.0)).bg(swatch_theme.accent),
-    };
-    div()
-        .id(SharedString::from(format!("accent-{}", selection.label())))
-        .flex_none()
-        .w(px(30.0))
-        .h(px(34.0))
-        .pb(px(4.0))
-        .border_b_2()
-        .border_color(if selected {
-            swatch_theme.accent
-        } else {
-            gpui::transparent_black()
-        })
-        .cursor_pointer()
-        .child(
-            div()
-                .size(px(30.0))
-                .p(px(2.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(if selected {
-                    page_theme.border_strong
-                } else {
-                    page_theme.border
-                })
-                .bg(page_theme.surface_raised.opacity(0.42))
-                .child(sample),
-        )
+    crate::components::settings_accent_swatch(page_theme, selection, selected)
 }
 
 impl AppearancePage {
