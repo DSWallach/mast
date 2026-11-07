@@ -2015,6 +2015,7 @@ impl FilesSurface {
                                         .when(self.target_change_pending, |button| button.hidden())
                                         .ml_auto()
                                         .cursor_pointer()
+                                        .when(true, |el| crate::components::review_text_action(el, &theme))
                                         .text_color(theme.text)
                                         .child("Retry")
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2026,6 +2027,7 @@ impl FilesSurface {
                                         div()
                                             .id("files-keep-open")
                                             .cursor_pointer()
+                                            .when(true, |el| crate::components::review_text_action(el, &theme))
                                             .text_color(theme.text_muted)
                                             .child("Keep Open")
                                             .on_click(
@@ -2037,6 +2039,7 @@ impl FilesSurface {
                                     div()
                                         .id("files-discard-close-changes")
                                         .cursor_pointer()
+                                        .when(true, |el| crate::components::review_text_action(el, &theme))
                                         .text_color(theme.danger_muted)
                                         .child("Discard Changes")
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2084,6 +2087,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-keep-external-edits")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text_muted)
                                                     .child("Keep Editing")
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2094,6 +2098,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-reload-external")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text)
                                                     .child("Reload from Disk")
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2107,6 +2112,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-cancel-reload")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text_muted)
                                                     .child("Cancel")
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2117,6 +2123,7 @@ impl FilesSurface {
                                                 div()
                                                     .id("files-confirm-reload")
                                                     .cursor_pointer()
+                                                    .when(true, |el| crate::components::review_text_action(el, &theme))
                                                     .text_color(theme.text)
                                                     .child("Discard & Reload")
                                                     .on_click(cx.listener(|this, _, _, cx| {
