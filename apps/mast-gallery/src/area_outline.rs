@@ -68,7 +68,15 @@ const ITEMS: &[Item] = &[
                         chats: 2,
                         selected: false,
                         collapsed: true,
-                        children: &[],
+                        children: &[Item {
+                            title: "Review message spacing",
+                            status: "Ready",
+                            needs: 0,
+                            chats: 1,
+                            selected: false,
+                            collapsed: false,
+                            children: &[],
+                        }],
                     },
                 ],
             },
@@ -218,7 +226,7 @@ fn node(item: &Item, depth: usize, option: usize, theme: &Theme, key: String) ->
                     .child(format!("{} needs you", item.needs)),
             )
         });
-    let row = c::outline_row_selection(row, theme, item.selected);
+    let row = c::outline_row_selection(row, theme, item.selected).max_w(px(800.));
     let children =
         div()
             .flex()

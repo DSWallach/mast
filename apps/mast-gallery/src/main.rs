@@ -839,7 +839,13 @@ mod tests {
                 mast_ui::snapshot::render_to_png(
                     &format!("area-outline-{}-{appearance_name}", ["a", "b", "c"][option]),
                     gpui::size(px(900.), px(650.)), ui_style::UiStyleId::Area, appearance,
-                    |_, cx| { init(cx, dir.path(), dir.path()); cx.new(|_| Snapshot(option)) },
+                    |_, cx| {
+                        init(cx, dir.path(), dir.path());
+                        let themes = mast_theme::ThemeSelection { light: "area-light".into(), dark: "area-dark".into() };
+                        let mode = if appearance_name == "dark" { appearance::AppearanceMode::Dark } else { appearance::AppearanceMode::Light };
+                        apply_themes(mode, themes, cx);
+                        cx.new(|_| Snapshot(option))
+                    },
                 ).unwrap();
             }
         }
