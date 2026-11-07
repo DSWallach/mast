@@ -15291,7 +15291,11 @@ impl Shell {
 
     pub fn fixture_snapshot_item_panel(&mut self, cx: &mut Context<Self>) {
         self.active_chat = "fixture-chat".into();
-        self.open_item_tab(cx);
+        let key = self.panel_key(cx);
+        self.panels.update(&key, |panel| {
+            panel.changes_open = true;
+            panel.right_active = RightSurface::Item;
+        });
     }
 }
 
