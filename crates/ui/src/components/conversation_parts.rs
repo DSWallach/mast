@@ -13,7 +13,6 @@ fn conversation_industrial_icon_key<
 ) -> T {
     let colors = theme.industrial_colors();
     let fill = if signal { colors.signal } else { colors.key };
-    let ring = crate::theme::flatten(theme.text.opacity(0.18), fill);
     let pressed = if signal {
         gpui::hsla(fill.h, fill.s, fill.l * 0.8, fill.a)
     } else {
@@ -27,21 +26,13 @@ fn conversation_industrial_icon_key<
         .border_color(colors.rule)
         .relative()
         .active(move |style| style.bg(pressed))
-        .child(
-            div()
-                .absolute()
-                .inset(px(3.0))
-                .rounded(px((radius - 3.0).max(0.0)))
-                .border_1()
-                .border_color(ring),
-        )
 }
 
 pub fn conversation_picker_label(label: SharedString) -> Div {
     div().min_w_0().truncate().child(label)
 }
 
-pub fn conversation_picker_icon<T: gpui::Styled>(theme: &Theme, icon: T) -> T {
+pub fn conversation_picker_icon<T: gpui::Styled + gpui::prelude::FluentBuilder>(theme: &Theme, icon: T) -> T {
     icon.when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| el.flex_none())
 }
 
@@ -160,7 +151,11 @@ pub fn conversation_picker_trigger(
                 )
             },
         );
-    super::segmented_key(chip, theme, open)
+    if theme.ui_style.conversation == ConversationVariant::Industrial {
+        conversation_industrial_icon_key(chip, theme, false)
+    } else {
+        super::segmented_key(chip, theme, open)
+    }
 }
 
 pub fn conversation_picker_footer_chip(
@@ -225,6 +220,7 @@ pub fn conversation_picker_approval(
     let chip = div()
         .id(id)
         .h(px(20.0))
+        .when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| el.h(px(32.0)))
         .flex_none()
         .flex()
         .flex_row()
@@ -256,7 +252,11 @@ pub fn conversation_picker_approval(
                 label.to_string()
             },
         );
-    super::segmented_key(chip, theme, auto)
+    if theme.ui_style.conversation == ConversationVariant::Industrial {
+        conversation_industrial_icon_key(chip, theme, false)
+    } else {
+        super::segmented_key(chip, theme, auto)
+    }
 }
 
 pub fn conversation_picker_footer_label(
@@ -949,7 +949,16 @@ pub fn conversation_send_hint(
     (theme.ui_style.behavior.hints == crate::ui_style::HintMode::Inline
         && enabled
         && width >= 480.0)
-        .then(|| crate::work_outline::hints::kbd_chip(theme, shortcut))
+        .then(|| {
+            let hint = crate::work_outline::hints::kbd_chip(theme, shortcut);
+            if theme.ui_style.conversation == ConversationVariant::Industrial {
+                hint.h(px(32.0)).min_w(px(32.0)).flex().items_center().justify_center()
+                    .rounded(px(4.0)).border_1().border_color(theme.industrial_colors().rule)
+                    .bg(theme.industrial_colors().key)
+            } else {
+                hint
+            }
+        })
 }
 
 pub struct ConversationComposerBody {
@@ -1279,6 +1288,7 @@ pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
     div()
         .id("composer-attach")
         .size(px(28.0))
+        .when(theme.ui_style.conversation == ConversationVariant::Industrial, |el| el.size(px(32.0)))
         .flex_none()
         .flex()
         .items_center()
@@ -1443,6 +1453,7 @@ pub fn conversation_send_key(
             "composer-send"
         })
         .size(px(28.0))
+        .when(key, |el| el.size(px(32.0)))
         .when(guided, |el| {
             el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0))
         })
