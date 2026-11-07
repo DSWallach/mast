@@ -1030,7 +1030,7 @@ mod tests {
         use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
         use gpui::Styled as _;
         let empty = crate::style_overrides::Overrides::default();
-        let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":3,"primaryColour":"success","surfaces":{"toolbar":{"border":true,"pageColour":true},"composer":{"border":true},"code":{"pageColour":true}}}}}"#);
+        let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":3,"primaryColour":"success","surfaces":{"toolbar":{"border":true,"pageColour":true},"composer":{"border":true},"code":{"pageColour":true},"tool":{"border":true,"pageColour":true}}}}}"#);
         for id in UiStyleId::ALL {
             let base_style = UiStyle::resolve(*id, UiLayout::Minimal);
             let base = Theme::dark().with_ui_style(base_style);
@@ -1042,6 +1042,8 @@ mod tests {
         let changed = Theme::dark().with_ui_style(overrides.apply(base.ui_style));
         assert_ne!(toolbar_control(div(), &base, true).style(), toolbar_control(div(), &changed, true).style());
         assert_ne!(conversation_parts::conversation_input_surface(div(), &base, base.accent, 8.0, base.border).style(), conversation_parts::conversation_input_surface(div(), &changed, base.accent, 8.0, base.border).style());
+        assert_ne!(conversation_parts::conversation_tool_chip_frame(false, 32.0, 28.0, 4.0, 1.0, &base).style(), conversation_parts::conversation_tool_chip_frame(false, 32.0, 28.0, 4.0, 1.0, &changed).style());
+        assert_ne!(conversation_parts::conversation_code_frame("base".into(), None, vec![], div().into_any_element(), &base).style(), conversation_parts::conversation_code_frame("changed".into(), None, vec![], div().into_any_element(), &changed).style());
     }
 
     #[test]
