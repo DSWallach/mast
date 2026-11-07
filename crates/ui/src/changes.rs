@@ -5169,7 +5169,6 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
@@ -5177,7 +5176,7 @@ impl Changes {
                 crate::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("changes-scope-trigger"))
-            .when(true, |element| crate::components::changes_selector(element, &theme))
+            .when(true, |element| crate::components::changes_selector(element, &theme, crate::components::ChangesSelector::Scope))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -5427,7 +5426,6 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .rounded(px(6.0))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-ref-trigger",
@@ -5435,7 +5433,7 @@ impl Changes {
                 crate::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-ref-trigger"))
-            .when(true, |element| crate::components::changes_selector(element, theme))
+            .when(true, |element| crate::components::changes_selector(element, theme, crate::components::ChangesSelector::Reference))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -5614,7 +5612,6 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .rounded(px(5.0))
             .cursor_pointer()
             .text_size(px(11.0))
             .text_color(theme.text_muted)
@@ -5624,6 +5621,7 @@ impl Changes {
                 crate::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-checkout-trigger"))
+            .when(true, |element| crate::components::changes_selector(element, theme, crate::components::ChangesSelector::Target))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,

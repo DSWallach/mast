@@ -3,10 +3,22 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) enum ChangesSelector {
+    Scope,
+    Reference,
+    Target,
+}
+
 pub(crate) fn changes_selector<T: Styled + ParentElement + FluentBuilder>(
     element: T,
     theme: &Theme,
+    kind: ChangesSelector,
 ) -> T {
+    let fallback = match kind {
+        ChangesSelector::Scope | ChangesSelector::Reference => 6.0,
+        ChangesSelector::Target => 5.0,
+    };
+    let element = element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(fallback)));
     let element = super::segmented_key(element, theme, false);
     element.when(super::is_area(theme), |element| {
         element.rounded_full().bg(theme.accent.opacity(0.10))
