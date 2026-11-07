@@ -1,9 +1,8 @@
 //! Fixture-only approximations for views that require the live shell and RPC.
 use gpui::{Div, div, prelude::*, px};
-use mast_ui::{popover, theme::Theme, typography};
+use mast_ui::{components, popover, theme::Theme, typography};
 
 pub fn sidebar(theme: &Theme) -> Div {
-    let height = theme.ui_style.tokens.sidebar_row_compact_h;
     div()
         .w(px(180.0))
         .h_full()
@@ -14,39 +13,32 @@ pub fn sidebar(theme: &Theme) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child("Mast Dev")
-        .child(
-            div()
-                .h(px(height))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .rounded(px(5.0))
-                .bg(theme.surface_raised)
-                .child("● Gallery fixtures"),
-        )
-        .child(
-            div()
-                .h(px(height))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .child("○ Design review"),
-        )
+        .child(mast_ui::stories::sidebar_row(
+            theme,
+            "fixture-selected".into(),
+            "Gallery fixtures",
+            true,
+        ))
+        .child(mast_ui::stories::sidebar_row(
+            theme,
+            "fixture-review".into(),
+            "Design review",
+            false,
+        ))
 }
 
 pub fn outline(theme: &Theme) -> Div {
     let style = theme.ui_style;
     let row = |label: &'static str, depth: f32, selected: bool| {
-        div()
-            .h(px(29.0 + style.tokens.outline_row_delta))
-            .pl(px(12.0 + depth * 20.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .rounded(px(5.0))
-            .when(selected, |el| el.bg(theme.surface_raised))
-            .child(if selected { "●" } else { "○" })
-            .child(label)
+        let row = components::outline_row(
+            label.into(),
+            29.0 + style.tokens.outline_row_delta,
+            12.0 + depth * 20.0,
+            theme,
+        )
+        .child(if selected { "●" } else { "○" })
+        .child(label);
+        components::outline_row_selection(row, theme, selected)
     };
     div()
         .flex()

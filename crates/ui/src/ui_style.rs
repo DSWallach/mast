@@ -502,6 +502,17 @@ pub fn current(cx: &gpui::App) -> UiStyle {
     crate::style_overrides::current(cx).apply(UiStyle::resolve(id, layout))
 }
 
+/// Resolve a style for a single view without changing the application's choice.
+/// Components that accept a theme can render independently using the returned
+/// theme; the original theme and the application global remain unchanged.
+pub fn theme_for_view(
+    theme: &crate::theme::Theme,
+    id: UiStyleId,
+    layout: UiLayout,
+) -> crate::theme::Theme {
+    theme.clone().with_ui_style(UiStyle::resolve(id, layout))
+}
+
 pub fn set_layout(layout: UiLayout, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
     let style = current(cx);
     if style.layout == layout {
