@@ -1,6 +1,7 @@
 //! Shared interface primitives. Callers supply semantic intent; the active
 //! appearance determines their treatment.
 
+pub(crate) mod browser_parts;
 mod outline_parts;
 pub use outline_parts::*;
 pub(crate) use outline_parts::{outline_proposal_diff, outline_revision_line};

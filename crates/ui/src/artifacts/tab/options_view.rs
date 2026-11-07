@@ -509,28 +509,7 @@ impl ArtifactTab {
         let busy = self.side.busy;
         let note = self.side.note.clone();
         let text_button = |id: String, label: SharedString, strong: bool| {
-            let selector = id.clone();
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .h(px(24.0))
-                .px(px(8.0))
-                .rounded(px(5.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.5))
-                .when(strong, |el| el.bg(theme.accent).text_color(theme.surface))
-                .when(!strong, |el| {
-                    el.border_1()
-                        .border_color(theme.border)
-                        .text_color(theme.text_muted)
-                        .hover(|el| el.text_color(theme.text).bg(crate::theme::wash(0.10)))
-                })
-                .when(busy, |el| el.opacity(0.5))
-                .child(label)
+            crate::components::browser_parts::artifact_option_button(id, label, strong, busy, theme)
         };
         let focus = self.side.layout.focus.clone();
         let columns = self.side.chosen.iter().copied().filter_map(|ix| {
@@ -580,18 +559,7 @@ impl ArtifactTab {
         let shown = self.side.chosen.len();
         let count_options = options.len();
         let toggle = |id: String, label: String, on: bool| {
-            let selector = id.clone();
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector.clone())
-                .px(px(6.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .border_1()
-                .border_color(if on { theme.accent } else { theme.border })
-                .text_color(if on { theme.text } else { theme.text_muted })
-                .child(SharedString::from(label))
+            crate::components::browser_parts::artifact_option_toggle(id, label, on, theme)
         };
         let layout_controls = div()
             .flex()
@@ -626,19 +594,9 @@ impl ArtifactTab {
                 .gap(px(4.0))
                 .children(options.iter().enumerate().map(|(ix, option)| {
                     let on = self.side.chosen.contains(&ix);
-                    let selector = format!("artifact-side-choose-{}", option.id);
-                    let label = selector.clone();
-                    div()
-                        .id(SharedString::from(selector))
-                        .debug_selector(move || label.clone())
-                        .px(px(6.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .border_1()
-                        .border_color(if on { theme.accent } else { theme.border })
-                        .text_color(if on { theme.text } else { theme.text_muted })
-                        .child(SharedString::from(option.id.clone()))
+                    crate::components::browser_parts::artifact_option_toggle(
+                        format!("artifact-side-choose-{}", option.id), option.id.clone(), on, theme,
+                    )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.toggle_side_option(ix, window, cx)
                         }))
@@ -692,15 +650,7 @@ impl ArtifactTab {
                                 ),
                             )
                             .children(picked.clone().map(|pick| {
-                                div()
-                                    .debug_selector(|| "artifact-picked-chip".into())
-                                    .flex_none()
-                                    .px(px(6.0))
-                                    .rounded(px(4.0))
-                                    .border_1()
-                                    .border_color(theme.accent)
-                                    .text_color(theme.accent)
-                                    .child(SharedString::from(Self::pick_label(&pick)))
+                                crate::components::browser_parts::artifact_picked_chip(Self::pick_label(&pick), theme)
                             }))
                             .child(div().flex_1())
                             .child(layout_controls)
@@ -717,13 +667,7 @@ impl ArtifactTab {
                             ),
                     )
                     .child(
-                        div()
-                            .debug_selector(|| "artifact-pick-note".into())
-                            .rounded(px(5.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .px(px(6.0))
-                            .py(px(2.0))
+                        crate::components::browser_parts::artifact_pick_note(theme)
                             .children(note),
                     ),
             )

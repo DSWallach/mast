@@ -24,7 +24,7 @@ use crate::artifacts::model::ArtifactBody;
 use crate::artifacts::questions_ui;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::theme::Theme;
-use crate::{icons, surface_chrome};
+use crate::icons;
 
 /// A comment being written: where it points and what it quotes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,25 +417,7 @@ impl ArtifactTab {
                      on: bool,
                      enabled: bool|
          -> gpui::Stateful<gpui::Div> {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .h(px(surface_chrome::CONTROL_SIZE))
-                .px(px(6.0))
-                .rounded(px(surface_chrome::CONTROL_RADIUS))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .when(enabled, |el| el.cursor_pointer())
-                .when(!enabled, |el| el.cursor_default().opacity(0.35))
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .when(on, |el| el.bg(crate::theme::wash(0.10)))
-                .when(enabled, |el| {
-                    el.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
-                })
-                .child(text)
+            crate::components::browser_parts::artifact_comment_control(id, text, on, enabled, theme)
         };
         let mut out = Vec::new();
         if self.comments.selection.is_some() && can {
@@ -587,16 +569,7 @@ impl ArtifactTab {
     fn render_draft(&self, draft: &Draft, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let input = self.comments.input.clone();
         let quote: SharedString = draft.quote.clone().into();
-        div()
-            .id("artifact-comment-draft")
-            .debug_selector(|| "artifact-comment-draft".into())
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .p(px(8.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.accent.opacity(0.5))
+        crate::components::browser_parts::artifact_comment_card("artifact-comment-draft".into(), true, false, false, theme)
             .when(!draft.quote.is_empty(), |el| {
                 el.child(
                     div()
@@ -656,20 +629,7 @@ impl ArtifactTab {
         let selector: SharedString = format!("artifact-comment-{}", comment.id).into();
         let toggle_selector: SharedString =
             format!("artifact-comment-toggle-{}", comment.id).into();
-        div()
-            .id(selector.clone())
-            .debug_selector({
-                let selector = selector.to_string();
-                move || selector.clone()
-            })
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .p(px(8.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
-            .when(resolved, |el| el.opacity(0.65))
+        crate::components::browser_parts::artifact_comment_card(selector, false, focused, resolved, theme)
             .when(row.state == CommentState::Open, |el| {
                 el.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.focus_comment(&select_id, cx)))
@@ -686,18 +646,7 @@ impl ArtifactTab {
                             .child(SharedString::from(comment.id.clone())),
                     )
                     .child(
-                        div()
-                            .px(px(6.0))
-                            .h(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(color.opacity(0.5))
-                            .bg(color.opacity(0.10))
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(color)
-                            .child(row.state.label()),
+                        crate::components::browser_parts::artifact_comment_badge(row.state.label(), color, theme)
                     )
                     .child(
                         div()
@@ -745,23 +694,5 @@ fn action_button(
     primary: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let id: SharedString = id.into();
-    let debug = id.to_string();
-    div()
-        .id(id)
-        .debug_selector(move || debug.clone())
-        .px(px(8.0))
-        .h(px(20.0))
-        .flex()
-        .items_center()
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(if primary { theme.accent } else { theme.border })
-        .when(primary, |el| {
-            el.bg(theme.accent).text_color(theme.on_accent)
-        })
-        .when(!primary, |el| el.text_color(theme.text_muted))
-        .text_size(crate::typography::ui_rems(11.0))
-        .cursor_pointer()
-        .child(label)
+    crate::components::browser_parts::artifact_action_button(id.into(), label, primary, theme)
 }

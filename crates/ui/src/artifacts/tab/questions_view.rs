@@ -514,24 +514,10 @@ fn badge(
     label: String,
     tooltip: Option<String>,
     color: gpui::Hsla,
-    _theme: &Theme,
+    theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let tooltip = tooltip.map(SharedString::from);
-    div()
-        .id(selector)
-        .debug_selector(move || selector.to_owned())
-        .flex_none()
-        .px(px(7.0))
-        .h(px(18.0))
-        .flex()
-        .items_center()
-        .rounded(px(9.0))
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .bg(color.opacity(0.10))
-        .text_size(crate::typography::ui_rems(10.5))
-        .text_color(color)
-        .child(SharedString::from(label))
+    crate::components::browser_parts::artifact_question_badge(selector, label, color, theme)
         .when_some(tooltip, |el, tip| {
             el.tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
         })

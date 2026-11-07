@@ -1257,19 +1257,7 @@ impl ArtifactTab {
         let rows = entries
             .into_iter()
             .map(|(target, selector, label, age, selected)| {
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text)
-                    .hover(|el| el.bg(theme.element_hover))
-                    .when(selected, |el| el.bg(crate::theme::wash(0.08)))
+                crate::components::browser_parts::artifact_picker_row(SharedString::from(selector), selected, theme)
                     .child(
                         div()
                             .flex_1()
@@ -1597,21 +1585,5 @@ fn compare_button(
     active: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let id: SharedString = id.into();
-    let selector = id.to_string();
-    div()
-        .id(id)
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .h(px(surface_chrome::CONTROL_SIZE))
-        .px(px(7.0))
-        .rounded(px(surface_chrome::CONTROL_RADIUS))
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(if active { theme.text } else { theme.text_muted })
-        .when(active, |el| el.bg(crate::theme::wash(0.12)))
-        .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
-        .child(label.into())
+    crate::components::browser_parts::artifact_compare_button(id.into(), label.into(), active, theme)
 }
