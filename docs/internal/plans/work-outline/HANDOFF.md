@@ -1006,6 +1006,17 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-07 00:10; coordinator e81de680)
+
+- **Installed and current: release 66** (f92924d9, 00:08; UI 2581/0/13). Area details section headings share one
+  size and left edge with gutter chevrons; Area list controls go through the shared `toolbar_control`
+  (`area_toolbar_control` removed). Backup of release 65: `~/zeron-dev-app-backups/mast-20261107-0008-pre-release66`.
+  No workers running; all worktrees removed.
+- **Follow-ups (not started):** Area SEND under non-Area themes uses the bright accent instead of the theme's muted
+  fill; Area Light marks the selected Style/Layout cards grey not accent; Linear/team and menus slices; the "UI
+  preview sheets" approval rule doesn't match workers' `CARGO_TARGET_DIR="$PWD/…" perl alarm … scripts/ui-preview.sh`
+  commands (they still ask; likely the `$PWD` expansion fails closed).
+
 ## In flight (snapshot 2026-11-06 23:30; coordinator e81de680)
 
 - **Installed and current: release 65** (cf711028, 23:31). Tests: UI 2581/0/13, nextest 28/28. Backup of release 64:
