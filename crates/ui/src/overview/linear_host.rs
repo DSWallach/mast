@@ -890,6 +890,7 @@ impl Overview {
                 })
                 .when(!active, |el| el.text_color(theme.text_muted))
                 .hover(|el| el.text_color(theme.text))
+                .when(true, |el| crate::components::toolbar_control(el, theme, false))
                 .child("Inbox")
                 .hint(
                     if active {

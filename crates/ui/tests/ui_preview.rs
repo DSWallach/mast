@@ -34,6 +34,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
     );
     let all_screens = [
         "chat",
+        "overview",
         "details",
         "walkthrough",
         "appearance",

@@ -4622,7 +4622,7 @@ impl Render for Overview {
                                 },
                             ))
                             .hint("Search", HintKey::Find)
-                            .child(popover::search_input_frame(
+                            .child(crate::components::toolbar_search_frame(
                                 &theme,
                                 self.search.clone().into_any_element(),
                             )),
@@ -4647,6 +4647,7 @@ impl Render for Overview {
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
                             .hover(|el| el.text_color(theme.text))
+                            .when(true, |el| crate::components::toolbar_control(el, &theme, false))
                             .child("Pull requests")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(shell) = this.shell.upgrade() {
@@ -4887,6 +4888,7 @@ impl Overview {
         };
         popover::btn_primary(theme, "+ New chat")
             .id("overview-new-chat")
+            .when(true, |el| crate::components::toolbar_control(el, theme, true))
             .on_click(cx.listener(|this, _, _, cx| {
                 let _ = this.shell.update(cx, |shell, cx| {
                     shell.open_new_session_from_overview(cx);
@@ -4919,6 +4921,7 @@ impl Overview {
             })
             .when(!active, |el| el.text_color(theme.text_muted))
             .hover(|el| el.text_color(theme.text))
+            .when(true, |el| crate::components::toolbar_control(el, theme, false))
             .child(SharedString::from(format!(
                 "{} ▾",
                 repo_filter_label(hidden)

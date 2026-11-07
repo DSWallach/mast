@@ -69,9 +69,9 @@ pub use conversation_parts::{
     conversation_input_text_color,
     conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
     conversation_message_expander,
-    conversation_model_picker, conversation_panel_radius, conversation_question_card,
+    conversation_model_label, conversation_model_picker, conversation_panel_radius, conversation_question_card,
     conversation_picker_approval, conversation_picker_footer_chip, conversation_picker_footer_content,
-    conversation_picker_footer_label, conversation_picker_footer_row, conversation_picker_label,
+    conversation_picker_footer_label, conversation_picker_footer_row, conversation_picker_icon, conversation_picker_label,
     conversation_picker_suffix, conversation_picker_trigger,
     conversation_question_chip, conversation_question_id, conversation_question_pill,
     conversation_answer_input,
@@ -548,6 +548,15 @@ pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
         .child(input)
 }
 
+pub fn toolbar_search_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
+    let frame = search_input_frame(theme, input);
+    if is_industrial(theme) {
+        toolbar_control(frame.mb(px(0.0)), theme, false)
+    } else {
+        frame
+    }
+}
+
 pub fn dialog_field(theme: &Theme, input: AnyElement) -> gpui::Div {
     div()
         .w_full()
@@ -587,6 +596,25 @@ pub fn segmented_key<T: gpui::Styled + gpui::ParentElement>(
                 spread_radius: px(0.0),
                 inset: false,
             }])
+    } else {
+        element
+    }
+}
+
+/// Apply the Industrial toolbar frame while leaving other appearances unchanged.
+pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
+    if is_industrial(theme) {
+        let colors = theme.industrial_colors();
+        element
+            .h(px(theme.ui_style.tokens.control_size))
+            .py(px(0.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(colors.rule)
+            .bg(if primary { colors.signal } else { colors.key })
+            .shadow(Vec::new())
+            .flex()
+            .items_center()
     } else {
         element
     }
@@ -806,6 +834,9 @@ pub fn agent_message_bubble(
     identity: gpui::Hsla,
     first: bool,
     first_block: bool,
+    continues: bool,
+    continued_by_next: bool,
+    gap: f32,
     model: Option<String>,
     content: AnyElement,
 ) -> AnyElement {
@@ -831,8 +862,13 @@ pub fn agent_message_bubble(
             })
             .child(
                 div()
-                    .p(px(10.0 * layout_spacing(theme)))
-                    .border_1()
+                    .px(px(10.0 * layout_spacing(theme)))
+                    .pt(px(if continues { gap } else { 10.0 * layout_spacing(theme) }))
+                    .pb(px(if continued_by_next { 0.0 } else { 10.0 * layout_spacing(theme) }))
+                    .border_l_1()
+                    .border_r_1()
+                    .when(!continues, |el| el.border_t_1())
+                    .when(!continued_by_next, |el| el.border_b_1())
                     .border_color(theme.industrial_colors().rule)
                     .bg(theme.industrial_colors().panel)
                     .child(content),
@@ -856,6 +892,14 @@ pub fn agent_message_bubble(
             .into_any_element()
     } else {
         content
+    }
+}
+
+pub fn agent_message_row_gap(theme: &Theme, continues: bool, gap: f32) -> f32 {
+    if continues && theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
+        0.0
+    } else {
+        gap
     }
 }
 

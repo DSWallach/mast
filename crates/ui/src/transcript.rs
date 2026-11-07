@@ -6493,10 +6493,14 @@ impl Transcript {
         };
 
         let is_first_entry_row = ix == 0 || self.rows.get(ix - 1).is_some_and(|previous| previous.entry_id != row.entry_id);
+        let is_markdown = |candidate: &Row| matches!(candidate.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
+        let adjacent = |candidate: &Row| is_markdown(candidate) && candidate.entry_id == row.entry_id;
+        let continues = is_markdown(&row) && ix.checked_sub(1).and_then(|i| self.rows.get(i)).is_some_and(adjacent);
+        let continued_by_next = is_markdown(&row) && self.rows.get(ix + 1).is_some_and(adjacent);
         let inner = if matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
             let model = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).and_then(|config| config.model.clone());
             let first_block = matches!(&row.kind, RowKind::Markdown { block_ix, .. } | RowKind::LiveMarkdown { block_ix, .. } if *block_ix == 0);
-            crate::components::agent_message_bubble(&theme, identity, is_first_entry_row, first_block, model, inner)
+            crate::components::agent_message_bubble(&theme, identity, is_first_entry_row, first_block, continues, continued_by_next, top_gap, model, inner)
         } else { inner };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -6583,7 +6587,7 @@ impl Transcript {
             .w_full()
             .flex()
             .justify_center()
-            .pt(px(top_gap))
+            .pt(px(crate::components::agent_message_row_gap(&theme, continues, top_gap)))
             .pb(px(bottom_pad))
             // Keep side gutters as the configurable column shrinks to fit.
             .px(px(48.0))
