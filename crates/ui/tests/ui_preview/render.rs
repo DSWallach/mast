@@ -176,7 +176,7 @@ pub fn render(
     let theme_id = theme_id.to_owned();
     super::snapshot(
         name,
-        size(px(1440.), px(900.)),
+        size(px(super::preview_width() as f32), px(900.)),
         style,
         layout,
         appearance,

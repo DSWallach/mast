@@ -861,7 +861,7 @@ pub fn agent_message_bubble(
     theme: &Theme,
     identity: gpui::Hsla,
     first: bool,
-    first_block: bool,
+    _first_block: bool,
     continues: bool,
     continued_by_next: bool,
     gap: f32,
@@ -915,13 +915,9 @@ pub fn agent_message_bubble(
             .into_any_element()
     } else if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area {
         div()
-            .flex()
-            .items_baseline()
-            .gap(px(8.0))
             .min_w_0()
-            .when(first_block, |el| {
-                el.child(div().flex_none().size(px(10.0)).rounded_full().bg(identity))
-            })
+            .w_full()
+            .max_w(px(720.0))
             .font_family("EB Garamond")
             .text_size(crate::typography::ui_rems(
                 16.0 + layout_type_adjustment(theme),
