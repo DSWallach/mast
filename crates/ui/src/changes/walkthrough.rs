@@ -847,7 +847,7 @@ impl Render for Walkthrough {
                                     .id("review-previous-step")
                                     .cursor_pointer()
                                     .when(true, |el| crate::components::review_text_action(el, &theme))
-                                    .child("Previous")
+                                    .child(crate::components::review_action_label("Previous", &theme))
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.move_step(false, cx)),
                                     ),
@@ -857,7 +857,7 @@ impl Render for Walkthrough {
                                     .id("review-next-step")
                                     .cursor_pointer()
                                     .when(true, |el| crate::components::review_text_action(el, &theme))
-                                    .child("Next")
+                                    .child(crate::components::review_action_label("Next", &theme))
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.move_step(true, cx)),
                                     ),
@@ -965,7 +965,7 @@ impl Render for Walkthrough {
                                     .id("review-step-ask")
                                     .cursor_pointer()
                                     .when(true, |el| crate::components::review_text_action(el, &theme))
-                                    .child("Ask")
+                                    .child(crate::components::review_action_label("Ask", &theme))
                                     .on_click(cx.listener(|this, _, _, cx| this.ask_step(cx))),
                             ),
                     )
@@ -1004,7 +1004,7 @@ impl Render for Walkthrough {
                                 .id("review-step-open-chat")
                                 .cursor_pointer()
                                 .when(true, |el| crate::components::review_text_action(el, &theme))
-                                .child("Open in chat")
+                                .child(crate::components::review_action_label("Open in chat", &theme))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(changes) = &this.changes {
                                         changes.update(cx, |changes, cx| {
@@ -1019,7 +1019,7 @@ impl Render for Walkthrough {
                             .id("review-step-close")
                             .cursor_pointer()
                             .when(true, |el| crate::components::review_text_action(el, &theme))
-                            .child(if waiting { "Cancel" } else { "Close" })
+                            .child(crate::components::review_action_label(if waiting { "Cancel" } else { "Close" }, &theme))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.cancel_step_question();
                                 cx.notify();
@@ -1032,7 +1032,7 @@ impl Render for Walkthrough {
                         .id("review-mark-step")
                         .cursor_pointer()
                         .when(true, |el| crate::components::walkthrough_review_action(el, &theme, selected_reviewed))
-                        .child("Mark reviewed")
+                        .child(crate::components::review_action_label("Mark reviewed", &theme))
                         .on_click(cx.listener(|this, _, _, cx| this.mark_step(cx))),
                 )
         });
@@ -1199,11 +1199,17 @@ pub(crate) fn snapshot_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
         "highlights":[],"questions":[]
     }"#).unwrap();
     let (_, review) = document.into_review().unwrap();
+    let changes = std::env::var_os("MAST_SNAPSHOT_POPULATED_CHANGES")
+        .map(|_| super::snapshot_populated_changes(cx));
+    let populated = changes.is_some();
+    if let Some(changes) = &changes {
+        changes.update(cx, |changes, _| changes.review_target = Some(review.target_key.clone()));
+    }
     cx.new(|cx| Walkthrough {
         review, files: Arc::new(Vec::new()), coverage: None,
         viewed: BTreeSet::new(), seen: HashSet::new(), target_selected: true,
-        selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: true, stale_head: None,
-        focus: cx.focus_handle(), changes: None, _changes_observer: None,
+        selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: !populated, stale_head: None,
+        focus: cx.focus_handle(), changes, _changes_observer: None,
         step_input: None, _step_input_events: None, step_panel: None,
         step_task: None, step_cancelled: None,
     })

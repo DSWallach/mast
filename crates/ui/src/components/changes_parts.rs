@@ -3,6 +3,29 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn review_action_label(label: &'static str, theme: &Theme) -> gpui::SharedString {
+    if super::is_industrial(theme) {
+        crate::popover::tracked_upper(label).into()
+    } else {
+        label.into()
+    }
+}
+
+pub(crate) fn file_toolbar_selection<T: Styled + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    selected: bool,
+) -> T {
+    element
+        .when(selected, |element| element.bg(crate::theme::wash(0.1)))
+        .when(selected && super::is_industrial(theme), |element| {
+            element.bg(theme.industrial_colors().pressed)
+        })
+        .when(selected && super::is_area(theme), |element| {
+            element.bg(theme.accent.opacity(0.18))
+        })
+}
+
 pub(crate) fn review_text_action<T: Styled + ParentElement + FluentBuilder>(
     element: T,
     theme: &Theme,
@@ -245,24 +268,27 @@ pub(crate) fn changes_repository_chip<T: Styled + ParentElement + FluentBuilder>
 pub(crate) fn changes_diff_header<T: Styled + StatefulInteractiveElement + FluentBuilder>(
     element: T,
     theme: &Theme,
+    default_hover: gpui::Hsla,
 ) -> T {
     let area_background = crate::theme::flatten(theme.accent.opacity(0.08), theme.surface);
     let area_hover = crate::theme::flatten(theme.accent.opacity(0.14), theme.surface);
     let industrial_background = theme.surface_raised;
-    let industrial_hover = theme.element_hover;
+    let hover = if super::is_industrial(theme) {
+        theme.element_hover
+    } else if super::is_area(theme) {
+        area_hover
+    } else {
+        default_hover
+    };
     element
         .when(super::is_industrial(theme), |element| {
             element
                 .bg(industrial_background)
                 .border_b_1()
                 .border_color(theme.border)
-                .hover(move |style| style.bg(industrial_hover))
         })
-        .when(super::is_area(theme), |element| {
-            element
-                .bg(area_background)
-                .hover(move |style| style.bg(area_hover))
-        })
+        .when(super::is_area(theme), |element| element.bg(area_background))
+        .hover(move |style| style.bg(hover))
 }
 
 pub(crate) enum ChangesSelector {
@@ -319,7 +345,7 @@ pub(crate) fn changes_file_row<T: Styled + StatefulInteractiveElement + FluentBu
     element
         .hover(move |style| style.bg(hover))
         .when(super::is_industrial(theme), |element| {
-            element.border_b_1().border_color(theme.border)
+            element.w_full().border_b_1().border_color(theme.border)
         })
         .when(super::is_area(theme), |element| element.rounded_full())
 }

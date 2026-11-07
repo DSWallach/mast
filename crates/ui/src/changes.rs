@@ -4694,8 +4694,7 @@ impl Changes {
             .pr(px(Theme::SPACE_MD))
             .bg(theme.ink(0.025))
             .cursor_pointer()
-            .hover(|style| style.bg(theme.ink(0.05)))
-            .when(true, |element| crate::components::changes_diff_header(element, theme))
+            .when(true, |element| crate::components::changes_diff_header(element, theme, theme.ink(0.05)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_submodule(group_ix, cx);
             }))
@@ -4872,8 +4871,7 @@ impl Changes {
             .pr(px(Theme::SPACE_MD))
             .bg(rest_bg)
             .cursor_pointer()
-            .hover(move |s| s.bg(hover_bg))
-            .when(true, |element| crate::components::changes_diff_header(element, theme))
+            .when(true, |element| crate::components::changes_diff_header(element, theme, hover_bg))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_fold(ix, cx);
                 window.focus(&this.diff_focus, cx);
@@ -6989,6 +6987,57 @@ impl Render for Changes {
             .child(content)
             .into_any_element()
     }
+}
+
+#[cfg(feature = "snapshot")]
+fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
+    let state = cx.new(|_| AppState::new());
+    cx.new(|cx| {
+        let mut changes = Changes::new(state, cx);
+        let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-    old();\n+    validate();\n+    save();\n }\ndiff --git a/src/model.rs b/src/model.rs\n--- a/src/model.rs\n+++ b/src/model.rs\n@@ -1 +1 @@\n-old model\n+new model\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old text\n+new text\n";
+        let diff = CheckoutDiff {
+            checkout_id: "snapshot".into(),
+            device_id: "local".into(),
+            cwd: "/snapshot".into(),
+            patch: patch.into(),
+            files: Vec::new(),
+            submodules: Vec::new(),
+            additions: 4,
+            deletions: 3,
+            truncated: false,
+            checksum: "snapshot".into(),
+            updated_at: chrono::Utc::now(),
+        };
+        changes.pinned_cwd = Some("/snapshot".into());
+        changes.scoped_for = Some("local|||/snapshot|workingTree|||".into());
+        let key = changes.parse_key(&diff);
+        let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+        let identities = hunk_identities(&files);
+        let (rows, ranges, headers) = flatten_diff_tree(
+            &files, &submodules, &layout, &[], None, changes.mode, |_| false, |_| false,
+        );
+        changes.list.reset_with_uniform_height(
+            rows.len(), px(diff_line_height(Theme::of(cx))),
+        );
+        changes.rows = rows;
+        changes.row_ranges = ranges;
+        changes.section_headers = headers;
+        changes.parsed = Some(ParsedDiff {
+            key,
+            truncated: false,
+            additions: 4,
+            deletions: 3,
+            file_count: files.len(),
+            horizontal: files.iter().map(FileHorizontalState::new).collect(),
+            hunk_identities: Arc::new(identities),
+            files: Arc::new(files),
+            origins: Arc::new(origins),
+            submodules: Arc::new(submodules),
+            layout: Arc::new(layout),
+        });
+        changes.scoped = Some(diff);
+        changes
+    })
 }
 
 #[cfg(test)]

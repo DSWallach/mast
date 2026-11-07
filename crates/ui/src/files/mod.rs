@@ -1067,9 +1067,7 @@ impl FilesSurface {
                     &theme,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
-                .when(include_ignored, |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
+                .when(true, |element| crate::components::file_toolbar_selection(element, &theme, include_ignored))
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_ignored(cx);

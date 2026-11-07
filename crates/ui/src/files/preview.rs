@@ -2267,7 +2267,7 @@ impl FilesSurface {
                         },
                         theme,
                     )
-                    .when(showing_markdown, |el| el.bg(crate::theme::wash(0.1)))
+                    .when(true, |el| crate::components::file_toolbar_selection(el, theme, showing_markdown))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let Some(path) = this.preview.active.clone() else {
                             return;
@@ -2361,9 +2361,7 @@ impl FilesSurface {
                     },
                     theme,
                 )
-                .when(self.preview.word_wrap(), |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
+                .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.preview.word_wrap()))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_word_wrap(window, cx)))
                 .child(
                     icon(icons::LIST)

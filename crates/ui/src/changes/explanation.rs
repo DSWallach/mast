@@ -492,7 +492,7 @@ impl Changes {
                             .id("explanation-open-chat")
                             .cursor_pointer()
                             .when(true, |el| crate::components::review_text_action(el, theme))
-                            .child("Open in chat")
+                            .child(crate::components::review_action_label("Open in chat", theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_explanation_chat(chat_id.clone(), cx);
                             })),
@@ -503,11 +503,11 @@ impl Changes {
                         .id("explanation-close")
                         .cursor_pointer()
                         .when(true, |el| crate::components::review_text_action(el, theme))
-                        .child(if matches!(status, ExplanationPanel::Waiting { .. }) {
+                        .child(crate::components::review_action_label(if matches!(status, ExplanationPanel::Waiting { .. }) {
                             "Cancel"
                         } else {
                             "Close"
-                        })
+                        }, theme))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.cancel_explanation();
                             cx.notify();
