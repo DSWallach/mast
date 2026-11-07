@@ -25,6 +25,9 @@ select Minimal, Compact and Guided. L and D choose light and dark, and T cycles
 through built-in themes. The 1–3 keys select the style for the full-screen
 fixtures. The chat story mounts the real transcript and composer with in-memory
 messages; the work outline and walkthrough remain fixture compositions.
+Hover the examples to see their interactive hover treatment. The disabled row
+is a dimmed fixture: the shared primitives do not all expose a disabled state.
+The Board story is a gallery-only composition of outline rows and cards.
 
 Agents must not launch the gallery. Run `cargo test -p mast-gallery --
 --test-threads=1` to exercise the stories headlessly.

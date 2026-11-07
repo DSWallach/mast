@@ -166,12 +166,20 @@ pub fn grid(story: Story, theme: &Theme) -> impl IntoElement {
                 .child(div().w(px(92.)).child(label))
                 .children(UiStyleId::ALL.iter().enumerate().map(|(column, &style)| {
                     let view_theme = ui_style::theme_for_view(theme, style, layout);
-                    div().flex_1().min_w_0().p(px(8.)).flex().child(fixture(
-                        story,
-                        state,
-                        &view_theme,
-                        format!("fixture-{row}-{column}"),
-                    ))
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .p(px(8.))
+                        .when(
+                            matches!(story, Story::Button | Story::Toolbar | Story::Chip),
+                            |el| el.flex(),
+                        )
+                        .child(fixture(
+                            story,
+                            state,
+                            &view_theme,
+                            format!("fixture-{row}-{column}"),
+                        ))
                 }))
         }))
 }
