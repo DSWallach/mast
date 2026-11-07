@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent,  Render, SharedString, StyledImage as _, Subscription, Window, div,
-    img, prelude::*, px,
+    KeyDownEvent, Render, SharedString, Subscription, Window, div,
+    prelude::*, px,
 };
 use mast_theme::vscode::{ImportReport, SourceCompilation};
 use mast_theme::{
