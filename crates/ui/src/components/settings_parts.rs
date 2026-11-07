@@ -1139,3 +1139,69 @@ pub(crate) fn settings_background_thumbnail(theme: &Theme, path: std::path::Path
                 .object_fit(gpui::ObjectFit::Cover),
         )
 }
+
+pub(crate) fn settings_report_panel(
+    theme: &Theme,
+    report: &mast_theme::vscode::ImportReport,
+) -> gpui::Stateful<gpui::Div> {
+    let summary = format!(
+        "{} mapped · {} adjusted · {} inferred/fallback · {} unsupported · {} warnings · {} validation",
+        report.mappings.len(),
+        report.adjustments.len(),
+        report.fallbacks.len(),
+        report.dropped.len(),
+        report.warnings.len(),
+        report.validation.len(),
+    );
+    div()
+        .id(SharedString::from(format!(
+            "theme-report-{}",
+            report.source_hash
+        )))
+        .mt(px(8.0))
+        .w_full()
+        .max_h(px(168.0))
+        .overflow_y_scroll()
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(8.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised.opacity(0.35))
+        .p(px(10.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .line_height(px(16.0))
+        .text_color(theme.text_muted)
+        .child(div().text_color(theme.text).child(summary))
+        .children(report.adjustments.iter().map(|adjustment| {
+            div().mt(px(4.0)).child(SharedString::from(format!(
+                "Adjusted · {} {} → {} · {}",
+                adjustment.mast_role, adjustment.original, adjustment.resolved, adjustment.reason
+            )))
+        }))
+        .children(report.fallbacks.iter().map(|message| {
+            div()
+                .mt(px(4.0))
+                .child(SharedString::from(format!("Fallback · {message}")))
+        }))
+        .children(report.warnings.iter().map(|message| {
+            div()
+                .mt(px(4.0))
+                .child(SharedString::from(format!("Warning · {message}")))
+        }))
+        .children(report.validation.iter().map(|issue| {
+            div().mt(px(4.0)).child(SharedString::from(format!(
+                "Validation {:?} {:?} · {}",
+                issue.category, issue.severity, issue.message
+            )))
+        }))
+        .children(report.dropped.iter().map(|message| {
+            div()
+                .mt(px(4.0))
+                .child(SharedString::from(format!("Unsupported · {message}")))
+        }))
+        .children(report.mappings.iter().map(|mapping| {
+            div().mt(px(4.0)).child(SharedString::from(format!(
+                "{} ← {}",
+                mapping.mast_role, mapping.vscode_key
+            )))
+        }))
+}
