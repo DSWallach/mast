@@ -1336,3 +1336,13 @@ pub(crate) fn settings_import_error(theme: &Theme) -> gpui::Div {
                 .mt(px(1.0)),
         )
 }
+
+pub(crate) fn settings_page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .mt(px(4.0))
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().body.unwrap_or(13.0) + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(copy.into())
+}

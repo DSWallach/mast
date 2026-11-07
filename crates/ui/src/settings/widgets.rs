@@ -172,11 +172,7 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
 
 /// Subtitle under the headline: `mt-1 text-[13px] text-muted-foreground`.
 pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .mt(px(4.0))
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted)
-        .child(copy.into())
+    crate::components::settings_page_subtitle(theme, copy)
 }
 
 /// Small label above a group of controls (`text-[13px] font-medium`) — the
