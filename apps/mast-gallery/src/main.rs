@@ -975,6 +975,26 @@ mod tests {
     }
 
     #[gpui::test]
+    fn inspector_shortcut_toggles_picking(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| init(cx, dir.path(), dir.path()));
+        let (_, vcx) = cx.add_window_view(|window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            gallery(focus, dir.path().to_owned(), cx)
+        });
+        vcx.update(|window, cx| {
+            window.activate_window();
+            window.draw(cx).clear();
+            assert!(!window.is_inspector_picking(cx));
+        });
+        vcx.simulate_keystrokes("cmd-alt-shift-i");
+        vcx.update(|window, cx| assert!(window.is_inspector_picking(cx)));
+        vcx.simulate_keystrokes("cmd-alt-shift-i");
+        vcx.update(|window, cx| assert!(!window.is_inspector_picking(cx)));
+    }
+
+    #[gpui::test]
     fn saved_overrides_refresh_each_view_without_changing_gallery_settings(
         cx: &mut gpui::TestAppContext,
     ) {
