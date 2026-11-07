@@ -41,7 +41,7 @@ pub use conversation_parts::{
     conversation_composer_expanded, conversation_composer_text_size, conversation_composer_width,
     conversation_error_chip, conversation_footer_slot, conversation_harness_tab,
     conversation_harness_tabs, conversation_input_surface, conversation_input_text_color,
-    conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
+    conversation_markdown_bullet_size, conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
     conversation_message_expander, conversation_model_label, conversation_model_picker,
     conversation_panel_radius, conversation_picker_approval, conversation_picker_footer_chip,
     conversation_picker_footer_content, conversation_picker_footer_label,
@@ -861,7 +861,7 @@ pub fn agent_message_bubble(
     theme: &Theme,
     identity: gpui::Hsla,
     first: bool,
-    first_block: bool,
+    _first_block: bool,
     continues: bool,
     continued_by_next: bool,
     gap: f32,
@@ -915,13 +915,9 @@ pub fn agent_message_bubble(
             .into_any_element()
     } else if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area {
         div()
-            .flex()
-            .items_baseline()
-            .gap(px(8.0))
             .min_w_0()
-            .when(first_block, |el| {
-                el.child(div().flex_none().size(px(10.0)).rounded_full().bg(identity))
-            })
+            .w_full()
+            .max_w(px(720.0))
             .font_family("EB Garamond")
             .text_size(crate::typography::ui_rems(
                 16.0 + layout_type_adjustment(theme),

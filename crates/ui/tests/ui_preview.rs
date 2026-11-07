@@ -160,7 +160,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let theme_refs: Vec<&str> = themes.iter().map(String::as_str).collect();
     let cells = matrix::matrix(&screen_refs, &style_refs, &layout_refs, &theme_refs);
     let (cell_width, cell_height) = matrix::cell_size(
-        1440,
+        preview_width(),
         900,
         themes.len() as u32,
         (styles.len() * layouts.len()) as u32,
@@ -284,6 +284,14 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
     println!("{}", manifest_path.display());
     Ok(manifest_path)
+}
+
+fn preview_width() -> u32 {
+    std::env::var("MAST_PREVIEW_WIDTH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|width| (320..=4096).contains(width))
+        .unwrap_or(1440)
 }
 
 /// Compare Minimal-only contact sheets while excluding the preview's label bar.

@@ -1022,8 +1022,9 @@ pub fn render_block(
                             .child(
                                 div()
                                     .ml(px(1.0))
-                                    .w(crate::typography::ui_rems(5.0))
-                                    .h(crate::typography::ui_rems(5.0))
+                                    .size(crate::typography::ui_rems(
+                                        crate::components::conversation_markdown_bullet_size(theme),
+                                    ))
                                     .rounded_full()
                                     .bg(theme.accent),
                             )
@@ -2819,6 +2820,56 @@ mod tests {
     use super::*;
     use crate::markdown::parser::{InlineStyle, parse_full};
     use gpui::TestAppContext;
+
+    struct AreaReplyHarness;
+
+    impl Render for AreaReplyHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let text = format!(
+                "{}\n\n- {}\n- Another item",
+                "A long assistant reply wraps inside the column. ".repeat(8),
+                "A list item wraps and keeps its hanging indent. ".repeat(5),
+            );
+            let tree = parse_full(&text);
+            let opts = RenderOptions::settled("area-reply".into());
+            let blocks = tree.blocks.iter().enumerate().map(|(ix, block)| {
+                let body = render_block(&block.block, ix, ix, &opts, &theme, window, None);
+                crate::components::agent_message_bubble(
+                    &theme, theme.accent, ix == 0, ix == 0, false, false, 0.0, None, body,
+                )
+            }).collect::<Vec<_>>();
+            div()
+                .size_full()
+                .child(selection_frame_reset())
+                .child(div().w_full().flex().flex_col().children(blocks))
+        }
+    }
+
+    #[gpui::test]
+    fn area_reply_wraps_and_list_text_keeps_its_indent(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark().with_ui_style(crate::ui_style::UiStyle::AREA)));
+        let (_, cx) = cx.add_window_view(|_, _| AreaReplyHarness);
+        for width in [320.0, 1000.0] {
+            cx.simulate_resize(size(px(width), px(900.0)));
+            cx.update(|window, cx| { window.refresh(); let _ = window.draw(cx); });
+            let paragraph = selection_test_bounds("area-reply:0");
+            let first = selection_test_bounds("area-reply:100");
+            let second = selection_test_bounds("area-reply:110");
+            assert!(paragraph.right() <= px(width));
+            assert!(paragraph.size.width <= px(720.0));
+            assert!(first.right() <= px(width));
+            assert_eq!(first.origin.x, second.origin.x);
+            assert!(first.origin.x > paragraph.origin.x);
+            if width == 320.0 {
+                let (text, layout, _) = selection_test_snapshot("area-reply:100");
+                let lines = range_rects(&layout, &(0..text.len()), 0.0, 0.0);
+                assert!(lines.len() > 1, "list item should wrap");
+                assert_eq!(lines[0].left(), lines[1].left(), "continuation aligns with the first line");
+            }
+        }
+    }
 
     #[test]
     fn area_code_tokens_remain_readable_on_inverse_panel() {

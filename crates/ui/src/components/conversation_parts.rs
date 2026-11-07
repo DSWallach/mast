@@ -925,6 +925,10 @@ pub fn conversation_markdown_gap(theme: &Theme, fallback: f32) -> f32 {
     theme.ui_style.tokens.grid.unwrap_or(fallback)
 }
 
+pub fn conversation_markdown_bullet_size(theme: &Theme) -> f32 {
+    if theme.ui_style.conversation == ConversationVariant::Area { 3.0 } else { 5.0 }
+}
+
 pub fn conversation_markdown_text_size(theme: &Theme, size: f32, body_size: f32) -> f32 {
     if size == body_size {
         theme.ui_style.tokens.body_size.unwrap_or(size)
