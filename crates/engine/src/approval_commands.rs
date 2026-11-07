@@ -783,6 +783,20 @@ mod tests {
             "CARGO_TARGET_DIR=\"$PWD/target-clean\" cargo test -p mast-ui --features snapshot --test ui_preview -- --ignored",
             &snapshot
         ));
+        snapshot.argv_prefix.pop();
+        snapshot.command_regex = Some("^cargo test -p mast-ui --features snapshot --test (offscreen_snapshot|ui_preview)( |$)".into());
+        assert!(check(
+            "CARGO_TARGET_DIR=$PWD/target-clean cargo test -p mast-ui --features snapshot --test offscreen_snapshot -- --ignored",
+            &snapshot
+        ));
+        assert!(check(
+            "CARGO_TARGET_DIR=$PWD/target-clean cargo test -p mast-ui --features snapshot --test ui_preview -- --ignored",
+            &snapshot
+        ));
+        assert!(!check(
+            "CARGO_TARGET_DIR=$PWD/target-clean cargo test -p mast-ui --features snapshot --test other -- --ignored",
+            &snapshot
+        ));
         #[cfg(unix)]
         {
             let outside = tempfile::tempdir().unwrap();

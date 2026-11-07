@@ -38,7 +38,15 @@ style globals are reset per cell. A failed or interrupted request can leave
 `request.inflight.json`; submit it again as a new request after checking the
 response. This is a local development protocol, with one client and no queue.
 
-The command must run **outside the Codex sandbox**: Metal and macOS services are unavailable inside it. Codex workers should prepare the command and request one escaped run; Claude Code workers and the coordinator can run it directly.
+The command must run **outside the Codex sandbox**: Metal and macOS services are unavailable inside it. An enabled matching approval rule can authorize the run; otherwise Codex workers must request an escaped run. Claude Code workers and the coordinator can run it directly.
+
+For an enabled Codex approval rule scoped to the worktrees directory, the
+snapshot test forms can share `argvPrefix` `['cargo', 'test', '-p', 'mast-ui',
+'--features', 'snapshot', '--test']` and `commandRegex`
+`^cargo test -p mast-ui --features snapshot --test (offscreen_snapshot|ui_preview)( |$)`.
+The preview script has its own `argvPrefix` `['scripts/ui-preview.sh']` rule.
+The scoped matcher accepts a leading `CARGO_TARGET_DIR="$PWD/target-clean"`;
+other shell expansions still require approval.
 
 ## UI changes: preview before handoff
 
