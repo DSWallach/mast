@@ -156,20 +156,7 @@ pub(crate) fn render(
 ) -> AnyElement {
     let selector = |suffix: &str| -> SharedString { format!("{id}-{suffix}").into() };
     let frame = |sel: SharedString| {
-        div()
-            .id(sel.clone())
-            .debug_selector(move || sel.to_string())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_card)
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
+        crate::components::browser_parts::artifact_plan_frame(sel, theme)
     };
     let note = |sel: SharedString, text: String| {
         frame(sel)

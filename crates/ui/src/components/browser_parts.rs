@@ -362,6 +362,11 @@ pub(crate) fn artifact_picker_button(
     open: bool,
     theme: &Theme,
 ) -> Stateful<Div> {
+    let label = if super::is_industrial(theme) {
+        SharedString::from(crate::popover::tracked_upper(&label))
+    } else {
+        label
+    };
     let button = div()
         .id(id)
         .debug_selector(move || id.into())
@@ -584,4 +589,136 @@ pub(crate) fn artifact_metadata_chip(text: String, color: gpui::Hsla, theme: &Th
         .child(SharedString::from(text))
         .when(super::is_area(theme), |el| el.rounded_full());
     super::segmented_key(chip, theme, false).into_any_element()
+}
+
+pub(crate) fn artifact_comment_card(
+    id: SharedString,
+    draft: bool,
+    focused: bool,
+    resolved: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = id.to_string();
+    let card = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_col()
+        .gap(px(if draft { 6.0 } else { 4.0 }))
+        .p(px(8.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(if draft {
+            theme.accent.opacity(0.5)
+        } else if focused {
+            theme.accent
+        } else {
+            theme.border
+        })
+        .when(resolved, |el| el.opacity(0.65))
+        .when(super::is_area(theme), |el| el.bg(theme.accent_wash));
+    super::segmented_key(card, theme, focused)
+}
+
+pub(crate) fn artifact_plan_frame(id: SharedString, theme: &Theme) -> Stateful<Div> {
+    let selector = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .px(px(10.0))
+        .py(px(6.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_card)
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .when(super::is_area(theme), |el| el.bg(theme.accent_wash))
+        .when(super::is_industrial(theme), |el| {
+            el.border_color(theme.industrial_colors().rule)
+                .bg(theme.industrial_colors().key)
+        })
+}
+
+pub(crate) fn artifact_index_row(
+    id: SharedString,
+    indent: f32,
+    active: bool,
+    focused: bool,
+    top_level: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = id.to_string();
+    let row = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .w_full()
+        .pl(px(indent))
+        .pr(px(8.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
+        .truncate()
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(if active { theme.text } else { theme.text_muted })
+        .when(top_level, |el| el.font_weight(gpui::FontWeight::MEDIUM))
+        .when(active, |el| {
+            el.bg(crate::theme::wash(if focused { 0.20 } else { 0.10 }))
+        })
+        .hover(|el| el.bg(crate::theme::wash(0.14)))
+        .when(super::is_area(theme), |el| {
+            el.rounded_full()
+                .when(active, |el| el.bg(theme.accent_wash))
+        });
+    super::segmented_key(row, theme, active)
+}
+
+pub(crate) fn browser_preview_open(
+    element: Div,
+    id: SharedString,
+    label: String,
+    available: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let button = element
+        .id(id)
+        .h(px(28.0))
+        .px(px(6.0))
+        .flex_shrink_0()
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .when(available, |el| {
+            el.cursor_pointer()
+                .hover(|style| style.bg(crate::theme::ink(0.05)))
+        })
+        .when(!available, |el| el.opacity(0.4))
+        .child("Open")
+        .when(super::is_area(theme), |el| el.rounded_full());
+    super::segmented_key(button, theme, false)
+}
+
+pub(crate) fn browser_empty_notice(theme: &Theme) -> Div {
+    div()
+        .p(px(16.0))
+        .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(12.0))
+        .line_height(px(19.0))
+        .text_color(theme.text_muted)
+        .when(super::is_area(theme), |el| el.bg(theme.accent_wash))
+        .when(super::is_industrial(theme), |el| {
+            el.bg(theme.industrial_colors().key)
+                .border_color(theme.industrial_colors().rule)
+        })
 }

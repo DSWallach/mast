@@ -569,16 +569,7 @@ impl ArtifactTab {
     fn render_draft(&self, draft: &Draft, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let input = self.comments.input.clone();
         let quote: SharedString = draft.quote.clone().into();
-        div()
-            .id("artifact-comment-draft")
-            .debug_selector(|| "artifact-comment-draft".into())
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .p(px(8.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.accent.opacity(0.5))
+        crate::components::browser_parts::artifact_comment_card("artifact-comment-draft".into(), true, false, false, theme)
             .when(!draft.quote.is_empty(), |el| {
                 el.child(
                     div()
@@ -638,20 +629,7 @@ impl ArtifactTab {
         let selector: SharedString = format!("artifact-comment-{}", comment.id).into();
         let toggle_selector: SharedString =
             format!("artifact-comment-toggle-{}", comment.id).into();
-        div()
-            .id(selector.clone())
-            .debug_selector({
-                let selector = selector.to_string();
-                move || selector.clone()
-            })
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .p(px(8.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
-            .when(resolved, |el| el.opacity(0.65))
+        crate::components::browser_parts::artifact_comment_card(selector, false, focused, resolved, theme)
             .when(row.state == CommentState::Open, |el| {
                 el.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.focus_comment(&select_id, cx)))

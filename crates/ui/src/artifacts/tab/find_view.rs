@@ -873,32 +873,11 @@ impl ArtifactTab {
         let rows = index.sections.iter().enumerate().map(|(ix, section)| {
             let selector = format!("artifact-index-row-{ix}");
             let is_active = active == Some(ix);
-            div()
-                .id(gpui::SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .w_full()
-                .pl(px(
-                    8.0 + 10.0 * f32::from(section.level.saturating_sub(base))
-                ))
-                .pr(px(8.0))
-                .py(px(3.0))
-                .rounded(px(4.0))
-                .truncate()
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(if is_active {
-                    theme.text
-                } else {
-                    theme.text_muted
-                })
-                .when(section.level == base, |el| {
-                    el.font_weight(gpui::FontWeight::MEDIUM)
-                })
-                .when(is_active, |el| {
-                    el.bg(crate::theme::wash(if rail_focused { 0.20 } else { 0.10 }))
-                })
-                .hover(|el| el.bg(crate::theme::wash(0.14)))
+            crate::components::browser_parts::artifact_index_row(
+                gpui::SharedString::from(selector),
+                8.0 + 10.0 * f32::from(section.level.saturating_sub(base)),
+                is_active, rail_focused, section.level == base, theme,
+            )
                 .child(gpui::SharedString::from(section.title.clone()))
                 .on_click(cx.listener(move |this, _, _, cx| this.goto_section(ix, cx)))
         });

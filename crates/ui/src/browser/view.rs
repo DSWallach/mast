@@ -155,7 +155,8 @@ impl BrowserSurface {
                             ),
                     )
                     .child(
-                        div()
+                        crate::components::browser_parts::browser_preview_open(
+                            div()
                             .map(|el| {
                                 #[cfg(feature = "browser-fixture")]
                                 if snapshot
@@ -169,32 +170,14 @@ impl BrowserSurface {
                                     });
                                 }
                                 el
-                            })
-                            .id(gpui::SharedString::from(format!(
-                                "open-preview-{}",
-                                service.id
-                            )))
-                            .h(px(28.0))
-                            .px(px(6.0))
-                            .flex_shrink_0()
-                            .rounded(px(6.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .role(gpui::Role::Button)
-                            .aria_label(format!("Open {} preview", service.name))
-                            .when(available, |el| {
-                                el.cursor_pointer()
-                                    .hover(|style| style.bg(crate::theme::ink(0.05)))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.navigate(&url, window, cx)
-                                    }))
-                            })
-                            .when(!available, |el| el.opacity(0.4))
-                            .child("Open"),
+                            }),
+                            gpui::SharedString::from(format!("open-preview-{}", service.id)),
+                            format!("Open {} preview", service.name), available, theme,
+                        )
+                        .when(available, |el| el.on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.navigate(&url, window, cx)
+                        })))
                     ),
             );
         }
@@ -207,14 +190,7 @@ impl BrowserSurface {
                 "Start a dev server in this Space. It will appear here automatically, ready to open."
             };
             content = content.child(
-                div()
-                    .p(px(16.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
+                crate::components::browser_parts::browser_empty_notice(theme)
                     .child(message),
             );
         }
