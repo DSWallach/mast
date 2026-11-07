@@ -64,6 +64,7 @@ pub fn conversation_picker_footer_content(
     icon: &'static str,
     label: SharedString,
 ) -> Vec<AnyElement> {
+    let label = if theme.ui_style.design_roles.tracked_caps == Some(true) { SharedString::from(crate::popover::tracked_upper(&label)) } else { label };
     vec![
         crate::icons::icon(icon)
             .size(px(12.0))
@@ -198,11 +199,13 @@ pub fn conversation_picker_footer_chip(
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer();
     let chip = super::segmented_key(chip, theme, open);
-    if super::is_area(theme) {
+    let chip = if super::is_area(theme) {
         super::toolbar_control(chip, theme, false)
     } else {
         chip
-    }
+    };
+    chip.when_some(theme.ui_style.design_roles.chip_radius, |el, radius| el.rounded(px(radius)))
+        .when_some(theme.ui_style.design_roles.secondary_colour, |el, role| { let colour = role.colour(theme); el.border_color(colour).text_color(colour) })
 }
 
 pub fn conversation_picker_approval(
@@ -285,6 +288,7 @@ pub fn conversation_picker_footer_label(
     label: SharedString,
     theme: &Theme,
 ) -> Div {
+    let label = if theme.ui_style.design_roles.tracked_caps == Some(true) { SharedString::from(crate::popover::tracked_upper(&label)) } else { label };
     div()
         .h(px(20.0))
         .when(super::is_area(theme), |el| {
@@ -1344,6 +1348,8 @@ pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
             theme.ui_style.controls == crate::ui_style::ControlVariant::Key,
             |el| conversation_industrial_icon_key(el, theme, false),
         )
+        .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
+        .when_some(theme.ui_style.design_roles.secondary_colour, |el, role| { let colour = role.colour(theme); el.border_color(colour).text_color(colour) })
         .on_hover(crate::motion::hover_listener("composer-attach"))
         .child(
             crate::icons::icon(crate::icons::PAPERCLIP)
@@ -1389,7 +1395,7 @@ pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder
     border: Hsla,
 ) -> T {
     let area = theme.ui_style.conversation == ConversationVariant::Area;
-    element
+    let element = element
         .rounded(px(conversation_panel_radius(theme, fallback_radius)))
         .border_1()
         .border_color(if area { identity } else { border })
@@ -1412,7 +1418,8 @@ pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder
                 && !theme.is_frost()
                 && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
             |el| el.shadow_lg(),
-        )
+        );
+    super::design_surface(element, theme, crate::style_overrides::DesignSurface::Composer)
 }
 
 pub fn conversation_composer_width(theme: &Theme, width: f32, gutter: f32) -> f32 {
@@ -1461,8 +1468,10 @@ pub fn conversation_send_key(
     let area = theme.ui_style.conversation == ConversationVariant::Area;
     let key = theme.ui_style.conversation == ConversationVariant::Industrial;
     let guided = theme.ui_style.layout == UiLayout::Guided;
-    let fill = if area { theme.accent } else { theme.text };
-    let text = if area {
+    let fill = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(if area { theme.accent } else { theme.text });
+    let text = if theme.ui_style.design_roles.primary_colour.is_some() {
+        theme.identity_text(fill)
+    } else if area {
         theme.identity_text(fill)
     } else if key {
         theme.on_accent
@@ -1510,8 +1519,10 @@ pub fn conversation_send_key(
             el.rounded(px(radius))
         })
         .when(area, |el| el.rounded_full())
+        .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
         .bg(fill)
         .when(key, |el| conversation_industrial_icon_key(el, theme, true))
+        .when_some(theme.ui_style.design_roles.primary_colour, |el, _| el.bg(fill))
         .flex()
         .items_center()
         .justify_center()
@@ -1521,11 +1532,7 @@ pub fn conversation_send_key(
                 div()
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(text)
-                    .child(if area && !stop {
-                        label.to_uppercase()
-                    } else {
-                        label.to_string()
-                    }),
+                    .child(match theme.ui_style.design_roles.tracked_caps { Some(true) => crate::popover::tracked_upper(label), Some(false) => label.to_string(), None if area && !stop => label.to_uppercase(), None => label.to_string() }),
             )
         })
 }
@@ -1621,8 +1628,10 @@ pub fn conversation_tool_theme(theme: &Theme) -> Theme {
 }
 
 /// Frame the tool group for the active conversation style.
-pub fn conversation_tool_panel(_theme: &Theme, _identity: Hsla, body: AnyElement) -> AnyElement {
-    body
+pub fn conversation_tool_panel(theme: &Theme, _identity: Hsla, body: AnyElement) -> AnyElement {
+    let roles = theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Tool);
+    if roles.border.is_none() && roles.page_colour.is_none() && theme.ui_style.design_roles.panel_radius.is_none() { return body; }
+    super::design_surface(div().when_some(theme.ui_style.design_roles.panel_radius, |el, radius| el.rounded(px(radius))).child(body), theme, crate::style_overrides::DesignSurface::Tool).into_any_element()
 }
 
 fn code_block_header(
@@ -1700,7 +1709,7 @@ pub fn conversation_code_frame(
     body: AnyElement,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    let frame = div()
         .id(id)
         .w_full()
         .min_w_0()
@@ -1722,10 +1731,12 @@ pub fn conversation_code_frame(
                     .p(px(4.0))
             },
         )
+        .when_some(theme.ui_style.design_roles.panel_radius, |el, radius| el.rounded(px(radius)))
         .overflow_hidden()
         .relative()
         .children(code_block_header(language, actions, theme))
-        .child(body)
+        .child(body);
+    super::design_surface(frame, theme, crate::style_overrides::DesignSurface::Code)
 }
 
 pub fn conversation_question_chip(

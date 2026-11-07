@@ -1,7 +1,9 @@
 //! Developer controls for the current style's live override values.
 use crate::{
     settings::{self, SavePolicy},
-    style_overrides::{self, ColourRole, HeadingFamily, HeadingWeight, TokenOverrides},
+    style_overrides::{
+        self, ColourRole, DesignSurface, HeadingFamily, HeadingWeight, TokenOverrides,
+    },
     theme::Theme,
     ui_style::{UiLayout, UiStyle, UiStyleId},
 };
@@ -253,6 +255,42 @@ impl DesignPanel {
         style_overrides::preview(overrides, cx);
         cx.notify();
     }
+    fn set_surface(
+        surface: DesignSurface,
+        border: bool,
+        value: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let style = crate::ui_style::current(cx);
+        let mut overrides = style_overrides::current(cx);
+        let entry = overrides
+            .styles
+            .entry(style_name(style.id).into())
+            .or_default();
+        let target = entry
+            .tokens
+            .surfaces
+            .entry(surface.name().into())
+            .or_default();
+        if border {
+            target.border = value;
+        } else {
+            target.page_colour = value;
+        }
+        if let Some(target) = entry
+            .layouts
+            .get_mut(layout_name(style.layout))
+            .and_then(|layout| layout.surfaces.get_mut(surface.name()))
+        {
+            if border {
+                target.border = None;
+            } else {
+                target.page_colour = None;
+            }
+        }
+        style_overrides::preview(overrides, cx);
+        cx.notify();
+    }
     fn drag(&mut self, index: usize, token: Token, x: Pixels, cx: &mut Context<Self>) {
         if let Some(bounds) = self.bounds[index].get() {
             let fraction = (f32::from(x - bounds.left()) / f32::from(bounds.size.width).max(1.0))
@@ -450,11 +488,7 @@ impl Render for DesignPanel {
                 "Settings heading weight",
                 &["Reset", "Regular", "Medium", "Semibold", "Bold"][..],
             ),
-            (
-                2,
-                "Settings heading tracked caps",
-                &["Reset", "Off", "On"][..],
-            ),
+            (2, "Tracked caps", &["Reset", "Off", "On"][..]),
         ] {
             let mut row = div()
                 .flex()
@@ -471,6 +505,43 @@ impl Render for DesignPanel {
                 );
             }
             content = content.child(row);
+        }
+        for surface in DesignSurface::ALL {
+            let roles = current.design_roles.surface(surface);
+            for border in [true, false] {
+                let selected = if border {
+                    roles.border
+                } else {
+                    roles.page_colour
+                };
+                let label = format!(
+                    "{} {}",
+                    surface.label(),
+                    if border { "border" } else { "page colour" }
+                );
+                let mut row = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().w(px(200.0)).child(label));
+                for (value, label) in [(None, "Reset"), (Some(false), "Off"), (Some(true), "On")] {
+                    row = row.child(
+                        Self::button(label, &theme)
+                            .id(SharedString::from(format!(
+                                "surface-{}-{border}-{label}",
+                                surface.name()
+                            )))
+                            .when(selected == value && value.is_some(), |el| {
+                                el.border_1().border_color(theme.accent)
+                            })
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                Self::set_surface(surface, border, value, cx)
+                            })),
+                    );
+                }
+                content = content.child(row);
+            }
         }
         content = content.child(
             div()
@@ -573,6 +644,10 @@ impl Render for DesignPanel {
                             ));
                         }
                         if let Some(style_overrides) = overrides.styles.get(style_name(style.id)) {
+                            for (surface, values) in &style_overrides.tokens.surfaces {
+                                if let Some(value) = values.border { patch.push_str(&format!("{surface} border: component default → {value}\n")); }
+                                if let Some(value) = values.page_colour { patch.push_str(&format!("{surface} page colour: component default → {value}\n")); }
+                            }
                             for (layout, values) in &style_overrides.layouts {
                                 let layout_id = match layout.as_str() {
                                     "compact" => UiLayout::Compact,
@@ -595,6 +670,10 @@ impl Render for DesignPanel {
                                             token.base_description(base)
                                         ));
                                     }
+                                }
+                                for (surface, values) in &values.surfaces {
+                                    if let Some(value) = values.border { patch.push_str(&format!("{layout} · {surface} border: style default → {value}\n")); }
+                                    if let Some(value) = values.page_colour { patch.push_str(&format!("{layout} · {surface} page colour: style default → {value}\n")); }
                                 }
                                 for (label, value) in [
                                     (
@@ -630,7 +709,7 @@ impl Render for DesignPanel {
                                         values.heading_weight.map(|v| format!("{v:?}")),
                                     ),
                                     (
-                                        "Settings heading tracked caps",
+                                        "Tracked caps",
                                         values.tracked_caps.map(|v| v.to_string()),
                                     ),
                                 ] {

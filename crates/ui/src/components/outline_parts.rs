@@ -704,7 +704,7 @@ pub fn outline_overview_header(theme: &Theme) -> Div {
 /// Row chrome; selection, drag handling and content remain with the caller.
 pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) -> Stateful<Div> {
     let selector = id.to_string();
-    div()
+    let row = div()
         .id(id)
         .group("outline-row")
         .debug_selector(move || selector.clone())
@@ -720,13 +720,15 @@ pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) ->
             theme.ui_style.tokens.body_size.unwrap_or(12.5),
         ))
         .border_1()
-        .border_color(gpui::transparent_black())
+        .border_color(gpui::transparent_black());
+    super::design_surface(row, theme, crate::style_overrides::DesignSurface::OutlineRow)
 }
 
 pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
     let mut result = theme.clone();
-    if super::is_area(theme) && selected {
-        result.text = theme.identity_text(theme.accent);
+    if selected && (super::is_area(theme) || theme.ui_style.design_roles.primary_colour.is_some()) {
+        let colour = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(theme.accent);
+        result.text = theme.identity_text(colour);
         result.text_muted = result.text;
         result.text_faint = result.text.opacity(0.8);
     }
@@ -734,7 +736,7 @@ pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
 }
 
 pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selected: bool) -> T {
-    if super::is_area(theme) && selected {
+    let element = if super::is_area(theme) && selected {
         element
             .max_w(px(400.0))
             .rounded_full()
@@ -742,7 +744,12 @@ pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selecte
             .border_color(theme.accent)
     } else {
         element
-    }
+    };
+    let element = if let Some(radius) = theme.ui_style.design_roles.panel_radius { element.rounded(px(radius)) } else { element };
+    let element = if let Some(role) = theme.ui_style.design_roles.primary_colour.filter(|_| selected) {
+        let colour = role.colour(theme); element.bg(colour).border_color(colour)
+    } else { element };
+    super::design_surface(element, theme, crate::style_overrides::DesignSurface::OutlineRow)
 }
 
 pub fn outline_row_extras(theme: &Theme) -> bool {

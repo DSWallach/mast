@@ -76,6 +76,69 @@ impl HeadingWeight {
     }
 }
 
+/// Surfaces with independent border and background decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesignSurface {
+    Toolbar,
+    SidebarRow,
+    HeaderChip,
+    Composer,
+    Message,
+    Tool,
+    Code,
+    OutlineRow,
+}
+impl DesignSurface {
+    pub const ALL: [Self; 8] = [
+        Self::Toolbar,
+        Self::SidebarRow,
+        Self::HeaderChip,
+        Self::Composer,
+        Self::Message,
+        Self::Tool,
+        Self::Code,
+        Self::OutlineRow,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Toolbar => "toolbar",
+            Self::SidebarRow => "sidebarRow",
+            Self::HeaderChip => "headerChip",
+            Self::Composer => "composer",
+            Self::Message => "message",
+            Self::Tool => "tool",
+            Self::Code => "code",
+            Self::OutlineRow => "outlineRow",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Toolbar => "Toolbar",
+            Self::SidebarRow => "Sidebar row",
+            Self::HeaderChip => "Chat header chip",
+            Self::Composer => "Composer",
+            Self::Message => "Message",
+            Self::Tool => "Tool panel",
+            Self::Code => "Code panel",
+            Self::OutlineRow => "Outline row",
+        }
+    }
+    fn index(self) -> usize {
+        self as usize
+    }
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|surface| surface.name() == name)
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurfaceOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_colour: Option<bool>,
+}
+
 /// Overrides for decisions whose default remains with the component.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DesignRoles {
@@ -89,6 +152,11 @@ pub struct DesignRoles {
     pub heading_weight: Option<HeadingWeight>,
     pub tracked_caps: Option<bool>,
     pub spacing_small: Option<f32>,
+    pub control_radius: Option<f32>,
+    pub panel_radius: Option<f32>,
+    pub chip_radius: Option<f32>,
+    pub bubble_radius: Option<f32>,
+    pub surfaces: [SurfaceOverrides; 8],
 }
 impl DesignRoles {
     pub const NONE: Self = Self {
@@ -102,7 +170,18 @@ impl DesignRoles {
         heading_weight: None,
         tracked_caps: None,
         spacing_small: None,
+        control_radius: None,
+        panel_radius: None,
+        chip_radius: None,
+        bubble_radius: None,
+        surfaces: [SurfaceOverrides {
+            border: None,
+            page_colour: None,
+        }; 8],
     };
+    pub fn surface(self, surface: DesignSurface) -> SurfaceOverrides {
+        self.surfaces[surface.index()]
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -144,6 +223,8 @@ pub struct TokenOverrides {
     pub tracked_caps: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spacing_small: Option<f32>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub surfaces: BTreeMap<String, SurfaceOverrides>,
 }
 
 impl TokenOverrides {
@@ -177,6 +258,29 @@ impl TokenOverrides {
         }
         if self.spacing_small.is_some() {
             style.design_roles.spacing_small = self.spacing_small;
+        }
+        if self.control_radius.is_some() {
+            style.design_roles.control_radius = self.control_radius;
+        }
+        if self.panel_radius.is_some() {
+            style.design_roles.panel_radius = self.panel_radius;
+        }
+        if self.chip_radius.is_some() {
+            style.design_roles.chip_radius = self.chip_radius;
+        }
+        if self.bubble_radius.is_some() {
+            style.design_roles.bubble_radius = self.bubble_radius;
+        }
+        for (name, values) in &self.surfaces {
+            if let Some(surface) = DesignSurface::from_name(name) {
+                let target = &mut style.design_roles.surfaces[surface.index()];
+                if values.border.is_some() {
+                    target.border = values.border;
+                }
+                if values.page_colour.is_some() {
+                    target.page_colour = values.page_colour;
+                }
+            }
         }
         let tokens = &mut style.tokens;
         if let Some(v) = self.control_radius {
@@ -338,6 +442,40 @@ fn parse_tokens(object: &serde_json::Map<String, Value>, allow_layouts: bool) ->
         if allow_layouts && key == "layouts" {
             continue;
         }
+        if key == "surfaces" {
+            if let Some(surfaces) = value.as_object() {
+                for (name, entry) in surfaces {
+                    if DesignSurface::from_name(name).is_none() {
+                        tracing::warn!(%name, "unknown design surface");
+                        continue;
+                    }
+                    let Some(entry) = entry.as_object() else {
+                        tracing::warn!(%name, "invalid design surface");
+                        continue;
+                    };
+                    let mut parsed = SurfaceOverrides::default();
+                    for (field, value) in entry {
+                        let target = match field.as_str() {
+                            "border" => &mut parsed.border,
+                            "pageColour" => &mut parsed.page_colour,
+                            _ => {
+                                tracing::warn!(%field, "unknown surface token");
+                                continue;
+                            }
+                        };
+                        if let Some(value) = value.as_bool() {
+                            *target = Some(value);
+                        } else {
+                            tracing::warn!(%field, "invalid surface token");
+                        }
+                    }
+                    tokens.surfaces.insert(name.clone(), parsed);
+                }
+            } else {
+                tracing::warn!("surfaces must be an object");
+            }
+            continue;
+        }
         if key == "headingFamily" {
             match serde_json::from_value::<HeadingFamily>(value.clone()) {
                 Ok(v) => tokens.heading_family = Some(v),
@@ -471,6 +609,25 @@ mod tests {
             Some(HeadingWeight::Bold)
         );
         assert_eq!(result.design_roles.tracked_caps, Some(true));
+        assert_eq!(
+            Overrides::parse(&serde_json::to_string(&overrides).unwrap()),
+            overrides
+        );
+    }
+
+    #[test]
+    fn surface_overrides_merge_independently_and_ignore_invalid_fields() {
+        let input = r#"{"version":"mast.style-overrides/v1","styles":{"area":{"surfaces":{"composer":{"border":true,"pageColour":false,"unknown":1},"code":{"border":"bad","pageColour":true},"missing":{"border":true}},"layouts":{"compact":{"surfaces":{"composer":{"border":false}}}}}}}"#;
+        let overrides = Overrides::parse(input);
+        let style = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Compact));
+        let composer = style.design_roles.surface(DesignSurface::Composer);
+        assert_eq!(composer.border, Some(false));
+        assert_eq!(composer.page_colour, Some(false));
+        assert_eq!(
+            style.design_roles.surface(DesignSurface::Code).page_colour,
+            Some(true)
+        );
+        assert_eq!(style.design_roles.surface(DesignSurface::Code).border, None);
         assert_eq!(
             Overrides::parse(&serde_json::to_string(&overrides).unwrap()),
             overrides

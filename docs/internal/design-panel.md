@@ -9,8 +9,12 @@ The sliders change control, panel, chip and bubble radii, control height,
 sidebar row height, grid size, small spacing and rule width where components use those tokens.
 The sidebar separator toggle changes the sidebar rule. The details controls affect the work-item details frame: its border and whether
 its background uses the page colour. The outline control changes the tree and overview header background. Primary and secondary colour choices affect
-work-item action buttons. Heading family, weight and tracked caps affect settings
-page headings. Other components retain their existing decisions. Reset clears an
+shared buttons, toolbars, selected sidebar and outline rows, chat header chips,
+and composer keys. Heading family and weight affect settings page headings;
+tracked caps also affect sidebar section labels and composer captions. The surface
+controls select a border and page-colour background for the toolbar, sidebar row,
+chat header chip, composer, message, tool, code and outline row. The reset state
+preserves each component's existing style-specific behavior. Reset clears an
 individual override; Reset style clears all overrides for that style, including
 layout-specific overrides. Save writes the file. Copy patch places a human-readable
 summary on the clipboard for the coordinator to translate into defaults.
@@ -49,3 +53,15 @@ that file and resolves each column's own Style and the selected Layout. Draft
 slider changes stay in Mast until saved. The gallery keeps its other settings in
 a separate temporary directory; `MAST_DATA_DIR` (or `ZERON_DATA_DIR`) selects a
 non-default profile directory for reading overrides.
+
+Surface overrides can also be supplied under `surfaces`, for example:
+
+```json
+{ "version": "mast.style-overrides/v1", "styles": { "area": {
+  "surfaces": { "composer": { "border": true, "pageColour": false } }
+} } }
+```
+
+Surface keys are `toolbar`, `sidebarRow`, `headerChip`, `composer`, `message`,
+`tool`, `code`, and `outlineRow`. Their controls apply where those shared
+components render, not to unrelated hand-built chrome.

@@ -111,6 +111,14 @@ fn layout_spacing(theme: &Theme) -> f32 {
     theme.ui_style.spacing_scale().small / crate::surface_chrome::CONTROL_GAP
 }
 
+/// Apply explicit surface decisions after the component's style defaults.
+pub(crate) fn design_surface<T: gpui::Styled>(mut element: T, theme: &Theme, surface: crate::style_overrides::DesignSurface) -> T {
+    let roles = theme.ui_style.design_roles.surface(surface);
+    if let Some(visible) = roles.border { element = if visible { element.border_1().border_color(theme.border) } else { element.border_color(gpui::transparent_black()) }; }
+    if let Some(page) = roles.page_colour { element = element.bg(if page { theme.bg } else { theme.surface }); }
+    element
+}
+
 /// A button without an event handler. Callers attach their action after building.
 pub fn button(
     id: impl Into<ElementId>,
@@ -165,7 +173,10 @@ pub fn button_with_identity(
                 .border_color(theme.border)
                 .text_color(theme.text_muted)
                 .hover(|el| el.bg(theme.element_hover).text_color(theme.text));
-            crate::surface_chrome::segmented_key(button, theme, false).child(label)
+            crate::surface_chrome::segmented_key(button, theme, false)
+                .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
+                .when_some(theme.ui_style.design_roles.secondary_colour, |el, role| { let colour = role.colour(theme); el.border_color(colour).text_color(colour) })
+                .child(label)
         }
         ButtonVariant::Primary => {
             let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
@@ -186,7 +197,10 @@ pub fn button_with_identity(
             } else {
                 button
             };
-            button.child(label)
+            button
+                .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
+                .when_some(theme.ui_style.design_roles.primary_colour, |el, role| { let colour = role.colour(theme); el.bg(colour).text_color(theme.identity_text(colour)) })
+                .child(label)
         }
         ButtonVariant::Danger => {
             let fill = danger_fill(theme);
@@ -522,11 +536,12 @@ pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
 
 pub fn toolbar_search_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
     let frame = search_input_frame(theme, input);
-    if is_industrial(theme) || is_area(theme) {
+    let frame = if is_industrial(theme) || is_area(theme) {
         toolbar_control(frame.mb(px(0.0)), theme, false)
     } else {
         frame
-    }
+    };
+    design_surface(frame, theme, crate::style_overrides::DesignSurface::Toolbar)
 }
 
 pub fn dialog_field(theme: &Theme, input: AnyElement) -> gpui::Div {
@@ -575,7 +590,7 @@ pub fn segmented_key<T: gpui::Styled + gpui::ParentElement>(
 
 /// Apply the Industrial toolbar frame while leaving other appearances unchanged.
 pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
-    if is_industrial(theme) {
+    let element = if is_industrial(theme) {
         let colors = theme.industrial_colors();
         element
             .h(px(theme.ui_style.tokens.control_size))
@@ -609,7 +624,15 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             })
     } else {
         element
-    }
+    };
+    let element = if let Some(radius) = theme.ui_style.design_roles.control_radius { element.rounded(px(radius)) } else { element };
+    let role = if primary { theme.ui_style.design_roles.primary_colour } else { theme.ui_style.design_roles.secondary_colour };
+    let element = if let Some(role) = role {
+        let colour = role.colour(theme);
+        if primary { element.bg(colour).border_color(colour).text_color(theme.identity_text(colour)) }
+        else { element.border_color(colour).text_color(colour) }
+    } else { element };
+    design_surface(element, theme, crate::style_overrides::DesignSurface::Toolbar)
 }
 
 /// Apply the Industrial panel radius to a shared error notice.
@@ -808,6 +831,7 @@ pub fn user_message_bubble(
         .text_color(text)
         .when(pending, |el| el.opacity(0.65))
         .child(content);
+    let bubble = design_surface(bubble, theme, crate::style_overrides::DesignSurface::Message);
     if variant == ConversationVariant::Industrial {
         div()
             .min_w_0()
@@ -841,7 +865,7 @@ pub fn agent_message_bubble(
     model: Option<String>,
     content: AnyElement,
 ) -> AnyElement {
-    if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
+    let bubble = if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
         div()
             .flex()
             .flex_col()
@@ -901,7 +925,10 @@ pub fn agent_message_bubble(
             .into_any_element()
     } else {
         content
-    }
+    };
+    let roles = theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message);
+    if roles.border.is_none() && roles.page_colour.is_none() && theme.ui_style.design_roles.bubble_radius.is_none() { return bubble; }
+    design_surface(div().when_some(theme.ui_style.design_roles.bubble_radius, |el, radius| el.rounded(px(radius))).child(bubble), theme, crate::style_overrides::DesignSurface::Message).into_any_element()
 }
 
 pub fn agent_message_row_gap(theme: &Theme, continues: bool, gap: f32) -> f32 {
