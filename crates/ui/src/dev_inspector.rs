@@ -48,7 +48,7 @@ fn format_details(id: &InspectorElementId, state: &DivInspectorState, context: &
     macro_rules! field {
         ($label:expr, $value:expr) => {
             if let Some(value) = &$value {
-                lines.push(format!("{}: {:?}", $label, value));
+                lines.push(format!("{}: {}", $label, value));
             }
         };
     }
@@ -98,6 +98,10 @@ fn format_details(id: &InspectorElementId, state: &DivInspectorState, context: &
     lines.join("\n")
 }
 
+fn copy_details(details: &str, cx: &mut App) {
+    cx.write_to_clipboard(ClipboardItem::new_string(details.to_owned()));
+}
+
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &ToggleInspector, cx| {
         cx.defer(|cx| {
@@ -129,10 +133,14 @@ pub fn init(cx: &mut App) {
             .child(
                 div()
                     .id("copy-inspector-details")
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(4.))
+                    .bg(theme.surface_raised)
                     .cursor_pointer()
                     .child(label)
                     .on_click(move |_, window, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text.clone()));
+                        copy_details(&clipboard_text, cx);
                         *copied.borrow_mut() = clipboard_text.clone();
                         window.refresh();
                     }),
@@ -143,7 +151,9 @@ pub fn init(cx: &mut App) {
         let states = inspector.render_inspector_states(window, cx);
         let theme = crate::theme::Theme::of(cx);
         div()
+            .id("inspector-panel")
             .size_full()
+            .overflow_y_scroll()
             .p(px(12.))
             .flex()
             .flex_col()
@@ -165,8 +175,7 @@ mod tests {
     use super::*;
     use gpui::{Context, Render, Window};
 
-    #[test]
-    fn details_include_source_and_colors_without_unset_fields() {
+    fn sample_details() -> String {
         let id = gpui::InspectorElementId {
             path: std::rc::Rc::new(gpui::InspectorElementPath {
                 global_id: Default::default(),
@@ -181,7 +190,12 @@ mod tests {
             bounds: Default::default(),
             content_size: Default::default(),
         };
-        let details = format_details(&id, &state, "Area, Dark");
+        format_details(&id, &state, "Area, Dark")
+    }
+
+    #[test]
+    fn details_include_source_and_colors_without_unset_fields() {
+        let details = sample_details();
         assert!(details.contains("crates/ui/src/dev_inspector.rs:"));
         assert_eq!(
             relative_source("/checkout/crates/ui/src/file.rs"),
@@ -205,6 +219,13 @@ mod tests {
         vcx.update(|window, cx| {
             crate::theme::Theme::install(crate::theme::Appearance::Dark, cx);
             init(cx);
+            copy_details(&sample_details(), cx);
+            assert!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .unwrap()
+                    .contains("crates/ui/src/dev_inspector.rs:")
+            );
             crate::app_menus::bind_keys(cx);
             window.activate_window();
             window.draw(cx).clear();
