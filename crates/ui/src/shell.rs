@@ -15299,6 +15299,10 @@ impl Shell {
     pub fn fixture_snapshot_ready(&mut self) {
         self.splash = SplashPhase::Gone;
     }
+
+    pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
+    }
 }
 
 /// Native visual QA uses the production shell with isolated fixture data.

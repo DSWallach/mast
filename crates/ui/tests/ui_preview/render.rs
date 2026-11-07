@@ -172,13 +172,13 @@ fn chat(data_dir: PathBuf, cx: &mut App) -> AnyView {
         state.selected_space = Some("fixture-space".into());
         state.auto_selected = true; state.chats_synced = true; state.spaces_synced = true;
         state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
-        state.chats = vec![serde_json::from_value(serde_json::json!({"id":"fixture-chat","deviceId":"local","spaceId":"fixture-space","title":"Review the workspace","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"claude-sonnet-4-6","reasoning":null,"sandbox":"workspace-write"}})).unwrap()];
+        state.chats = vec![serde_json::from_value(serde_json::json!({"id":"fixture-chat","deviceId":"local","spaceId":"fixture-space","title":"Review the workspace","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"Opus 5.5","reasoning":"high","sandbox":"workspace-write"}})).unwrap()];
         state
     });
     state.update(cx, |state, cx| {
         state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
             {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
-            {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I will inspect the layout and report the changes."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
+            {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I inspected the layout.\n\nThe controls now align with their captions.\n\n- The model name stays visible.\n- The attachment has one border.\n\nThe reply has one frame."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
         ])).unwrap() }, cx).unwrap();
     });
     let boot = mast_ui::EngineBootConfig {
@@ -193,6 +193,7 @@ fn chat(data_dir: PathBuf, cx: &mut App) -> AnyView {
     cx.new(|cx| {
         let mut shell = mast_ui::shell::Shell::new(state, boot, cx);
         shell.fixture_snapshot_ready();
+        shell.fixture_snapshot_attachment(include_bytes!("../../assets/dock/mast-icon-ready.png").to_vec(), cx);
         shell
     })
     .into()
@@ -355,6 +356,9 @@ impl Render for ComponentMatrix {
                         theme.identity_color(""),
                         true,
                         true,
+                        false,
+                        false,
+                        0.0,
                         Some("Model".into()),
                         div().child("Reply").into_any_element(),
                     ),
