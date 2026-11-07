@@ -349,7 +349,7 @@ pub fn outline_action_button(
         });
     crate::surface_chrome::segmented_key(button, theme, primary && enabled)
         .when(super::is_area(theme), |el| {
-            if primary && enabled {
+            if enabled && (primary || matches!(label, "Approve" | "Accept rule" | "Send")) {
                 el.rounded_full()
                     .bg(theme.accent)
                     .border_color(theme.accent)
