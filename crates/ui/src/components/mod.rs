@@ -2,7 +2,7 @@
 //! appearance determines their treatment.
 
 mod settings_parts;
-pub(crate) use settings_parts::{settings_effective_surface, settings_ghost_action};
+pub(crate) use settings_parts::{settings_effective_surface, settings_ghost_action, settings_layout_preview};
 
 mod outline_parts;
 pub use outline_parts::*;
