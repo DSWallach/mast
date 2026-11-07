@@ -2497,6 +2497,78 @@ mod tests {
         assert_eq!(accounts.local_sign_in_status(HarnessId::ClaudeCode).await, LocalSignInStatus::SignedIn);
     }
 
+    fn claude_test_accounts() -> (tempfile::TempDir, AgentAccounts, AgentAccountsConfig) {
+        let home = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: home.path().join("data"),
+            claude_config_dir: home.path().join("claude"),
+            claude_config_file: home.path().join("claude.json"),
+            codex_home: home.path().join("codex"),
+            cursor_sdk_auth_file: home.path().join("cursor.json"),
+        };
+        std::fs::create_dir_all(&config.claude_config_dir).unwrap();
+        std::fs::write(&config.claude_config_file, serde_json::json!({
+            "oauthAccount": {"accountUuid": "active", "emailAddress": "active@example.test"},
+            "userID": "fixture-user", "other": "preserved"
+        }).to_string()).unwrap();
+        std::fs::write(config.claude_creds_file(), serde_json::json!({
+            "claudeAiOauth": {"accessToken": "expired"},
+            "trustedDeviceToken": "device", "mcpOAuth": {"server": "shared"}
+        }).to_string()).unwrap();
+        let accounts = AgentAccounts::new(config.clone());
+        (home, accounts, config)
+    }
+
+    fn claude_test_slot(key: &str, token: &str) -> Slot {
+        Slot {
+            id: slot_id_for(HarnessId::ClaudeCode, key),
+            harness: HarnessId::ClaudeCode,
+            account_key: key.into(),
+            profile: SlotProfile {
+                email: format!("{key}@example.test"), display_name: None,
+                organization: None, plan: None, auth_kind: AgentAuthKind::Oauth,
+            },
+            credentials: serde_json::json!({"claudeAiOauth": {"accessToken": token}}),
+            claude_config: None, saved_at: now_ms(), created_at: None, promoted_to: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_reauthentication_updates_live_login_and_snapshot() {
+        let (_home, accounts, config) = claude_test_accounts();
+        accounts.list(false).await.unwrap();
+        accounts.save_claude_login(&claude_test_slot("active", "renewed")).await.unwrap();
+        let snapshot = accounts.list(false).await.unwrap();
+        assert!(snapshot.accounts.iter().any(|account| account.active && account.id == slot_id_for(HarnessId::ClaudeCode, "active")));
+        let live = read_json(&config.claude_creds_file()).unwrap();
+        assert_eq!(live["claudeAiOauth"]["accessToken"], "renewed");
+        assert_eq!(live["trustedDeviceToken"], "device");
+        assert_eq!(live["mcpOAuth"]["server"], "shared");
+        let slot = accounts.read_slots(HarnessId::ClaudeCode).pop().unwrap();
+        assert_eq!(slot.credentials, live);
+        let identity = read_json(&config.claude_config_file).unwrap();
+        assert_eq!(identity["userID"], "fixture-user");
+        assert_eq!(identity["other"], "preserved");
+    }
+
+    #[tokio::test]
+    async fn claude_sign_in_for_another_account_preserves_switching() {
+        let (_home, accounts, config) = claude_test_accounts();
+        accounts.list(false).await.unwrap();
+        accounts.save_claude_login(&claude_test_slot("other", "other-token")).await.unwrap();
+        accounts.list(false).await.unwrap();
+        assert_eq!(read_json(&config.claude_creds_file()).unwrap()["claudeAiOauth"]["accessToken"], "expired");
+        accounts.activate(HarnessId::ClaudeCode, &slot_id_for(HarnessId::ClaudeCode, "other")).await.unwrap();
+        let live = read_json(&config.claude_creds_file()).unwrap();
+        assert_eq!(live["claudeAiOauth"]["accessToken"], "other-token");
+        assert_eq!(live["mcpOAuth"]["server"], "shared");
+        accounts.activate(HarnessId::ClaudeCode, &slot_id_for(HarnessId::ClaudeCode, "active")).await.unwrap();
+        let live = read_json(&config.claude_creds_file()).unwrap();
+        assert_eq!(live["claudeAiOauth"]["accessToken"], "expired");
+        assert_eq!(live["mcpOAuth"]["server"], "shared");
+        assert_eq!(live["trustedDeviceToken"], "device");
+    }
+
     #[test]
     fn plan_labels() {
         assert_eq!(
