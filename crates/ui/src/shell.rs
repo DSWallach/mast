@@ -571,6 +571,7 @@ pub enum SettingsSection {
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
+    Developer,
     Files,
     Notifications,
     /// Linear integration: API key and connection status.
@@ -581,11 +582,12 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 10] = [
+    pub const ALL: [SettingsSection; 11] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
         SettingsSection::Appearance,
+        SettingsSection::Developer,
         SettingsSection::Files,
         SettingsSection::Notifications,
         SettingsSection::Linear,
@@ -602,6 +604,7 @@ impl SettingsSection {
             SettingsSection::Harnesses => "Agents",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
+            SettingsSection::Developer => "Developer",
             SettingsSection::Files => "Files",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Linear => "Linear",
@@ -1696,6 +1699,7 @@ pub struct Shell {
     archived_page: Option<Entity<ArchivedPage>>,
     linear_settings_page: Option<Entity<crate::linear::settings_page::LinearSettingsPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
+    design_page: Option<Entity<crate::settings::design_panel::DesignPanel>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
@@ -2225,6 +2229,7 @@ impl Shell {
             archived_page: None,
             linear_settings_page: None,
             appearance_page: None,
+            design_page: None,
             files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
@@ -4986,6 +4991,10 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::Developer => {
+                let page = self.design_page.get_or_insert_with(|| cx.new(crate::settings::design_panel::DesignPanel::new));
+                page.clone().into_any_element()
+            }
             SettingsSection::Files => {
                 if self.files_settings_page.is_none() {
                     let page = cx.new(|cx| {
@@ -7080,6 +7089,7 @@ impl Shell {
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
+            SettingsSection::Developer => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Linear => icons::CHECKLIST,

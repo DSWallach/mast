@@ -102,6 +102,7 @@ pub mod transcript;
 pub(crate) use mast_proto::message_source;
 pub mod typography;
 pub mod ui_style;
+pub mod style_overrides;
 pub(crate) mod work_outline;
 pub mod workspace_chip;
 mod workspace_links;
@@ -214,6 +215,7 @@ pub fn run_app(config: UiConfig) {
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
         ui_style::init_with_layout(ui_settings.ui_style, ui_settings.ui_layout, cx);
+        style_overrides::init(data_dir.clone(), cx);
         typography::init(
             ui_settings.ui_font_family.clone(),
             ui_settings.ui_font_size,

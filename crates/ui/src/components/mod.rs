@@ -111,6 +111,14 @@ fn layout_spacing(theme: &Theme) -> f32 {
     theme.ui_style.spacing_scale().small / crate::surface_chrome::CONTROL_GAP
 }
 
+/// Apply explicit surface decisions after the component's style defaults.
+pub(crate) fn design_surface<T: gpui::Styled>(mut element: T, theme: &Theme, surface: crate::style_overrides::DesignSurface) -> T {
+    let roles = theme.ui_style.design_roles.surface(surface);
+    if let Some(visible) = roles.border { element = if visible { element.border_1().border_color(theme.border) } else { element.border_color(gpui::transparent_black()) }; }
+    if let Some(page) = roles.page_colour { element = element.bg(if page { theme.bg } else { theme.surface }); }
+    element
+}
+
 /// A button without an event handler. Callers attach their action after building.
 pub fn button(
     id: impl Into<ElementId>,
@@ -165,7 +173,10 @@ pub fn button_with_identity(
                 .border_color(theme.border)
                 .text_color(theme.text_muted)
                 .hover(|el| el.bg(theme.element_hover).text_color(theme.text));
-            crate::surface_chrome::segmented_key(button, theme, false).child(label)
+            crate::surface_chrome::segmented_key(button, theme, false)
+                .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
+                .when_some(theme.ui_style.design_roles.secondary_colour, |el, role| { let colour = role.colour(theme); el.border_color(colour).text_color(colour) })
+                .child(label)
         }
         ButtonVariant::Primary => {
             let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
@@ -186,7 +197,10 @@ pub fn button_with_identity(
             } else {
                 button
             };
-            button.child(label)
+            button
+                .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
+                .when_some(theme.ui_style.design_roles.primary_colour, |el, role| { let colour = role.colour(theme); el.bg(colour).text_color(theme.identity_text(colour)) })
+                .child(label)
         }
         ButtonVariant::Danger => {
             let fill = danger_fill(theme);
@@ -522,11 +536,12 @@ pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
 
 pub fn toolbar_search_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
     let frame = search_input_frame(theme, input);
-    if is_industrial(theme) || is_area(theme) {
+    let frame = if is_industrial(theme) || is_area(theme) {
         toolbar_control(frame.mb(px(0.0)), theme, false)
     } else {
         frame
-    }
+    };
+    design_surface(frame, theme, crate::style_overrides::DesignSurface::Toolbar)
 }
 
 pub fn dialog_field(theme: &Theme, input: AnyElement) -> gpui::Div {
@@ -575,7 +590,7 @@ pub fn segmented_key<T: gpui::Styled + gpui::ParentElement>(
 
 /// Apply the Industrial toolbar frame while leaving other appearances unchanged.
 pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool) -> T {
-    if is_industrial(theme) {
+    let element = if is_industrial(theme) {
         let colors = theme.industrial_colors();
         element
             .h(px(theme.ui_style.tokens.control_size))
@@ -609,7 +624,16 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             })
     } else {
         element
-    }
+    };
+    let element = if let Some(radius) = theme.ui_style.design_roles.control_radius { element.rounded(px(radius)) } else { element };
+    let role = if primary { theme.ui_style.design_roles.primary_colour } else { theme.ui_style.design_roles.secondary_colour };
+    let element = if let Some(role) = role {
+        let colour = role.colour(theme);
+        if primary { element.bg(colour).border_color(colour).text_color(theme.identity_text(colour)) }
+        else { element.border_color(colour).text_color(colour) }
+    } else { element };
+    let element = design_surface(element, theme, crate::style_overrides::DesignSurface::Toolbar);
+    if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Toolbar).page_colour.is_some() { element.text_color(theme.text) } else { element }
 }
 
 /// Apply the Industrial panel radius to a shared error notice.
@@ -778,7 +802,9 @@ pub fn user_message_bubble(
     use crate::ui_style::ConversationVariant;
     let variant = theme.ui_style.conversation;
     let area = variant == ConversationVariant::Area;
-    let text = if area {
+    let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour.is_some() {
+        theme.text
+    } else if area {
         theme.identity_text(identity)
     } else {
         theme.text
@@ -808,6 +834,7 @@ pub fn user_message_bubble(
         .text_color(text)
         .when(pending, |el| el.opacity(0.65))
         .child(content);
+    let bubble = design_surface(bubble, theme, crate::style_overrides::DesignSurface::Message);
     if variant == ConversationVariant::Industrial {
         div()
             .min_w_0()
@@ -841,7 +868,7 @@ pub fn agent_message_bubble(
     model: Option<String>,
     content: AnyElement,
 ) -> AnyElement {
-    if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
+    let bubble = if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial {
         div()
             .flex()
             .flex_col()
@@ -880,6 +907,9 @@ pub fn agent_message_bubble(
                     .when(!continued_by_next, |el| el.border_b_1())
                     .border_color(theme.industrial_colors().rule)
                     .bg(theme.industrial_colors().panel)
+                    .when_some(theme.ui_style.design_roles.bubble_radius, |el, radius| el.rounded(px(radius)))
+                    .when_some(theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).border, |el, visible| if visible { el.border_1().border_color(theme.border) } else { el.border_color(gpui::transparent_black()) })
+                    .when_some(theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
                     .child(content),
             )
             .into_any_element()
@@ -896,12 +926,15 @@ pub fn agent_message_bubble(
             .text_size(crate::typography::ui_rems(
                 16.0 + layout_type_adjustment(theme),
             ))
-            .text_color(identity_foreground_on(theme, identity, theme.surface))
+            .text_color(if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour.is_some() { theme.text } else { identity_foreground_on(theme, identity, theme.surface) })
             .child(content)
             .into_any_element()
     } else {
         content
-    }
+    };
+    let roles = theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message);
+    if roles.border.is_none() && roles.page_colour.is_none() && theme.ui_style.design_roles.bubble_radius.is_none() { return bubble; }
+    design_surface(div().when_some(theme.ui_style.design_roles.bubble_radius, |el, radius| el.rounded(px(radius))).child(bubble), theme, crate::style_overrides::DesignSurface::Message).into_any_element()
 }
 
 pub fn agent_message_row_gap(theme: &Theme, continues: bool, gap: f32) -> f32 {
@@ -991,6 +1024,27 @@ pub fn section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn design_overrides_change_targeted_shared_surfaces_without_changing_empty_defaults() {
+        use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
+        use gpui::Styled as _;
+        let empty = crate::style_overrides::Overrides::default();
+        let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":3,"primaryColour":"success","surfaces":{"toolbar":{"border":true,"pageColour":true},"composer":{"border":true},"code":{"pageColour":true},"tool":{"border":true,"pageColour":true}}}}}"#);
+        for id in UiStyleId::ALL {
+            let base_style = UiStyle::resolve(*id, UiLayout::Minimal);
+            let base = Theme::dark().with_ui_style(base_style);
+            let no_override = Theme::dark().with_ui_style(empty.apply(base_style));
+            assert_eq!(toolbar_control(div(), &base, true).style(), toolbar_control(div(), &no_override, true).style());
+            assert_eq!(conversation_parts::conversation_input_surface(div(), &base, base.accent, 8.0, base.border).style(), conversation_parts::conversation_input_surface(div(), &no_override, base.accent, 8.0, base.border).style());
+        }
+        let base = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        let changed = Theme::dark().with_ui_style(overrides.apply(base.ui_style));
+        assert_ne!(toolbar_control(div(), &base, true).style(), toolbar_control(div(), &changed, true).style());
+        assert_ne!(conversation_parts::conversation_input_surface(div(), &base, base.accent, 8.0, base.border).style(), conversation_parts::conversation_input_surface(div(), &changed, base.accent, 8.0, base.border).style());
+        assert_ne!(conversation_parts::conversation_tool_chip_frame(false, 32.0, 28.0, 4.0, 1.0, &base).style(), conversation_parts::conversation_tool_chip_frame(false, 32.0, 28.0, 4.0, 1.0, &changed).style());
+        assert_ne!(conversation_parts::conversation_code_frame("base".into(), None, vec![], div().into_any_element(), &base).style(), conversation_parts::conversation_code_frame("changed".into(), None, vec![], div().into_any_element(), &changed).style());
+    }
 
     #[test]
     fn tab_inset_preserves_default_minimal_and_scales_all_other_combinations() {

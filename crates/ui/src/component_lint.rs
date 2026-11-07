@@ -31,7 +31,9 @@ fn visit(path: &Path, counts: &mut [usize; 4]) {
         } else if path.extension().is_some_and(|ext| ext == "rs")
             && !path
                 .file_name()
-                .is_some_and(|name| name == "ui_style.rs" || name == "component_lint.rs")
+                // The resolver and its editor must enumerate style/layout keys;
+                // this ratchet targets presentation decisions in ordinary screens.
+                .is_some_and(|name| matches!(name.to_str(), Some("ui_style.rs" | "style_overrides.rs" | "design_panel.rs" | "component_lint.rs")))
         {
             let source = fs::read_to_string(&path).expect("read UI source");
             counts[0] += count_numeric_call(&source, ".text_size(", "ui_rems(");
