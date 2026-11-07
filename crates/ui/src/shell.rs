@@ -10370,17 +10370,7 @@ impl Shell {
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
-        let panel_bg = theme.panel_bg();
-        let panel = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            // In takeover the panel's left edge IS the sidebar seam, which
-            // already carries the sidebar tone's right hairline — a second
-            // border there doubled up (user report).
-            .when(!self.right_pane_expanded, |el| {
-                el.border_l_1().border_color(theme.border)
-            })
+        let panel = crate::components::shell_parts::right_panel_frame(&theme, self.right_pane_expanded)
             // With the explorer undocked the panel's right edge IS the
             // window's right edge: it carries the CSD window's rounded corners
             // directly (gpui cannot clip children rounded — each full-bleed
@@ -10393,7 +10383,6 @@ impl Shell {
                     el.rounded_tr(px(corner)).rounded_br(px(corner))
                 },
             )
-            .bg(panel_bg)
             .overflow_hidden()
             // The titlebar is a glass overlay over the full-height content
             // row; the panel's own chrome starts below it.
@@ -15306,6 +15295,15 @@ impl Shell {
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
+    }
+
+    pub fn fixture_snapshot_item_panel(&mut self, cx: &mut Context<Self>) {
+        self.active_chat = "fixture-chat".into();
+        let key = self.panel_key(cx);
+        self.panels.update(&key, |panel| {
+            panel.changes_open = true;
+            panel.right_active = RightSurface::Item;
+        });
     }
 }
 

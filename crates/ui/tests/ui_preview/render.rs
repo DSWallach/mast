@@ -173,6 +173,7 @@ fn chat(data_dir: PathBuf, overview: bool, cx: &mut App) -> AnyView {
         state.auto_selected = true; state.chats_synced = true; state.spaces_synced = true;
         state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
         state.chats = vec![serde_json::from_value(serde_json::json!({"id":"fixture-chat","deviceId":"local","spaceId":"fixture-space","title":"Review the workspace","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"Opus 5.5","reasoning":"high","sandbox":"workspace-write"}})).unwrap()];
+        mast_ui::snapshot::preview_chat_outline(&mut state);
         state
     });
     state.update(cx, |state, cx| {
@@ -190,7 +191,7 @@ fn chat(data_dir: PathBuf, overview: bool, cx: &mut App) -> AnyView {
         workos_client_id: None,
         default_harness: mast_proto::HarnessId::Mock,
     };
-    cx.new(|cx| {
+    let shell = cx.new(|cx| {
         let mut shell = mast_ui::shell::Shell::new(state, boot, cx);
         shell.fixture_snapshot_ready();
         shell.fixture_snapshot_attachment(include_bytes!("../../assets/dock/mast-icon-ready.png").to_vec(), cx);
@@ -198,8 +199,9 @@ fn chat(data_dir: PathBuf, overview: bool, cx: &mut App) -> AnyView {
             shell.fixture_snapshot_overview(cx);
         }
         shell
-    })
-    .into()
+    });
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_item_panel(cx));
+    shell.into()
 }
 
 pub fn render(

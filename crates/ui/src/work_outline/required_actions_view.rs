@@ -1106,7 +1106,7 @@ impl RequiredActionsList {
         let info_open = self.info_open.contains(&id) || is_rule_proposal;
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
         let busy = self.in_flight.contains(&id);
-        let attention = chips::attention_color(theme);
+        let attention = crate::components::outline_request_attention(theme, chips::attention_color(theme));
         let mut relevant_chat_ids = Vec::new();
         if row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff {
             let branches: Vec<&str> = row
