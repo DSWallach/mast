@@ -1098,6 +1098,28 @@ foundation owner before concurrent screen migrations begin.
 | Linear and Team | `linear/`, `team/`, `team.rs` |
 | Menus and remaining surfaces | `popover.rs`, `pickers.rs`, `app_menus.rs`, `menu_bar.rs`, other paths not owned above |
 
+### Changes and walkthrough audit (in progress)
+
+Locations refer to `91995af39`. This index identifies the existing appearance
+decisions and the surfaces requiring manual migration; it is not yet a complete
+inventory of inline controls.
+
+| Surface | Candidate locations |
+| --- | --- |
+| Walkthrough navigation, notes, progress and controls | `changes/walkthrough.rs:748`, `831`, `866`, `905`, `913`, `952`, `1029`, `1077`, `1110`, `1124`, `1144`, `1181`, `1188`, `1223`, `1254` |
+| Explanation trigger, answer and loading indicator | `changes/explanation.rs:437`, `448`, `451`, `490` |
+| Changes toolbar, selectors and menus | `changes.rs:5001`, `5012`, `5097`, `5382`, `5413`, `5547`, `5632`, `5698`, `5903`, `6012`; `changes/ref_picker.rs:188` |
+| Changes file and diff rows | `changes/file_list.rs:445`; `changes.rs:4305`, `4665`, `4793`, `4935`, `6193`, `6208`, `6283`, `6423`, `6570`, `6626` |
+| File explorer toolbar, tree and search | `files/mod.rs:45`, `268`, `590`, `1042`; `files/tree.rs:176`, `207`, `492`; `files/search.rs:548`, `598` |
+| File preview and review comments | `files/preview.rs:1960`, `2147`, `2156`, `2659`, `2770`, `2861`; `files/markdown_preview.rs:1031`, `1215`, `1358`, `1450` |
+
+The explicit production style and layout decisions are the walkthrough and
+explanation references above, `files/mod.rs:46–59`, and reveal behavior at
+`files/markdown_preview.rs:1450` and `files/preview.rs:2721,2836`. Token reads
+and indirect `surface_chrome` calls also require migration. Default diff code
+geometry and data-specific status colors need separate review before deciding
+which literals stay in the baseline.
+
 ### Shell and sidebar audit (in progress)
 
 Locations refer to `d68928981`. This is a starting index, not a complete
