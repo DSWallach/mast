@@ -244,15 +244,7 @@ impl OutlineView {
         // the rows' 1px borders so lines join up. Child y = row y + 1.
         let full = height + 2.0;
         let elbow = mid + 1.0;
-        let segment = |top: f32, bottom: f32, color: gpui::Hsla| {
-            div()
-                .absolute()
-                .left(px(3.0))
-                .top(px(top))
-                .w(px(1.0))
-                .h(px(bottom - top))
-                .bg(color)
-        };
+        let segment = crate::components::outline_guide_segment;
         let upper_end = match cell.kind {
             GuideKind::Continue => full,
             GuideKind::Tee | GuideKind::Last => elbow + 1.0,
@@ -266,23 +258,9 @@ impl OutlineView {
         let arm = (cell.kind != GuideKind::Continue).then(|| {
             let arm_selector = format!("outline-guide-arm-{key}");
             let min = if compact { 3.0 } else { 4.0 };
-            div()
-                .debug_selector(move || arm_selector.clone())
-                .absolute()
-                .left(px(3.0))
-                .top(px(elbow))
-                .w(px((arm_end - x).max(min)))
-                .h(px(1.0))
-                .bg(upper)
+            crate::components::outline_guide_arm(arm_selector, elbow, (arm_end - x).max(min), upper)
         });
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .absolute()
-            .left(px(x - 3.0))
-            .top(px(-1.0))
-            .w(px(7.0))
-            .h(px(full))
+        crate::components::outline_guide_cell(SharedString::from(selector), x, full)
             .child(upper_line)
             .children(lower_line)
             .children(arm)
@@ -306,16 +284,7 @@ impl OutlineView {
             "after"
         };
         let selector = format!("outline-drop-{edge}-{}", row.key);
-        div()
-            .debug_selector(move || selector.clone())
-            .absolute()
-            .left(px(left))
-            .right(px(4.0))
-            .h(px(2.0))
-            .rounded(px(1.0))
-            .bg(theme.accent)
-            .when(zone == DropZone::Before, |el| el.top(px(-1.0)))
-            .when(zone == DropZone::After, |el| el.bottom(px(-1.0)))
+        crate::components::outline_drop_line(selector, left, zone == DropZone::Before, theme)
             .into_any_element()
     }
 
@@ -323,21 +292,7 @@ impl OutlineView {
     pub(super) fn drop_label_element(&self, theme: &Theme) -> Option<AnyElement> {
         let text = self.drop_label()?;
         Some(
-            div()
-                .debug_selector(|| "outline-drop-label".into())
-                .absolute()
-                .right(px(6.0))
-                .top(px(2.0))
-                .max_w(px(220.0))
-                .px(px(5.0))
-                .rounded(px(3.0))
-                .border_1()
-                .border_color(theme.accent)
-                .bg(theme.surface_raised)
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.accent)
-                .truncate()
-                .child(SharedString::from(text))
+            crate::components::outline_drop_label(text, theme)
                 .into_any_element(),
         )
     }
@@ -346,12 +301,7 @@ impl OutlineView {
     pub(super) fn move_flash_overlay(&self, key: &str, theme: &Theme) -> Option<AnyElement> {
         (self.guide_state.flash.as_deref() == Some(key)).then(|| {
             let selector = format!("outline-move-flash-{key}");
-            div()
-                .debug_selector(move || selector.clone())
-                .absolute()
-                .inset_0()
-                .rounded(px(4.0))
-                .bg(theme.accent_wash)
+            crate::components::outline_move_flash(selector, theme)
                 .into_any_element()
         })
     }

@@ -12,7 +12,7 @@
 //!
 //! A child module of `details_panel` (like the other sections), so it uses
 //! the surface's private state directly.
-use gpui::{AnyElement, Context, Focusable as _, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Focusable as _, Window, div, prelude::*};
 use mast_proto::{DeleteWorkItemTemplateParams, SaveWorkItemTemplateParams, WorkItemTemplateView};
 
 use super::super::actions::new_operation_id;
@@ -249,10 +249,7 @@ impl WorkItemDetails {
             ),
         };
         out.push(
-            div()
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(note))
+            crate::components::outline_secondary_text(note, theme)
                 .into_any_element(),
         );
         out.push(
@@ -264,20 +261,17 @@ impl WorkItemDetails {
                         window.prevent_default();
                     }
                 }))
-                .child(Self::input_frame(&self.template_name_input, theme))
+                .child(crate::components::outline_input_frame(&self.template_name_input, theme))
                 .into_any_element(),
         );
         if let Some(error) = &self.templates.error {
             out.push(
-                div()
+                crate::components::outline_secondary_text(error.clone(), theme)
                     .debug_selector(|| "work-item-template-error".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(error.clone()))
                     .into_any_element(),
             );
         }
-        let mut buttons = div().flex().gap(px(6.0));
+        let mut buttons = crate::components::outline_action_row(theme);
         if prompt.existing.is_some() {
             buttons = buttons
                 .child(
@@ -312,28 +306,13 @@ impl WorkItemDetails {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let mut section = div()
-            .debug_selector(|| "space-templates".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
-                    .child("Blueprints"),
-            );
+        let mut section = crate::components::outline_blueprints_section(theme);
         section = section.child(
-            div().text_size(crate::typography::ui_rems(10.5)).text_color(theme.text_muted)
-                .child("Blueprints copy a saved tree once. Child templates apply live rules to direct children; configure one in an item’s details."),
+            crate::components::outline_blueprint_explanation("Blueprints copy a saved tree once. Child templates apply live rules to direct children; configure one in an item’s details.", theme),
         );
         if snapshot.templates.is_empty() {
             return section.child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child("No blueprints yet. Pick any item and Save as blueprint\u{2026} to copy its tree."),
+                crate::components::outline_blueprint_explanation("No blueprints yet. Pick any item and Save as blueprint… to copy its tree.", theme),
             );
         }
         for (ix, template) in snapshot.templates.iter().enumerate() {
@@ -346,27 +325,9 @@ impl WorkItemDetails {
             let new_selector = format!("space-template-new-{}", template.id);
             let delete_selector = format!("space-template-delete-{}", template.id);
             section = section.child(
-                div()
-                    .debug_selector(move || row_selector.clone())
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_blueprint_row(row_selector, theme)
                     .child(
-                        div()
-                            .id(("space-template-toggle", ix))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text)
-                            .hover(|el| el.text_color(theme.text_muted))
-                            .child(SharedString::from(format!(
-                                "{} {} \u{b7} {}",
-                                if open { "\u{25be}" } else { "\u{25b8}" },
-                                template.name,
-                                super::super::templates::summary_line(template)
-                            )))
+                        crate::components::outline_blueprint_toggle(("space-template-toggle", ix), format!("{} {} · {}", if open { "▾" } else { "▸" }, template.name, super::super::templates::summary_line(template)), theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let expanded = &mut this.templates.expanded;
                                 if !expanded.remove(&toggle_id) {
@@ -406,20 +367,8 @@ impl WorkItemDetails {
         let mut lines = Vec::new();
         preview_lines(&template.body, 0, &mut lines);
         let selector = format!("space-template-preview-{}", template.id);
-        div()
-            .debug_selector(move || selector.clone())
-            .flex()
-            .flex_col()
-            .gap(px(1.0))
-            .pl(px(12.0))
-            .children(lines.into_iter().map(|(depth, text, dim)| {
-                div()
-                    .pl(px(12.0 * depth as f32))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(if dim { theme.text_muted } else { theme.text })
-                    .child(SharedString::from(text))
-            }))
+        crate::components::outline_blueprint_preview(selector, theme)
+            .children(lines.into_iter().map(|(depth, text, dim)| crate::components::outline_blueprint_line(depth, text, dim, theme)))
     }
 }
 

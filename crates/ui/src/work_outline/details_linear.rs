@@ -322,13 +322,7 @@ impl WorkItemDetails {
         }
         let selector = format!("work-item-{field}-synced");
         Some(
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child("Synced from Linear")
+            crate::components::outline_linear_sync_marker(selector, theme)
                 .tooltip(|_, cx| {
                     cx.new(|_| {
                         TextTooltip("Follows the Linear issue until you edit it here".into())
@@ -357,19 +351,9 @@ impl WorkItemDetails {
         }
         let shell = Some(self.shell.clone());
         let refresh_identifier = issue.as_ref().map(|r| r.external_id.clone());
-        let mut section = div().flex().flex_col().gap(px(4.0)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child("Linear"),
-                )
+        let mut section = crate::components::outline_detail_section(theme).child(
+            crate::components::outline_detail_row(theme)
+                .child(crate::components::outline_detail_heading("Linear", theme))
                 .child(
                     crate::work_outline::hints::details_button(
                         "work-item-linear-refresh",
@@ -410,19 +394,10 @@ impl WorkItemDetails {
             );
             let id = reference.id.clone();
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(chip)
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(title)),
+                        crate::components::outline_detail_row_text(title, theme),
                     )
                     .child(
                         crate::work_outline::hints::details_button("work-item-linear-unlink", "Unlink", theme)
@@ -470,10 +445,7 @@ impl WorkItemDetails {
                 theme,
             );
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(chip)
                     .children(fix)
                     .child(div().flex_1())
@@ -490,7 +462,7 @@ impl WorkItemDetails {
                     .into();
             section = section.child(
                 div().flex().child(
-                    crate::linear::panel::LinearPanel::small_button(
+                    crate::components::outline_small_button(
                         add_selector,
                         format!("Add issues from {project_name}\u{2026}"),
                         theme,
@@ -509,19 +481,13 @@ impl WorkItemDetails {
         }
         if let Some(line) = self.linear.status_line.clone() {
             section = section.child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(line)),
+                crate::components::outline_execution_line(line, 10.5, theme.text_faint, theme),
             );
         }
         if let Some(error) = self.linear.error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-linear-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_execution_line(error, 11.0, theme.warning, theme)
+                    .debug_selector(|| "work-item-linear-error".into()),
             );
         }
         Some(section.into_any_element())
@@ -537,23 +503,7 @@ impl WorkItemDetails {
             return None;
         }
         Some(
-            div()
-                .debug_selector(|| "work-item-linear-hint".into())
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(8.0))
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text_muted)
-                        .child("Linear link saved as a plain link. Enable Linear for this Space?"),
-                )
+            crate::components::outline_linear_hint(theme)
                 .child(
                     crate::work_outline::hints::details_button("work-item-linear-hint-enable", "Enable", theme)
                         .debug_selector(|| "work-item-linear-hint-enable".into())
@@ -587,61 +537,28 @@ impl WorkItemDetails {
         let store = &self.state.read(cx).linear;
         let configured = store.configured();
         let not_available = matches!(&store.status, Some(Err(error)) if error.not_available());
-        let toggle = crate::settings::widgets::toggle_switch(theme, enabled)
+        let toggle = crate::components::toggle_switch(theme, enabled)
             .id("space-linear-toggle")
             .debug_selector(|| "space-linear-toggle".into())
             .cursor_pointer()
             .when(self.linear.toggling, |el| el.opacity(0.5))
             .on_click(cx.listener(move |this, _, _, cx| this.set_linear_enabled(!enabled, cx)));
-        let mut section = div()
-            .debug_selector(|| "space-linear".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_muted)
-                            .child("Linear"),
-                    )
+        let mut section = crate::components::outline_section("space-linear", theme)
+            .child(crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_detail_heading("Linear", theme))
                     .child(toggle),
             )
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_faint)
-                    .child(if enabled {
-                        "On: the Linear panel, chips and links work in this Space. Nothing is created or written automatically."
-                    } else {
-                        "Off: no Linear calls or UI in this Space; Linear URLs stay plain links."
-                    }),
+                crate::components::outline_execution_line(if enabled { "On: the Linear panel, chips and links work in this Space. Nothing is created or written automatically." } else { "Off: no Linear calls or UI in this Space; Linear URLs stay plain links." }.into(), 11.0, theme.text_faint, theme),
             );
         if not_available {
             section = section.child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child("Linear isn\u{2019}t available on this host yet"),
+                crate::components::outline_execution_line("Linear isn’t available on this host yet".into(), 11.0, theme.text_muted, theme),
             );
         } else if configured == Some(false) {
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child("No Linear API key on this device."),
-                    )
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_execution_line("No Linear API key on this device.".into(), 11.0, theme.text_muted, theme))
                     .child(
                         crate::work_outline::hints::details_button("space-linear-connect", "Connect Linear\u{2026}", theme)
                             .debug_selector(|| "space-linear-connect".into())
@@ -651,11 +568,8 @@ impl WorkItemDetails {
         }
         if let Some(error) = self.linear.error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "space-linear-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_execution_line(error, 11.0, theme.warning, theme)
+                    .debug_selector(|| "space-linear-error".into()),
             );
         }
         section.into_any_element()

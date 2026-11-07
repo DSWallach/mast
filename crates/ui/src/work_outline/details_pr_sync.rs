@@ -24,7 +24,6 @@ use super::super::chips::TextTooltip;
 use super::super::model;
 use super::{DetailsEvent, WorkItemDetails};
 use crate::github::store::{self, SyncResult};
-use crate::linear::panel::LinearPanel;
 use crate::theme::Theme;
 
 /// Per-surface PR review sync state.
@@ -122,46 +121,19 @@ impl WorkItemDetails {
         let set = destination.is_some();
         let picker_open = self.pr_sync.picker_open;
         let busy = self.pr_sync.setting;
-        let mut section = div()
-            .debug_selector(|| "space-pr-sync".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("space-pr-sync", theme)
+            .child(crate::components::outline_list_heading("PR review sync".into(), theme))
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
-                    .child("PR review sync"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(if set {
-                                "Syncing into"
-                            } else {
-                                "Auto-sync review requests into\u{2026}"
-                            }),
+                        crate::components::outline_execution_line(if set { "Syncing into" } else { "Auto-sync review requests into…" }.into(), 11.5, theme.text_muted, theme).flex_none(),
                     )
                     .child(
-                        div()
-                            .debug_selector(|| "space-pr-sync-destination".into())
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(if set { theme.text } else { theme.text_faint })
-                            .child(SharedString::from(target_label)),
+                        crate::components::outline_execution_line(target_label, 11.5, if set { theme.text } else { theme.text_faint }, theme)
+                            .debug_selector(|| "space-pr-sync-destination".into()).flex_1().min_w_0().truncate(),
                     )
                     .child(
-                        LinearPanel::small_button(
+                        crate::components::outline_small_button(
                             "space-pr-sync-choose",
                             if busy {
                                 "Saving\u{2026}"
@@ -180,7 +152,7 @@ impl WorkItemDetails {
                     )
                     .when(set, |el| {
                         el.child(
-                            LinearPanel::small_button("space-pr-sync-clear", "Stop", theme)
+                            crate::components::outline_small_button("space-pr-sync-clear", "Stop", theme)
                                 .debug_selector(|| "space-pr-sync-clear".into())
                                 .tooltip(|_, cx| {
                                     cx.new(|_| {
@@ -198,17 +170,7 @@ impl WorkItemDetails {
                     }),
             )
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_faint)
-                    .child(if set {
-                        "Every open PR that requests your review in this Space\u{2019}s \
-                         repositories gets an item here, with a Required Action per review \
-                         round. Kept in step every 3 minutes; nothing is written to GitHub."
-                    } else {
-                        "Off: choose a work item and every PR that requests your review gets \
-                         an item there automatically."
-                    }),
+                crate::components::outline_execution_line(if set { "Every open PR that requests your review in this Space’s repositories gets an item here, with a Required Action per review round. Kept in step every 3 minutes; nothing is written to GitHub." } else { "Off: choose a work item and every PR that requests your review gets an item there automatically." }.into(), 11.0, theme.text_faint, theme),
             );
         if picker_open {
             section = section.child(self.render_destination_picker(snapshot, theme, cx));
@@ -223,12 +185,9 @@ impl WorkItemDetails {
                 .cloned();
             let running = matches!(result, Some(SyncResult::Running));
             section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(
-                        LinearPanel::small_button(
+                        crate::components::outline_small_button(
                             "space-pr-sync-now",
                             if running {
                                 "Syncing\u{2026}"
@@ -243,28 +202,16 @@ impl WorkItemDetails {
                     .when_some(result.filter(|_| !running), |el, result| {
                         let failed = matches!(result, SyncResult::Failed(_));
                         el.child(
-                            div()
-                                .debug_selector(|| "space-pr-sync-result".into())
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(if failed {
-                                    theme.warning
-                                } else {
-                                    theme.text_faint
-                                })
-                                .child(SharedString::from(result.line())),
+                            crate::components::outline_execution_line(result.line(), 10.5, if failed { theme.warning } else { theme.text_faint }, theme)
+                                .debug_selector(|| "space-pr-sync-result".into()).flex_1().min_w_0(),
                         )
                     }),
             );
         }
         if let Some(error) = self.pr_sync.error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "space-pr-sync-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_execution_line(error, 11.0, theme.warning, theme)
+                    .debug_selector(|| "space-pr-sync-error".into()),
             );
         }
         section.into_any_element()
@@ -292,50 +239,16 @@ impl WorkItemDetails {
                 let id = item.id.clone();
                 let checked = current.as_deref() == Some(id.as_str());
                 let selector = format!("space-pr-sync-pick-{id}");
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(if checked {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(10.0))
-                            .text_color(theme.accent)
-                            .child(if checked { "\u{2713}" } else { "" }),
-                    )
-                    .child(div().min_w_0().truncate().child(SharedString::from(label)))
+                crate::components::outline_pr_destination(selector, label, checked, theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_pr_review_destination(Some(id.clone()), cx)
                     }))
             })
             .collect::<Vec<_>>();
-        div()
-            .id("space-pr-sync-picker")
-            .debug_selector(|| "space-pr-sync-picker".into())
-            .max_h(px(220.0))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .pl(px(8.0))
+        crate::components::outline_pr_destination_picker(theme)
             .when(rows.is_empty(), |el| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child("No work items in this Space yet"),
+                    crate::components::outline_execution_line("No work items in this Space yet".into(), 11.0, theme.text_faint, theme),
                 )
             })
             .children(rows)
@@ -411,7 +324,7 @@ impl WorkItemDetails {
         let review = |id: &'static str, label: &'static str, action: PrReviewAction| {
             let space_id = self.space_id.clone();
             let item_id = item.id.clone();
-            LinearPanel::small_button(id, label, theme)
+            crate::components::outline_small_button(id, label, theme)
                 .debug_selector(move || id.into())
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(DetailsEvent::StartPrReview {
@@ -426,26 +339,12 @@ impl WorkItemDetails {
         let refresh_pr = pr.clone();
         let open_url = pr.url.clone();
         let shell = self.shell.clone();
-        let section = div()
-            .debug_selector(|| "work-item-pr".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let section = crate::components::outline_section("work-item-pr", theme)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_detail_heading("Pull request", theme))
                     .child(
-                        div()
-                            .flex_1()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_muted)
-                            .child("Pull request"),
-                    )
-                    .child(
-                        LinearPanel::small_button(
+                        crate::components::outline_small_button(
                             "work-item-pr-refresh",
                             if loading {
                                 "Refreshing\u{2026}"
@@ -461,15 +360,8 @@ impl WorkItemDetails {
                     ),
             )
             .child(
-                div().flex().items_center().gap(px(6.0)).child(chip).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(title)),
-                ),
+                crate::components::outline_detail_row(theme).child(chip)
+                    .child(crate::components::outline_detail_row_text(title, theme)),
             )
             .when(!others.is_empty(), |el| {
                 el.child(
@@ -483,25 +375,19 @@ impl WorkItemDetails {
                 )
             })
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::outline_detail_row(theme)
                     .child(review_button)
                     .child(fix_button)
                     .child(
-                        LinearPanel::small_button("work-item-pr-open", "Open on GitHub", theme)
+                        crate::components::outline_small_button("work-item-pr-open", "Open on GitHub", theme)
                             .debug_selector(|| "work-item-pr-open".into())
                             .on_click(crate::github::chip::open_pr(Some(shell), open_url)),
                     ),
             )
             .when_some(synced, |el, line| {
                 el.child(
-                    div()
-                        .debug_selector(|| "work-item-pr-synced".into())
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(line)),
+                    crate::components::outline_execution_line(line, 10.5, theme.text_faint, theme)
+                        .debug_selector(|| "work-item-pr-synced".into()),
                 )
             });
         Some(section.into_any_element())

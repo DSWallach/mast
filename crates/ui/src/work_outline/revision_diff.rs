@@ -6,7 +6,7 @@
 //! numbers, a `+`/`−` marker, the code font and size — plus the entry-level
 //! summary (changed / added / removed / reordered), which leads because entry
 //! numbers in the rendered envelope shift when entries are inserted.
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, SharedString, div, prelude::*};
 use mast_proto::{InstructionRevisionComparison, TextDiffKind, TextDiffLine};
 
 use crate::theme::Theme;
@@ -89,92 +89,6 @@ pub(crate) fn present(lines: &[TextDiffLine]) -> Vec<PresentedLine> {
     out
 }
 
-fn code_size(theme: &Theme) -> f32 {
-    crate::typography::clamp_font_size(theme.code_font_size * 0.92)
-}
-
-fn line_row(line: &PresentedLine, theme: &Theme) -> AnyElement {
-    let size = code_size(theme);
-    let height = (size * 1.55).round();
-    let PresentedLine::Line {
-        kind,
-        old_no,
-        new_no,
-        text,
-    } = line
-    else {
-        let PresentedLine::Folded(count) = line else {
-            unreachable!()
-        };
-        return div()
-            .h(px(height))
-            .pl(px(12.0))
-            .flex()
-            .items_center()
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_faint)
-            .child(SharedString::from(format!(
-                "\u{22ef} {count} unchanged line{}",
-                if *count == 1 { "" } else { "s" }
-            )))
-            .into_any_element();
-    };
-    let (marker, color) = match kind {
-        TextDiffKind::Added => ("+", Some(theme.diff_add)),
-        TextDiffKind::Removed => ("\u{2212}", Some(theme.diff_del)),
-        TextDiffKind::Same => ("\u{b7}", None),
-    };
-    let gutter = |no: Option<u32>| {
-        div()
-            .w(px(26.0))
-            .flex_none()
-            .flex()
-            .justify_end()
-            .pr(px(6.0))
-            .text_color(color.map_or(theme.text_faint.opacity(0.8), |c| c.opacity(0.9)))
-            .child(SharedString::from(
-                no.map(|n| n.to_string()).unwrap_or_default(),
-            ))
-    };
-    div()
-        .min_h(px(height))
-        .w_full()
-        .flex()
-        .items_start()
-        .font_family(theme.font_mono.clone())
-        .text_size(px(size))
-        .line_height(px(height))
-        .when_some(color, |el, color| {
-            let mut wash = color;
-            wash.a = 0.055;
-            el.bg(wash)
-        })
-        .child(
-            div()
-                .w(px(2.0))
-                .h(px(height))
-                .flex_none()
-                .when_some(color, |el, color| el.bg(color.opacity(0.55))),
-        )
-        .child(gutter(*old_no))
-        .child(gutter(*new_no))
-        .child(
-            div()
-                .w(px(12.0))
-                .flex_none()
-                .text_color(color.unwrap_or(theme.text_faint.opacity(0.5)))
-                .child(marker),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_color(theme.text.opacity(0.92))
-                .child(SharedString::from(text.clone())),
-        )
-        .into_any_element()
-}
-
 /// The stacked line diff (capped at [`MAX_PRESENTED_LINES`]).
 pub(crate) fn render_text_diff(
     selector: &'static str,
@@ -183,64 +97,18 @@ pub(crate) fn render_text_diff(
 ) -> AnyElement {
     let presented = present(lines);
     let hidden = presented.len().saturating_sub(MAX_PRESENTED_LINES);
-    div()
-        .debug_selector(move || selector.into())
-        .w_full()
-        .flex()
-        .flex_col()
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden()
+    crate::components::outline_revision_frame(selector, theme)
         .children(
             presented
                 .iter()
                 .take(MAX_PRESENTED_LINES)
-                .map(|line| line_row(line, theme)),
+                .map(|line| crate::components::outline_revision_line(line, theme)),
         )
         .when(hidden > 0, |el| {
             el.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!("{hidden} more lines not shown"))),
+                crate::components::outline_revision_overflow(hidden, theme),
             )
         })
-        .into_any_element()
-}
-
-fn summary_group(
-    selector: String,
-    label: String,
-    rows: Vec<(Option<TextDiffKind>, String)>,
-    theme: &Theme,
-) -> AnyElement {
-    div()
-        .debug_selector(move || selector.clone())
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .child(SharedString::from(label)),
-        )
-        .children(rows.into_iter().map(|(kind, text)| {
-            let color = match kind {
-                Some(TextDiffKind::Added) => theme.diff_add,
-                Some(TextDiffKind::Removed) => theme.diff_del,
-                _ => theme.text,
-            };
-            div()
-                .pl(px(8.0))
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(color)
-                .child(SharedString::from(text))
-        }))
         .into_any_element()
 }
 
@@ -249,23 +117,16 @@ pub(crate) fn render_comparison(
     comparison: &InstructionRevisionComparison,
     theme: &Theme,
 ) -> AnyElement {
-    let mut root = div()
-        .debug_selector(|| "instruction-comparison".into())
-        .flex()
-        .flex_col()
-        .gap(px(10.0));
+    let mut root = crate::components::outline_revision_comparison(theme);
     if comparison.identical {
         return root
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child("No differences"),
+                crate::components::outline_execution_line("No differences".into(), 12.0, theme.text_muted, theme),
             )
             .into_any_element();
     }
     if !comparison.changed.is_empty() {
-        root = root.child(summary_group(
+        root = root.child(crate::components::outline_revision_summary(
             "instruction-comparison-changed".into(),
             format!("Changed ({})", comparison.changed.len()),
             comparison
@@ -282,7 +143,7 @@ pub(crate) fn render_comparison(
         ));
     }
     if !comparison.added.is_empty() {
-        root = root.child(summary_group(
+        root = root.child(crate::components::outline_revision_summary(
             "instruction-comparison-added".into(),
             format!("Added ({})", comparison.added.len()),
             comparison
@@ -299,7 +160,7 @@ pub(crate) fn render_comparison(
         ));
     }
     if !comparison.removed.is_empty() {
-        root = root.child(summary_group(
+        root = root.child(crate::components::outline_revision_summary(
             "instruction-comparison-removed".into(),
             format!("Removed ({})", comparison.removed.len()),
             comparison

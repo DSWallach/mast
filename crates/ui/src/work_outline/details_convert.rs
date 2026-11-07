@@ -217,13 +217,7 @@ impl WorkItemDetails {
         ) else {
             return out;
         };
-        let muted = |text: SharedString| {
-            div()
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_muted)
-                .child(text)
-                .into_any_element()
-        };
+        let muted = |text: SharedString| crate::components::outline_secondary_text(text.to_string(), theme).into_any_element();
         out.push(muted(
             "Convert to project: pick the blueprint this item should become. Nothing is changed until Apply."
                 .into(),
@@ -234,19 +228,7 @@ impl WorkItemDetails {
             let id = template.id.clone();
             let selector = format!("convert-template-{}", template.id);
             picks = picks.child(
-                div()
-                    .id(("convert-template", ix))
-                    .debug_selector(move || selector.clone())
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(if selected { theme.accent } else { theme.border })
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(if selected { theme.text } else { theme.text_muted })
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(SharedString::from(template.name.clone()))
+                crate::components::outline_conversion_choice(ix, selector, template.name.clone(), selected, theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.convert_pick_template(id.clone(), cx)
                     })),
@@ -267,21 +249,12 @@ impl WorkItemDetails {
                 if paths.is_empty() {
                     break;
                 }
-                let selector = format!("convert-child-{ix}");
                 let label = match target {
                     Some(path) => format!("\u{2611} {} \u{2192} {}", child.title, path.join(" / ")),
                     None => format!("\u{2610} {} (stays)", child.title),
                 };
                 out.push(
-                    div()
-                        .id(("convert-child", ix))
-                        .debug_selector(move || selector.clone())
-                        .cursor_pointer()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text)
-                        .hover(|el| el.text_color(theme.text_muted))
-                        .child(SharedString::from(label))
+                    crate::components::outline_conversion_child(ix, label, theme)
                         .on_click(cx.listener(move |this, _, _, cx| this.convert_cycle_child(ix, cx)))
                         .into_any_element(),
                 );
@@ -289,17 +262,7 @@ impl WorkItemDetails {
             match convert::plan_conversion(snapshot, &item.id, template, &state.choices, "preview") {
                 Ok(plan) => {
                     out.push(
-                        div()
-                            .debug_selector(|| "convert-preview".into())
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.0))
-                            .children(convert::preview_lines(&plan).into_iter().map(|line| {
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(format!("\u{2022} {line}")))
-                            }))
+                        crate::components::outline_conversion_preview(convert::preview_lines(&plan), theme)
                             .into_any_element(),
                     );
                 }
@@ -310,9 +273,7 @@ impl WorkItemDetails {
             out.push(muted(SharedString::from(error.clone())));
         }
         out.push(
-            div()
-                .flex()
-                .gap(px(6.0))
+            crate::components::outline_action_row(theme)
                 .when(state.template_id.is_some(), |row| {
                     row.child(
                         crate::work_outline::hints::details_button("work-item-convert-apply", "Apply", theme)

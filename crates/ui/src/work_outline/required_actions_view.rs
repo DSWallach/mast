@@ -1025,22 +1025,7 @@ impl RequiredActionsList {
         enabled: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        let button = div()
-            .id(id)
-            .flex_none()
-            .px(px(6.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(10.5))
-            .when(enabled, |el| {
-                el.cursor_pointer()
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            })
-            .when(!enabled, |el| el.text_color(theme.text_faint))
-            .child(label);
+        let button = crate::components::outline_action_button(id, label, enabled, false, theme);
         match super::hints::details_button_hint(label) {
             Some((tip, key)) => super::hints::WithHint::hint(button, tip, key),
             None => button,
@@ -1061,26 +1046,8 @@ impl RequiredActionsList {
         let tip: SharedString = unavailable
             .unwrap_or("Send your note to the Chat that asked, then resolve (\u{21a9})")
             .into();
-        div()
-            .id(SharedString::from(id.to_owned()))
+        crate::components::outline_action_button(SharedString::from(id.to_owned()), label, enabled, true, theme)
             .debug_selector(move || selector.clone())
-            .flex_none()
-            .px(px(6.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .border_1()
-            .text_size(crate::typography::ui_rems(10.5))
-            .when(enabled, |el| {
-                el.cursor_pointer()
-                    .border_color(theme.accent.opacity(0.5))
-                    .bg(theme.accent.opacity(0.12))
-                    .text_color(theme.accent)
-                    .hover(|el| el.bg(theme.accent.opacity(0.22)))
-            })
-            .when(!enabled, |el| {
-                el.border_color(theme.border).text_color(theme.text_faint)
-            })
-            .child(label)
             .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
     }
 
@@ -1276,13 +1243,7 @@ impl RequiredActionsList {
         };
         let path_space = row.space_id.clone();
         let path_item = row.work_item_id.clone();
-        let mut meta = div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .min_w_0()
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_muted)
+        let mut meta = crate::components::outline_action_metadata(theme)
             .child(
                 div()
                     .id(SharedString::from(format!("required-actions-path-{id}")))
@@ -1562,15 +1523,7 @@ impl RequiredActionsList {
                     .gap(px(4.0))
                     .pl(px(12.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(6.0))
-                            .py(px(3.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .child(input),
+                        crate::components::outline_reply_input(input, theme),
                     )
                     .child(
                         Self::button(
@@ -1591,10 +1544,7 @@ impl RequiredActionsList {
             None
         };
         let resolve_form = resolving.then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
+            crate::components::outline_detail_section(theme)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         this.cancel_resolve(cx);
@@ -1602,22 +1552,10 @@ impl RequiredActionsList {
                     }
                 }))
                 .child(
-                    div()
-                        .debug_selector(|| "required-actions-note".into())
-                        .w_full()
-                        .min_h(px(24.0))
-                        .px(px(6.0))
-                        .py(px(3.0))
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(theme.accent)
-                        .bg(theme.surface)
-                        .child(self.note_input.clone()),
+                    crate::components::outline_resolve_input(self.note_input.clone(), theme),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
+                    crate::components::outline_action_row(theme)
                         .when(self.decision.is_some(), |el| {
                             el.child(
                                 Self::button(
@@ -1820,9 +1758,7 @@ impl RequiredActionsList {
             });
             crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
         });
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
+        crate::components::outline_required_action_row(SharedString::from(selector), theme)
             .when_some(choice_focus, |el, focus| el.track_focus(&focus))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                 if !keyboard_enabled || event.is_held || event.keystroke.modifiers != gpui::Modifiers::default() { return; }
@@ -1833,13 +1769,6 @@ impl RequiredActionsList {
                             cx.stop_propagation();
                         }
             }))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .px(px(6.0))
-            .py(px(4.0))
-            .rounded(px(4.0))
-            .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
             .child(
                 div()
                     .flex()
@@ -1861,42 +1790,21 @@ impl RequiredActionsList {
                             .text_color(if open { attention } else { theme.text_faint })),
                     )
                     .child(
-                        div()
-                            .debug_selector({ let selector = format!("required-actions-text-{id}"); move || selector.clone() })
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(if open { theme.text } else { theme.text_muted })
-                            // Two lines until Details expands the row.
-                            .when(open && !info_open, |el| el.line_clamp(2))
-                            .child(SharedString::from(row.text.clone())),
+                        crate::components::outline_required_text(format!("required-actions-text-{id}"), row.text.clone(), open, info_open, theme),
                     )
                     .when_some(lifecycle, |el, lifecycle| el.child(
-                        div().debug_selector({ let selector = format!("required-actions-lifecycle-{id}-{lifecycle}"); move || selector.clone() })
-                            .px(px(5.0)).rounded(px(4.0)).border_1().border_color(theme.border)
-                            .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
-                            .child(lifecycle)
+                        crate::components::outline_required_lifecycle(format!("required-actions-lifecycle-{id}-{lifecycle}"), lifecycle.to_string(), theme)
                     )),
             )
             .child(div().pl(px(12.0)).child(meta))
             .children(row.facts.iter().filter(|fact| row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests"))).chain(row.facts.iter().filter(|fact| row.kind != mast_proto::work_outline_user_actions::UserActionKind::Handoff || !(fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")))).map(|fact| {
-                div().debug_selector({ let selector = format!("required-actions-fact-{id}-{}", fact.label); move || selector.clone() }).pl(px(12.0)).text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .when(row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")), |el| el.text_color(theme.text).font_weight(gpui::FontWeight::SEMIBOLD))
-                    .child(SharedString::from(format!("{}: {}", fact.label, fact.value)))
+                crate::components::outline_required_fact(format!("required-actions-fact-{id}-{}", fact.label), format!("{}: {}", fact.label, fact.value), row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")), theme)
             }))
             .when_some(request_links, |el, links| el.child(links))
             .when_some(artifact_links, |el, links| el.child(links))
             .when(info_open, |el| {
                 el.child(
-                    div()
-                        .debug_selector({
-                            let selector = format!("required-actions-info-{id}");
-                            move || selector.clone()
-                        })
-                        .pl(px(12.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
+                    crate::components::outline_required_info(format!("required-actions-info-{id}"), theme)
                         .children(detail),
                 )
             })
@@ -1946,19 +1854,7 @@ impl RequiredActionsList {
                 let label = link.label.clone();
                 let target = link.target.clone();
                 let chat_id = row.chat_id.clone();
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_color(theme.accent)
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(SharedString::from(label))
+                crate::components::outline_request_link(SharedString::from(selector), label, theme)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         if let RequestLinkTarget::Chat { id } = &target {
@@ -2033,22 +1929,7 @@ impl RequiredActionsList {
             } else {
                 link.label.clone()
             };
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .max_w(px(220.0))
-                .flex()
-                .items_center()
-                .gap(px(3.0))
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.accent)
-                .hover(|el| el.bg(theme.element_hover))
-                .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(10.0)))
-                .child(div().min_w_0().truncate().child(SharedString::from(label)))
+            crate::components::outline_artifact_link(SharedString::from(selector), label, theme)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if let Some(shell) = &this.shell {
@@ -2099,8 +1980,7 @@ impl RequiredActionsList {
             let selector = format!("approval-card-{id}");
             let prefill_selector = format!("approval-prefill-{id}");
             let save_selector = format!("approval-save-{id}");
-            let mut card = div().debug_selector(move || selector.clone()).flex().flex_col().gap(px(4.0))
-                .px(px(6.0)).py(px(4.0)).border_1().border_color(theme.border)
+            let mut card = crate::components::outline_approval_card(selector, theme)
                 .child(div().text_color(theme.text).child("Approve command"))
                 .child(div().text_color(theme.text_muted).child(SharedString::from(question.question.clone())))
                 .child(Self::button(SharedString::from(format!("approval-open-{id}")), "Open chat", true, theme)
@@ -2291,18 +2171,7 @@ fn group_heading(group: NeedsGroup, count: usize, theme: &Theme) -> gpui::Div {
         NeedsGroup::ReadyToMerge => theme.success,
         NeedsGroup::Fyi => theme.text_muted,
     };
-    div()
-        .debug_selector(move || format!("required-actions-group-{}", group.label()))
-        .px(px(6.0))
-        .pt(px(6.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .text_size(crate::typography::ui_rems(10.5))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(color)
-        .child(group.label())
-        .child(SharedString::from(format!("\u{b7} {count}")))
+    crate::components::outline_needs_heading(group.label(), count, color, theme)
 }
 
 impl Render for RequiredActionsList {
@@ -2316,35 +2185,10 @@ impl Render for RequiredActionsList {
                 .child(self.render_body(rows, &theme, window, cx));
         }
         let count = rows.open.len() + self.pending_command_approvals(cx).len();
-        let close = div()
-            .id("required-actions-close")
-            .debug_selector(|| "required-actions-close".into())
-            .flex_none()
-            .size(px(22.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover))
-            .child(
-                crate::icons::icon(crate::icons::CLOSE)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-            )
+        let close = crate::components::outline_required_close(&theme)
             .on_click(cx.listener(|_, _, _, cx| cx.emit(RequiredActionsEvent::Close)));
-        div()
-            .id("required-actions-panel")
-            .debug_selector(|| "required-actions-panel".into())
+        crate::components::outline_required_panel(&theme)
             .track_focus(&self.focus)
-            .flex_none()
-            .w_full()
-            .h_full()
-            .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(theme.border)
-            .bg(theme.surface)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key != "escape" {
                     return;
@@ -2357,45 +2201,12 @@ impl Render for RequiredActionsList {
                 cx.stop_propagation();
             }))
             .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(14.0))
-                    .pt(px(10.0))
-                    .pb(px(6.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child("Required Actions"),
-                    )
-                    .when(count > 0, |el| {
-                        el.child(
-                            div()
-                                .debug_selector(|| "required-actions-count".into())
-                                .flex_none()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(chips::attention_color(&theme))
-                                .child(SharedString::from(count.to_string())),
-                        )
-                    })
+                crate::components::outline_required_header(count, chips::attention_color(&theme), &theme)
                     .child(close),
             )
             .child(
-                div()
-                    .id("required-actions-body")
+                crate::components::outline_required_body(&theme)
                     .track_scroll(&self.scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(8.0))
-                    .pb(px(10.0))
                     .child(self.render_body(rows, &theme, window, cx)),
             )
     }

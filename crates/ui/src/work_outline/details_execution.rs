@@ -550,52 +550,13 @@ impl WorkItemDetails {
     // Rendering
     // ----------------------------------------------------------------------
 
-    fn checkbox(checked: bool, round: bool, theme: &Theme) -> gpui::Div {
-        div()
-            .flex_none()
-            .size(px(12.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(if round { 6.0 } else { 3.0 }))
-            .border_1()
-            .border_color(theme.border_strong)
-            .when(checked && round, |el| {
-                el.child(div().size(px(6.0)).rounded_full().bg(theme.accent))
-            })
-            .when(checked && !round, |el| {
-                el.child(
-                    crate::icons::icon(crate::icons::CHECK)
-                        .size(px(9.0))
-                        .text_color(theme.text),
-                )
-            })
-    }
-
-    fn muted_line(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
-        div()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .child(text.into())
-    }
-
     fn render_validation(&self, theme: &Theme, cx: &gpui::App) -> Option<AnyElement> {
-        let block = div()
-            .debug_selector(|| "work-item-execution-validation".into())
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .p(px(6.0))
-            .rounded(px(4.0))
-            .bg(theme.element_hover.opacity(0.4));
+        let block = crate::components::outline_validation_panel(theme);
         let element = match &self.execution_validation {
             ValidationState::Idle => return None,
-            ValidationState::Running => block.child(Self::muted_line("Validating\u{2026}", theme)),
+            ValidationState::Running => block.child(crate::components::outline_muted_line("Validating\u{2026}", theme)),
             ValidationState::Failed(message) => block.child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(message.clone())),
+                crate::components::outline_execution_line(message.clone(), 11.0, theme.warning, theme),
             ),
             ValidationState::Done(reply) => {
                 let headline = exec::validation_headline(reply);
@@ -637,16 +598,11 @@ impl WorkItemDetails {
                     ValidationHeadline::Blocked { .. } => "blocked",
                 };
                 let mut block = block.child(
-                    div()
-                        .debug_selector(move || format!("work-item-execution-validation-{kind}"))
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(color)
-                        .child(SharedString::from(text)),
+                    crate::components::outline_validation_headline(kind, text, color, theme),
                 );
                 if let Some(validated) = reply.validated.as_ref() {
                     block = block.children(validated.repositories.iter().map(|repo| {
-                        Self::muted_line(
+                        crate::components::outline_muted_line(
                             format!(
                                 "{} \u{b7} {} \u{b7} {}",
                                 exec::path_name(&repo.repo_path),
@@ -659,22 +615,7 @@ impl WorkItemDetails {
                 }
                 block.children(exec::validation_issues(reply).into_iter().enumerate().map(
                     |(ix, issue)| {
-                        div()
-                            .debug_selector(move || format!("work-item-execution-issue-{ix}"))
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(issue.message)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(issue.remediation)),
-                            )
+                        crate::components::outline_validation_issue(ix, issue.message, issue.remediation, theme)
                     },
                 ))
             }
@@ -696,18 +637,7 @@ impl WorkItemDetails {
             return None;
         }
         Some(
-            div()
-                .debug_selector(|| "work-item-execution-exceptions".into())
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted)
-                        .child("Exceptions"),
-                )
+            crate::components::outline_exceptions_section(theme)
                 .children(exceptions.into_iter().enumerate().map(|(ix, binding)| {
                     let chat = self.chats.iter().find(|chat| chat.id == binding.chat_id);
                     let title = chat.map_or_else(
@@ -716,44 +646,7 @@ impl WorkItemDetails {
                     );
                     let open_id = binding.chat_id.clone();
                     let missing = chat.is_none();
-                    div()
-                        .id(("work-item-execution-exception", ix))
-                        .debug_selector(move || format!("work-item-execution-exception-{ix}"))
-                        .flex()
-                        .flex_col()
-                        .px(px(4.0))
-                        .rounded(px(4.0))
-                        .hover(|el| el.bg(theme.element_hover))
-                        .when(!missing, |el| el.cursor_pointer())
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(crate::typography::ui_rems(12.0))
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(title)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(crate::typography::ui_rems(10.5))
-                                        .text_color(theme.text_muted)
-                                        .child("uses a different configuration"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(exec::captured_summary(
-                                    &binding.resolved.configuration,
-                                ))),
-                        )
+                    crate::components::outline_exception_row(ix, title, exec::captured_summary(&binding.resolved.configuration), missing, theme)
                         .on_click(cx.listener(move |_, _, _, cx| {
                             if !missing {
                                 cx.emit(DetailsEvent::OpenChat(open_id.clone()));
@@ -777,47 +670,23 @@ impl WorkItemDetails {
         let archived = self.item().is_some_and(|item| item.archived_at.is_some());
         let validating = self.in_flight.contains("execution:validate");
         let saving = self.in_flight.contains("execution:save");
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        crate::components::outline_detail_section(theme)
             .child(
-                div()
-                    .debug_selector(|| "work-item-execution-source".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format!("Source: {source}"))),
+                crate::components::outline_execution_line(format!("Source: {source}"), 11.0, theme.text_muted, theme)
+                    .debug_selector(|| "work-item-execution-source".into()),
             )
             .child(
-                div()
-                    .debug_selector(|| "work-item-execution-root".into())
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(
-                        if configuration.execution_root.is_empty() {
-                            "No execution root".to_owned()
-                        } else {
-                            configuration.execution_root.clone()
-                        },
-                    )),
+                crate::components::outline_execution_line(if configuration.execution_root.is_empty() { "No execution root".to_owned() } else { configuration.execution_root.clone() }, 12.0, theme.text, theme)
+                    .debug_selector(|| "work-item-execution-root".into()).truncate(),
             )
             .when_some(resolved.invalid_reason.clone(), |el, reason| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(format!(
-                            "This configuration can\u{2019}t be used: {reason}"
-                        ))),
+                    crate::components::outline_execution_line(format!("This configuration can’t be used: {reason}"), 11.0, theme.warning, theme),
                 )
             })
             .when(configuration.bindings.is_empty(), |el| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child("No repositories bound"),
+                    crate::components::outline_execution_line("No repositories bound".into(), 11.0, theme.text_faint, theme),
                 )
             })
             .children(
@@ -827,32 +696,12 @@ impl WorkItemDetails {
                     .enumerate()
                     .map(|(ix, binding)| {
                         let tip: SharedString = binding.checkout_path().to_owned().into();
-                        div()
-                            .id(("work-item-execution-repo", ix))
-                            .debug_selector(move || format!("work-item-execution-repo-{ix}"))
-                            .flex()
-                            .gap(px(6.0))
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(exec::path_name(&binding.repo_path))),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(exec::binding_summary(binding))),
-                            )
+                        crate::components::outline_execution_repository(ix, exec::path_name(&binding.repo_path), exec::binding_summary(binding), theme)
                             .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
                     }),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(6.0))
+                crate::components::outline_action_row(theme)
                     .when(!archived, |el| {
                         el.child(
                             crate::work_outline::hints::details_button("work-item-execution-edit", "Edit", theme)
@@ -927,37 +776,9 @@ impl WorkItemDetails {
                 .any(|(choice, _)| choice.as_ref().map(|(c, _)| c) == Some(*id))
         });
         let ref_input = self.execution_ref_inputs.get(ix).cloned();
-        div()
-            .debug_selector(move || format!("work-item-execution-binding-{ix}"))
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .p(px(6.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
+        crate::components::outline_binding_card(ix, theme)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(SharedString::from(exec::path_name(&binding.repo_path))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(binding.repo_path.clone())),
-                    )
+                crate::components::outline_binding_heading(exec::path_name(&binding.repo_path), binding.repo_path.clone(), theme)
                     .child(
                         crate::work_outline::hints::details_button(("work-item-execution-remove", ix), "Remove", theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -966,37 +787,15 @@ impl WorkItemDetails {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(12.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
+                crate::components::outline_binding_toggle_group(theme)
                     .child(
-                        div()
-                            .id(("work-item-execution-member", ix))
-                            .debug_selector(move || format!("work-item-execution-member-{ix}"))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .cursor_pointer()
-                            .hover(|el| el.text_color(theme.text))
-                            .child(Self::checkbox(binding.member, false, theme))
-                            .child("Member")
+                        crate::components::outline_binding_toggle(ix, false, binding.member, theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_execution_binding(cx, |d| d.toggle_member(ix))
                             })),
                     )
                     .child(
-                        div()
-                            .id(("work-item-execution-primary", ix))
-                            .debug_selector(move || format!("work-item-execution-primary-{ix}"))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .cursor_pointer()
-                            .hover(|el| el.text_color(theme.text))
-                            .child(Self::checkbox(binding.primary, true, theme))
-                            .child("Primary")
+                        crate::components::outline_binding_toggle(ix, true, binding.primary, theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_execution_binding(cx, |d| d.set_primary(ix))
                             })),
@@ -1008,7 +807,7 @@ impl WorkItemDetails {
                     .flex_wrap()
                     .items_center()
                     .gap(px(4.0))
-                    .child(Self::muted_line("Checkout:", theme))
+                    .child(crate::components::outline_muted_line("Checkout:", theme))
                     .children(
                         choices
                             .into_iter()
@@ -1016,22 +815,7 @@ impl WorkItemDetails {
                             .map(|(cix, (choice, label))| {
                                 let active =
                                     choice.as_ref().map(|(id, _)| id.clone()) == selected_worktree;
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "work-item-execution-worktree-{ix}-{cix}"
-                                    )))
-                                    .debug_selector(move || {
-                                        format!("work-item-execution-worktree-{ix}-{cix}")
-                                    })
-                                    .px(px(5.0))
-                                    .rounded(px(3.0))
-                                    .border_1()
-                                    .border_color(if active { theme.accent } else { theme.border })
-                                    .cursor_pointer()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(if active { theme.text } else { theme.text_muted })
-                                    .hover(|el| el.bg(theme.element_hover))
-                                    .child(SharedString::from(label))
+                                crate::components::outline_binding_choice(ix, cix, label, active, theme)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let choice = choice.clone();
                                         this.edit_execution_binding(cx, |d| {
@@ -1042,33 +826,20 @@ impl WorkItemDetails {
                     )
                     .when_some(pinned_unlisted.cloned(), |el, _| {
                         el.child(
-                            div()
-                                .px(px(5.0))
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(theme.accent)
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(theme.text)
-                                .child(SharedString::from(format!(
-                                    "{} (pinned)",
-                                    exec::path_name(binding.checkout_path())
-                                ))),
+                            crate::components::outline_binding_pinned(format!("{} (pinned)", exec::path_name(binding.checkout_path())), theme),
                         )
                     })
                     .when(draft.describing, |el| {
-                        el.child(Self::muted_line("Loading worktrees\u{2026}", theme))
+                        el.child(crate::components::outline_muted_line("Loading worktrees\u{2026}", theme))
                     }),
             )
             .when_some(draft.describe_error.clone(), |el, error| {
                 el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(error)),
+                    crate::components::outline_execution_line(error, 10.5, theme.warning, theme),
                 )
             })
             .when_some(ref_input, |el, input| {
-                el.child(Self::input_frame(&input, theme).border_color(theme.border))
+                el.child(crate::components::outline_input_frame(&input, theme).border_color(theme.border))
             })
             .into_any_element()
     }
@@ -1091,7 +862,7 @@ impl WorkItemDetails {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(Self::muted_line("Execution root", theme))
+            .child(crate::components::outline_muted_line("Execution root", theme))
             .child(
                 div()
                     .flex()
@@ -1101,7 +872,7 @@ impl WorkItemDetails {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Self::input_frame(&self.execution_root_input, theme)),
+                            .child(crate::components::outline_input_frame(&self.execution_root_input, theme)),
                     )
                     .child(
                         crate::work_outline::hints::details_button(
@@ -1115,7 +886,7 @@ impl WorkItemDetails {
                         })),
                     ),
             )
-            .child(Self::muted_line("Repositories", theme))
+            .child(crate::components::outline_muted_line("Repositories", theme))
             .children(bindings)
             .child(
                 div().child(
@@ -1135,9 +906,7 @@ impl WorkItemDetails {
                 ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(6.0))
+                crate::components::outline_action_row(theme)
                     .child(
                         crate::work_outline::hints::details_button(
                             "work-item-execution-save",
@@ -1185,12 +954,9 @@ impl WorkItemDetails {
         } else {
             "Execution"
         };
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
+        let header = crate::components::outline_detail_row(theme)
             .child(
-                Self::section_header("work-item-execution-toggle", title.into(), open, theme)
+                crate::components::outline_section_header("work-item-execution-toggle", title.into(), open, theme)
                     .debug_selector(|| "work-item-execution-toggle".into())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.execution_open = !this.execution_open;
@@ -1200,31 +966,11 @@ impl WorkItemDetails {
             .when(exception_count > 0, |el| {
                 let tip = exec::exception_tooltip(exception_count);
                 el.child(
-                    div()
-                        .id("work-item-execution-exceptions-marker")
-                        .debug_selector(|| "work-item-execution-exceptions-marker".into())
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.accent)
-                        .child(
-                            crate::icons::icon(crate::icons::FOLDER_WITH_FILES)
-                                .size(px(10.0))
-                                .text_color(theme.accent),
-                        )
-                        .child(SharedString::from(format!(
-                            "{exception_count} exception{}",
-                            if exception_count == 1 { "" } else { "s" }
-                        )))
+                    crate::components::outline_execution_exception_marker(exception_count, theme)
                         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
                 )
             });
-        let mut section = div()
-            .debug_selector(|| "work-item-execution".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("work-item-execution", theme)
             .child(header);
         if !open {
             return section.into_any_element();
@@ -1234,7 +980,7 @@ impl WorkItemDetails {
         } else if let Some(resolved) = self.resolved_execution() {
             section = section.child(self.render_execution_view(snapshot, &resolved, theme, cx));
         } else {
-            section = section.child(Self::muted_line(
+            section = section.child(crate::components::outline_muted_line(
                 "Execution configuration needs the Space to be available",
                 theme,
             ));
@@ -1244,11 +990,8 @@ impl WorkItemDetails {
             .children(self.render_exceptions(snapshot, theme, cx))
             .when_some(self.execution_error.clone(), |el, error| {
                 el.child(
-                    div()
-                        .debug_selector(|| "work-item-execution-error".into())
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(error)),
+                    crate::components::outline_execution_line(error, 11.0, theme.warning, theme)
+                        .debug_selector(|| "work-item-execution-error".into()),
                 )
             })
             .into_any_element()

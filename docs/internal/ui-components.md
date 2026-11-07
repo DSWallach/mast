@@ -1165,6 +1165,63 @@ Each slice must audit its own inline call sites and remove screen-owned style
 and layout branches after shared components support the existing treatments.
 The candidate index is not a substitute for that audit.
 
+## Outline and item details migration audit (partial)
+
+Locations refer to foundation commit `d68928981`. This is a starting inventory,
+not a completed screen-by-screen audit. All listed renderers still need their
+inline elements checked against the shared components.
+
+- `work_outline/outline_view.rs:2524,2587,2718,2776,2824,3365,3549,3597,3803,3848`: row geometry, first-use prompt, artifact/drift/proposal chips, row body, totals and status indicators. Style/layout branches occur at 2624, 3145, 3152, 3565, 3649, 3895 and 4100; style tokens also control row geometry at 2673 and 3211–3219. Tree guide geometry is in `work_outline/outline_view/tree_guides_view.rs:180`.
+- `work_outline/details_panel.rs:1224`: collapsible section header applies tracked caps whenever a label-size token exists, including Area. Controls and layout branch at 1317–1318, 1338, 1380, 1394, 1488, 1540–1542, 1578, 1590, 1827 and 2026–2046; the title and status control are at 1509 and 1540. Check Archive in the same renderer.
+- `work_outline/details_instructions.rs:441,757,958,1082,1138`: instruction, effective instruction, PR prompt and approval rule sections. `details_templates.rs:231,309,405`, `details_container_template.rs:509,649`, and `details_template_review.rs:283,377`: template controls, editor rows and review.
+- `work_outline/details_user_actions.rs:456,502,585,678,707,899,1184`: required-action and proposal sections and rows. `required_actions_view.rs:1022,1052,1107,1127,1823`: ad-hoc buttons, links and action cards. `chips.rs:38,218` and `hints.rs:24,479`: chips, details buttons and shortcut badge. Check `context_menu.rs` and the other `details_*` modules for inline controls.
+- `overview.rs:3271,5522`: status-indicator branches; 3390, 3450, 4534, 4884: buttons; 3481: item/chat panel content; 5303, 5449, 5494: lane header and list rows; 5831, 5988: outline toolbar and filter. Inspect `overview_grouping.rs` and `overview_positions.rs` for remaining presentation decisions.
+
+### Remaining inline presentation index
+
+Mechanical inventory at `4dc1911d`: each line contains an inline `div()`, radius, type-size, background, or border expression in the owned files. This deliberately includes structural containers, non-covered Overview content, and tests embedded in production files; each entry must be classified during migration. Components already called from these lines are not necessarily ad-hoc. The index includes the instruction, proposal, template, and Required Actions surfaces as well as outline rows. There are no production matches for direct `UiStyleId` / `UiLayout` comparisons or `ui_style` control, surface, layout, indicator, conversation, or behavior branches in the owned files at this commit.
+
+- `crates/ui/src/overview.rs`: 692, 699, 700, 702, 1255, 1258, 1259, 1260, 1261, 1264, 1384, 1389, 1392, 1394, 1396, 1399, 1403, 1404, 3143, 3173, 3182, 3183, 3184, 3201, 3210, 3211, 3212, 3285, 3298, 3299, 3302, 3303, 3305, 3306, 3315, 3319, 3328, 3333, 3340, 3346, 3347, 3358, 3366, 3367, 3368, 3369, 3370, 3391, 3395, 3400, 3402, 3451, 3456, 3458, 3460, 3461, 3544, 3552, 3560, 3561, 3562, 3565, 3567, 3578, 3586, 3587, 3588, 3597, 3604, 3605, 3607, 3613, 3617, 3623, 3629, 3636, 3638, 3645, 3669, 3675, 3698, 3701, 3719, 3737, 3745, 3778, 3779, 3802, 3817, 3818, 3819, 3821, 3828, 3829, 3831, 3838, 3843, 3847, 3853, 3857, 3864, 3866, 3872, 3885, 3892, 3930, 3934, 3935, 3937, 3942, 3944, 3966, 3974, 3975, 3976, 3977, 3979, 3995, 4000, 4008, 4012, 4013, 4014, 4016, 4025, 4030, 4034, 4036, 4047, 4055, 4085, 4088, 4093, 4096, 4099, 4109, 4112, 4113, 4114, 4126, 4143, 4170, 4174, 4179, 4215, 4222, 4231, 4247, 4259, 4289, 4314, 4323, 4364, 4371, 4373, 4375, 4376, 4377, 4390, 4397, 4399, 4401, 4402, 4403, 4413, 4420, 4422, 4424, 4425, 4427, 4429, 4455, 4460, 4476, 4477, 4485, 4486, 4492, 4502, 4506, 4510, 4541, 4548, 4550, 4552, 4593, 4599, 4604, 4605, 4610, 4611, 4616, 4632, 4640, 4645, 4647, 4665, 4691, 4695, 4697, 4699, 4712, 4717, 4718, 4720, 4722, 4730, 4751, 4801, 4838, 4852, 4908, 4913, 4915, 4916, 4918, 4946, 4950, 4952, 4954, 4955, 4956, 4962, 4965, 4977, 4984, 4986, 4988, 4991, 4992, 4996, 4998, 4999, 5003, 5005, 5007, 5011, 5035, 5058, 5178, 5187, 5188, 5194, 5195, 5201, 5263, 5269, 5278, 5281, 5283, 5286, 5289, 5292, 5407, 5429, 5438, 5457, 5545, 5558, 5565, 5566, 5570, 5572, 5575, 5578, 5594, 5609, 5616, 5621, 5633, 5638, 5642, 5648, 5650, 5661, 5667, 5669, 5678, 5690, 5786, 5928, 5933, 5935, 5936, 5938, 5965, 5973, 5975, 5977, 5980, 5981, 5985, 5987, 5988, 5992, 5995, 5999, 6035, 6038, 6064, 6065, 6069, 6071, 6073, 6074, 6075, 6084
+- `crates/ui/src/work_outline/chips.rs`: 18, 21, 22, 23, 24, 25, 93, 101, 103, 105, 127
+- `crates/ui/src/work_outline/details_artifacts.rs`: 324, 336, 338, 376, 384, 386, 387, 399, 403, 417, 420, 421, 422, 423, 430, 432, 495, 507, 514, 516, 534, 539, 541, 543, 552, 557, 558, 559, 560
+- `crates/ui/src/work_outline/details_container_template.rs`: 517, 518, 519, 550, 568, 576, 578, 589, 594, 596, 617, 619, 624, 662, 663, 670, 739, 743, 760
+- `crates/ui/src/work_outline/details_convert.rs`: 221, 222, 231, 237, 242, 243, 244, 246, 248, 276, 281, 292, 298, 299, 313
+- `crates/ui/src/work_outline/details_execution.rs`: 554, 560, 561, 562, 564, 576, 577, 583, 589, 590, 595, 596, 640, 642, 662, 667, 668, 673, 674, 699, 705, 706, 719, 725, 726, 729, 733, 736, 741, 743, 749, 751, 780, 785, 787, 792, 795, 807, 808, 817, 818, 830, 835, 837, 843, 853, 930, 936, 937, 938, 940, 945, 947, 953, 957, 969, 972, 975, 990, 1006, 1019, 1027, 1028, 1029, 1031, 1033, 1045, 1047, 1048, 1049, 1050, 1064, 1065, 1071, 1078, 1089, 1096, 1101, 1121, 1138, 1188, 1203, 1209, 1223, 1247, 1249
+- `crates/ui/src/work_outline/details_friction.rs`: 242, 248, 249, 280, 296, 315, 354, 356, 364, 366, 372, 375, 397, 402, 408, 412, 418, 427, 446, 448, 449, 451, 458, 464, 473, 489, 527, 555, 699, 712
+- `crates/ui/src/work_outline/details_instructions.rs`: 410, 421, 451, 475, 482, 486, 491, 492, 493, 541, 548, 549, 553, 560, 562, 568, 638, 644, 645, 646, 647, 654, 661, 662, 664, 677, 681, 694, 695, 701, 716, 722, 723, 724, 736, 747, 749, 766, 789, 791, 803, 805, 812, 813, 826, 834, 838, 840, 845, 850, 852, 855, 861, 880, 882, 894, 896, 906, 908, 959, 964, 967, 977, 1087, 1088, 1098, 1099, 1110, 1128, 1133, 1151, 1159, 1163, 1170, 1172, 1188, 1200, 1201
+- `crates/ui/src/work_outline/details_linear.rs`: 325, 329, 360, 361, 366, 368, 413, 419, 423, 473, 479, 492, 512, 513, 520, 522, 540, 547, 548, 549, 551, 553, 596, 602, 607, 609, 617, 618, 628, 629, 635, 640, 641, 654, 656
+- `crates/ui/src/work_outline/details_panel.rs`: 805, 806, 811, 812, 862, 863, 872, 880, 884, 885, 886, 888, 894, 904, 905, 1322, 1324, 1326, 1341, 1355, 1367, 1382, 1387, 1395, 1403, 1411, 1445, 1446, 1462, 1478, 1503, 1523, 1549, 1552, 1596, 1604, 1605, 1608, 1613, 1657, 1664, 1665, 1671, 1678, 1681, 1683, 1688, 1693, 1720, 1725, 1726, 1735, 1742, 1744, 1745, 1747, 1750, 1771, 1794, 1806, 1812, 1834, 1847, 1864, 1915, 1917, 1922, 1942, 1944
+- `crates/ui/src/work_outline/details_pr_sync.rs`: 125, 131, 132, 138, 143, 145, 154, 159, 201, 202, 226, 246, 250, 263, 265, 295, 303, 305, 311, 313, 319, 325, 335, 336, 429, 435, 440, 442, 464, 465, 469, 476, 486, 500, 502
+- `crates/ui/src/work_outline/details_template_review.rs`: 302, 330, 331, 342, 344, 351, 394, 400, 403, 408, 411, 417, 419
+- `crates/ui/src/work_outline/details_templates.rs`: 252, 253, 259, 272, 274, 280, 315, 321, 322, 328, 333, 334, 349, 355, 361, 409, 416, 419
+- `crates/ui/src/work_outline/details_user_actions.rs`: 469, 474, 478, 536, 556, 559, 604, 630, 632, 641, 646, 667, 670, 717, 732, 733, 742, 745, 789, 791, 804, 806, 831, 833, 834, 854, 859, 865, 866, 920, 972, 984, 985, 986, 995, 1020, 1076, 1077, 1083, 1111, 1113, 1126, 1132, 1195, 1201, 1202, 1214, 1215
+- `crates/ui/src/work_outline/hints.rs`: 199, 205, 206, 207, 208, 209, 479, 480, 481
+- `crates/ui/src/work_outline/linear_outline.rs`: 33, 246, 251, 252, 253, 255, 257, 356, 364, 366, 368, 372, 377, 380, 544, 549, 566, 586, 630, 639, 641, 643, 644, 645, 662, 671, 673, 675, 681, 691, 699, 700, 727, 733, 734, 735, 736, 738
+- `crates/ui/src/work_outline/outline_view/move_toast.rs`: 265, 270, 272, 276, 286, 287, 288, 289, 290, 292
+- `crates/ui/src/work_outline/outline_view/templates.rs`: 476, 481, 483, 487, 497, 498, 499, 500, 501, 503
+- `crates/ui/src/work_outline/outline_view/tree_guides_view.rs`: 196
+- `crates/ui/src/work_outline/outline_view.rs`: 442, 446, 447, 448, 449, 450, 2593, 2602, 2649, 2663, 2670, 2671, 2672, 2673, 2781, 2797, 2808, 2810, 2834, 2843, 2850, 2859, 2861, 2866, 2874, 2876, 2878, 2906, 2913, 2932, 2942, 2944, 2946, 2963, 2970, 2977, 2979, 2984, 2988, 3131, 3133, 3136, 3139, 3144, 3314, 3318, 3321, 3323, 3329, 3351, 3359, 3361, 3363, 3364, 3366, 3376, 3388, 3389, 3390, 3391, 3396, 3401, 3404, 3412, 3415, 3417, 3425, 3455, 3494, 3501, 3509, 3515, 3516, 3527, 3540, 3541, 3583, 3592, 3602, 3612, 3627, 3639, 3652, 3688, 3694, 3707, 3711, 3712, 3714, 3730, 3743, 3762, 3771, 3781, 3787, 3794, 3799, 3804, 3816, 3820, 3821, 3823, 3866, 3876, 3888, 3939, 3947, 3952, 4085, 4106, 4111
+- `crates/ui/src/work_outline/pr_sync_outline.rs`: 319, 326, 339, 347, 348
+- `crates/ui/src/work_outline/required_actions_view.rs`: 1074, 1246, 1251, 1254, 1269, 1271, 1286, 1287, 1290, 1325, 1329, 1363, 1527, 1532, 1537, 1538, 1539, 1561, 1572, 1578, 1579, 1580, 1581, 1585, 1674, 1678, 1680, 1713, 1802, 1807, 1822, 1826, 1833, 1834, 1835, 1839, 1841, 1850, 1856, 1862, 1868, 1907, 1912, 1913, 1914, 1916, 1918, 1952, 1994, 2003, 2005, 2007, 2009, 2020, 2040, 2044, 2047, 2060, 2061, 2062, 2063, 2071, 2117, 2124, 2126, 2127, 2138, 2146, 2176, 2182, 2252, 2259, 2271, 2277, 2285, 2287, 2294, 2303, 2304, 2305, 2318, 2327, 2330, 2337, 2340, 2349
+- `crates/ui/src/work_outline/revision_diff.rs`: 109, 114, 128, 139, 145, 150, 153, 157, 162, 169, 186, 191, 192, 193, 203, 206, 220, 226, 227, 238, 240, 252, 260, 261, 320, 321
+
+The remaining detail sub-surfaces represented by that index include execution
+validation, exceptions, binding and editor controls (`work_outline/details_execution.rs:582,685,767,896,1076,1171`); friction (`details_friction.rs:233`); Linear links and setup (`details_linear.rs:343,531,575`); PR sync (`details_pr_sync.rs:103,275,347`); artifacts and their menu (`details_artifacts.rs:282,524`); conversion (`details_convert.rs:204`); template review (`details_template_review.rs:283,377`); and instruction revision comparisons (`revision_diff.rs:96,179,248`). The renderer and its children should be checked together: section wrappers are not evidence that their rows or controls already use a component.
+
+### Convergence triage
+
+The index above records all presentation expressions at `4dc1911d`; subsequent
+commits moved the style-sensitive outline and item-detail controls into
+`components/outline_parts.rs`. The remaining indexed expressions stay literal,
+in the baseline: structural flex containers and spacers (geometry controlled by
+the parent component), data-dependent text and semantic colors (content rather
+than an appearance selection), tooltip plumbing and event hit targets, and
+Overview chat/canvas renderers outside the requested item-panel surfaces. The
+index includes tests embedded in production files. These are not claims that
+all inline expressions were eliminated; future migrations can reduce the
+ratchet further. A direct scan of the owned production files found no branches
+on `UiStyleId`, `UiLayout`, or the appearance control, surface, status,
+conversation, and behavior variants.
 
 ### Shell follow-ups
 

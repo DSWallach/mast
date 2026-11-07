@@ -439,18 +439,7 @@ struct OutlineDragGhost {
 impl Render for OutlineDragGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        div()
-            .max_w(px(260.0))
-            .px(px(8.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text)
-            .truncate()
-            .child(self.title.clone())
+        crate::components::outline_drag_preview(self.title.clone(), theme)
     }
 }
 
@@ -2590,41 +2579,9 @@ impl OutlineView {
             &keymap,
             HintKey::Command(super::command::WorkOutlineCommand::CreateWorkItem),
         );
-        let button = |id: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .px(px(7.0))
-                .py(px(2.0))
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .text_color(theme.text_muted)
-                .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-        };
-        div()
-            .debug_selector(|| "outline-first-use".into())
-            .flex_none()
-            .mx(px(14.0))
-            .my(px(6.0))
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.0))
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.text_muted)
-            .child("No work items yet \u{2014} group Chats and share instructions under one.")
+        crate::components::outline_first_use(theme)
             .child(
-                button("outline-first-use-create")
-                    .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-                        el.h(px(32.0)).bg(theme.solid).text_color(theme.on_solid)
-                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
-                    })
+                crate::components::outline_first_use_button("outline-first-use-create", true, theme)
                     .child("Create work item")
                     .when_some(create_keys, |el, keys| {
                         el.child(crate::popover::kbd_hint(theme, &keys))
@@ -2636,7 +2593,7 @@ impl OutlineView {
                     })),
             )
             .child(
-                button("outline-first-use-learn-more")
+                crate::components::outline_first_use_button("outline-first-use-learn-more", false, theme)
                     .child("Learn more")
                     .hint(
                         "Outline keys and commands",
@@ -2681,19 +2638,7 @@ impl OutlineView {
     }
 
     fn editor_box(&self, submitting: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex_1()
-            .min_w_0()
-            .h(px(20.0))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.accent)
-            .bg(theme.surface)
-            .overflow_hidden()
-            .when(submitting, |el| el.opacity(0.6))
+        crate::components::outline_editor_frame(submitting, theme)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "enter" => {
@@ -2747,17 +2692,7 @@ impl OutlineView {
             format!("{count} artifacts").into()
         };
         Some(
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child(crate::icons::icon(crate::icons::DOCUMENT).size(px(10.0)))
-                .child(SharedString::from(count.to_string()))
+            crate::components::outline_artifact_count(SharedString::from(selector), count, theme)
                 .children(changed.map(|(from, to)| {
                     crate::artifacts::questions_ui::changed_dot(
                         format!("outline-artifacts-changed-{key}"),
@@ -2788,28 +2723,7 @@ impl OutlineView {
             .is_some_and(|state| state.drift);
         (drift && !chat.dangling).then(|| {
             let chat_id = chat.chat.id.clone();
-            div()
-                .id(SharedString::from(format!("outline-drift-{key}")))
-                .debug_selector({
-                    let selector = format!("outline-drift-{key}");
-                    move || selector.clone()
-                })
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.warning)
-                .hover(|el| el.bg(theme.element_hover))
-                .child(
-                    crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                        .size(px(10.0))
-                        .text_color(theme.warning),
-                )
-                .child("Instructions changed")
+            crate::components::outline_drift_button(SharedString::from(format!("outline-drift-{key}")), theme)
                 .hint(chips::INSTRUCTION_DRIFT_TOOLTIP, HintKey::None)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -2843,33 +2757,10 @@ impl OutlineView {
             self.editing.as_ref().map(|edit| &edit.kind),
             Some(EditKind::Rename { key: k, .. }) if *k == key
         );
-        let selector = format!("outline-row-{key}");
         let disclosure = if row.has_children {
             let toggle_key = key.clone();
             let collapsed = row.collapsed;
-            div()
-                .id(SharedString::from(format!("outline-disclosure-{key}")))
-                .debug_selector({
-                    let selector = format!("outline-disclosure-{key}");
-                    move || selector.clone()
-                })
-                .flex_none()
-                .size(px(14.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .hover(|el| el.bg(theme.element_hover))
-                .child(
-                    crate::icons::icon(if collapsed {
-                        crate::icons::ALT_ARROW_RIGHT
-                    } else {
-                        crate::icons::ALT_ARROW_DOWN
-                    })
-                    .size(px(10.0))
-                    .text_color(theme.text_muted),
-                )
+            crate::components::outline_disclosure(SharedString::from(format!("outline-disclosure-{key}")), collapsed, theme)
                 .hint(
                     if collapsed { "Expand" } else { "Collapse" },
                     HintKey::Outline(if collapsed {
@@ -2884,7 +2775,7 @@ impl OutlineView {
                 }))
                 .into_any_element()
         } else {
-            div().flex_none().size(px(14.0)).into_any_element()
+            crate::components::outline_disclosure_space().into_any_element()
         };
         let body: AnyElement = match &row.kind {
             OutlineRowKind::Space {
@@ -2916,20 +2807,7 @@ impl OutlineView {
                             .child("Hidden"),
                     )
                     .child(
-                        div()
-                            .id(SharedString::from(format!("outline-space-unhide-{key}")))
-                            .debug_selector({
-                                let selector = format!("outline-space-unhide-{space_id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .px(px(4.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
-                            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                            .child("Unhide")
+                        crate::components::outline_inline_action(SharedString::from(format!("outline-space-unhide-{key}")), format!("outline-space-unhide-{space_id}"), "Unhide", theme.text_muted, theme)
                             .hint("Show this Space in the Outline again", HintKey::None)
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation()
@@ -2982,22 +2860,7 @@ impl OutlineView {
                         el.child(self.proposals_chip(&key, space_id, "", proposals, theme, cx))
                     })
                     .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "outline-space-instructions-{key}"
-                            )))
-                            .debug_selector({
-                                let selector = format!("outline-space-instructions-{space_id}");
-                                move || selector.clone()
-                            })
-                            .flex_none()
-                            .px(px(4.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_faint)
-                            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                            .child("Instructions")
+                        crate::components::outline_inline_action(SharedString::from(format!("outline-space-instructions-{key}")), format!("outline-space-instructions-{space_id}"), "Instructions", theme.text_faint, theme)
                             .tooltip(|_, cx| {
                                 cx.new(|_| TextTooltip("Space-root instructions".into()))
                                     .into()
@@ -3126,32 +2989,7 @@ impl OutlineView {
             .map(|item| {
                 let space_id = item.space_id.clone();
                 let item_id = item.item_id.clone();
-                div()
-                    .id(SharedString::from(format!("outline-start-chat-{key}")))
-                    .debug_selector({
-                        let selector = format!("outline-start-chat-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px(px(4.0))
-                    .rounded(px(3.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-                        el.h(px(32.0)).px(px(8.0)).bg(theme.solid).text_color(theme.on_solid)
-                            .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
-                    })
-                    .child(
-                        crate::icons::icon(crate::icons::ACTION_PLAY)
-                            .size(px(10.0))
-                            .text_color(if theme.ui_style.layout == crate::ui_style::UiLayout::Guided { theme.on_solid } else { theme.text_muted }),
-                    )
-                    .child("Start Chat")
+                crate::components::outline_start_chat_button(SharedString::from(format!("outline-start-chat-{key}")), theme)
                     .hint(
                         "Start a Chat in this work item",
                         HintKey::Outline(OutlineNavKey::StartChat),
@@ -3205,20 +3043,7 @@ impl OutlineView {
         let drop_label = drop_zone.and_then(|_| self.drop_label_element(theme));
         let guides = self.guide_layer(ix, compact, theme, cx);
         let flash = self.move_flash_overlay(&key, theme);
-        div()
-            .id(SharedString::from(format!("outline-row-{key}")))
-            .debug_selector(move || selector.clone())
-            .h(px(Self::row_height(compact, theme.ui_style.tokens)))
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(theme.ui_style.tokens.grid.unwrap_or(4.0)))
-            .pl(px(Self::indent(row.depth)))
-            .pr(px(8.0))
-            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(4.0)))
-            .text_size(crate::typography::ui_rems(theme.ui_style.tokens.body_size.unwrap_or(12.5)))
-            .border_1()
-            .border_color(gpui::transparent_black())
+        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), Self::indent(row.depth), theme)
             .when(highlighted, |el| el.border_color(theme.accent.opacity(0.6)))
             .when((selected || in_group) && focused, |el| {
                 el.bg(theme.element_active)
@@ -3379,25 +3204,7 @@ impl OutlineView {
         let selector = format!("outline-proposals-{key}");
         let space_id = space_id.to_owned();
         let item_id = item_id.to_owned();
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .px(px(3.0))
-            .rounded(px(3.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(10.0))
-            .text_color(theme.text_muted)
-            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            .child(
-                crate::icons::icon(crate::icons::DOCUMENT)
-                    .size(px(10.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(SharedString::from(format!("{count} proposed")))
+        crate::components::outline_proposal_button(SharedString::from(selector), count, theme)
             .hint(tip, HintKey::None)
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3419,18 +3226,7 @@ impl OutlineView {
         let placement = matches!(picker.purpose, PickerPurpose::Move { .. }).then(|| {
             let chip = |label: &'static str, first: bool, cx: &mut Context<Self>| {
                 let active = picker.place_first == first;
-                let selector = format!("outline-picker-place-{}", label.to_lowercase());
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .px(px(6.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .when(active, |el| {
-                        el.bg(theme.element_active).text_color(theme.text)
-                    })
-                    .when(!active, |el| el.hover(|el| el.bg(theme.element_hover)))
-                    .child(label)
+                crate::components::outline_picker_place(label, active, theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_picker_place_first(first, cx);
                     }))
@@ -3457,47 +3253,15 @@ impl OutlineView {
         });
         let rows = picker.entries.iter().enumerate().map(|(ix, entry)| {
             let active = ix == picker.active;
-            div()
-                .id(("outline-picker-entry", ix))
-                .debug_selector(move || format!("outline-picker-entry-{ix}"))
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .pl(px(8.0 + entry.depth as f32 * 12.0))
-                .pr(px(8.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text)
-                .when(active, |el| el.bg(theme.element_active))
-                .hover(|el| el.bg(theme.element_hover))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(entry.label.clone())),
-                )
+            crate::components::outline_picker_entry(ix, entry.depth, entry.label.clone(), active, theme)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.choose_picker_entry(ix, window, cx);
                 }))
         });
         Some(
-            div()
-                .id("outline-picker")
-                .debug_selector(|| "outline-picker".into())
+            crate::components::outline_picker(theme)
                 .key_context(PICKER_KEY_CONTEXT)
                 .track_focus(&self.picker_focus)
-                .mx(px(8.0))
-                .mb(px(6.0))
-                .p(px(6.0))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.surface_raised)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                     this.picker_key(event, window, cx);
                 }))
@@ -3552,22 +3316,7 @@ fn status_totals_element(
     theme: &Theme,
 ) -> AnyElement {
     let tip: SharedString = format!("Including descendants: {}", totals.label()).into();
-    let selector = id.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(3.0))
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text_faint)
-        .when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| {
-            let dark = theme.appearance.is_dark();
-            el.font_family(theme.font_mono.clone()).px(px(4.0)).border_1().border_color(theme.industrial_colors().rule)
-                .bg(if dark { theme.bg } else { theme.solid })
-                .text_color(if dark { theme.text } else { theme.on_solid })
-        })
+    crate::components::outline_status_totals(SharedString::from(id), theme)
         .when_some(totals.active_label(), |el, label| {
             el.child(SharedString::from(label))
         })
@@ -3632,7 +3381,7 @@ fn item_body(
                 .w(px(12.0))
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(color)
-                .child(glyph)
+                .child(crate::components::outline_item_indicator(glyph, color, theme))
                 .map(|el| match open_details {
                     Some((press, open)) => el
                         .cursor_pointer()
@@ -3646,9 +3395,7 @@ fn item_body(
                     }
                 }),
         )
-        .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(color).child(label))
-        })
+        .children(crate::components::outline_status_word(label, color, theme))
         .child(
             div()
                 .flex_1()
@@ -3663,9 +3410,7 @@ fn item_body(
             let date = chrono::DateTime::from_timestamp_millis(until)
                 .map(|date| date.with_timezone(&chrono::Local).format("%b %-d").to_string())
                 .unwrap_or_default();
-            el.child(div().debug_selector(|| "work-item-waiting-chip".into())
-                .flex_none().text_size(crate::typography::ui_rems(9.5)).text_color(theme.text_muted)
-                .child(SharedString::from(if due { format!("due · {date}") } else { format!("waiting · {date}") })))
+            el.child(crate::components::outline_waiting_chip(if due { format!("due · {date}") } else { format!("waiting · {date}") }, theme))
         })
         .when_some(
             chips::attention_indicator(
@@ -3706,18 +3451,7 @@ fn item_body(
         )
         .when(item.follows_template && !item.archived, |el| {
             el.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "outline-follows-template-{key}"
-                    )))
-                    .debug_selector({
-                        let selector = format!("outline-follows-template-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child("\u{25c7}")
+                crate::components::outline_glyph_marker(SharedString::from(format!("outline-follows-template-{key}")), "◇", theme)
                     .hint("Follows its parent\u{2019}s child template", HintKey::None),
             )
         })
@@ -3725,24 +3459,7 @@ fn item_body(
             item.chat_count > 0 && !compact_pr && item.compact_chat.is_none(),
             |el| {
                 el.child(
-                    div()
-                        .id(SharedString::from(format!("outline-chats-{key}")))
-                        .debug_selector({
-                            let selector = format!("outline-chats-{key}");
-                            move || selector.clone()
-                        })
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.text_faint)
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(10.0))
-                                .text_color(theme.text_faint),
-                        )
-                        .child(SharedString::from(item.chat_count.to_string()))
+                    crate::components::outline_count_marker(SharedString::from(format!("outline-chats-{key}")), crate::icons::CHAT_ROUND_LINE, item.chat_count.to_string(), theme.text_faint, theme)
                         .tooltip(move |_, cx| cx.new(|_| TextTooltip(chats_tip.clone())).into()),
                 )
             },
@@ -3750,43 +3467,13 @@ fn item_body(
         .when(item.execution_exceptions > 0, |el| {
             let tip = super::execution::exception_tooltip(item.execution_exceptions as usize);
             el.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "outline-execution-exceptions-{key}"
-                    )))
-                    .debug_selector({
-                        let selector = format!("outline-execution-exceptions-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.accent)
-                    .child(
-                        crate::icons::icon(crate::icons::FOLDER_WITH_FILES)
-                            .size(px(10.0))
-                            .text_color(theme.accent),
-                    )
-                    .child(SharedString::from(item.execution_exceptions.to_string()))
+                crate::components::outline_count_marker(SharedString::from(format!("outline-execution-exceptions-{key}")), crate::icons::FOLDER_WITH_FILES, item.execution_exceptions.to_string(), theme.accent, theme)
                     .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
             )
         })
         .when(item.has_references && !compact_pr, |el| {
             el.child(
-                div()
-                    .id(SharedString::from(format!("outline-refs-{key}")))
-                    .debug_selector({
-                        let selector = format!("outline-refs-{key}");
-                        move || selector.clone()
-                    })
-                    .flex_none()
-                    .child(
-                        crate::icons::icon(crate::icons::GLOBAL)
-                            .size(px(10.0))
-                            .text_color(theme.text_faint),
-                    )
+                crate::components::outline_reference_marker(SharedString::from(format!("outline-refs-{key}")), theme)
                     .tooltip(|_, cx| {
                         cx.new(|_| TextTooltip("Has external references".into()))
                             .into()
@@ -3809,7 +3496,7 @@ fn compact_chat_segment(
 ) -> AnyElement {
     let chat = &row.chat;
     let status = crate::status_style::Status::from(chat.status);
-    let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-compact-status-{key}"), cx.entity_id(), cx);
+    let indicator = crate::components::outline_chat_indicator(status, format!("outline-compact-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, cx.entity_id(), cx);
     let tip: SharedString = format!("Chat: {}", chat.title).into();
     div()
         .flex_none()
@@ -3830,16 +3517,7 @@ fn compact_chat_segment(
         .when_some(drift, |el, drift| el.child(drift))
         .when_some(chat.harness.clone(), |el, harness| {
             el.child(
-                div()
-                    .flex_none()
-                    .max_w(px(100.0))
-                    .px(px(4.0))
-                    .rounded(px(3.0))
-                    .bg(theme.element_hover.opacity(0.7))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(9.0))
-                    .text_color(theme.text_muted.opacity(0.85))
-                    .child(SharedString::from(harness)),
+                crate::components::outline_harness_badge(harness, theme),
             )
         })
         .into_any_element()
@@ -3877,7 +3555,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
             .into_any_element();
     }
     let status = crate::status_style::Status::from(chat.status);
-    let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("outline-chat-status-{key}"), cx.entity_id(), cx);
+    let indicator = crate::components::outline_chat_indicator(status, format!("outline-chat-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, cx.entity_id(), cx);
     let status_label = match chat.status {
         mast_proto::ChatIndicator::Working => "Working",
         mast_proto::ChatIndicator::AwaitingInput => "Needs you",
@@ -3892,9 +3570,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
         .items_center()
         .gap(px(6.0))
         .child(indicator)
-        .when(theme.ui_style.layout == crate::ui_style::UiLayout::Guided, |el| {
-            el.child(div().flex_none().text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted).child(status_label))
-        })
+        .children(crate::components::outline_status_word(status_label, theme.text_muted, theme))
         .child(
             div()
                 .flex_1()
@@ -3906,51 +3582,17 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, theme: &Theme,
         .when_some(drift, |el, drift| el.child(drift))
         .when_some(chat.branch.clone(), |el, branch| {
             el.child(
-                div()
-                    .flex_none()
-                    .max_w(px(140.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child(
-                        crate::icons::icon(crate::icons::GIT_BRANCH)
-                            .size(px(10.0))
-                            .text_color(theme.text_faint),
-                    )
-                    .child(div().min_w_0().truncate().child(SharedString::from(branch))),
+                crate::components::outline_chat_reference(crate::icons::GIT_BRANCH, branch, Some(140.0), theme),
             )
         })
         .when_some(chat.pr_number.filter(|n| *n > 0), |el, number| {
             el.child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .text_color(theme.text_faint)
-                    .child(
-                        crate::icons::icon(crate::icons::PULL_REQUEST)
-                            .size(px(10.0))
-                            .text_color(theme.text_faint),
-                    )
-                    .child(SharedString::from(format!("#{number}"))),
+                crate::components::outline_chat_reference(crate::icons::PULL_REQUEST, format!("#{number}"), None, theme),
             )
         })
         .when_some(chat.harness.clone(), |el, harness| {
             el.child(
-                div()
-                    .flex_none()
-                    .max_w(px(100.0))
-                    .px(px(4.0))
-                    .rounded(px(3.0))
-                    .bg(theme.element_hover.opacity(0.7))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(9.0))
-                    .text_color(theme.text_muted.opacity(0.85))
-                    .child(SharedString::from(harness)),
+                crate::components::outline_harness_badge(harness, theme),
             )
         })
         .into_any_element()
@@ -4094,11 +3736,7 @@ impl Render for OutlineView {
                 .track_scroll(&self.scroll)
                 .into_any_element()
         };
-        div()
-            .id("work-outline")
-            .relative()
-            .when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))
-            .debug_selector(|| "work-outline".into())
+        crate::components::outline_tree(&theme)
             .track_focus(&self.focus)
             .when(!editing, |el| el.key_context(KEY_CONTEXT))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {

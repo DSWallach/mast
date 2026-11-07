@@ -539,7 +539,7 @@ impl WorkItemDetails {
             .flex_col()
             .gap(px(4.0))
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-required-actions-toggle",
                     format!("Required actions ({open_count})"),
                     open,
@@ -601,13 +601,9 @@ impl WorkItemDetails {
             .partition(required_actions::is_pending);
         let open = self.proposals_open || self.proposal_review.is_some();
         let now = chrono::Utc::now();
-        let mut section = div()
-            .debug_selector(|| "work-item-proposals".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_proposal_section(theme)
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-proposals-toggle",
                     if pending.is_empty() {
                         "Proposed instructions".to_owned()
@@ -627,30 +623,14 @@ impl WorkItemDetails {
         }
         if pending.is_empty() {
             section = section.child(
-                div()
-                    .pl(px(14.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_faint)
-                    .child("No pending proposals"),
+                crate::components::outline_section_message("No pending proposals".into(), theme.text_faint, theme),
             );
         }
         section = section.children(self.render_pending_proposal_groups(pending, snapshot, theme, cx));
         if !reviewed.is_empty() {
             let history_open = self.proposal_history_open;
             section = section.child(
-                div()
-                    .id("work-item-proposals-history-toggle")
-                    .debug_selector(|| "work-item-proposals-history-toggle".into())
-                    .pl(px(14.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.text_color(theme.text))
-                    .child(SharedString::from(format!(
-                        "{} History ({})",
-                        if history_open { "\u{25be}" } else { "\u{25b8}" },
-                        reviewed.len()
-                    )))
+                crate::components::outline_proposal_history(reviewed.len(), history_open, theme)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.proposal_history_open = !this.proposal_history_open;
                         cx.notify();
@@ -664,12 +644,8 @@ impl WorkItemDetails {
         }
         if let Some(error) = self.proposals_error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-proposals-error".into())
-                    .pl(px(14.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_section_message(error, theme.warning, theme)
+                    .debug_selector(|| "work-item-proposals-error".into()),
             );
         }
         Some(section.into_any_element())
@@ -714,7 +690,7 @@ impl WorkItemDetails {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut column = div().flex().flex_col().gap(px(4.0));
+        let mut column = crate::components::outline_detail_section(theme);
         if let Some(instruction_id) = group.instruction_id.as_deref() {
             let current = snapshot
                 .instructions
@@ -725,27 +701,7 @@ impl WorkItemDetails {
                 .unwrap_or_default();
             let count = group.proposals.len();
             let selector = format!("work-item-proposal-group-{instruction_id}");
-            column = column
-                .debug_selector(move || selector.clone())
-                .pl(px(14.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(if count > 1 {
-                            format!("Instruction \u{b7} {count} proposed changes")
-                        } else {
-                            "Instruction".to_owned()
-                        })),
-                )
-                .child(
-                    div()
-                        .max_h(px(54.0))
-                        .overflow_hidden()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(current)),
-                );
+            column = crate::components::outline_proposal_summary(selector, count, current, theme);
         }
         for proposal in &group.proposals {
             column = column.child(self.render_pending_proposal(
@@ -762,38 +718,6 @@ impl WorkItemDetails {
     }
 
     /// An inline diff: added words tinted, removed words struck through.
-    fn diff_text(runs: &[(DiffKind, String)], selector: String, theme: &Theme) -> AnyElement {
-        let (text, ranges) = proposal_diff::diff_layout(runs);
-        let added = gpui::HighlightStyle {
-            background_color: Some(theme.diff_add.opacity(0.22)),
-            ..Default::default()
-        };
-        let removed = gpui::HighlightStyle {
-            color: Some(theme.diff_del),
-            strikethrough: Some(gpui::StrikethroughStyle {
-                thickness: px(1.0),
-                color: Some(theme.diff_del),
-            }),
-            ..Default::default()
-        };
-        let highlights = ranges.into_iter().map(|(range, kind)| {
-            (
-                range,
-                if kind == DiffKind::Added {
-                    added
-                } else {
-                    removed
-                },
-            )
-        });
-        div()
-            .debug_selector(move || selector.clone())
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text)
-            .child(gpui::StyledText::new(text).with_highlights(highlights))
-            .into_any_element()
-    }
-
     fn rationale_line(
         proposal: &WorkItemInstructionProposalView,
         theme: &Theme,
@@ -801,12 +725,7 @@ impl WorkItemDetails {
         let rationale = proposal.rationale.as_deref().filter(|r| !r.is_empty())?;
         let selector = format!("work-item-proposal-rationale-{}", proposal.id);
         Some(
-            div()
-                .debug_selector(move || selector.clone())
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_muted)
-                .italic()
-                .child(SharedString::from(format!("Why: {rationale}")))
+            crate::components::outline_proposal_rationale(selector, rationale.to_owned(), theme)
                 .into_any_element(),
         )
     }
@@ -828,16 +747,11 @@ impl WorkItemDetails {
                 proposal_diff::word_diff(runs_from, &proposal.text)
             }
         };
-        let mut body = div().flex().flex_col().gap(px(3.0));
-        let label = |text: &'static str| {
-            div()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child(text)
-        };
+        let mut body = crate::components::outline_proposal_body(theme);
+        let label = |text: &'static str| crate::components::outline_execution_line(text.into(), 10.0, theme.text_faint, theme);
         match standing {
             Standing::Current => {
-                body = body.child(Self::diff_text(
+                body = body.child(crate::components::outline_proposal_diff(
                     &proposed(&base),
                     format!("work-item-proposal-diff-{id}"),
                     theme,
@@ -870,7 +784,7 @@ impl WorkItemDetails {
                 if let Some(now) = now {
                     body = body
                         .child(label("Now (changes since)"))
-                        .child(Self::diff_text(
+                        .child(crate::components::outline_proposal_diff(
                             &proposal_diff::word_diff(&base, now),
                             format!("work-item-proposal-now-{id}"),
                             theme,
@@ -882,7 +796,7 @@ impl WorkItemDetails {
                     } else {
                         "Proposed (against when proposed)"
                     }))
-                    .child(Self::diff_text(
+                    .child(crate::components::outline_proposal_diff(
                         &proposed(&base),
                         format!("work-item-proposal-diff-{id}"),
                         theme,
@@ -914,12 +828,7 @@ impl WorkItemDetails {
             .filter(|review| review.proposal_id == id);
         let busy = self.in_flight.contains(&format!("proposal:{id}"));
         let open_chat = proposal.source_ref.chat_id.clone();
-        let provenance = div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_faint)
+        let provenance = crate::components::outline_proposal_provenance(theme)
             .child("Proposed by")
             .child(
                 div()
@@ -946,13 +855,7 @@ impl WorkItemDetails {
                 now,
             )));
         let selector = format!("work-item-proposal-{id}");
-        let mut row = div()
-            .debug_selector(move || selector.clone())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .pl(px(14.0))
-            .py(px(2.0))
+        let mut row = crate::components::outline_proposal_row(selector, theme)
             .child(provenance);
         let is_modification = proposal.action != ProposalAction::Add;
         if proposal.target.scope == mast_proto::work_outline_user_actions::ProposalTargetScope::ChildTemplate {
@@ -1003,7 +906,7 @@ impl WorkItemDetails {
                             space_id: space_id.clone(), item_id: item_id.clone(),
                         }))))))
                 .child(body)
-                .child(div().flex().gap(px(6.0))
+                .child(crate::components::outline_action_row(theme)
                     .when(rule.is_some(), |buttons| buttons.child(crate::work_outline::hints::details_button(SharedString::from(format!("template-apply-{id}")), "Apply to template", theme)
                         .debug_selector({ let selector = format!("template-apply-{id}"); move || selector.clone() })
                         .on_click(cx.listener(move |this, _, _, cx| this.accept_template_proposal(&template_id, false, cx)))))
@@ -1028,7 +931,7 @@ impl WorkItemDetails {
                     (true, false) => "Apply anyway",
                     (false, false) => "Accept",
                 };
-                let mut buttons = div().flex().gap(px(6.0));
+                let mut buttons = crate::components::outline_action_row(theme);
                 if !archived {
                     buttons = buttons.child(
                         crate::work_outline::hints::details_button(
@@ -1136,7 +1039,7 @@ impl WorkItemDetails {
             row = row.child(
                 div()
                     .debug_selector(|| "work-item-proposal-reason".into())
-                    .child(Self::input_frame(&self.reason_input, theme)),
+                    .child(crate::components::outline_input_frame(&self.reason_input, theme)),
             );
         }
         row.child(

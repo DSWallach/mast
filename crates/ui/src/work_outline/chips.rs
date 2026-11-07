@@ -41,21 +41,8 @@ pub(crate) fn path_chip(
     theme: &Theme,
 ) -> AnyElement {
     let tooltip: SharedString = format!("Work item: {}", path.full).into();
-    div()
-        .id(id.into())
-        .debug_selector(|| "work-item-path-chip".into())
-        .min_w_0()
-        .max_w(px(160.0))
-        .px(px(5.0))
-        .py(px(1.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(theme.border)
-        .truncate()
-        .text_size(crate::typography::ui_rems(9.0))
-        .text_color(theme.text_muted)
+    crate::components::outline_path_chip(id.into(), path.short.clone(), theme)
         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tooltip.clone())).into())
-        .child(SharedString::from(path.short.clone()))
         .into_any_element()
 }
 
@@ -70,27 +57,13 @@ pub(crate) fn attention_indicator(
     if !required && count == 0 {
         return None;
     }
-    let color = attention_color(theme);
     let tooltip: SharedString = match count {
         0 | 1 => "User action required".to_string(),
         n => format!("User action required ({n})"),
     }
     .into();
     Some(
-        div()
-            .id(id.into())
-            .debug_selector(|| "work-item-attention".into())
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(3.0))
-            .text_size(crate::typography::ui_rems(9.5))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(color)
-            .child(crate::status_style::indicator_for_theme(crate::status_style::Status::Waiting, &theme))
-            .when(count > 1, |el| {
-                el.child(SharedString::from(count.to_string()))
-            })
+        crate::components::outline_attention(id.into(), count, theme)
             .hint(
                 tooltip,
                 HintKey::Command(super::command::WorkOutlineCommand::OpenRequiredActions),
@@ -216,15 +189,6 @@ mod tests {
 /// The "Blueprint changed (rev N → M)" chip of a project whose template moved
 /// on, on its Outline row and in its Details Project section.
 pub(crate) fn template_chip(selector: String, from: u32, to: u32, theme: &Theme) -> gpui::Div {
-    div()
+    crate::components::outline_metadata_chip(super::template_review::chip_text(from, to), theme)
         .debug_selector(move || selector.clone())
-        .flex_none()
-        .px(px(5.0))
-        .py(px(1.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(theme.border)
-        .text_size(crate::typography::ui_rems(9.5))
-        .text_color(theme.accent)
-        .child(SharedString::from(super::template_review::chip_text(from, to)))
 }

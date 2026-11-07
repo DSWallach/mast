@@ -3268,13 +3268,8 @@ impl Overview {
             .take(visible_count)
             .map(|sub| {
                 let color = sub.status.color(theme.appearance);
-                let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-                    crate::status_style::indicator_for_theme(if sub.status == SubagentStatus::Running { crate::status_style::Status::Working } else { crate::status_style::Status::Done }, &theme).into_any_element()
-                } else if sub.status == SubagentStatus::Running {
-                    crate::loaders::mini_mono_spinner(format!("overview-subagent-status-{chat_id}-{}", sub.agent_id), 1.5, color, cx.entity_id(), cx).into_any_element()
-                } else {
-                    crate::status_style::indicator_for_theme(crate::status_style::Status::Done, &theme).into_any_element()
-                };
+                let status = if sub.status == SubagentStatus::Running { crate::status_style::Status::Working } else { crate::status_style::Status::Done };
+                let indicator = crate::components::outline_chat_indicator(status, format!("overview-subagent-status-{chat_id}-{}", sub.agent_id), color, theme, cx.entity_id(), cx);
                 let name = sub.display_name();
                 let peeking = self
                     .subagent_peek
@@ -5085,17 +5080,7 @@ impl Overview {
     }
 
     fn render_filter_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let trigger = div()
-            .id("overview-filter-menu")
-            .debug_selector(|| "overview-filter-menu".into())
-            .relative()
-            .px(px(8.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .text_color(theme.text_muted)
-            .bg(theme.element_hover.opacity(0.5))
-            .child("⋯")
+        let trigger = crate::components::outline_filter_trigger(theme)
             .hint("Overview filters", HintKey::None)
             .on_mouse_down(
                 MouseButton::Left,
@@ -5113,19 +5098,7 @@ impl Overview {
             return trigger.into_any_element();
         }
         let popup = theme.for_popup();
-        let row = |id: &'static str, label: &'static str, checked: bool| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .px(px(8.0))
-                .py(px(5.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(popup.text)
-                .hover(|el| el.bg(popup.element_hover))
-                .child(format!("{}  {}", if checked { "✓" } else { "　" }, label))
-        };
+        let row = |id, label, checked| crate::components::outline_filter_row(id, label, checked, &popup);
         let card = popover::popover_card(&popup)
             .w(px(180.0))
             .flex()
@@ -5296,35 +5269,6 @@ fn unread_done_ribbon(scale: f32) -> gpui::Div {
         .bg(gpui::white())
 }
 
-/// `.lane-header` / `.lane-header.nested` (`session_canvas.html:299-315`):
-/// text in the group's color, underlined in the same color; top level is
-/// 13px bold uppercase with a 2px rule, nested is 10px semibold mixed-case
-/// with a 1px rule.
-fn lane_header(text: String, color: gpui::Hsla, depth: usize) -> gpui::Div {
-    let top = depth == 0;
-    div()
-        .flex_none()
-        .text_color(color)
-        .border_color(color)
-        .when(top, |el| {
-            el.text_size(crate::typography::ui_rems(13.0))
-                .font_weight(gpui::FontWeight::BOLD)
-                .pb(px(6.0))
-                .border_b_2()
-        })
-        .when(!top, |el| {
-            el.text_size(crate::typography::ui_rems(10.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .pb(px(3.0))
-                .border_b_1()
-        })
-        .child(SharedString::from(if top {
-            text.to_uppercase()
-        } else {
-            text
-        }))
-}
-
 impl Overview {
     fn render_list_body(
         &mut self,
@@ -5468,7 +5412,7 @@ impl Overview {
                 .pr(px(10.0))
                 .pt(px(if depth == 0 { 14.0 } else { 8.0 }))
                 .pb(px(2.0))
-                .child(lane_header(format!("{label} ({count})"), color, depth))
+                .child(crate::components::outline_lane_heading(format!("{label} ({count})"), color, depth, &theme))
                 .into_any_element(),
             ListPresentationItem::Row { row_index, .. } => {
                 let rows = self.list_rows.clone();
@@ -5519,13 +5463,7 @@ impl Overview {
             .unwrap_or_else(|| format_time_ago(row.chat.created_at, now))
             .into();
         let dot = crate::status_style::status_style(row.status.into(), theme.appearance).color;
-        let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
-            crate::status_style::indicator_for_theme(row.status.into(), &theme).into_any_element()
-        } else if row.status == ChatIndicator::Working {
-            crate::loaders::mini_mono_spinner(format!("overview-status-{chat_id}"), 1.5, dot, cx.entity_id(), cx).into_any_element()
-        } else {
-            crate::status_style::indicator_for_theme(row.status.into(), &theme).into_any_element()
-        };
+        let indicator = crate::components::outline_chat_indicator(row.status.into(), format!("overview-status-{chat_id}"), dot, theme, cx.entity_id(), cx);
         let (icon, label) = status_style(row.status);
         let unread = is_unread_done(
             &self.acknowledged_done,
@@ -5833,22 +5771,7 @@ impl Overview {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let pill = |id: &'static str, label: String, active: bool| {
-            div()
-                .id(id)
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .bg(theme.element_hover.opacity(0.5))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .hover(|el| el.text_color(theme.text))
-                .child(SharedString::from(label))
-        };
+        let pill = |id, label, active| crate::components::outline_toolbar_button(id, label, active, theme);
         let mut out = vec![
             pill("outline-new-item", "New item".into(), false)
                 .debug_selector(|| "outline-new-item".into())
@@ -5897,21 +5820,7 @@ impl Overview {
         // The shortcut reference, on demand (also `?` in the Outline and the
         // palette's Show Outline Shortcuts).
         out.push(
-            div()
-                .id("outline-shortcuts")
-                .debug_selector(|| "outline-shortcuts".into())
-                .aria_label("Keyboard shortcuts")
-                .flex()
-                .items_center()
-                .px(px(6.0))
-                .py(px(4.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .bg(theme.element_hover.opacity(0.5))
-                .text_color(theme.text_muted)
-                .hover(|el| el.text_color(theme.text))
-                .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
-                .child("?")
+            crate::components::outline_shortcuts_button(theme)
                 .hint(
                     "Keyboard shortcuts",
                     HintKey::Outline(crate::shell::work_outline_ui::OutlineNavKey::ShowShortcuts),

@@ -448,13 +448,9 @@ impl WorkItemDetails {
         let list = instructions::live_instructions(snapshot, self.scope_item());
         let list: Vec<WorkItemInstructionView> = list.into_iter().cloned().collect();
         let open = self.instructions_open || self.instruction_draft.is_some();
-        let mut section = div()
-            .debug_selector(|| "work-item-instructions".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("work-item-instructions", theme)
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-instructions-toggle",
                     format!("Instructions ({})", list.len()),
                     open,
@@ -472,34 +468,7 @@ impl WorkItemDetails {
         if let Some(item) = item.filter(|item| item.parent_work_item_id.is_some()) {
             let inherit = item.inherit_parent_instructions;
             section = section.child(
-                div()
-                    .id("work-item-inherit-toggle")
-                    .debug_selector(|| "work-item-inherit-toggle".into())
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.text_color(theme.text))
-                    .child(
-                        div()
-                            .size(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .border_1()
-                            .border_color(theme.border_strong)
-                            .when(inherit, |el| {
-                                el.child(
-                                    crate::icons::icon(crate::icons::CHECK)
-                                        .size(px(9.0))
-                                        .text_color(theme.text),
-                                )
-                            }),
-                    )
-                    .child("Inherit parent instructions")
+                crate::components::outline_inheritance_toggle(inherit, theme)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.set_inheritance(!inherit, cx)),
                     ),
@@ -535,29 +504,13 @@ impl WorkItemDetails {
             let from_template = instruction.template_instruction_id.is_some();
             let collapsible = needs_collapse(&instruction.text);
             let expanded = self.instructions_expanded.contains(&instruction.id);
-            let line_height = crate::typography::ui_rems(LINE_HEIGHT_REMS);
             section =
                 section.child(
-                    div()
-                        .debug_selector(move || format!("work-item-instruction-{ix}"))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .px(px(4.0))
-                        .py(px(3.0))
-                        .rounded(px(4.0))
-                        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+                    crate::components::outline_instruction_row(ix, theme)
                         // Header: the number, the controls, and the provenance
                         // badge stay at the top whatever the text length.
                         .child(
-                            div()
-                                .debug_selector(move || {
-                                    format!("work-item-instruction-header-{ix}")
-                                })
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .text_size(crate::typography::ui_rems(12.0))
+                            crate::components::outline_instruction_header(ix, theme)
                                 .child(
                                     div()
                                         .flex_none()
@@ -635,35 +588,12 @@ impl WorkItemDetails {
                                 )
                                 .when(from_template, |el| {
                                     el.child(
-                                        div()
-                                            .debug_selector(move || {
-                                                format!("work-item-instruction-template-{ix}")
-                                            })
-                                            .flex_none()
-                                            .px(px(4.0))
-                                            .rounded(px(3.0))
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .text_size(crate::typography::ui_rems(9.5))
-                                            .text_color(theme.accent)
-                                            .child("From child template"),
+                                        crate::components::outline_instruction_template_badge(ix, theme),
                                     )
                                 })
                                 .when_some(badge, |el, badge| {
                                     el.child(
-                                        div()
-                                            .id(("work-item-instruction-badge", ix))
-                                            .debug_selector(move || {
-                                                format!("work-item-instruction-badge-{ix}")
-                                            })
-                                            .flex_none()
-                                            .px(px(4.0))
-                                            .rounded(px(3.0))
-                                            .bg(theme.element_hover.opacity(0.7))
-                                            .cursor_pointer()
-                                            .text_size(crate::typography::ui_rems(9.5))
-                                            .text_color(theme.text_muted)
-                                            .child(badge)
+                                        crate::components::outline_instruction_provenance(ix, badge, theme)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if !this.excerpts_open.remove(&toggle_id) {
                                                     this.excerpts_open.insert(toggle_id.clone());
@@ -674,34 +604,12 @@ impl WorkItemDetails {
                                 }),
                         )
                         .child(
-                            div()
-                                .debug_selector(move || format!("work-item-instruction-text-{ix}"))
-                                .ml(px(14.0))
-                                .min_w_0()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .line_height(line_height)
-                                .text_color(theme.text)
-                                .when(collapsible && !expanded, |el| {
-                                    el.max_h(crate::typography::ui_rems(
-                                        LINE_HEIGHT_REMS * COLLAPSED_LINES as f32,
-                                    ))
-                                    .overflow_hidden()
-                                })
-                                .child(SharedString::from(instruction.text.clone())),
+                            crate::components::outline_instruction_text(ix, instruction.text.clone(), LINE_HEIGHT_REMS, (collapsible && !expanded).then_some(LINE_HEIGHT_REMS * COLLAPSED_LINES as f32), theme),
                         )
                         .when(collapsible, |el| {
                             el.child(
                                 div().ml(px(14.0)).flex().child(
-                                    div()
-                                        .id(("work-item-instruction-fold", ix))
-                                        .debug_selector(move || {
-                                            format!("work-item-instruction-fold-{ix}")
-                                        })
-                                        .cursor_pointer()
-                                        .text_size(crate::typography::ui_rems(10.5))
-                                        .text_color(theme.text_muted)
-                                        .hover(|el| el.text_color(theme.text))
-                                        .child(if expanded { "Show less" } else { "Show more" })
+                                    crate::components::outline_instruction_fold(ix, expanded, theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if !this.instructions_expanded.remove(&fold_id) {
                                                 this.instructions_expanded.insert(fold_id.clone());
@@ -713,18 +621,7 @@ impl WorkItemDetails {
                         })
                         .when_some(excerpt, |el, excerpt| {
                             el.child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("work-item-instruction-excerpt-{ix}")
-                                    })
-                                    .ml(px(14.0))
-                                    .pl(px(6.0))
-                                    .border_l_2()
-                                    .border_color(theme.border_strong)
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .italic()
-                                    .child(SharedString::from(excerpt)),
+                                crate::components::outline_instruction_excerpt(ix, excerpt, theme),
                             )
                         }),
                 );
@@ -744,11 +641,8 @@ impl WorkItemDetails {
         }
         if let Some(error) = self.instructions_error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-instructions-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error)),
+                crate::components::outline_detail_text(error, 11.0, theme.warning, theme)
+                    .debug_selector(|| "work-item-instructions-error".into()),
             );
         }
         section.into_any_element()
@@ -763,13 +657,9 @@ impl WorkItemDetails {
     ) -> AnyElement {
         let effective = snapshot.effective_instructions(&item.id);
         let open = self.effective_open;
-        let mut section = div()
-            .debug_selector(|| "work-item-effective".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let mut section = crate::components::outline_section("work-item-effective", theme)
             .child(
-                Self::section_header(
+                crate::components::outline_section_header(
                     "work-item-effective-toggle",
                     format!("Effective instructions ({})", effective.entry_count),
                     open,
@@ -786,33 +676,18 @@ impl WorkItemDetails {
         }
         let over = !effective.within_budget;
         section = section.child(
-            div()
-                .debug_selector(|| "work-item-effective-budget".into())
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(if over { theme.danger } else { theme.text_faint })
-                .child(SharedString::from(format!(
-                    "{} / {} characters \u{b7} {} / {} entries",
-                    effective.rendered_chars,
-                    effective.budget.max_chars,
-                    effective.entry_count,
-                    effective.budget.max_entries
-                ))),
+            crate::components::outline_detail_text(format!("{} / {} characters · {} / {} entries", effective.rendered_chars, effective.budget.max_chars, effective.entry_count, effective.budget.max_entries), 10.5, if over { theme.danger } else { theme.text_faint }, theme)
+                .debug_selector(|| "work-item-effective-budget".into()),
         );
         if let Some(error) = effective.budget_error.clone() {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-effective-budget-error".into())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.danger)
-                    .child(SharedString::from(error)),
+                crate::components::outline_detail_text(error, 11.0, theme.danger, theme)
+                    .debug_selector(|| "work-item-effective-budget-error".into()),
             );
         }
         if effective.entries.is_empty() {
             section = section.child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .child("No instructions apply"),
+                crate::components::outline_detail_text("No instructions apply".into(), 11.5, theme.text_faint, theme),
             );
         }
         for (ix, entry) in effective.entries.iter().enumerate() {
@@ -823,49 +698,14 @@ impl WorkItemDetails {
             };
             let local = !entry.inherited;
             section = section.child(
-                div()
-                    .debug_selector(move || format!("work-item-effective-entry-{ix}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .px(px(4.0))
-                    .py(px(2.0))
+                crate::components::outline_effective_entry(ix, theme)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(crate::typography::ui_rems(10.5))
+                        crate::components::outline_effective_header(ix, theme)
                             .child(
-                                div()
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from(format!("{}.", ix + 1))),
+                                crate::components::outline_effective_marker(ix, local, theme),
                             )
                             .child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("work-item-effective-marker-{ix}")
-                                    })
-                                    .px(px(4.0))
-                                    .rounded(px(3.0))
-                                    .when(local, |el| {
-                                        el.bg(theme.accent_wash).text_color(theme.accent)
-                                    })
-                                    .when(!local, |el| {
-                                        el.bg(theme.element_hover.opacity(0.7))
-                                            .text_color(theme.text_muted)
-                                    })
-                                    .child(if local { "Local" } else { "Inherited" }),
-                            )
-                            .child(
-                                div()
-                                    .id(("work-item-effective-source", ix))
-                                    .min_w_0()
-                                    .truncate()
-                                    .cursor_pointer()
-                                    .text_color(theme.text_muted)
-                                    .hover(|el| el.text_color(theme.text))
-                                    .child(SharedString::from(entry.scope_title.clone()))
+                                crate::components::outline_effective_source(ix, entry.scope_title.clone(), theme)
                                     .when(!local, |el| {
                                         el.on_click(cx.listener(move |_, _, _, cx| {
                                             cx.emit(DetailsEvent::OpenItem {
@@ -877,11 +717,7 @@ impl WorkItemDetails {
                             ),
                     )
                     .child(
-                        div()
-                            .pl(px(14.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(entry.text.clone())),
+                        crate::components::outline_effective_text(entry.text.clone(), theme),
                     ),
             );
         }
@@ -891,23 +727,14 @@ impl WorkItemDetails {
             .and_then(|id| snapshot.item(id))
         {
             section = section.child(
-                div()
-                    .debug_selector(|| "work-item-effective-boundary".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!(
-                        "Parent instructions stop at \u{201C}{}\u{201D}",
-                        boundary.title
-                    ))),
+                crate::components::outline_detail_text(format!("Parent instructions stop at “{}”", boundary.title), 10.5, theme.text_faint, theme)
+                    .debug_selector(|| "work-item-effective-boundary".into()),
             );
         }
         section
             .child(
-                div()
-                    .debug_selector(|| "work-item-effective-precedence".into())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(effective.precedence_rule.clone())),
+                crate::components::outline_detail_text(effective.precedence_rule.clone(), 10.5, theme.text_faint, theme)
+                    .debug_selector(|| "work-item-effective-precedence".into()),
             )
             .into_any_element()
     }
@@ -975,7 +802,7 @@ impl WorkItemDetails {
             ] {
                 section = section
                     .child(div().text_color(theme.text).child(label))
-                    .child(Self::input_frame(input, theme));
+                    .child(crate::components::outline_input_frame(input, theme));
             }
             section
                 .child(
@@ -1095,7 +922,7 @@ impl WorkItemDetails {
                 .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
                 .unwrap_or_else(|| "Never used".into());
             let label = SharedString::from(format!("{} · {} uses · {}", rule.label, rule.hit_count, last_used));
-            section = section.child(div().flex().items_center().gap(px(6.0))
+            section = section.child(crate::components::outline_detail_row(theme)
                 .child(div().flex_1().min_w_0().truncate().text_color(theme.text_muted).child(label))
                 .child(approval_rule_button(button_id, if rule.enabled { "On" } else { "Off" }, theme)
                     .debug_selector(move || selector.to_string())
@@ -1107,7 +934,7 @@ impl WorkItemDetails {
         }
         if let Some(draft) = &self.approval_rule_draft {
             for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input)] {
-                section = section.child(div().text_color(theme.text_muted).child(label)).child(Self::input_frame(input, theme));
+                section = section.child(div().text_color(theme.text_muted).child(label)).child(crate::components::outline_input_frame(input, theme));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
             section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
@@ -1126,7 +953,7 @@ impl WorkItemDetails {
             })));
         }
         section = section.child(div().text_color(theme.text_muted).child("Test as Codex in the Space root"))
-            .child(Self::input_frame(&self.approval_test_input, theme))
+            .child(crate::components::outline_input_frame(&self.approval_test_input, theme))
             .child(approval_rule_button("approval-rule-test", "Test command", theme).on_click(cx.listener(|this, _, _, cx| this.test_approval_command(cx))))
             .child(approval_rule_button("approval-rule-prefill", "Create rule from command…", theme).on_click(cx.listener(|this, _, _, cx| this.prefill_approval_command(cx))));
         if let Some(result) = &self.approval_test_result {
@@ -1148,30 +975,11 @@ impl WorkItemDetails {
             .space_row(&self.space_id)
             .map(|space| space.display_name().to_owned())
             .unwrap_or_default();
-        let header = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(14.0))
-            .pt(px(10.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(label)),
-            )
+        let header = crate::components::outline_space_header(label, theme)
             .child(close);
         let Some(snapshot) = self.snapshot.clone() else {
             return frame.child(header).child(
-                div()
-                    .px(px(16.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child("Loading\u{2026}"),
+                crate::components::outline_detail_text("Loading…".into(), 12.0, theme.text_muted, theme).px(px(16.0)),
             );
         };
         let required_actions = self.render_required_actions_section(&snapshot, theme, cx);
@@ -1185,24 +993,9 @@ impl WorkItemDetails {
         let friction = self.render_friction_section(theme, cx);
         let approval_rules = self.render_approval_rules(&snapshot, theme, cx);
         frame.child(header).child(
-            div()
-                .id("work-item-details-body")
+            crate::components::outline_details_body(theme)
                 .debug_selector(|| "space-root-details".into())
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .px(px(14.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(15.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child("Space root"),
-                )
+                .child(crate::components::outline_space_title(theme))
                 .child(approval_rules)
                 .child(required_actions)
                 .child(friction)
