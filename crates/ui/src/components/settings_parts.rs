@@ -162,6 +162,12 @@ pub(crate) fn settings_option_card(
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                .when(super::is_area(theme), |el| {
+                    el.rounded_full()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .bg(theme.accent.opacity(if selected { 0.16 } else { 0.06 }))
+                })
                 .text_size(crate::typography::ui_rems(13.0))
                 .font_weight(if selected {
                     gpui::FontWeight::MEDIUM
