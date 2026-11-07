@@ -1338,7 +1338,7 @@ fn import_scene_preview(variant: &mast_theme::ThemeVariant) -> AnyElement {
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(theme.border)
-                .child(miniature(&theme, Corners::All)),
+                .child(crate::components::settings_theme_miniature(&theme)),
         )
         .child(
             div()

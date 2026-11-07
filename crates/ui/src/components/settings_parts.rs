@@ -519,3 +519,12 @@ pub(crate) fn settings_style_preview(theme: &Theme, id: crate::ui_style::UiStyle
         )
         .into_any_element()
 }
+
+/// Theme import sample with its original preview frame.
+pub(crate) fn settings_theme_miniature(theme: &Theme) -> AnyElement {
+    miniature(
+        theme,
+        Corners::All,
+        crate::settings::widgets::OPTION_CARD_RADIUS,
+    )
+}
