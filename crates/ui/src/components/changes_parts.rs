@@ -3,6 +3,29 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn walkthrough_heading(label: &str, theme: &Theme) -> gpui::SharedString {
+    if super::is_industrial(theme) {
+        crate::popover::tracked_upper(label).into()
+    } else {
+        label.to_owned().into()
+    }
+}
+
+pub(crate) fn walkthrough_section_label(label: &'static str, theme: &Theme) -> gpui::SharedString {
+    if super::is_area(theme) {
+        match label {
+            "HIGHLIGHTS" => "Highlights",
+            "QUESTIONS" => "Questions",
+            _ => label,
+        }
+        .into()
+    } else if super::is_industrial(theme) {
+        crate::popover::tracked_upper(label).into()
+    } else {
+        label.into()
+    }
+}
+
 pub(crate) fn file_save_status<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element
         .rounded(px(theme

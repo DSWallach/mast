@@ -872,7 +872,7 @@ impl Render for Walkthrough {
                                 .min_w_0()
                                 .when(true, |el| crate::components::walkthrough_title(el, &theme))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(step.title.clone()),
+                                .child(crate::components::walkthrough_heading(&step.title, &theme)),
                         )
                         .child(
                             div()
@@ -926,7 +926,7 @@ impl Render for Walkthrough {
                         div()
                             .text_color(theme.text_muted)
                             .text_size(crate::typography::ui_rems(11.0))
-                            .child("HIGHLIGHTS"),
+                            .child(crate::components::walkthrough_section_label("HIGHLIGHTS", &theme)),
                     )
                     .children(self.review.highlights.iter().map(|highlight| {
                         div()
@@ -939,7 +939,7 @@ impl Render for Walkthrough {
                         div()
                             .text_color(theme.text_muted)
                             .text_size(crate::typography::ui_rems(11.0))
-                            .child("QUESTIONS"),
+                            .child(crate::components::walkthrough_section_label("QUESTIONS", &theme)),
                     )
                     .children(
                         self.review
