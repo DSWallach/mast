@@ -1597,21 +1597,5 @@ fn compare_button(
     active: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let id: SharedString = id.into();
-    let selector = id.to_string();
-    div()
-        .id(id)
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .h(px(surface_chrome::CONTROL_SIZE))
-        .px(px(7.0))
-        .rounded(px(surface_chrome::CONTROL_RADIUS))
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(if active { theme.text } else { theme.text_muted })
-        .when(active, |el| el.bg(crate::theme::wash(0.12)))
-        .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
-        .child(label.into())
+    crate::components::browser_parts::artifact_compare_button(id.into(), label.into(), active, theme)
 }

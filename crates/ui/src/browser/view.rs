@@ -13,15 +13,7 @@ fn button(
     theme: &Theme,
     _cx: &mut Context<BrowserSurface>,
 ) -> gpui::Stateful<gpui::Div> {
-    // Match Files/History chrome, including focus-preserving mouse-down and
-    // tooltips. Disabled controls have neither a pointer cursor nor a handler.
-    crate::files::toolbar_button(id, label, theme)
-        .when(!enabled, |el| el.cursor_default().opacity(0.35))
-        .child(
-            icons::icon(glyph)
-                .size(px(surface_chrome::ICON_SIZE))
-                .text_color(theme.text_muted),
-        )
+    crate::components::browser_parts::browser_toolbar_button(id, label, glyph, enabled, theme)
 }
 
 impl BrowserSurface {
@@ -127,39 +119,18 @@ impl BrowserSurface {
         for service in &snapshot.services {
             let url = service.url(snapshot.proxy_port);
             let row_url = url.clone();
-            let border_strong = theme.border_strong;
             let label = if snapshot.remote {
                 format!("{} · localhost:{}", service.device_name, service.port)
             } else {
                 format!("localhost:{}", service.port)
             };
             content = content.child(
-                div()
-                    .id(gpui::SharedString::from(format!(
-                        "preview-row-{}",
-                        service.id
-                    )))
-                    .w_full()
-                    .h(px(56.0))
-                    .px(px(14.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.02))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .when(available, |el| {
-                        el.cursor_pointer()
-                            .hover(move |style| {
-                                style
-                                    .bg(crate::theme::ink(0.05))
-                                    .border_color(border_strong)
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.navigate(&row_url, window, cx)
-                            }))
-                    })
+                crate::components::browser_parts::browser_preview_row(
+                    gpui::SharedString::from(format!("preview-row-{}", service.id)), available, theme,
+                )
+                    .when(available, |el| el.on_click(cx.listener(move |this, _, window, cx| {
+                        this.navigate(&row_url, window, cx)
+                    })))
                     .child(
                         div()
                             .flex_1()

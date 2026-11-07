@@ -1051,15 +1051,7 @@ impl ArtifactTab {
             artifact.revisions.len() > 1
         };
         let button = |id: &'static str, label: &'static str, glyph: &'static str, enabled: bool| {
-            crate::files::toolbar_button(id, label, theme)
-                .debug_selector(move || id.into())
-                .when(!enabled, |el| el.cursor_default().opacity(0.35))
-                .child(
-                    icons::icon(glyph)
-                        .size(px(surface_chrome::ICON_SIZE))
-                        .text_color(theme.text_muted),
-                )
-                .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded_full().border_1().border_color(theme.border_strong))
+            crate::components::browser_parts::browser_toolbar_button(id, label, glyph, enabled, theme)
         };
         let shown = self
             .content
@@ -1095,16 +1087,13 @@ impl ArtifactTab {
         };
         let pinned = artifact.pinned_as_plan;
         surface_chrome::toolbar(theme)
-            .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |toolbar| {
-                toolbar.child(div().flex().items_center().rounded(px(12.0)).border_1().border_color(theme.border_strong).overflow_hidden()
-                    .children([(previous_revision, icons::ALT_ARROW_LEFT, "artifact-previous-revision", "Previous revision"), (next_revision, icons::ALT_ARROW_RIGHT, "artifact-next-revision", "Next revision")].into_iter().map(|(revision, icon, id, label)| {
-                        div().id(id).debug_selector(move || id.into()).aria_label(label).size(px(26.0)).flex().items_center().justify_center()
-                            .when(revision.is_some() && id == "artifact-previous-revision", |el| el.bg(theme.accent))
-                            .when(revision.is_none(), |el| el.opacity(0.35))
+            .children(crate::components::browser_parts::artifact_revision_navigation(theme,
+                [(previous_revision, icons::ALT_ARROW_LEFT, "artifact-previous-revision", "Previous revision", true), (next_revision, icons::ALT_ARROW_RIGHT, "artifact-next-revision", "Next revision", false)]
+                    .into_iter().map(|(revision, icon, id, label, previous)| {
+                        crate::components::browser_parts::artifact_revision_button(id, label, icon, revision.is_some(), previous, theme)
                             .when_some(revision, |el, revision| el.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| this.load(Some(revision), window, cx))))
-                            .child(icons::icon(icon).size(px(12.0)).text_color(if revision.is_some() && id == "artifact-previous-revision" { theme.identity_text(theme.accent) } else { theme.text_muted }))
-                    })))
-            })
+                            .into_any_element()
+                    }).collect()))
             .child(
                 picker_button(
                     "artifact-revision-picker",
@@ -1196,7 +1185,6 @@ impl ArtifactTab {
     }
 
     fn render_area_footer(&self, artifact: &ArtifactView, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if theme.ui_style.id != crate::ui_style::UiStyleId::Area { return None; }
         let revision = self.shown.unwrap_or(artifact.current_revision);
         let author = artifact.revisions.iter().find(|entry| entry.id == revision).map(|entry| {
             entry.by.chat_id.as_ref().and_then(|id| self.state.read(cx).chats.iter().find(|chat| &chat.id == id).and_then(|chat| chat.title.clone()))
@@ -1204,14 +1192,17 @@ impl ArtifactTab {
         });
         let standalone = self.standalone_path(cx).is_some();
         let local = self.is_local(artifact, cx);
-        Some(div().w_full().h(px(40.0)).px(px(12.0)).flex().items_center().gap(px(8.0)).text_color(theme.text_muted)
-            .text_size(crate::typography::ui_rems(11.0))
-            .child(div().flex_1().min_w_0().truncate().child(SharedString::from(author.map_or_else(|| "Artifact".into(), |author| format!("Written by {author}")))))
-            .when(local, |el| el.child(div().id("area-artifact-reveal").debug_selector(|| "area-artifact-reveal".into()).px(px(10.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border_strong).cursor_pointer().child("Reveal")
-                .on_click(cx.listener(|this, _, _, cx| this.reveal(cx)))))
-            .when(standalone, |el| el.child(div().id("area-artifact-open").debug_selector(|| "area-artifact-open".into()).px(px(10.0)).py(px(5.0)).rounded_full().bg(theme.accent).text_color(theme.identity_text(theme.accent)).cursor_pointer().child("Open")
-                .on_click(cx.listener(|this, _, _, cx| this.open_standalone(cx)))))
-            .into_any_element())
+        let mut actions = Vec::new();
+        if local {
+            actions.push(crate::components::browser_parts::artifact_footer_button("area-artifact-reveal", "Reveal", false, theme)
+                .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))).into_any_element());
+        }
+        if standalone {
+            actions.push(crate::components::browser_parts::artifact_footer_button("area-artifact-open", "Open", true, theme)
+                .on_click(cx.listener(|this, _, _, cx| this.open_standalone(cx))).into_any_element());
+        }
+        crate::components::browser_parts::artifact_footer(theme,
+            SharedString::from(author.map_or_else(|| "Artifact".into(), |author| format!("Written by {author}"))), actions)
     }
 
     fn render_picker(

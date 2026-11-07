@@ -39,6 +39,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
         "appearance",
         "controls",
         "components",
+        "browser",
     ];
     anyhow::ensure!(
         !screens.is_empty() && screens.iter().all(|s| all_screens.contains(&s.as_str())),
@@ -137,16 +138,28 @@ fn render_ui_preview() -> anyhow::Result<()> {
                 mast_theme::Appearance::Light => Appearance::Light,
                 mast_theme::Appearance::Dark => Appearance::Dark,
             };
-            let path = render::render(
-                cell.screen,
-                style,
-                layout,
-                cell.theme,
-                appearance,
-                cell.label.clone(),
-                data_dir.path().to_owned(),
-                &format!("preview-{screen_index}-{index}"),
-            )?;
+            let path = if cell.screen == "browser" {
+                render_browser(
+                    style,
+                    layout,
+                    cell.theme,
+                    appearance,
+                    cell.label.clone(),
+                    data_dir.path().to_owned(),
+                    &format!("preview-{screen_index}-{index}"),
+                )?
+            } else {
+                render::render(
+                    cell.screen,
+                    style,
+                    layout,
+                    cell.theme,
+                    appearance,
+                    cell.label.clone(),
+                    data_dir.path().to_owned(),
+                    &format!("preview-{screen_index}-{index}"),
+                )?
+            };
             let image = image::open(path)?.into_rgba8();
             let image = imageops::resize(
                 &image,
@@ -216,4 +229,88 @@ fn compare_minimal_preview() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "snapshot"))]
+fn render_browser(
+    style: mast_ui::ui_style::UiStyleId,
+    layout: mast_ui::ui_style::UiLayout,
+    theme_id: &str,
+    appearance: mast_ui::theme::Appearance,
+    label: String,
+    data_dir: std::path::PathBuf,
+    name: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    use gpui::{AppContext, Render, div, prelude::*, px, size};
+    struct BrowserFrame {
+        browser: gpui::Entity<mast_ui::browser::BrowserSurface>,
+        label: String,
+    }
+    impl Render for BrowserFrame {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = mast_ui::theme::Theme::of(cx);
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(theme.surface)
+                .text_color(theme.text)
+                .child(
+                    div()
+                        .h(px(30.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .bg(theme.surface_raised)
+                        .child(format!("browser   |   {}", self.label)),
+                )
+                .child(div().flex_1().min_h_0().child(self.browser.clone()))
+        }
+    }
+    let theme_id = theme_id.to_owned();
+    mast_ui::snapshot::render_to_png_with_layout(
+        name,
+        size(px(1440.), px(900.)),
+        style,
+        layout,
+        appearance,
+        move |window, cx| {
+            let mut settings = mast_ui::settings::UiSettings::default();
+            settings.ui_style = style;
+            settings.ui_layout = layout;
+            mast_ui::settings::init(settings.clone(), &data_dir, cx);
+            let fonts = mast_ui::typography::register_fonts(cx);
+            mast_ui::typography::init(
+                settings.ui_font_family.clone(),
+                settings.ui_font_size,
+                settings.terminal_font_family.clone(),
+                settings.terminal_font_size,
+                settings.code_font_family.clone(),
+                settings.code_font_size,
+                fonts,
+                cx,
+            );
+            mast_ui::composer::init(cx, settings.composer_send_behavior);
+            mast_ui::theme::Theme::install_selection(
+                appearance,
+                &theme_id,
+                mast_theme::AccentSelection::ThemeDefault,
+                mast_theme::SurfacePreference::default(),
+                cx,
+            );
+            let browser = cx.new(|cx| {
+                mast_ui::browser::BrowserSurface::new(
+                    mast_ui::browser::BrowserContext::default(),
+                    false,
+                    window,
+                    cx,
+                )
+            });
+            cx.new(|_| BrowserFrame { browser, label })
+        },
+    )
 }

@@ -745,23 +745,5 @@ fn action_button(
     primary: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let id: SharedString = id.into();
-    let debug = id.to_string();
-    div()
-        .id(id)
-        .debug_selector(move || debug.clone())
-        .px(px(8.0))
-        .h(px(20.0))
-        .flex()
-        .items_center()
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(if primary { theme.accent } else { theme.border })
-        .when(primary, |el| {
-            el.bg(theme.accent).text_color(theme.on_accent)
-        })
-        .when(!primary, |el| el.text_color(theme.text_muted))
-        .text_size(crate::typography::ui_rems(11.0))
-        .cursor_pointer()
-        .child(label)
+    crate::components::browser_parts::artifact_action_button(id.into(), label, primary, theme)
 }
