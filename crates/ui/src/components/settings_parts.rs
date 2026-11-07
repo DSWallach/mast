@@ -281,3 +281,39 @@ pub(crate) fn settings_shortcut_key(
             })
     }
 }
+
+/// A destination option in a settings row.
+pub(crate) fn settings_destination(
+    theme: &Theme,
+    index: usize,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let area = super::is_area(theme);
+    div()
+        .id(("appshot-destination", index))
+        .px(px(10.0))
+        .py(px(7.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
+        .when(area, |el| el.rounded_full())
+        .border_1()
+        .when(super::is_industrial(theme), |el| el.border_b_2())
+        .border_color(if selected {
+            theme.text.opacity(0.24)
+        } else {
+            theme.border
+        })
+        .bg(if area {
+            theme.accent.opacity(if selected { 0.2 } else { 0.08 })
+        } else if selected {
+            ink(0.09)
+        } else {
+            gpui::transparent_black()
+        })
+        .text_size(px(11.0))
+        .text_color(if selected {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .cursor_pointer()
+}

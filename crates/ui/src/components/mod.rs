@@ -2,7 +2,7 @@
 //! appearance determines their treatment.
 
 mod settings_parts;
-pub(crate) use settings_parts::{settings_choice, settings_effective_surface, settings_ghost_action, settings_layout_preview, settings_page_header, settings_option_card, settings_row_tile, settings_shortcut_key};
+pub(crate) use settings_parts::{settings_choice, settings_destination, settings_effective_surface, settings_ghost_action, settings_layout_preview, settings_page_header, settings_option_card, settings_row_tile, settings_shortcut_key};
 
 mod outline_parts;
 pub use outline_parts::*;
