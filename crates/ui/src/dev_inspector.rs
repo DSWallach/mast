@@ -1,7 +1,102 @@
 //! Development-only GPUI element inspector.
-use gpui::{App, DivInspectorState, actions, div, prelude::*, px};
+use gpui::{
+    App, ClipboardItem, DivInspectorState, InspectorElementId, Rgba, actions, div, prelude::*, px,
+};
+use std::{cell::RefCell, rc::Rc};
 
 actions!(mast_dev, [ToggleInspector]);
+
+fn relative_source(path: &str) -> &str {
+    path.find("crates/")
+        .map(|index| &path[index..])
+        .unwrap_or(path)
+}
+
+fn color_hex(color: gpui::Hsla) -> String {
+    let color: Rgba = color.into();
+    let byte = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        byte(color.r),
+        byte(color.g),
+        byte(color.b),
+        byte(color.a)
+    )
+}
+
+fn format_details(id: &InspectorElementId, state: &DivInspectorState, context: &str) -> String {
+    let location = id.path.source_location;
+    let bounds = state.bounds;
+    let style = &state.base_style;
+    let mut lines = vec![
+        format!(
+            "Source: {}:{}:{}",
+            relative_source(location.file()),
+            location.line(),
+            location.column()
+        ),
+        format!("ID: {}", id.path.global_id),
+        format!(
+            "Bounds: x={} y={} width={} height={} px",
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height)
+        ),
+        format!("Theme: {context}"),
+    ];
+    macro_rules! field {
+        ($label:expr, $value:expr) => {
+            if let Some(value) = &$value {
+                lines.push(format!("{}: {:?}", $label, value));
+            }
+        };
+    }
+    field!("Width", style.size.width);
+    field!("Height", style.size.height);
+    field!("Min width", style.min_size.width);
+    field!("Min height", style.min_size.height);
+    field!("Max width", style.max_size.width);
+    field!("Max height", style.max_size.height);
+    field!("Padding top", style.padding.top);
+    field!("Padding right", style.padding.right);
+    field!("Padding bottom", style.padding.bottom);
+    field!("Padding left", style.padding.left);
+    field!("Margin top", style.margin.top);
+    field!("Margin right", style.margin.right);
+    field!("Margin bottom", style.margin.bottom);
+    field!("Margin left", style.margin.left);
+    field!("Gap horizontal", style.gap.width);
+    field!("Gap vertical", style.gap.height);
+    field!("Radius top left", style.corner_radii.top_left);
+    field!("Radius top right", style.corner_radii.top_right);
+    field!("Radius bottom right", style.corner_radii.bottom_right);
+    field!("Radius bottom left", style.corner_radii.bottom_left);
+    field!("Border top", style.border_widths.top);
+    field!("Border right", style.border_widths.right);
+    field!("Border bottom", style.border_widths.bottom);
+    field!("Border left", style.border_widths.left);
+    if let Some(color) = style.border_color {
+        lines.push(format!("Border color: {}", color_hex(color)));
+    }
+    if let Some(background) = &style.background {
+        if let Some(color) = background
+            .color()
+            .and_then(|background| background.as_solid())
+        {
+            lines.push(format!("Background: {}", color_hex(color)));
+        } else {
+            lines.push(format!("Background: {:?}", background));
+        }
+    }
+    if let Some(color) = style.text.color {
+        lines.push(format!("Text color: {}", color_hex(color)));
+    }
+    field!("Text size", style.text.font_size);
+    field!("Text weight", style.text.font_weight);
+    field!("Font family", style.text.font_family);
+    lines.join("\n")
+}
 
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &ToggleInspector, cx| {
@@ -11,32 +106,40 @@ pub fn init(cx: &mut App) {
             }
         });
     });
-    cx.register_inspector_element(|_, state: &DivInspectorState, _, cx| {
+    let copied = Rc::new(RefCell::new(String::new()));
+    cx.register_inspector_element(move |id, state: &DivInspectorState, _, cx| {
         let theme = crate::theme::Theme::of(cx);
-        let style = &state.base_style;
+        let details = format_details(
+            &id,
+            state,
+            &format!("{:?}, {:?}", theme.ui_style, theme.appearance),
+        );
+        let label = if *copied.borrow() == details {
+            "Copied"
+        } else {
+            "Copy details"
+        };
+        let copied = copied.clone();
+        let clipboard_text = details.clone();
         div()
             .flex()
             .flex_col()
             .gap(px(6.))
             .text_color(theme.text)
-            .child(format!("Bounds: {:?}", state.bounds))
-            .child(format!("Size: {:?}", style.size))
-            .child(format!("Padding: {:?}", style.padding))
-            .child(format!("Radius: {:?}", style.corner_radii))
-            .child(format!("Background: {:?}", style.background))
-            .child(format!("Border widths: {:?}", style.border_widths))
-            .child(format!("Border color: {:?}", style.border_color))
+            .child(
+                div()
+                    .id("copy-inspector-details")
+                    .cursor_pointer()
+                    .child(label)
+                    .on_click(move |_, window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text.clone()));
+                        *copied.borrow_mut() = clipboard_text.clone();
+                        window.refresh();
+                    }),
+            )
+            .child(details)
     });
     cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
-        let label = inspector
-            .active_element_id()
-            .map(|id| {
-                format!(
-                    "ID: {:?}\nSource: {}",
-                    id.path.global_id, id.path.source_location
-                )
-            })
-            .unwrap_or_else(|| "Hover and click an element to inspect it".to_owned());
         let states = inspector.render_inspector_states(window, cx);
         let theme = crate::theme::Theme::of(cx);
         div()
@@ -49,7 +152,9 @@ pub fn init(cx: &mut App) {
             .text_color(theme.text)
             .text_size(px(12.))
             .child("Inspector — toggle to pick again")
-            .child(label)
+            .when(inspector.active_element_id().is_none(), |element| {
+                element.child("Hover and click an element to inspect it")
+            })
             .children(states)
             .into_any_element()
     }));
@@ -59,6 +164,33 @@ pub fn init(cx: &mut App) {
 mod tests {
     use super::*;
     use gpui::{Context, Render, Window};
+
+    #[test]
+    fn details_include_source_and_colors_without_unset_fields() {
+        let id = gpui::InspectorElementId {
+            path: std::rc::Rc::new(gpui::InspectorElementPath {
+                global_id: Default::default(),
+                source_location: std::panic::Location::caller(),
+            }),
+            instance_id: 0,
+        };
+        let mut style = gpui::StyleRefinement::default();
+        style.border_color = Some(gpui::rgb(0x123456).into());
+        let state = DivInspectorState {
+            base_style: Box::new(style),
+            bounds: Default::default(),
+            content_size: Default::default(),
+        };
+        let details = format_details(&id, &state, "Area, Dark");
+        assert!(details.contains("crates/ui/src/dev_inspector.rs:"));
+        assert_eq!(
+            relative_source("/checkout/crates/ui/src/file.rs"),
+            "crates/ui/src/file.rs"
+        );
+        assert!(details.contains("#123456ff"));
+        assert!(!details.contains("None"));
+        assert!(!details.contains("Padding top"));
+    }
 
     struct Host;
     impl Render for Host {
