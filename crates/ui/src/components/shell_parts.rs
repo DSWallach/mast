@@ -269,6 +269,21 @@ pub(crate) fn right_surface_tab(
         .children(crate::surface_chrome::active_key_dot(theme, active))
 }
 
+pub(crate) fn right_panel_frame(theme: &Theme, expanded: bool) -> gpui::Div {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .when(!expanded && !super::is_area(theme), |el| {
+            el.border_l_1().border_color(theme.border)
+        })
+        .bg(if super::is_area(theme) {
+            theme.bg
+        } else {
+            theme.panel_bg()
+        })
+}
+
 pub(crate) fn surface_close_slot(theme: &Theme, index: usize) -> gpui::Stateful<gpui::Div> {
     div()
         .id(("right-surface-close", index))
