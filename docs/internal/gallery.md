@@ -14,8 +14,10 @@ next edit. Press Ctrl-C in the terminal to stop the watcher and gallery. Python
 
 The watcher keeps the selected story, style, layout, light/dark mode and theme
 in a temporary file for the lifetime of the watcher. The gallery uses temporary
-settings and fixture data; it does not connect to the engine or read the
-installed app's data. Running `cargo run -p mast-gallery` directly also works,
+settings and fixture data; it does not connect to the engine. It reads the
+installed app's style-overrides.json, if present, and refreshes the comparison
+columns when that file changes. Save edits in Mast's Design panel to update it;
+unsaved drafts stay in Mast. It never writes that file. Running `cargo run -p mast-gallery` directly also works,
 but does not retain selections between launches unless `MAST_GALLERY_STATE`
 points to a writable state file.
 

@@ -42,3 +42,10 @@ weights are `regular`, `medium`, `semibold`, and `bold`. The panel changes
 style-wide values and clears the corresponding current-layout value so the edit
 is visible immediately. Overrides are prototypes, not a replacement for updating
 the compiled style defaults.
+
+The component gallery reads the same override file without writing to it. Once
+Save is pressed in Mast, the gallery refreshes its side-by-side columns using
+that file and resolves each column's own Style and the selected Layout. Draft
+slider changes stay in Mast until saved. The gallery keeps its other settings in
+a separate temporary directory; `MAST_DATA_DIR` (or `ZERON_DATA_DIR`) selects a
+non-default profile directory for reading overrides.

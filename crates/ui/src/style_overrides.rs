@@ -503,6 +503,7 @@ mod tests {
 struct OverrideState {
     overrides: Overrides,
     directory: PathBuf,
+    read_only: bool,
     file_watch: std::rc::Rc<std::cell::RefCell<FileWatch>>,
     _watch: gpui::Task<()>,
 }
@@ -516,6 +517,15 @@ pub fn current(cx: &gpui::App) -> Overrides {
 
 /// Installs the profile file and polls its contents, including atomic replacement.
 pub fn init(directory: PathBuf, cx: &mut gpui::App) {
+    init_inner(directory, false, cx);
+}
+
+/// Watch an app profile without granting the preview process write access.
+pub fn init_read_only(directory: PathBuf, cx: &mut gpui::App) {
+    init_inner(directory, true, cx);
+}
+
+fn init_inner(directory: PathBuf, read_only: bool, cx: &mut gpui::App) {
     let path = Overrides::path(&directory);
     let file_watch = std::rc::Rc::new(std::cell::RefCell::new(FileWatch::new(path)));
     let watch = file_watch.clone();
@@ -539,6 +549,7 @@ pub fn init(directory: PathBuf, cx: &mut gpui::App) {
     cx.set_global(OverrideState {
         overrides,
         directory,
+        read_only,
         file_watch,
         _watch: task,
     });
@@ -555,6 +566,12 @@ pub fn save(overrides: &Overrides, cx: &gpui::App) -> std::io::Result<()> {
     let state = cx
         .try_global::<OverrideState>()
         .ok_or_else(|| std::io::Error::other("style overrides not initialized"))?;
+    if state.read_only {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "style overrides are read-only",
+        ));
+    }
     std::fs::create_dir_all(&state.directory)?;
     let contents = serde_json::to_vec_pretty(overrides).map_err(std::io::Error::other)?;
     let path = Overrides::path(&state.directory);

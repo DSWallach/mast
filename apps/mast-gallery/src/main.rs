@@ -229,6 +229,7 @@ impl Gallery {
 
 impl Render for Gallery {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let overrides = mast_ui::style_overrides::current(cx);
         let theme = Theme::of(cx);
         let badge = badges::MessageBadge {
             icon: icons::GIT_BRANCH,
@@ -432,14 +433,14 @@ impl Render for Gallery {
                         el.child(self.appearance_page.clone())
                     })
                     .when(self.story == Story::Board, |el| {
-                        el.child(stories::board(theme))
+                        el.child(stories::board(theme, &overrides))
                     })
                     .when_some(
                         match self.story {
                             Story::Component(story) => Some(story),
                             _ => None,
                         },
-                        |el, story| el.child(stories::grid(story, theme)),
+                        |el, story| el.child(stories::grid(story, theme, &overrides)),
                     )
                     .when(self.story == Story::Controls, |el| {
                         el.child("Buttons and toggles")
@@ -604,13 +605,14 @@ fn gallery(focus: gpui::FocusHandle, cx: &mut Context<Gallery>) -> Gallery {
     }
 }
 
-fn init(cx: &mut App, data_dir: &std::path::Path) {
+fn init(cx: &mut App, data_dir: &std::path::Path, override_dir: &std::path::Path) {
     gpui_base::init(cx);
     let settings = settings::UiSettings::default();
     let saved = GalleryState::load();
     settings::init(settings.clone(), data_dir, cx);
     let fonts = typography::register_fonts(cx);
     ui_style::init_with_layout(saved.style, saved.layout, cx);
+    mast_ui::style_overrides::init_read_only(override_dir.to_path_buf(), cx);
     mast_ui::composer::init(cx, settings.composer_send_behavior);
     typography::init(
         settings.ui_font_family,
@@ -635,12 +637,41 @@ fn init(cx: &mut App, data_dir: &std::path::Path) {
     );
 }
 
+/// Resolve the app's settings directory without creating or modifying it.
+fn gallery_override_dir() -> std::path::PathBuf {
+    if let Some(dir) =
+        std::env::var_os("MAST_DATA_DIR").or_else(|| std::env::var_os("ZERON_DATA_DIR"))
+    {
+        return dir.into();
+    }
+    #[cfg(windows)]
+    {
+        let local = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|home| {
+                    std::path::PathBuf::from(home)
+                        .join("AppData")
+                        .join("Local")
+                        .into_os_string()
+                })
+            })
+            .expect("LOCALAPPDATA or USERPROFILE required");
+        std::path::PathBuf::from(local).join("Zeron")
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME required"));
+        mast_proto::env::home_storage_dir(&home, false).0
+    }
+}
+
 fn main() {
     let data_dir = tempfile::tempdir().expect("gallery temporary settings directory");
+    let override_dir = gallery_override_dir();
     gpui_platform::application()
         .with_assets(icons::Assets)
         .run(move |cx: &mut App| {
-            init(cx, data_dir.path());
+            init(cx, data_dir.path(), &override_dir);
             cx.open_window(Default::default(), |window, cx| {
                 cx.new(|cx| {
                     let focus = cx.focus_handle();
@@ -664,6 +695,7 @@ mod tests {
         struct Snapshot(Story);
         impl Render for Snapshot {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let overrides = mast_ui::style_overrides::current(cx);
                 let theme = Theme::of(cx);
                 div()
                     .size_full()
@@ -671,8 +703,10 @@ mod tests {
                     .bg(theme.surface)
                     .text_color(theme.text)
                     .child(match self.0 {
-                        Story::Component(story) => stories::grid(story, theme).into_any_element(),
-                        Story::Board => stories::board(theme).into_any_element(),
+                        Story::Component(story) => {
+                            stories::grid(story, theme, &overrides).into_any_element()
+                        }
+                        Story::Board => stories::board(theme, &overrides).into_any_element(),
                         _ => div().into_any_element(),
                     })
             }
@@ -692,7 +726,7 @@ mod tests {
                 ui_style::UiStyleId::Default,
                 mast_ui::theme::Appearance::Light,
                 |_, cx| {
-                    init(cx, dir.path());
+                    init(cx, dir.path(), dir.path());
                     cx.new(|_| Snapshot(story))
                 },
             )
@@ -732,13 +766,17 @@ mod tests {
                     base,
                     ui_style::UiStyleId::Default,
                     ui_style::UiLayout::Minimal,
+                    &mast_ui::style_overrides::current(cx),
                 );
                 let area = ui_style::theme_for_view(
                     base,
                     ui_style::UiStyleId::Area,
                     ui_style::UiLayout::Minimal,
+                    &mast_ui::style_overrides::current(cx),
                 );
                 assert_ne!(default.ui_style.conversation, area.ui_style.conversation);
+                assert_eq!(default.ui_style.tokens.control_radius, None);
+                assert_eq!(area.ui_style.tokens.control_radius, Some(23.0));
                 assert_eq!(ui_style::current(cx).id, ui_style::UiStyleId::Default);
                 div()
                     .flex()
@@ -759,16 +797,68 @@ mod tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| init(cx, dir.path()));
+        std::fs::write(
+            mast_ui::style_overrides::Overrides::path(dir.path()),
+            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":23}}}"#,
+        )
+        .unwrap();
+        cx.update(|cx| {
+            init(cx, dir.path(), dir.path());
+            assert_eq!(
+                mast_ui::style_overrides::save(&mast_ui::style_overrides::current(cx), cx)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        });
         let window = cx.add_window(|_, _| Comparison);
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
     }
 
     #[gpui::test]
+    fn saved_overrides_refresh_each_view_without_changing_gallery_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| init(cx, dir.path(), dir.path()));
+        cx.run_until_parked();
+        std::fs::write(mast_ui::style_overrides::Overrides::path(dir.path()), r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":25,"layouts":{"compact":{"controlRadius":19}}},"industrial":{"controlRadius":3}}}"#).unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let base = Theme::of(cx);
+            let overrides = mast_ui::style_overrides::current(cx);
+            let area = ui_style::theme_for_view(
+                base,
+                ui_style::UiStyleId::Area,
+                ui_style::UiLayout::Compact,
+                &overrides,
+            );
+            let industrial = ui_style::theme_for_view(
+                base,
+                ui_style::UiStyleId::Industrial,
+                ui_style::UiLayout::Compact,
+                &overrides,
+            );
+            let default = ui_style::theme_for_view(
+                base,
+                ui_style::UiStyleId::Default,
+                ui_style::UiLayout::Compact,
+                &overrides,
+            );
+            assert_eq!(area.ui_style.tokens.control_radius, Some(19.0));
+            assert_eq!(industrial.ui_style.tokens.control_radius, Some(3.0));
+            assert_eq!(default.ui_style.tokens.control_radius, None);
+            assert_eq!(ui_style::current(cx).id, ui_style::UiStyleId::Default);
+        });
+    }
+
+    #[gpui::test]
     fn stories_render_in_each_style_and_appearance(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| init(cx, dir.path()));
+        cx.update(|cx| init(cx, dir.path(), dir.path()));
         let window = cx.add_window(|window, cx| {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);

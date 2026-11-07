@@ -145,7 +145,11 @@ fn fixture(story: Story, state: State, theme: &Theme, id: String) -> AnyElement 
         .into_any_element()
 }
 
-pub fn grid(story: Story, theme: &Theme) -> impl IntoElement {
+pub fn grid(
+    story: Story,
+    theme: &Theme,
+    overrides: &mast_ui::style_overrides::Overrides,
+) -> impl IntoElement {
     let layout = theme.ui_style.layout;
     div()
         .flex()
@@ -165,7 +169,7 @@ pub fn grid(story: Story, theme: &Theme) -> impl IntoElement {
                 .items_center()
                 .child(div().w(px(92.)).child(label))
                 .children(UiStyleId::ALL.iter().enumerate().map(|(column, &style)| {
-                    let view_theme = ui_style::theme_for_view(theme, style, layout);
+                    let view_theme = ui_style::theme_for_view(theme, style, layout, overrides);
                     div()
                         .flex_1()
                         .min_w_0()
@@ -185,7 +189,7 @@ pub fn grid(story: Story, theme: &Theme) -> impl IntoElement {
 }
 
 /// A fixture-only status board composed from the outline's actual row and card chrome.
-pub fn board(theme: &Theme) -> impl IntoElement {
+pub fn board(theme: &Theme, overrides: &mast_ui::style_overrides::Overrides) -> impl IntoElement {
     let layout = theme.ui_style.layout;
     div()
         .id("board-comparison")
@@ -197,7 +201,7 @@ pub fn board(theme: &Theme) -> impl IntoElement {
                 .iter()
                 .enumerate()
                 .map(|(style_index, &style)| {
-                    let view = ui_style::theme_for_view(theme, style, layout);
+                    let view = ui_style::theme_for_view(theme, style, layout, overrides);
                     let lanes: [(&str, &[&str]); 4] = [
                         ("Needs you", &["Review the design", "Choose a theme"]),
                         ("Running", &["Build the gallery", "Check component states"]),

@@ -509,8 +509,9 @@ pub fn theme_for_view(
     theme: &crate::theme::Theme,
     id: UiStyleId,
     layout: UiLayout,
+    overrides: &crate::style_overrides::Overrides,
 ) -> crate::theme::Theme {
-    theme.clone().with_ui_style(UiStyle::resolve(id, layout))
+    theme.clone().with_ui_style(overrides.apply(UiStyle::resolve(id, layout)))
 }
 
 pub fn set_layout(layout: UiLayout, window: &mut gpui::Window, cx: &mut gpui::App) -> bool {
