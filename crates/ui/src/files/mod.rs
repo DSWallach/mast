@@ -268,11 +268,11 @@ impl FilesSurface {
                         .id("files-retry-root")
                         .h(px(28.0))
                         .px(px(12.0))
-                        .rounded(px(7.0))
                         .border_1()
                         .border_color(theme.border)
                         .bg(crate::theme::wash(0.04))
                         .hover(|style| style.bg(crate::theme::wash(0.09)))
+                        .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Retry))
                         .cursor_pointer()
                         .flex()
                         .items_center()
@@ -335,7 +335,6 @@ impl FilesSurface {
                                 .h(px(20.0))
                                 .flex_none()
                                 .px(px(6.0))
-                                .rounded(px(5.0))
                                 .flex()
                                 .items_center()
                                 .cursor_pointer()
@@ -343,6 +342,7 @@ impl FilesSurface {
                                 .aria_label("Refresh workspace files now")
                                 .text_color(theme.text_muted)
                                 .hover(|style| style.bg(crate::theme::wash(0.07)))
+                                .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Refresh))
                                 .child("Refresh now")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.refresh(cx);

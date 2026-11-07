@@ -3,6 +3,45 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) enum FileAction {
+    Retry,
+    Refresh,
+}
+
+pub(crate) fn file_action<T: Styled + ParentElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    action: FileAction,
+) -> T {
+    let radius = match action {
+        FileAction::Retry => 7.0,
+        FileAction::Refresh => 5.0,
+    };
+    let element = element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(radius)));
+    let element = super::segmented_key(element, theme, false);
+    element.when(super::is_area(theme), |element| {
+        element.rounded_full().bg(theme.accent.opacity(0.10))
+    })
+}
+
+pub(crate) fn changes_repository_chip<T: Styled + ParentElement + FluentBuilder>(
+    element: T,
+    theme: &Theme,
+    active: bool,
+) -> T {
+    let element = element
+        .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))
+        .border_1()
+        .border_color(if active { theme.accent } else { theme.border })
+        .when(active, |element| element.bg(theme.accent.opacity(0.08)));
+    let element = super::segmented_key(element, theme, active);
+    element.when(super::is_area(theme), |element| {
+        element
+            .rounded_full()
+            .bg(theme.accent.opacity(if active { 0.18 } else { 0.06 }))
+    })
+}
+
 pub(crate) fn changes_diff_header<T: Styled + StatefulInteractiveElement + FluentBuilder>(
     element: T,
     theme: &Theme,
