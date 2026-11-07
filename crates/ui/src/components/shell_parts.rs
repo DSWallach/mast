@@ -451,6 +451,9 @@ pub(crate) fn header_attention_badge(
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(color)
+        .when(super::is_area(theme), |el| {
+            el.border_color(theme.bg).text_color(theme.text_muted)
+        })
         .hover(|el| el.bg(theme.element_hover))
         .child(glyph)
         .when(count > 0, |el| {

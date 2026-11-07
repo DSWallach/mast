@@ -912,6 +912,14 @@ pub fn outline_move_flash(selector: String, theme: &Theme) -> Div {
 }
 
 /// Metadata row beneath a required action.
+pub fn outline_request_attention(theme: &Theme, color: gpui::Hsla) -> gpui::Hsla {
+    if super::is_area(theme) {
+        theme.text_muted
+    } else {
+        color
+    }
+}
+
 pub fn outline_action_metadata(theme: &Theme) -> Div {
     div()
         .flex()
