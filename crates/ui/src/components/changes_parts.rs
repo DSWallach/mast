@@ -1,7 +1,7 @@
 //! Presentation primitives for changes and review walkthrough surfaces.
 
 use crate::theme::Theme;
-use gpui::{prelude::*, px};
+use gpui::{div, prelude::*, px};
 
 pub(crate) fn file_toolbar_button(
     id: &'static str,
@@ -289,4 +289,56 @@ pub(crate) fn walkthrough_notes<T: Styled + FluentBuilder>(element: T, theme: &T
                 .border_color(theme.border)
         },
     )
+}
+
+/// Icon action in the changes pane header.
+pub(crate) fn changes_header_toggle(
+    id: &'static str,
+    icon_path: &'static str,
+    active: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .size(px(crate::surface_chrome::CONTROL_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+        .cursor_pointer()
+        // Latched: the blend is neither read nor driven, and its listener
+        // would dirty the whole window on every enter/leave for nothing.
+        .map(|el| {
+            if active {
+                el.bg(crate::theme::wash(0.14))
+            } else {
+                el.bg(crate::motion::hover_blend(
+                    id,
+                    crate::theme::wash(0.0),
+                    crate::theme::wash(0.14),
+                ))
+                .on_hover(crate::motion::hover_listener(id))
+            }
+        })
+        .when(super::is_industrial(theme), |el| {
+            super::icon_key(el, theme, active)
+        })
+        .when(super::is_area(theme), |el| {
+            el.rounded_full()
+                .when(active, |el| el.bg(theme.accent.opacity(0.18)))
+        })
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        .child(
+            crate::icons::icon(icon_path)
+                .size(px(crate::surface_chrome::ICON_SIZE))
+                .text_color(if active {
+                    theme.text
+                } else {
+                    theme.text_muted.opacity(0.7)
+                }),
+        )
 }

@@ -5015,42 +5015,7 @@ impl Changes {
         active: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .size(px(crate::surface_chrome::CONTROL_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-            .cursor_pointer()
-            // Latched: the blend is neither read nor driven, and its listener
-            // would dirty the whole window on every enter/leave for nothing.
-            .map(|el| {
-                if active {
-                    el.bg(crate::theme::wash(0.14))
-                } else {
-                    el.bg(motion::hover_blend(
-                        id,
-                        crate::theme::wash(0.0),
-                        crate::theme::wash(0.14),
-                    ))
-                    .on_hover(motion::hover_listener(id))
-                }
-            })
-            .occlude()
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                window.prevent_default()
-            })
-            .child(
-                crate::icons::icon(icon_path)
-                    .size(px(crate::surface_chrome::ICON_SIZE))
-                    .text_color(if active {
-                        theme.text
-                    } else {
-                        theme.text_muted.opacity(0.7)
-                    }),
-            )
+        crate::components::changes_header_toggle(id, icon_path, active, theme)
     }
 
     /// The unified ⇄ split layout toggle (both the scoped and the
