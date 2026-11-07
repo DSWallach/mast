@@ -11,7 +11,7 @@ pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(6.0 * super::layout_spacing(theme)))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
         .when(super::is_area(theme), |el| {
             el.rounded_full()
@@ -27,9 +27,11 @@ pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
                     .border_color(theme.border)
             },
         )
-        .px(px(10.0))
-        .py(px(6.0))
-        .text_size(crate::typography::ui_rems(12.0))
+        .px(px(10.0 * super::layout_spacing(theme)))
+        .py(px(6.0 * super::layout_spacing(theme)))
+        .text_size(crate::typography::ui_rems(
+            12.0 + super::layout_type_adjustment(theme),
+        ))
         .text_color(if super::is_area(theme) {
             theme.accent
         } else {
@@ -89,6 +91,11 @@ pub(crate) fn settings_layout_preview(
 }
 
 pub(crate) fn settings_page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Div {
+    let title = if super::is_industrial(theme) {
+        crate::popover::tracked_upper(title)
+    } else {
+        title.to_owned()
+    };
     div()
         .flex()
         .flex_row()
@@ -96,10 +103,13 @@ pub(crate) fn settings_page_header(theme: &Theme, title: &str, count: Option<usi
         .gap(px(10.0))
         .child(
             div()
-                .text_size(crate::typography::ui_rems(16.0))
+                .text_size(crate::typography::ui_rems(
+                    theme.ui_style.type_roles().title.unwrap_or(16.0)
+                        + super::layout_type_adjustment(theme),
+                ))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(SharedString::from(title.to_string())),
+                .child(SharedString::from(title)),
         )
         .when_some(count, |el, count| {
             el.child(
@@ -118,6 +128,12 @@ pub(crate) fn settings_option_card(
     selected: bool,
     preview: AnyElement,
 ) -> gpui::Div {
+    let label: SharedString = label.into();
+    let label = if super::is_industrial(theme) {
+        SharedString::from(crate::popover::tracked_upper(label.as_ref()))
+    } else {
+        label
+    };
     div()
         .flex_1()
         .min_w_0()
@@ -158,7 +174,7 @@ pub(crate) fn settings_option_card(
                     theme.text_muted
                 })
                 .child(crate::icons::icon(icon_path).size(px(16.0)).flex_none())
-                .child(label.into()),
+                .child(label),
         )
 }
 
