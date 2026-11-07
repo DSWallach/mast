@@ -1550,49 +1550,12 @@ pub fn conversation_column(theme: &Theme, width: f32) -> Div {
 
 /// Theme for the tool panel and its contents.
 pub fn conversation_tool_theme(theme: &Theme) -> Theme {
-    let mut result = theme.clone();
-    if theme.ui_style.conversation == ConversationVariant::Area {
-        let panel = if theme.appearance.is_dark() {
-            theme.surface_raised
-        } else {
-            theme.solid
-        };
-        let foreground = theme.identity_text(panel);
-        result.bg = panel;
-        result.surface = panel;
-        result.surface_raised = panel;
-        result.text = foreground;
-        result.text_muted = foreground.opacity(0.8);
-        result.text_faint = foreground.opacity(0.7);
-    }
-    result
+    theme.clone()
 }
 
 /// Frame the tool group for the active conversation style.
-pub fn conversation_tool_panel(theme: &Theme, identity: Hsla, body: AnyElement) -> AnyElement {
-    if theme.ui_style.conversation != ConversationVariant::Area {
-        return body;
-    }
-    div()
-        .rounded(px(14.0))
-        .bg(theme.bg)
-        .px(px(16.0))
-        .py(px(12.0))
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .justify_center()
-                .items_center()
-                .gap(px(6.0))
-                .text_color(theme.identity_foreground(identity))
-                .font_family("EB Garamond")
-                .text_size(crate::typography::ui_rems(16.0))
-                .child(div().size(px(10.0)).rounded_full().bg(identity))
-                .child("Tools"),
-        )
-        .child(body)
-        .into_any_element()
+pub fn conversation_tool_panel(_theme: &Theme, _identity: Hsla, body: AnyElement) -> AnyElement {
+    body
 }
 
 fn code_block_header(
@@ -1610,16 +1573,13 @@ fn code_block_header(
                 .relative()
                 .flex()
                 .items_center()
-                .justify_center()
+                .justify_between()
+                .px(px(12.0))
                 .child(
                     div()
-                        .font_family("EB Garamond")
-                        .text_size(px(16.0))
-                        .text_color(theme.text)
-                        .child(SharedString::from(language.map_or_else(
-                            || "Code".to_string(),
-                            |lang| format!("Code · {lang}"),
-                        ))),
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .children(language.map(|lang| SharedString::from(lang.to_string()))),
                 )
                 .child(
                     div()
@@ -1690,8 +1650,8 @@ pub fn conversation_code_frame(
             theme.ui_style.id == crate::ui_style::UiStyleId::Area,
             |el| {
                 el.rounded(px(14.0))
-                    .bg(theme.bg)
-                    .border_color(theme.bg)
+                    .bg(theme.surface_raised)
+                    .border_color(theme.surface_raised)
                     .p(px(4.0))
             },
         )
