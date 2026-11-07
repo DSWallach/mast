@@ -197,11 +197,7 @@ pub fn conversation_picker_footer_chip(
         })
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer();
-    super::segmented_key(chip, theme, open).when(super::is_area(theme), |el| {
-        el.h(px(theme.ui_style.tokens.control_size))
-            .bg(gpui::transparent_black())
-            .text_color(theme.text_muted)
-    })
+    super::area_toolbar_control(super::segmented_key(chip, theme, open), theme, false)
 }
 
 pub fn conversation_picker_approval(

@@ -1239,7 +1239,7 @@ impl WorkItemDetails {
 }
 
 impl Render for WorkItemDetails {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         self.sync_skill_sources(cx);
         let shell_frame = crate::components::outline_details_frame(&theme)
@@ -1774,7 +1774,7 @@ impl Render for WorkItemDetails {
                         .child(crate::work_outline::hints::details_button("waiting-week", "1 week", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(Some(chrono::Utc::now().timestamp_millis() + 604_800_000), cx))))
                         .child(crate::work_outline::hints::details_button("waiting-clear", "Clear", &theme).on_click(cx.listener(|this, _, _, cx| this.set_waiting_until(None, cx))))
                     )
-                    .child(crate::components::outline_action_row(&theme).child(crate::components::outline_input_frame(&self.waiting_input, &theme))
+                    .child(crate::components::outline_action_row(&theme).child(crate::components::outline_date_input_frame(&self.waiting_input, &theme, gpui::Focusable::focus_handle(self.waiting_input.read(cx), cx).is_focused(window)))
                         .child(crate::work_outline::hints::details_button("waiting-custom", "Set date", &theme).on_click(cx.listener(|this, _, _, cx| this.save_waiting_date(cx)))))
                 )
                 .child(required_actions)

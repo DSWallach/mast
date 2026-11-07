@@ -4750,7 +4750,7 @@ impl Render for Overview {
             );
         }
 
-        let header = div()
+        let header = crate::components::outline_overview_header(&theme)
             .flex_none()
             .flex()
             .flex_col()
@@ -6983,6 +6983,8 @@ impl Overview {
             cx,
         );
         self.set_mode(OverviewMode::Outline, cx);
+        self.sync_outline(cx);
+        self.outline.update(cx, |outline, cx| outline.select(&row_key::item("fixture-space", "w-api"), cx));
     }
 
     /// Outline navigation bindings for fixtures that run without a Shell.
