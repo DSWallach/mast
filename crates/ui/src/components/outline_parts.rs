@@ -486,6 +486,14 @@ pub fn outline_action_button(
                 .text_color(theme.text_muted)
         }
     })
+    .when_some(if enabled { if primary { theme.ui_style.design_roles.primary_colour } else { theme.ui_style.design_roles.secondary_colour } } else { None }, |el, role| {
+        let colour = role.colour(theme);
+        if super::is_area(theme) && enabled && primary {
+            el.bg(colour).border_color(colour).text_color(theme.identity_text(colour))
+        } else {
+            el.border_color(colour).text_color(colour)
+        }
+    })
     .child(label)
 }
 
@@ -594,12 +602,15 @@ pub fn outline_details_frame(theme: &Theme) -> Stateful<Div> {
         .when(super::is_industrial(theme), |el| {
             el.border_l_2().border_color(theme.industrial_colors().rule)
         })
-        .bg(if super::is_area(theme) {
+        .bg(if theme.ui_style.design_roles.details_page_surface.unwrap_or_else(|| super::is_area(theme)) {
             theme.bg
         } else {
             theme.surface
         })
         .when(super::is_area(theme), |el| el.border_color(theme.bg))
+        .when_some(theme.ui_style.design_roles.details_border, |el, visible| {
+            el.border_color(if visible { theme.border } else { gpui::transparent_black() })
+        })
 }
 
 /// Scrollable item-details body.

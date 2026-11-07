@@ -12,6 +12,93 @@ use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
 pub const FILE_NAME: &str = "style-overrides.json";
 const VERSION: &str = "mast.style-overrides/v1";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColourRole {
+    Accent,
+    Text,
+    Muted,
+    Success,
+    Danger,
+}
+impl ColourRole {
+    pub fn colour(self, theme: &crate::theme::Theme) -> gpui::Hsla {
+        match self {
+            Self::Accent => theme.accent,
+            Self::Text => theme.text,
+            Self::Muted => theme.text_muted,
+            Self::Success => theme.success,
+            Self::Danger => theme.danger,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Accent => "Accent",
+            Self::Text => "Text",
+            Self::Muted => "Muted",
+            Self::Success => "Success",
+            Self::Danger => "Danger",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            Self::Accent => Self::Text,
+            Self::Text => Self::Muted,
+            Self::Muted => Self::Success,
+            Self::Success => Self::Danger,
+            Self::Danger => Self::Accent,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HeadingFamily {
+    Sans,
+    Mono,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HeadingWeight {
+    Regular,
+    Medium,
+    Semibold,
+    Bold,
+}
+impl HeadingWeight {
+    pub fn weight(self) -> gpui::FontWeight {
+        match self {
+            Self::Regular => gpui::FontWeight::NORMAL,
+            Self::Medium => gpui::FontWeight::MEDIUM,
+            Self::Semibold => gpui::FontWeight::SEMIBOLD,
+            Self::Bold => gpui::FontWeight::BOLD,
+        }
+    }
+}
+
+/// Overrides for decisions whose default remains with the component.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DesignRoles {
+    pub details_border: Option<bool>,
+    pub details_page_surface: Option<bool>,
+    pub primary_colour: Option<ColourRole>,
+    pub secondary_colour: Option<ColourRole>,
+    pub heading_family: Option<HeadingFamily>,
+    pub heading_weight: Option<HeadingWeight>,
+    pub tracked_caps: Option<bool>,
+}
+impl DesignRoles {
+    pub const NONE: Self = Self {
+        details_border: None,
+        details_page_surface: None,
+        primary_colour: None,
+        secondary_colour: None,
+        heading_family: None,
+        heading_weight: None,
+        tracked_caps: None,
+    };
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenOverrides {
@@ -31,10 +118,45 @@ pub struct TokenOverrides {
     pub grid: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details_border: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details_page_surface: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_colour: Option<ColourRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_colour: Option<ColourRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heading_family: Option<HeadingFamily>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heading_weight: Option<HeadingWeight>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracked_caps: Option<bool>,
 }
 
 impl TokenOverrides {
     fn apply(&self, style: &mut UiStyle) {
+        if self.details_border.is_some() {
+            style.design_roles.details_border = self.details_border;
+        }
+        if self.details_page_surface.is_some() {
+            style.design_roles.details_page_surface = self.details_page_surface;
+        }
+        if self.primary_colour.is_some() {
+            style.design_roles.primary_colour = self.primary_colour;
+        }
+        if self.secondary_colour.is_some() {
+            style.design_roles.secondary_colour = self.secondary_colour;
+        }
+        if self.heading_family.is_some() {
+            style.design_roles.heading_family = self.heading_family;
+        }
+        if self.heading_weight.is_some() {
+            style.design_roles.heading_weight = self.heading_weight;
+        }
+        if self.tracked_caps.is_some() {
+            style.design_roles.tracked_caps = self.tracked_caps;
+        }
         let tokens = &mut style.tokens;
         if let Some(v) = self.control_radius {
             tokens.control_radius = Some(v);
@@ -195,6 +317,53 @@ fn parse_tokens(object: &serde_json::Map<String, Value>, allow_layouts: bool) ->
         if allow_layouts && key == "layouts" {
             continue;
         }
+        if key == "headingFamily" {
+            match serde_json::from_value::<HeadingFamily>(value.clone()) {
+                Ok(v) => tokens.heading_family = Some(v),
+                Err(_) => tracing::warn!(%key, "invalid heading family"),
+            }
+            continue;
+        }
+        if key == "headingWeight" {
+            match serde_json::from_value::<HeadingWeight>(value.clone()) {
+                Ok(v) => tokens.heading_weight = Some(v),
+                Err(_) => tracing::warn!(%key, "invalid heading weight"),
+            }
+            continue;
+        }
+        if key == "trackedCaps" {
+            if let Some(v) = value.as_bool() {
+                tokens.tracked_caps = Some(v);
+            } else {
+                tracing::warn!(%key, "invalid tracked caps value");
+            }
+            continue;
+        }
+        if key == "primaryColour" || key == "secondaryColour" {
+            let target = if key == "primaryColour" {
+                &mut tokens.primary_colour
+            } else {
+                &mut tokens.secondary_colour
+            };
+            match serde_json::from_value::<ColourRole>(value.clone()) {
+                Ok(value) => *target = Some(value),
+                Err(_) => tracing::warn!(%key, "invalid colour role"),
+            }
+            continue;
+        }
+        if key == "detailsBorder" || key == "detailsPageSurface" {
+            let target = if key == "detailsBorder" {
+                &mut tokens.details_border
+            } else {
+                &mut tokens.details_page_surface
+            };
+            if let Some(value) = value.as_bool() {
+                *target = Some(value);
+            } else {
+                tracing::warn!(%key, "invalid style token value");
+            }
+            continue;
+        }
         let target = match key.as_str() {
             "controlRadius" => &mut tokens.control_radius,
             "panelRadius" => &mut tokens.panel_radius,
@@ -244,11 +413,50 @@ mod tests {
         assert_eq!(minimal.tokens.control_radius, Some(8.0));
         assert_eq!(minimal.tokens.panel_radius, Some(14.0));
     }
+
+    #[test]
+    fn component_roles_round_trip_and_invalid_values_do_not_hide_neighbours() {
+        let input = r#"{"version":"mast.style-overrides/v1","styles":{"industrial":{"primaryColour":"success","secondaryColour":"invalid","headingFamily":"mono","headingWeight":"bold","trackedCaps":true}}}"#;
+        let overrides = Overrides::parse(input);
+        let result = overrides.apply(UiStyle::resolve(UiStyleId::Industrial, UiLayout::Minimal));
+        assert_eq!(
+            result.design_roles.primary_colour,
+            Some(ColourRole::Success)
+        );
+        assert_eq!(result.design_roles.secondary_colour, None);
+        assert_eq!(
+            result.design_roles.heading_family,
+            Some(HeadingFamily::Mono)
+        );
+        assert_eq!(
+            result.design_roles.heading_weight,
+            Some(HeadingWeight::Bold)
+        );
+        assert_eq!(result.design_roles.tracked_caps, Some(true));
+        assert_eq!(
+            Overrides::parse(&serde_json::to_string(&overrides).unwrap()),
+            overrides
+        );
+    }
+
+    #[test]
+    fn component_roles_merge_with_layout_precedence() {
+        let overrides = Overrides::parse(
+            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"detailsBorder":true,"detailsPageSurface":false,"layouts":{"compact":{"detailsBorder":false}}}}}"#,
+        );
+        let minimal = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        assert_eq!(minimal.design_roles.details_border, Some(true));
+        assert_eq!(minimal.design_roles.details_page_surface, Some(false));
+        let compact = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Compact));
+        assert_eq!(compact.design_roles.details_border, Some(false));
+        assert_eq!(compact.design_roles.details_page_surface, Some(false));
+    }
 }
 
 struct OverrideState {
     overrides: Overrides,
     directory: PathBuf,
+    file_watch: std::rc::Rc<std::cell::RefCell<FileWatch>>,
     _watch: gpui::Task<()>,
 }
 impl gpui::Global for OverrideState {}
@@ -262,14 +470,16 @@ pub fn current(cx: &gpui::App) -> Overrides {
 /// Installs the profile file and polls its contents, including atomic replacement.
 pub fn init(directory: PathBuf, cx: &mut gpui::App) {
     let path = Overrides::path(&directory);
-    let mut watch = FileWatch::new(path);
+    let file_watch = std::rc::Rc::new(std::cell::RefCell::new(FileWatch::new(path)));
+    let watch = file_watch.clone();
     let overrides = Overrides::load(&directory);
     let task = cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(500))
                 .await;
-            if let Some(overrides) = watch.poll() {
+            let changed = watch.borrow_mut().poll();
+            if let Some(overrides) = changed {
                 cx.update(|cx| {
                     if cx.has_global::<OverrideState>() {
                         cx.global_mut::<OverrideState>().overrides = overrides;
@@ -282,6 +492,7 @@ pub fn init(directory: PathBuf, cx: &mut gpui::App) {
     cx.set_global(OverrideState {
         overrides,
         directory,
+        file_watch,
         _watch: task,
     });
 }
@@ -301,8 +512,10 @@ pub fn save(overrides: &Overrides, cx: &gpui::App) -> std::io::Result<()> {
     let contents = serde_json::to_vec_pretty(overrides).map_err(std::io::Error::other)?;
     let path = Overrides::path(&state.directory);
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, contents)?;
-    std::fs::rename(temporary, path)
+    std::fs::write(&temporary, &contents)?;
+    std::fs::rename(temporary, path)?;
+    state.file_watch.borrow_mut().previous = Some(contents);
+    Ok(())
 }
 
 struct FileWatch {

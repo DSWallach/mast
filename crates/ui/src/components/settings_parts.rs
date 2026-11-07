@@ -91,7 +91,7 @@ pub(crate) fn settings_layout_preview(
 }
 
 pub(crate) fn settings_page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Div {
-    let title = if super::is_industrial(theme) {
+    let title = if theme.ui_style.design_roles.tracked_caps.unwrap_or_else(|| super::is_industrial(theme)) {
         crate::popover::tracked_upper(title)
     } else {
         title.to_owned()
@@ -107,7 +107,8 @@ pub(crate) fn settings_page_header(theme: &Theme, title: &str, count: Option<usi
                     theme.ui_style.type_roles().title.unwrap_or(16.0)
                         + super::layout_type_adjustment(theme),
                 ))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(theme.ui_style.design_roles.heading_weight.map(|weight| weight.weight()).unwrap_or(gpui::FontWeight::SEMIBOLD))
+                .when_some(theme.ui_style.design_roles.heading_family, |el, family| el.font_family(match family { crate::style_overrides::HeadingFamily::Sans => theme.font_sans.clone(), crate::style_overrides::HeadingFamily::Mono => theme.font_mono.clone() }))
                 .text_color(theme.text)
                 .child(SharedString::from(title)),
         )

@@ -1,7 +1,7 @@
 //! Developer controls for the current style's live override values.
 use crate::{
     settings::{self, SavePolicy},
-    style_overrides::{self, TokenOverrides},
+    style_overrides::{self, ColourRole, HeadingFamily, HeadingWeight, TokenOverrides},
     theme::Theme,
     ui_style::{UiLayout, UiStyle, UiStyleId},
 };
@@ -155,6 +155,89 @@ impl DesignPanel {
         style_overrides::preview(overrides, cx);
         cx.notify();
     }
+    fn set_role(index: usize, value: Option<bool>, cx: &mut Context<Self>) {
+        let style = crate::ui_style::current(cx);
+        let mut overrides = style_overrides::current(cx);
+        let entry = overrides
+            .styles
+            .entry(style_name(style.id).into())
+            .or_default();
+        if index == 0 {
+            entry.tokens.details_border = value;
+        } else {
+            entry.tokens.details_page_surface = value;
+        }
+        if let Some(layout) = entry.layouts.get_mut(layout_name(style.layout)) {
+            if index == 0 {
+                layout.details_border = None;
+            } else {
+                layout.details_page_surface = None;
+            }
+        }
+        style_overrides::preview(overrides, cx);
+        cx.notify();
+    }
+    fn set_colour(primary: bool, value: Option<ColourRole>, cx: &mut Context<Self>) {
+        let style = crate::ui_style::current(cx);
+        let mut overrides = style_overrides::current(cx);
+        let entry = overrides
+            .styles
+            .entry(style_name(style.id).into())
+            .or_default();
+        if primary {
+            entry.tokens.primary_colour = value;
+        } else {
+            entry.tokens.secondary_colour = value;
+        }
+        if let Some(layout) = entry.layouts.get_mut(layout_name(style.layout)) {
+            if primary {
+                layout.primary_colour = None;
+            } else {
+                layout.secondary_colour = None;
+            }
+        }
+        style_overrides::preview(overrides, cx);
+        cx.notify();
+    }
+    fn set_heading(kind: usize, option: usize, cx: &mut Context<Self>) {
+        let style = crate::ui_style::current(cx);
+        let mut overrides = style_overrides::current(cx);
+        let entry = overrides
+            .styles
+            .entry(style_name(style.id).into())
+            .or_default();
+        let apply = |tokens: &mut TokenOverrides, option| match kind {
+            0 => {
+                tokens.heading_family = match option {
+                    1 => Some(HeadingFamily::Sans),
+                    2 => Some(HeadingFamily::Mono),
+                    _ => None,
+                }
+            }
+            1 => {
+                tokens.heading_weight = match option {
+                    1 => Some(HeadingWeight::Regular),
+                    2 => Some(HeadingWeight::Medium),
+                    3 => Some(HeadingWeight::Semibold),
+                    4 => Some(HeadingWeight::Bold),
+                    _ => None,
+                }
+            }
+            _ => {
+                tokens.tracked_caps = match option {
+                    1 => Some(false),
+                    2 => Some(true),
+                    _ => None,
+                }
+            }
+        };
+        apply(&mut entry.tokens, option);
+        if let Some(layout) = entry.layouts.get_mut(layout_name(style.layout)) {
+            apply(layout, 0);
+        }
+        style_overrides::preview(overrides, cx);
+        cx.notify();
+    }
     fn drag(&mut self, index: usize, token: Token, x: Pixels, cx: &mut Context<Self>) {
         if let Some(bounds) = self.bounds[index].get() {
             let fraction = (f32::from(x - bounds.left()) / f32::from(bounds.size.width).max(1.0))
@@ -261,6 +344,106 @@ impl Render for DesignPanel {
                     ),
             );
         }
+        for (index, label) in [(0, "Details border"), (1, "Details uses page colour")] {
+            let roles = current.design_roles;
+            let selected = if index == 0 {
+                roles
+                    .details_border
+                    .unwrap_or(current.id != UiStyleId::Area)
+            } else {
+                roles
+                    .details_page_surface
+                    .unwrap_or(current.id == UiStyleId::Area)
+            };
+            content = content.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(div().w(px(200.0)).child(label))
+                    .child(
+                        Self::button(if selected { "On" } else { "Off" }, &theme)
+                            .id(SharedString::from(format!("design-role-{index}")))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                Self::set_role(index, Some(!selected), cx);
+                            })),
+                    )
+                    .child(
+                        Self::button("Reset", &theme)
+                            .id(SharedString::from(format!("design-role-reset-{index}")))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                Self::set_role(index, None, cx);
+                            })),
+                    ),
+            );
+        }
+        for (primary, label) in [
+            (true, "Primary action colour"),
+            (false, "Secondary action colour"),
+        ] {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().w(px(200.0)).child(label));
+            for role in [
+                ColourRole::Accent,
+                ColourRole::Text,
+                ColourRole::Muted,
+                ColourRole::Success,
+                ColourRole::Danger,
+            ] {
+                let selected = if primary {
+                    current.design_roles.primary_colour
+                } else {
+                    current.design_roles.secondary_colour
+                } == Some(role);
+                let button = Self::button(role.label(), &theme)
+                    .id(SharedString::from(format!(
+                        "colour-{primary}-{}",
+                        role.label()
+                    )))
+                    .when(selected, |el| el.border_1().border_color(theme.accent));
+                row = row.child(button.on_click(
+                    cx.listener(move |_, _, _, cx| Self::set_colour(primary, Some(role), cx)),
+                ));
+            }
+            row = row.child(
+                Self::button("Reset", &theme)
+                    .id(SharedString::from(format!("colour-reset-{primary}")))
+                    .on_click(cx.listener(move |_, _, _, cx| Self::set_colour(primary, None, cx))),
+            );
+            content = content.child(row);
+        }
+        for (kind, label, options) in [
+            (0, "Settings heading family", &["Reset", "Sans", "Mono"][..]),
+            (
+                1,
+                "Settings heading weight",
+                &["Reset", "Regular", "Medium", "Semibold", "Bold"][..],
+            ),
+            (
+                2,
+                "Settings heading tracked caps",
+                &["Reset", "Off", "On"][..],
+            ),
+        ] {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().w(px(200.0)).child(label));
+            for (option, &name) in options.iter().enumerate() {
+                row = row.child(
+                    Self::button(name, &theme)
+                        .id(SharedString::from(format!("heading-{kind}-{option}")))
+                        .on_click(
+                            cx.listener(move |_, _, _, cx| Self::set_heading(kind, option, cx)),
+                        ),
+                );
+            }
+            content = content.child(row);
+        }
         content = content.child(
             div()
                 .flex()
@@ -306,6 +489,46 @@ impl Render for DesignPanel {
                                     value
                                 ));
                             }
+                        }
+                        if let Some(value) = tokens.details_border {
+                            patch.push_str(&format!(
+                                "Details border: {} → {}\n",
+                                style.id != UiStyleId::Area,
+                                value
+                            ));
+                        }
+                        if let Some(value) = tokens.details_page_surface {
+                            patch.push_str(&format!(
+                                "Details uses page colour: {} → {}\n",
+                                style.id == UiStyleId::Area,
+                                value
+                            ));
+                        }
+                        if let Some(role) = tokens.primary_colour {
+                            patch.push_str(&format!(
+                                "Primary action colour: component default → {}\n",
+                                role.label()
+                            ));
+                        }
+                        if let Some(role) = tokens.secondary_colour {
+                            patch.push_str(&format!(
+                                "Secondary action colour: component default → {}\n",
+                                role.label()
+                            ));
+                        }
+                        if let Some(v) = tokens.heading_family {
+                            patch.push_str(&format!(
+                                "Settings heading family: component default → {v:?}\n"
+                            ));
+                        }
+                        if let Some(v) = tokens.heading_weight {
+                            patch.push_str(&format!("Settings heading weight: Semibold → {v:?}\n"));
+                        }
+                        if let Some(v) = tokens.tracked_caps {
+                            patch.push_str(&format!(
+                                "Settings heading tracked caps: {} → {v}\n",
+                                style.id == UiStyleId::Industrial
+                            ));
                         }
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(patch));
                     })),

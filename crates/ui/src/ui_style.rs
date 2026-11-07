@@ -201,6 +201,7 @@ pub struct UiStyle {
     pub conversation: ConversationVariant,
     pub status_indicator: StatusIndicator,
     pub font_preference: FontPreference,
+    pub design_roles: crate::style_overrides::DesignRoles,
 }
 
 impl UiStyle {
@@ -231,6 +232,7 @@ impl UiStyle {
         conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
             reveal: Reveal::Hover,
@@ -270,6 +272,7 @@ impl UiStyle {
         conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             labels: LabelMode::IconOnly,
             reveal: Reveal::Always,
@@ -309,6 +312,7 @@ impl UiStyle {
         conversation: ConversationVariant::Standard,
         status_indicator: StatusIndicator::Minimal,
         font_preference: FontPreference::UserDefault,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             labels: LabelMode::All,
             reveal: Reveal::Always,
@@ -345,6 +349,7 @@ impl UiStyle {
         conversation: ConversationVariant::Industrial,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             motion: Motion::Instant,
             ..Self::MINIMAL.behavior
@@ -374,6 +379,7 @@ impl UiStyle {
         conversation: ConversationVariant::Area,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
+        design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             motion: Motion::Soft,
             ..Self::MINIMAL.behavior
