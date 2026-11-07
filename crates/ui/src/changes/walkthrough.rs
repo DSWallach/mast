@@ -995,7 +995,7 @@ impl Render for Walkthrough {
                         .gap_2()
                         .child(label);
                     if waiting {
-                        reply = reply.child(crate::components::walkthrough_loading(&theme, cx.entity_id(), cx));
+                        reply = reply.child(crate::components::changes_loading(&theme, "step-question-spinner", cx.entity_id(), cx));
                     }
                     if let Some(chat_id) = chat_id {
                         reply = reply.child(

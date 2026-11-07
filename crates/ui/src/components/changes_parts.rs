@@ -3,8 +3,9 @@
 use crate::theme::Theme;
 use gpui::{prelude::*, px};
 
-pub(crate) fn walkthrough_loading(
+pub(crate) fn changes_loading(
     theme: &Theme,
+    id: &'static str,
     owner: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -12,9 +13,17 @@ pub(crate) fn walkthrough_loading(
         crate::status_style::indicator_for_theme(crate::status_style::Status::Working, theme)
             .into_any_element()
     } else {
-        crate::loaders::gradient_spinner("step-question-spinner", theme, 2.0, owner, cx)
-            .into_any_element()
+        crate::loaders::gradient_spinner(id, theme, 2.0, owner, cx).into_any_element()
     }
+}
+
+pub(crate) fn explanation_trigger<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .bg(theme.surface_raised)
+        .when(super::is_industrial(theme), |element| {
+            element.border_1().border_b_2().border_color(theme.border)
+        })
 }
 
 pub(crate) fn walkthrough_title<T: Styled>(element: T, theme: &Theme) -> T {
