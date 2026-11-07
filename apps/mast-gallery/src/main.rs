@@ -1,4 +1,5 @@
 mod screen_stubs;
+mod stories;
 
 use gpui::{App, Context, IntoElement, Render, Window, div, prelude::*, px};
 use mast_ui::{appearance, badges, icons, settings, theme::Theme, typography, ui_style};
@@ -25,6 +26,7 @@ enum Story {
     Outline,
     Walkthrough,
     Appearance,
+    Component(stories::Story),
 }
 
 const STORIES: [(Story, &str); 5] = [
@@ -50,7 +52,11 @@ fn switch_appearance(mode: appearance::AppearanceMode, cx: &mut App) {
     apply_themes(mode, settings.theme_selection, cx);
 }
 
-fn apply_themes(mode: appearance::AppearanceMode, themes: mast_theme::ThemeSelection, cx: &mut App) {
+fn apply_themes(
+    mode: appearance::AppearanceMode,
+    themes: mast_theme::ThemeSelection,
+    cx: &mut App,
+) {
     let settings = settings::current(cx);
     appearance::init(mode, themes, settings.accent, settings.surface, cx);
     cx.refresh_windows();
@@ -58,7 +64,11 @@ fn apply_themes(mode: appearance::AppearanceMode, themes: mast_theme::ThemeSelec
 
 impl Gallery {
     fn mode(&self) -> appearance::AppearanceMode {
-        if self.dark { appearance::AppearanceMode::Dark } else { appearance::AppearanceMode::Light }
+        if self.dark {
+            appearance::AppearanceMode::Dark
+        } else {
+            appearance::AppearanceMode::Light
+        }
     }
 
     fn set_dark(&mut self, dark: bool, cx: &mut App) {
@@ -68,7 +78,11 @@ impl Gallery {
 
     /// Cycles the active appearance through every built-in theme variant.
     fn cycle_theme(&mut self, cx: &mut App) {
-        let appearance = if self.dark { mast_theme::Appearance::Dark } else { mast_theme::Appearance::Light };
+        let appearance = if self.dark {
+            mast_theme::Appearance::Dark
+        } else {
+            mast_theme::Appearance::Light
+        };
         let ids: Vec<String> = mast_theme::ThemeRegistry::builtin()
             .variants_for(appearance)
             .map(|variant| variant.id.clone())
@@ -77,13 +91,20 @@ impl Gallery {
             return;
         }
         let current = self.themes.variant_id(appearance).to_owned();
-        let next = ids.iter().position(|id| *id == current).map_or(0, |ix| (ix + 1) % ids.len());
+        let next = ids
+            .iter()
+            .position(|id| *id == current)
+            .map_or(0, |ix| (ix + 1) % ids.len());
         self.themes.set_variant(appearance, ids[next].clone());
         apply_themes(self.mode(), self.themes.clone(), cx);
     }
 
     fn theme_label(&self) -> String {
-        let appearance = if self.dark { mast_theme::Appearance::Dark } else { mast_theme::Appearance::Light };
+        let appearance = if self.dark {
+            mast_theme::Appearance::Dark
+        } else {
+            mast_theme::Appearance::Light
+        };
         format!("Theme: {} (T)", self.themes.variant_id(appearance))
     }
 }
@@ -116,17 +137,26 @@ impl Render for Gallery {
                         cx.notify();
                     }
                     key => {
-                        let key = match key { "!" => "1", "@" => "2", "#" => "3", other => other };
+                        let key = match key {
+                            "!" => "1",
+                            "@" => "2",
+                            "#" => "3",
+                            other => other,
+                        };
                         let Some(index) = key.parse::<usize>().ok().filter(|n| (1..=3).contains(n))
                         else {
                             return;
                         };
                         if event.keystroke.modifiers.shift {
-                            let Some(&layout) = ui_style::UiLayout::ALL.get(index - 1) else { return; };
+                            let Some(&layout) = ui_style::UiLayout::ALL.get(index - 1) else {
+                                return;
+                            };
                             ui_style::set_layout_in_memory(layout, cx);
                             window.set_rem_size(px(typography::effective_rem_px(cx)));
                         } else {
-                            let Some(&style) = gallery_styles().get(index - 1) else { return; };
+                            let Some(&style) = gallery_styles().get(index - 1) else {
+                                return;
+                            };
                             switch_style(style, window, cx);
                         }
                     }
@@ -135,6 +165,8 @@ impl Render for Gallery {
             }))
             .child(
                 div()
+                    .id("story-list")
+                    .overflow_y_scroll()
                     .w(px(200.))
                     .h_full()
                     .p(px(20.))
@@ -162,10 +194,29 @@ impl Render for Gallery {
                                     }))
                                     .child(label)
                             }),
-                    ),
+                    )
+                    .children(stories::STORIES.iter().enumerate().map(
+                        |(index, &(story, label))| {
+                            div()
+                                .id(("component-story", index))
+                                .cursor_pointer()
+                                .px(px(8.))
+                                .py(px(6.))
+                                .when(self.story == Story::Component(story), |el| {
+                                    el.rounded(px(5.)).bg(theme.surface_raised)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.story = Story::Component(story);
+                                    cx.notify();
+                                }))
+                                .child(label)
+                        },
+                    )),
             )
             .child(
                 div()
+                    .id("story-content")
+                    .overflow_y_scroll()
                     .flex_1()
                     .p(px(24.))
                     .flex()
@@ -191,20 +242,27 @@ impl Render for Gallery {
                                         .child(format!("{} {:?}", index + 1, id))
                                 },
                             ))
-                            .children(ui_style::UiLayout::ALL.iter().copied().enumerate().map(|(index, layout)| {
-                                div().id(("layout", index)).cursor_pointer()
-                                    .on_click(cx.listener(move |_, _, window, cx| {
-                                        ui_style::set_layout_in_memory(layout, cx);
-                                        window.set_rem_size(px(typography::effective_rem_px(cx)));
-                                        cx.notify();
-                                    }))
-                                    .child(format!("⇧{} {}", index + 1, layout.label()))
-                            }))
+                            .children(ui_style::UiLayout::ALL.iter().copied().enumerate().map(
+                                |(index, layout)| {
+                                    div()
+                                        .id(("layout", index))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |_, _, window, cx| {
+                                            ui_style::set_layout_in_memory(layout, cx);
+                                            window
+                                                .set_rem_size(px(typography::effective_rem_px(cx)));
+                                            cx.notify();
+                                        }))
+                                        .child(format!("⇧{} {}", index + 1, layout.label()))
+                                },
+                            ))
                             .child(
                                 div()
                                     .id("light")
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_dark(false, cx)))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.set_dark(false, cx)),
+                                    )
                                     .child("Light (L)"),
                             )
                             .child(
@@ -250,6 +308,13 @@ impl Render for Gallery {
                     .when(self.story == Story::Appearance, |el| {
                         el.child(self.appearance_page.clone())
                     })
+                    .when_some(
+                        match self.story {
+                            Story::Component(story) => Some(story),
+                            _ => None,
+                        },
+                        |el, story| el.child(stories::grid(story, theme)),
+                    )
                     .when(self.story == Story::Controls, |el| {
                         el.child("Buttons and toggles")
                             .child(
@@ -461,6 +526,50 @@ mod tests {
     use super::*;
 
     #[gpui::test]
+    fn views_render_independent_styles(cx: &mut gpui::TestAppContext) {
+        struct Comparison;
+        impl Render for Comparison {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                use mast_ui::components::{ButtonSize, ButtonVariant, button};
+                let base = Theme::of(cx);
+                let default = ui_style::theme_for_view(
+                    base,
+                    ui_style::UiStyleId::Default,
+                    ui_style::UiLayout::Minimal,
+                );
+                let area = ui_style::theme_for_view(
+                    base,
+                    ui_style::UiStyleId::Area,
+                    ui_style::UiLayout::Minimal,
+                );
+                assert_ne!(default.ui_style.conversation, area.ui_style.conversation);
+                assert_eq!(ui_style::current(cx).id, ui_style::UiStyleId::Default);
+                div()
+                    .flex()
+                    .child(button(
+                        "default-button",
+                        "Default",
+                        ButtonVariant::Primary,
+                        ButtonSize::Md,
+                        &default,
+                    ))
+                    .child(button(
+                        "area-button",
+                        "Area",
+                        ButtonVariant::Primary,
+                        ButtonSize::Md,
+                        &area,
+                    ))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| init(cx, dir.path()));
+        let window = cx.add_window(|_, _| Comparison);
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn stories_render_in_each_style_and_appearance(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| init(cx, dir.path()));
@@ -486,6 +595,19 @@ mod tests {
                         .unwrap();
                     cx.update_window(window.into(), |_, window, cx| {
                         switch_style(style, window, cx);
+                        window.refresh();
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
+                }
+                for &(story, _) in stories::STORIES {
+                    window
+                        .update(cx, |gallery, _, cx| {
+                            gallery.story = Story::Component(story);
+                            cx.notify();
+                        })
+                        .unwrap();
+                    cx.update_window(window.into(), |_, window, cx| {
                         window.refresh();
                         window.draw(cx).clear();
                     })
