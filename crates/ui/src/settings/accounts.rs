@@ -347,23 +347,7 @@ impl AccountsPage {
         let open = self.device_menu.is_open();
 
         let mut trigger =
-            div()
-                .id("accounts-device-switcher")
-                .flex_none()
-                .h(px(28.0))
-                .px(px(8.0))
-                .rounded(px(6.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .cursor_pointer()
-                .bg(if open {
-                    crate::theme::ink(0.06)
-                } else {
-                    gpui::transparent_black()
-                })
-                .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
+            crate::components::settings_device_switcher(theme, "accounts-device-switcher", open)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _, _, _| this.device_menu.note_trigger_press()),

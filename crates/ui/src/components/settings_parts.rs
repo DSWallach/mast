@@ -734,3 +734,40 @@ pub(crate) fn settings_import_mode(
                 .child(description),
         )
 }
+
+/// Device selector shared by account and harness settings.
+pub(crate) fn settings_device_switcher(
+    theme: &Theme,
+    id: &'static str,
+    open: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let area = super::is_area(theme);
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(28.0))
+        .px(px(8.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
+        .when(area, |el| el.rounded_full())
+        .when(super::is_industrial(theme), |el| {
+            el.border_1()
+                .border_b_2()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
+        })
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .cursor_pointer()
+        .bg(if area {
+            theme.accent.opacity(if open { 0.18 } else { 0.08 })
+        } else if open {
+            ink(0.06)
+        } else if super::is_industrial(theme) {
+            theme.surface_raised
+        } else {
+            gpui::transparent_black()
+        })
+        .when(!open, |el| el.hover(|s| s.bg(ink(0.04))))
+}
