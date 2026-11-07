@@ -1227,3 +1227,53 @@ pub(crate) fn settings_import_close(theme: &Theme) -> gpui::Stateful<gpui::Div> 
         .cursor_pointer()
         .hover(|style| style.bg(theme.surface_raised_hover))
 }
+
+pub(crate) fn settings_row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            theme
+                .ui_style
+                .type_roles()
+                .body
+                .unwrap_or(crate::settings::widgets::ROW_TITLE_SIZE)
+                + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text)
+        .child(title.into())
+}
+
+pub(crate) fn settings_meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
+    let mut line = div()
+        .mt(px(Theme::TEXT_STACK_GAP))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(8.0))
+        .gap_y(px(2.0))
+        .text_size(crate::typography::ui_rems(
+            theme
+                .ui_style
+                .type_roles()
+                .secondary
+                .unwrap_or(crate::settings::widgets::ROW_DESCRIPTION_SIZE)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted.opacity(0.65));
+    let mut first = true;
+    for fragment in fragments {
+        if !first {
+            line = line.child(
+                div()
+                    .text_color(theme.text_muted.opacity(0.3))
+                    .child(SharedString::from("·")),
+            );
+        }
+        line = line.child(fragment);
+        first = false;
+    }
+    line
+}

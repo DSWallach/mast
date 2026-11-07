@@ -247,41 +247,13 @@ pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
 /// Row title. These metrics intentionally match the Shortcuts rows, whose
 /// title/description rhythm is the reference for the other settings cards.
 pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .min_w_0()
-        .truncate()
-        .text_size(crate::typography::ui_rems(ROW_TITLE_SIZE))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text)
-        .child(title.into())
+    crate::components::settings_row_title(theme, title)
 }
 
 /// The quiet meta line under a row title: `text-[12px]
 /// text-muted-foreground/65` fragments joined by dots.
 pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
-    let mut line = div()
-        .mt(px(Theme::TEXT_STACK_GAP))
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(8.0))
-        .gap_y(px(2.0))
-        .text_size(crate::typography::ui_rems(ROW_DESCRIPTION_SIZE))
-        .text_color(theme.text_muted.opacity(0.65));
-    let mut first = true;
-    for fragment in fragments {
-        if !first {
-            line = line.child(
-                div()
-                    .text_color(theme.text_muted.opacity(0.3))
-                    .child(SharedString::from("·")),
-            );
-        }
-        line = line.child(fragment);
-        first = false;
-    }
-    line
+    crate::components::settings_meta_line(theme, fragments)
 }
 
 /// Right-anchored badge pill: `rounded-full border px-2 py-0.5 text-[10.5px]`.
