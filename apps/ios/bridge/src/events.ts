@@ -3,12 +3,13 @@ import type { ServerResponse } from "node:http";
 import type { SpaceAccess } from "./shared-spaces.js";
 
 /** Streams only invalidations, never raw engine frames or unshared identifiers. */
-export async function streamEvents(response: ServerResponse, url: string, access: SpaceAccess, chatId?: string, authorized: () => Promise<boolean> = async () => true): Promise<void> {
+export async function streamEvents(response: ServerResponse, url: string, access: SpaceAccess, chatId?: string, authorized: () => Promise<boolean> = async () => true, appearance: () => Promise<unknown> = async () => null): Promise<void> {
   const spaces = await access.spaces();
   const ids = new Set(spaces.map(space => space.id));
   if (chatId && !(await access.chatAllowed(chatId))) { response.writeHead(403); response.end(); return; }
   response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "Connection": "keep-alive", "X-Accel-Buffering": "no" });
   response.write(": connected\n\n");
+  let appearanceValue = JSON.stringify(await appearance());
   let closed = false;
   const sockets: WebSocket[] = [];
   const close = () => { if (closed) return; closed = true; clearInterval(heartbeat); for (const ws of sockets) ws.terminate(); response.end(); };
@@ -17,6 +18,8 @@ export async function streamEvents(response: ServerResponse, url: string, access
     if (!(await authorized())) return close();
     const current = await access.spaces();
     if (current.length !== ids.size || current.some(space => !ids.has(space.id)) || (chatId && !(await access.chatAllowed(chatId)))) return close();
+    const nextAppearance = JSON.stringify(await appearance());
+    if (nextAppearance !== appearanceValue) { appearanceValue = nextAppearance; response.write("event: appearance\ndata: {}\n\n"); }
     response.write(": heartbeat\n\n");
   })().catch(close); }, 5000);
   function watch(method: string, params: object, filter: (item: any) => Promise<unknown>, event: string) {

@@ -1,3 +1,4 @@
+import { readAppearance } from "./appearance.js";
 import qr from "qrcode-terminal";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -65,6 +66,6 @@ if (command === "spaces") {
   } : engineSpaceAccess(url, shared);
   const backend = command === "fixture" ? fixture : engineBackend("/Applications/Mast.app/Contents/MacOS/mast", url, undefined, undefined, access);
   const replies = command === "start" ? new ReplyCoordinator(new FileIntentStore(join(directory, "replies")), ipcReplyEngine(url, access)) : undefined;
-  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies, access, audit, command === "start" ? url : undefined);
+  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies, access, audit, command === "start" ? url : undefined, command === "start" ? () => readAppearance(join(process.env.MAST_DATA_DIR || process.env.ZERON_DATA_DIR || join(homedir(), ".zeron"), "ui-settings.json")) : undefined);
   server.listen(27655, "127.0.0.1", () => { console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655. Pairing code expires in five minutes:`); console.log(code); qr.generate(pairing.toString(), { small: true }); });
 } else { console.error("Usage: node dist/cli.js start | fixture | spaces [share|unshare <id|name>] | devices | revoke <device|--all> | audit [count]"); process.exitCode = 1; }

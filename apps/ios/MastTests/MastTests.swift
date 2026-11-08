@@ -229,11 +229,23 @@ import SwiftUI
 
 private struct MarkdownPreview: View {
     @Environment(\.colorScheme) private var scheme
-    var body: some View { MarkdownReply(text: "# Release notes\n\nA **bold** and *italic* reply with `code` and a [link](https://example.com).\n\n- First item\n- Second item\n1. Numbered item\n\n```swift\nlet value = 1\n``` ", linkColor: Horizon.provider(Demo.chats[0], scheme)).padding(22).foregroundStyle(Horizon.provider(Demo.chats[0], scheme)) }
+    var body: some View { MarkdownReply(text: "# Release notes\n\nA **bold** and *italic* reply with `code` and a [link](https://example.com).\n\n- First item\n- Second item\n1. Numbered item\n\n```swift\nlet value = 1\n``` ", linkColor: MastStyle(id: .horizon).provider(Demo.chats[0], scheme)).padding(22).foregroundStyle(MastStyle(id: .horizon).provider(Demo.chats[0], scheme)) }
 }
 
 @MainActor
 final class HorizonSnapshotTests: XCTestCase {
+    func testRenderStyleMatrix() throws {
+        let model = Companion(credential: MemoryCredential())
+        let screens: [(String, AnyView)] = [("chat", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Demo.messages))), ("inbox", AnyView(InboxScreen(model: model))), ("chats", AnyView(ChatsScreen(model: model)))]
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/style-snapshots")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for id in MastStyleID.allCases { for scheme in [ColorScheme.light, .dark] { for (name, screen) in screens {
+            let style = MastStyle(id: id)
+            let renderer = ImageRenderer(content: screen.environment(\.mastStyle, style).environment(\.colorScheme, scheme).environment(\.snapshotRendering, true).frame(width: 393, height: 852, alignment: .topLeading).background(style.surface(scheme)))
+            renderer.scale = 1
+            try XCTUnwrap(try XCTUnwrap(renderer.uiImage).pngData()).write(to: directory.appendingPathComponent("\(name)-\(id.rawValue)-\(scheme == .dark ? "dark" : "light").png"))
+        } } }
+    }
     func testRenderScreens() throws {
         let model = Companion(credential: MemoryCredential())
         let offline = Companion(credential: MemoryCredential())
@@ -265,7 +277,7 @@ final class HorizonSnapshotTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for scheme in [ColorScheme.light, .dark] {
             for (name, screen) in screens {
-                let renderer = ImageRenderer(content: screen.environment(\.colorScheme, scheme).environment(\.snapshotRendering, true).frame(width: 393, height: 852, alignment: .topLeading).background(Horizon.surface(scheme)))
+                let renderer = ImageRenderer(content: screen.environment(\.colorScheme, scheme).environment(\.snapshotRendering, true).frame(width: 393, height: 852, alignment: .topLeading).background(MastStyle(id: .horizon).surface(scheme)))
                 renderer.scale = 1
                 let png = try XCTUnwrap(try XCTUnwrap(renderer.uiImage).pngData())
                 try png.write(to: directory.appendingPathComponent("\(name)-\(scheme == .dark ? "dark" : "light").png"))
