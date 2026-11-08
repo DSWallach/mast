@@ -26,6 +26,9 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 70: Horizon polish + Linear/team migration** (2026-11-08): Horizon SEND is muted on any theme; Horizon
+  selected Appearance cards are marked; Linear and team screens are on shared components (all planned screen
+  migrations done).
 - **Release 69: Horizon** (2026-11-07): the Area style is renamed Horizon; saved `area` settings, themes and
   style overrides still load. Horizon list bullets follow the agent colour.
 - **Release 68: Area tweaks** (2026-11-07): Area replies wrap at a reading width with quiet bullets; agent colour
@@ -1012,6 +1015,27 @@ Coordinator tips:
   text, `read_chat` the `originChatId`.
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
+
+## In flight (snapshot 2026-11-08 01:31; coordinator dd899921, overnight)
+
+- **Installed: release 70** (93c138ba, 01:31; nextest 8/8, UI 2601/0/13). Backup of release 69:
+  `~/zeron-dev-app-backups/mast-20261108-0131-pre-release70`. Mikey has not restarted yet. It contains:
+  - `horizon-fixes-1`: Horizon SEND and primary chrome use the theme accent with saturation capped at 0.22, so they
+    stay muted on any theme; Design-panel overrides win. Horizon's selected Appearance/Style/Layout cards get a soft
+    accent wash and a check badge.
+  - `migrate-linear-team`: the **last screen migration slice**. The Linear panel, project picker, settings, Inbox host
+    and Team UI are on shared components, with offline previews (`linear`, `linear-settings`, `team`). Ratchet
+    442/227/3/2 → 410/205/3/2; Default+Minimal compare 1.0 / 1.0 / 0.9999996. Follow-up: the Horizon Inbox panel
+    still draws a divider rule.
+- **iOS companion** (item 14c99c51, Terra chat 3c892a57, branch `ios-companion`, **not merged**): native SwiftUI app
+  (bundle `computer.mikey.mast.companion`, iOS 17 target) plus a Node bridge under `apps/ios/`. It must not change any
+  Rust/Cargo files. The bridge binds to loopback, connects to the engine IPC on 127.0.0.1:27654, and exposes only
+  allowlisted HTTP endpoints. Pairing uses a one-time code and a Keychain token; Tailscale Serve is the phone path.
+  v1 scope: a read-only Needs-you inbox, running chats, and send message. Reply & resolve stays off until desktop
+  parity is verified. Research: mast-artifact:05bc2b8a. Coordinator decisions (Mikey delegated any choice that doesn't
+  affect the Rust build): native now, Node bridge, iOS 17, no APNs, no approvals in v1. QA steps:
+  `docs/internal/ios-companion.md` on the branch.
+- **Standing Horizon worker** (8ac73b69): waiting until 2026-11-08 12:00 for Mikey's next batch.
 
 ## In flight (snapshot 2026-11-07 23:35; coordinator dd899921)
 
