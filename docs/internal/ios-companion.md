@@ -4,13 +4,13 @@ The app in `apps/ios` and bridge are an experimental prototype. Live iPhone use 
 
 ## Build and fixture tests
 
-From the repository root, with Xcode 27 and Node 18:
+From the repository root, with Xcode 27 and Node 22:
 
 ```sh
 xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/mast-ios-derived CODE_SIGNING_ALLOWED=NO build
 cd apps/ios/bridge
-PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH" npm ci
-PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH" npm test
+PATH="$HOME/.nvm/versions/node/v22.17.0/bin:$PATH" npm ci --ignore-scripts
+PATH="$HOME/.nvm/versions/node/v22.17.0/bin:$PATH" npm test
 ```
 
 Run the unit tests only on the designated iPhone 15 Pro Max simulator, not the iPhone 15 Pro used for live QA:
@@ -19,12 +19,12 @@ Run the unit tests only on the designated iPhone 15 Pro Max simulator, not the i
 xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'platform=iOS Simulator,id=E50FC8FD-69AB-4633-B2C5-49A34B1B6299' -derivedDataPath /tmp/mast-ios-design-derived CODE_SIGNING_ALLOWED=NO test -quiet
 ```
 
-The bridge tests use isolated state, fake IPC and fake MCP; they never connect to the live engine. The app targets iOS 17.0. For the Space sharing and lock changes, the Node 18 suite passed 27 tests and the simulator command above passed 13 tests on iOS 17.5. Interactive Face ID, the app switcher, signing and the phone transport still need device QA.
+The bridge tests use isolated state, fake IPC and fake MCP; they never connect to the live engine. The app targets iOS 17.0. For the Space sharing and lock changes, the then-current Node 18 suite passed 27 tests and the simulator command above passed 13 tests on iOS 17.5. Interactive Face ID, the app switcher, signing and the phone transport still need device QA.
 
 ## QA and administration
 
 1. Open `apps/ios/Mast.xcodeproj` in Xcode and run the Mast scheme on the simulator yourself. Demo mode uses fixtures. Verify the lock on cold launch, background timeout, app switcher cover, and passcode fallback; the locked-screen ImageRenderer fixtures are `apps/ios/build/snapshots/locked-light.png` and `locked-dark.png`.
-2. With approval for the environment and Mast running, build the bridge as above. From `apps/ios/bridge`, use Node 18:
+2. With approval for the environment and Mast running, build the bridge as above. From `apps/ios/bridge`, use Node 22:
 
    ```sh
    node dist/cli.js spaces
@@ -98,3 +98,5 @@ Markdown and supported images use native views. HTML uses a non-persistent WebKi
 For remote use start the bridge with `--tailscale-user <login>` and the HTTPS `--url` value. With that option, every request must have the matching `Tailscale-User-Login`; simulator loopback requests without that header are refused. The bridge refuses a `Tailscale-Funnel-Request` header and refuses startup when read-only `tailscale serve status --json` indicates Funnel; an unreadable status fails closed. The installed CLI status was inspected without changing Serve. Tailscale documents that Serve strips incoming identity headers and supplies its own, while Funnel does not supply identity headers; the additional Funnel header is defensive and has not been verified as a header the installed version emits. See [Tailscale Serve identity headers](https://tailscale.com/docs/features/tailscale-serve). Do not rely on the header check without `--tailscale-user`: local callers can forge headers, and a network ACL is still required.
 
 A tailnet administrator can restrict the phone to the Mac's HTTPS port with a grant such as `{"src":["tag:mast-phone"],"dst":["tag:mast-mac"],"ip":["tcp:443"]}` in the tailnet's `grants` list, after assigning the tags and removing any broader grants that would also permit access. This is an example for DevOps review, not a change made by the bridge. Tagged sources do not receive user identity headers; use a user-owned phone with the login check or a separately designed tagged-device authorization. Audit events include the received login when present.
+
+The bridge requires Node 22 or newer; if absent, install a supported LTS using `nvm install 22` and select it with `nvm use 22`. Do not use an end-of-life runtime. Install bridge dependencies with `npm ci --ignore-scripts`.
