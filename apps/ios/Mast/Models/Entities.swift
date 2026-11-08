@@ -29,6 +29,7 @@ struct TranscriptMessage: Identifiable, Codable {
     var author: String? = nil
 }
 struct TranscriptPage: Decodable { let messages: [TranscriptMessage]; let olderRemaining: Int; let nextOffset: Int }
+struct MacAppearance: Decodable { let style: String, layout: String, lightTheme: String, darkTheme: String }
 struct SharedSpace: Identifiable, Codable { let id: String, name: String }
 struct SharedSpaceList: Decodable { let spaces: [SharedSpace]; let noSpacesShared: Bool }
 struct SpaceItems<T: Decodable>: Decodable { let items: [T]; let noSpacesShared: Bool }

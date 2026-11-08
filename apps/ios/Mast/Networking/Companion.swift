@@ -82,6 +82,7 @@ final class Companion: ObservableObject {
     @Published var isLoading = false
     @Published var hasLoaded = false
     @Published var lastUpdated: Date?
+    @Published var macAppearance = MacAppearance(style: "default", layout: "minimal", lightTheme: "mast-light", darkTheme: "mast-dark")
     @Published var activeChatId: String?
     @Published var transcriptRevision = 0
     @Published var liveStatus = "Stale"
@@ -97,6 +98,7 @@ final class Companion: ObservableObject {
         guard !connection.hasPrefix("Disconnected"), let spaceId else { return false }
         return !hiddenSpaceIds.contains(spaceId) && sharedSpaces.contains(where: { $0.id == spaceId })
     }
+    func refreshAppearance() async { if !demo, let appearance: MacAppearance = try? await request("/appearance") { macAppearance = appearance } }
     func refreshSharedSpaces() async {
         if demo { return }
         do {
@@ -119,9 +121,10 @@ final class Companion: ObservableObject {
                 defer { session.invalidateAndCancel() }
                 let (bytes, response) = try await session.bytes(for: req)
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw BridgeError.response }
-                liveStatus = "Live"; delay = 1; await refresh()
+                liveStatus = "Live"; delay = 1; await refresh(); await refreshAppearance()
                 for try await line in bytes.lines {
                     if Task.isCancelled { return }
+                    if line == "event: appearance" { await refreshAppearance() }
                     if line == "event: refresh" { await refresh() }
                     if line == "event: transcript" { transcriptRevision += 1 }
                 }
@@ -173,6 +176,7 @@ final class Companion: ObservableObject {
             sharedSpaces = spaces.spaces; noSpacesShared = spaces.noSpacesShared || requestsReply.noSpacesShared || chatsReply.noSpacesShared
             requests = noSpacesShared ? [] : requestsReply.items; chats = noSpacesShared ? [] : chatsReply.items
             connection = "Connected · updated now"
+            await refreshAppearance()
             hasLoaded = true; lastUpdated = Date()
         } catch BridgeError.unauthorized { connection = "Disconnected · pair again" }
         catch { connection = "Disconnected · showing stale data" }
