@@ -59,6 +59,7 @@ enum BridgeError: LocalizedError {
 }
 private struct PairReply: Decodable { let token: String }
 private struct SendReply: Decodable { let delivery: String }
+private struct StopReply: Decodable { let status: String }
 private final class NoRedirect: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
@@ -81,6 +82,9 @@ final class Companion: ObservableObject {
     @Published var isLoading = false
     @Published var hasLoaded = false
     @Published var lastUpdated: Date?
+    @Published var activeChatId: String?
+    @Published var transcriptRevision = 0
+    @Published var liveStatus = "Stale"
     @Published var sharedSpaces: [SharedSpace] = []
     @Published var noSpacesShared = false
     @Published var hiddenSpaceIds = Set(UserDefaults.standard.stringArray(forKey: "hiddenSharedSpaces") ?? []) {
@@ -101,6 +105,34 @@ final class Companion: ObservableObject {
             sharedSpaces = latest.spaces; noSpacesShared = latest.noSpacesShared
             if changed || connection.hasPrefix("Disconnected") { requests = []; chats = []; await refresh() }
         } catch { connection = "Disconnected · showing stale data" }
+    }
+    func watchEvents() async {
+        guard !demo else { liveStatus = "Demo"; return }
+        var delay: UInt64 = 1
+        while !Task.isCancelled && !demo {
+            do {
+                let base = try baseURL()
+                let path = activeChatId.map { "/events?chat=\($0)" } ?? "/events"
+                guard let url = URL(string: path, relativeTo: base)?.absoluteURL, let token = credential.read() else { throw BridgeError.credential }
+                var req = URLRequest(url: url); req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); req.timeoutInterval = 35
+                let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
+                defer { session.invalidateAndCancel() }
+                let (bytes, response) = try await session.bytes(for: req)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw BridgeError.response }
+                liveStatus = "Live"; delay = 1; await refresh()
+                for try await line in bytes.lines {
+                    if Task.isCancelled { return }
+                    if line == "event: refresh" { await refresh() }
+                    if line == "event: transcript" { transcriptRevision += 1 }
+                }
+                throw BridgeError.response
+            } catch {
+                if Task.isCancelled { return }
+                liveStatus = "Stale · reconnecting"; await refresh()
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                delay = min(delay * 2, 30)
+            }
+        }
     }
     private func baseURL() throws -> URL {
         guard let components = URLComponents(string: address), let host = components.host, components.user == nil, components.password == nil, components.query == nil, components.fragment == nil, (components.path.isEmpty || components.path == "/") else { throw BridgeError.address }
@@ -154,6 +186,10 @@ final class Companion: ObservableObject {
         let result: SendReply = try await request("/chats/\(chat.id)/messages", body: ["text": text])
         if result.delivery == "simulated" { return "Fixture only · message was not sent" }
         return result.delivery == "queued" ? "Queued" : "Accepted"
+    }
+    func stop(_ chat: Chat) async throws {
+        if demo { return }
+        let _: StopReply = try await request("/chats/\(chat.id)/stop", body: [:])
     }
     func pendingDecision(_ requestId: String) throws -> PendingDecision? { demo ? nil : try decisions.read(requestId) }
     func answer(_ requestId: String, outcome: String, text: String? = nil, optionId: String? = nil) async throws -> PendingDecision {
