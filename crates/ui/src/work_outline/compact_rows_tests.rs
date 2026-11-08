@@ -522,7 +522,8 @@ fn area_outline_nesting_tracks_depth_selection_and_collapse(cx: &mut gpui::TestA
     let (_overview, outline, _calls, _events, vcx) = compact_overview(
         cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"),
     );
-    vcx.update(|window, cx| crate::ui_style::set_style(crate::ui_style::UiStyleId::Area, window, cx));
+    use crate::ui_style::UiStyleId::{Area};
+    vcx.update(|window, cx| crate::ui_style::set_style(Area, window, cx));
     draw(vcx);
     let launch = item_key(LAUNCH);
     let api = item_key(API);

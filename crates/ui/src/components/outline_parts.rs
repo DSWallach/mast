@@ -701,6 +701,26 @@ pub fn outline_overview_header(theme: &Theme) -> Div {
         .when_some(theme.ui_style.design_roles.outline_page_surface, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
 }
 
+/// Area presents descendants inside a continuous rounded surface per ancestor.
+pub fn outline_uses_rounded_nesting(theme: &Theme) -> bool {
+    super::is_area(theme)
+}
+
+pub fn outline_nested_row(key: &str, depth: u16, previous: u16, next: u16, row: gpui::AnyElement, theme: &Theme) -> gpui::AnyElement {
+    let offset = |level: u16| level as f32 * 20.0;
+    let backgrounds = (1..=depth).map(|level| {
+        let selector = format!("area-outline-nesting-{key}-{level}");
+        div().id(selector.clone()).debug_selector(move || selector.clone())
+            .absolute().top_0().bottom_0().right_0().left(px(offset(level)))
+            .bg(theme.text.opacity(0.035))
+            .when(previous < level, |el| el.rounded_tl(px(12.)).rounded_tr(px(12.)))
+            .when(next < level, |el| el.rounded_bl(px(12.)).rounded_br(px(12.)))
+    });
+    div().relative().w_full().children(backgrounds)
+        .child(div().w_full().flex().pl(px(offset(depth))).child(row))
+        .into_any_element()
+}
+
 /// Row chrome; selection, drag handling and content remain with the caller.
 pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) -> Stateful<Div> {
     let selector = id.to_string();
