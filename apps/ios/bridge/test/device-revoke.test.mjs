@@ -22,6 +22,18 @@ test("revoking one device immediately denies that token but preserves the other"
     await (await FileTokenStore.open(dir)).revoke(device.id);
     assert.equal((await fetchSpaces(first)).status, 401);
     assert.equal((await fetchSpaces(second)).status, 200);
-    assert.deepEqual(await store.devices(), [other]);
+    assert.deepEqual((await store.devices()).map(({id,label})=>({id,label})), [other]);
   } finally { bridge.closeAllConnections(); await new Promise(resolve => bridge.close(resolve)); for (const name of await readdir(dir)) await unlink(join(dir, name)); await rmdir(dir); }
+});
+
+test('self revocation removes only the authenticated device', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mast-self-revoke-')), store = await FileTokenStore.open(dir);
+  const first = randomBytes(32).toString('base64url'), second = randomBytes(32).toString('base64url');
+  await store.add(tokenDigest(first),'Phone'); await store.add(tokenDigest(second),'Other');
+  const bridge = createBridge({},store,new PairingChallenge('unused',Date.now()),undefined,fixtureAccess,fixtureAudit); await new Promise(r=>bridge.listen(0,'127.0.0.1',r));
+  try { const base=`http://127.0.0.1:${bridge.address().port}`, headers={authorization:`Bearer ${first}`};
+    assert.equal((await fetch(base+'/devices/self',{method:'DELETE',headers})).status,200);
+    assert.equal((await fetch(base+'/spaces',{headers})).status,401);
+    assert.equal((await fetch(base+'/spaces',{headers:{authorization:`Bearer ${second}`}})).status,200);
+  } finally {bridge.closeAllConnections();await new Promise(r=>bridge.close(r));for(const name of await readdir(dir))await unlink(join(dir,name));await rmdir(dir);}
 });

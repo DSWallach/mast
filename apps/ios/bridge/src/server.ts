@@ -18,7 +18,7 @@ export interface BridgeBackend {
 }
 
 export type DeviceIdentity = { id: string; label: string };
-export interface TokenStore { add(hash: string, label: string): Promise<DeviceIdentity>; authenticate(hash: string): Promise<DeviceIdentity | null>; }
+export interface TokenStore { add(hash: string, label: string): Promise<DeviceIdentity>; authenticate(hash: string): Promise<DeviceIdentity | null>; revoke?(selector: string): Promise<DeviceIdentity>; }
 
 async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
   let body = "";
@@ -68,6 +68,12 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
         const now = Date.now(), recent = (writes.get(device.id) ?? []).filter(time => now - time < 86400000);
         if (recent.length >= 200 || recent.filter(time => now - time < 60000).length >= minuteLimit) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "write", outcome: "rate-limited"}); return reply(response, 429, {error: "rate limited"}); }
         recent.push(now); writes.set(device.id, recent);
+      }
+      if (request.method === "DELETE" && path === "/devices/self" && tokens.revoke) {
+        await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "revoke-self", outcome: "started"});
+        await tokens.revoke(device.id);
+        await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "revoke-self", outcome: "revoked"});
+        return reply(response, 200, {status: "revoked"});
       }
       const events = /^\/events(?:\?chat=([A-Za-z0-9_-]{1,128}))?$/.exec(path);
       if (request.method === "GET" && events && eventsUrl) { await streamEvents(response, eventsUrl, access, events[1], async () => !!(await tokens.authenticate(tokenDigest(match![1]))), appearance); return; }

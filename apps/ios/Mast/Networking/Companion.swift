@@ -250,6 +250,15 @@ final class Companion: ObservableObject {
         decision.phase = result.state; decision.resolveOnly = result.resolveOnly; try decisions.save(requestId, decision: decision)
         return decision
     }
+    func forgetThisMac() async throws {
+        let base = try baseURL()
+        guard let token = try token(for: base), let url = URL(string: "/devices/self", relativeTo: base)?.absoluteURL else { throw BridgeError.credential }
+        var req = URLRequest(url: url); req.httpMethod = "DELETE"; req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil); defer { session.invalidateAndCancel() }
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 401 else { throw BridgeError.response }
+        forget()
+    }
     func forget() { credential.clear(); isPaired = false; demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
 }
 

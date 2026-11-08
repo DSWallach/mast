@@ -37,7 +37,7 @@ if (command === "spaces") {
     console.log(`${spaceName(matches[0])}: ${action === "share" ? "shared" : "not shared"}`);
   } else throw new Error("Usage: spaces [share|unshare <id|name>]");
 } else if (command === "devices") {
-  for (const device of await (await FileTokenStore.open(directory)).devices()) console.log(`${device.id}\t${device.label}`);
+  for (const device of await (await FileTokenStore.open(directory)).devices()) console.log(`${device.id}\t${device.label}\tcreated=${new Date(device.createdAt).toISOString()}\tlastUsed=${new Date(device.lastUsedAt).toISOString()}\texpires=${new Date(device.expiresAt).toISOString()}`);
 } else if (command === "revoke") {
   const selector = process.argv[3]; if (!selector) throw new Error("Usage: revoke <device-id|label|--all>");
   const store = await FileTokenStore.open(directory);
