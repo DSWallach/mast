@@ -25,9 +25,9 @@ struct ChatRow: View {
     @Environment(\.colorScheme) private var scheme
     var body: some View { HStack(alignment: .top, spacing: 13) {
         Circle().fill(Horizon.provider(chat, scheme)).frame(width: 9, height: 9).padding(.top, 7)
-        VStack(alignment: .leading, spacing: 6) { Text(chat.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(Horizon.ink(scheme)); Text([chat.model, statusLabel].compactMap { $0 }.joined(separator: "  ·  ")).font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme)) }
+        VStack(alignment: .leading, spacing: 6) { Text(chat.title).font(Horizon.semibold(15)).foregroundStyle(Horizon.ink(scheme)); Text([chat.model, statusLabel].compactMap { $0 }.joined(separator: "  ·  ")).font(Horizon.ui(12)).foregroundStyle(Horizon.muted(scheme)) }
         Spacer(minLength: 4)
         TimelineView(.periodic(from: .now, by: 60)) { _ in Text(Horizon.relativeISO(chat.lastMessageAt)) }.font(.system(size: 12)).foregroundStyle(Horizon.muted(scheme))
-    }.padding(.vertical, 8).contentShape(Rectangle()) }
+    }.frame(minHeight: Horizon.rowHeight).padding(.vertical, 4).contentShape(Rectangle()) }
     private var statusLabel: String { let status = chat.status.lowercased(); return status.contains("stale") ? "Offline" : (status.hasPrefix("working") ? "Running" : (status.contains("awaiting") || status.contains("waiting") ? "Waiting" : (status == "idle" ? "Idle" : chat.status))) }
 }
