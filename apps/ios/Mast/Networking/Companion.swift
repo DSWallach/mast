@@ -2,9 +2,10 @@ import SwiftUI
 import Security
 import UIKit
 
+struct BoundCredential: Codable, Equatable { let origin: String, token: String }
 protocol CredentialStore {
-    func read() -> String?
-    func save(_ token: String) throws
+    func read() -> BoundCredential?
+    func save(_ credential: BoundCredential) throws
     func clear()
 }
 protocol DecisionStore {
@@ -33,19 +34,19 @@ struct KeychainDecisionStore: DecisionStore {
 }
 struct Credential: CredentialStore {
     private let service = "computer.mikey.mast.companion.bridge"
-    func read() -> String? {
+    func read() -> BoundCredential? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device", kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         let identity: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"]
         guard SecItemUpdate(identity as CFDictionary, [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly] as CFDictionary) == errSecSuccess else { return nil }
-        return String(data: data, encoding: .utf8)
+        return try? JSONDecoder().decode(BoundCredential.self, from: data)
     }
-    func save(_ token: String) throws {
+    func save(_ credential: BoundCredential) throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"]
         SecItemDelete(query as CFDictionary)
         var item = query
-        item[kSecValueData as String] = Data(token.utf8)
+        item[kSecValueData as String] = try JSONEncoder().encode(credential)
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw BridgeError.credential }
     }
@@ -69,8 +70,9 @@ final class Companion: ObservableObject {
     private let credential: any CredentialStore
     private let decisions: any DecisionStore
     private let configuration: URLSessionConfiguration
-    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral) { self.credential = credential; self.decisions = decisions; self.configuration = configuration }
+    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral) { self.credential = credential; self.decisions = decisions; self.configuration = configuration; if let stored = credential.read() { address = stored.origin; isPaired = true } }
     @Published var demo = true
+    @Published private(set) var isPaired = false
     @Published var address = "http://127.0.0.1:27655"
     @Published var requests = Demo.requests
     @Published var chats = Demo.chats
@@ -116,7 +118,7 @@ final class Companion: ObservableObject {
             do {
                 let base = try baseURL()
                 let path = activeChatId.map { "/events?chat=\($0)" } ?? "/events"
-                guard let url = URL(string: path, relativeTo: base)?.absoluteURL, let token = credential.read() else { throw BridgeError.credential }
+                guard let url = URL(string: path, relativeTo: base)?.absoluteURL, let token = try token(for: base) else { throw BridgeError.credential }
                 var req = URLRequest(url: url); req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); req.timeoutInterval = 35
                 let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
                 defer { session.invalidateAndCancel() }
@@ -144,25 +146,37 @@ final class Companion: ObservableObject {
         guard components.scheme == "https" || (components.scheme == "http" && local) else { throw BridgeError.address }
         guard let url = components.url else { throw BridgeError.address }; return url
     }
+    private func token(for base: URL) throws -> String? {
+        guard let stored = credential.read() else { return nil }
+        guard stored.origin == canonicalOrigin(base) else { throw BridgeError.credential }
+        return stored.token
+    }
+    private func canonicalOrigin(_ url: URL) -> String {
+        var c = URLComponents(); c.scheme = url.scheme?.lowercased(); c.host = url.host?.lowercased()
+        if let port = url.port, !((c.scheme == "https" && port == 443) || (c.scheme == "http" && port == 80)) { c.port = port }
+        return c.string ?? ""
+    }
     private func request<T: Decodable>(_ path: String, body: [String: String]? = nil, authenticated: Bool = true, idempotencyKey: String? = nil) async throws -> T {
         let base = try baseURL()
         guard let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw BridgeError.address }
         var request = URLRequest(url: url); request.timeoutInterval = 20
         if let body { request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONEncoder().encode(body) }
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
-        if authenticated { guard let token = credential.read() else { throw BridgeError.credential }; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if authenticated { guard let token = try token(for: base) else { throw BridgeError.credential }; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw BridgeError.response }
-        if http.statusCode == 401 { credential.clear(); connection = "Disconnected · pair again"; throw BridgeError.unauthorized }
+        if http.statusCode == 401 { credential.clear(); isPaired = false; connection = "Disconnected · pair again"; throw BridgeError.unauthorized }
         guard (200..<300).contains(http.statusCode) else { throw BridgeError.response }
         return try JSONDecoder().decode(T.self, from: data)
     }
     func pair() async {
         do {
+            let origin = canonicalOrigin(try baseURL())
             let reply: PairReply = try await request("/pair", body: ["code": pairingCode, "label": UIDevice.current.name], authenticated: false)
-            try credential.save(reply.token); pairingCode = ""; demo = false; hasLoaded = false; requests = []; chats = []; await refresh()
+            guard canonicalOrigin(try baseURL()) == origin else { throw BridgeError.address }
+            try credential.save(BoundCredential(origin: origin, token: reply.token)); isPaired = true; pairingCode = ""; demo = false; hasLoaded = false; requests = []; chats = []; await refresh()
         } catch { connection = "Disconnected · \(error.localizedDescription)" }
     }
     func refresh() async {
@@ -191,7 +205,8 @@ final class Companion: ObservableObject {
         guard id.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else { throw BridgeError.response }
         if demo { return (ArtifactMetadata(id: id, title: "Sample plan", kind: "markdown", spaceId: "demo", revision: 1), Data("# Sample plan\n\nReview the **design** before proceeding.".utf8)) }
         let metadata: ArtifactMetadata = try await request("/artifacts/\(id)")
-        guard canView(spaceId: metadata.spaceId), let token = credential.read(), let url = URL(string: "/artifacts/\(id)/content", relativeTo: try baseURL())?.absoluteURL else { throw BridgeError.response }
+        let base = try baseURL()
+        guard canView(spaceId: metadata.spaceId), let token = try token(for: base), let url = URL(string: "/artifacts/\(id)/content", relativeTo: base)?.absoluteURL else { throw BridgeError.response }
         var req = URLRequest(url: url); req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); req.timeoutInterval = 20
         let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil); defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(for: req)
@@ -226,6 +241,6 @@ final class Companion: ObservableObject {
         decision.phase = result.state; decision.resolveOnly = result.resolveOnly; try decisions.save(requestId, decision: decision)
         return decision
     }
-    func forget() { credential.clear(); demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
+    func forget() { credential.clear(); isPaired = false; demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
 }
 

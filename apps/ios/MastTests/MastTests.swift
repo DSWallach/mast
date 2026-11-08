@@ -2,9 +2,9 @@ import XCTest
 @testable import Mast
 
 private final class MemoryCredential: CredentialStore {
-    var token: String?
-    func read() -> String? { token }
-    func save(_ token: String) throws { self.token = token }
+    var token: BoundCredential?
+    func read() -> BoundCredential? { token }
+    func save(_ token: BoundCredential) throws { self.token = token }
     func clear() { token = nil }
 }
 private final class MemoryDecisionStore: DecisionStore {
@@ -72,8 +72,15 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(request.options, ["Yes"])
         XCTAssertEqual(request.origin, "Chat")
     }
+    func testCredentialIsNeverSentToAnotherOrigin() async throws {
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "https://good.ts.net", token: "secret"))
+        let model = model(credential); XCTAssertEqual(model.address, "https://good.ts.net")
+        model.address = "https://attacker.example"; var sent = false
+        StubProtocol.reply = { _ in sent = true; return (200, "{}") }
+        await model.refresh(); XCTAssertFalse(sent); XCTAssertNotNil(credential.read())
+    }
     func testRefreshLoadsInboxAndChatsAndRetainsStaleData() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let model = model(credential)
         defer { model.hiddenSpaceIds.removeAll() }
         StubProtocol.reply = { request in
@@ -104,7 +111,7 @@ final class MastTests: XCTestCase {
             }
         }
         model.pairingCode = "code"; await model.pair()
-        XCTAssertEqual(credential.read(), "device")
+        XCTAssertEqual(credential.read()?.token, "device")
         XCTAssertTrue(model.noSpacesShared)
         XCTAssertTrue(model.visibleRequests.isEmpty)
         let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working")
@@ -115,7 +122,7 @@ final class MastTests: XCTestCase {
         model.forget(); XCTAssertNil(credential.read())
     }
     func testUnauthorizedClearsCredentialAndRequiresPairing() async throws {
-        let credential = MemoryCredential(); try credential.save("revoked")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "revoked"))
         let model = model(credential)
         StubProtocol.reply = { _ in (401, "{}") }
         await model.refresh()
@@ -123,7 +130,7 @@ final class MastTests: XCTestCase {
         XCTAssertTrue(model.connection.contains("pair again"))
     }
     func testTranscriptPagesAndChatVisibility() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let model = model(credential)
         StubProtocol.reply = { request in
             XCTAssertEqual(request.url?.query, "offset=40")
@@ -155,7 +162,7 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(link.underlineStyle, .single)
     }
     func testAnswerPersistsIntentAndRetriesOnlyResolution() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
         let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
@@ -177,7 +184,7 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(resolved.phase, "resolved")
     }
     func testAnswerKindsAndDemoCannotOverwriteLiveIntent() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
         let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
