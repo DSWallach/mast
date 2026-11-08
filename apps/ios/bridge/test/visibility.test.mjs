@@ -17,7 +17,7 @@ test("projects assistant tool summaries without their output", async () => {
   const call = async () => ({ total: 1, olderRemaining: 0, messages: [{ id: "m", role: "assistant", text: "Done", tools: ["exec: cargo test → private output", "read: README.md"] }] });
   const backend = engineBackend("unused", "unused", call, async () => []);
   const page = await backend.transcript("chat", 0);
-  assert.deepEqual(page.messages[1], { id: "m:tools", role: "tool", text: "exec: cargo test\nread: README.md", author: "tool" });
+  assert.deepEqual(page.messages[1], { id: "m:tools", role: "tool", text: "exec:\nread:", author: "tool" });
 });
 
 test("classifies user participation across pages, caches revisions, and keeps request origins", async () => {

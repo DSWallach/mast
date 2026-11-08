@@ -22,7 +22,7 @@ export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = c
     const messages = result.messages.flatMap((message: Message) => {
       const rows = [];
       if (typeof message.text === "string" && message.text.length > 0) rows.push({ id: message.id, role: message.role, text: message.text, author: messageAuthor(message) });
-      const tools = (message.tools ?? []).filter(line => typeof line === "string" && !line.startsWith("image:")).map(line => line.split(" → ")[0]);
+      const tools = (message.tools ?? []).filter(line => typeof line === "string" && !line.startsWith("image:")).map(line => { const name = /^([A-Za-z][A-Za-z0-9_.-]{0,63})(?=:|$)/.exec(line); return name ? `${name[1]}:` : "tool:"; });
       if (message.role === "assistant" && tools.length) rows.push({ id: `${message.id}:tools`, role: "tool", text: tools.join("\n"), author: "tool" });
       return rows;
     });
