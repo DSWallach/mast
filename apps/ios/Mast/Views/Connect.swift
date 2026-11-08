@@ -13,6 +13,6 @@ struct ConnectScreen: View {
         HStack { Circle().fill(model.connection.hasPrefix("Connected") ? Color.green : Horizon.slate).frame(width: 7, height: 7); Text(model.connection); Spacer(); Button("Disconnect") { model.forget() } }.font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme))
         if snapshot { HStack { Text("Demo mode"); Spacer(); Text("On").foregroundStyle(Horizon.muted(scheme)) }.font(.system(size: 14)); HStack { Text("Show worker chats"); Spacer(); Text("Off").foregroundStyle(Horizon.muted(scheme)) }.font(.system(size: 14)) }
         else { Toggle("Demo mode", isOn: $model.demo).tint(Horizon.muted(scheme)).onChange(of: model.demo) { _, demo in if !demo { model.hasLoaded = false; model.requests = []; model.chats = [] }; Task { await model.refresh() } }.font(.system(size: 14)); Toggle("Show worker chats", isOn: $model.showWorkers).tint(Horizon.muted(scheme)).font(.system(size: 14)) }
-        Text("Reply & resolve is unavailable until delivery is verified.").font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme))
+        if snapshot { HStack { Text("Reply & resolve"); Spacer(); Text(model.replyEnabled ? "On" : "Off").foregroundStyle(Horizon.muted(scheme)) }.font(.system(size: 14)) } else { Toggle("Reply & resolve", isOn: $model.replyEnabled).tint(Horizon.muted(scheme)).font(.system(size: 14)) }
     }.foregroundStyle(Horizon.ink(scheme)).padding(.horizontal, 22).padding(.top, 24) }.background(Horizon.surface(scheme)).toolbar(.hidden, for: .navigationBar) }
 }

@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
 export type AnswerInput = { outcome: string; text?: string; optionId?: string };
-export type AnswerRow = { id: string; text: string; kind: string; state: string; chatId: string; system: boolean; chatAvailable: boolean; options: { id: string; label: string }[] };
-export type Intent = { key: string; input: AnswerInput; requestId: string; operationId: string; chatId: string; rowSignature: string; message: string; note: string; outcome: string; optionId?: string; phase: "prepared" | "idleDispatch" | "queueDispatch" | "sent" | "resolved" | "unknown"; resolveOnly: boolean };
+export type AnswerRow = { id: string; text: string; kind: string; state: string; chatId: string; system: boolean; chatAvailable: boolean; options: { id: string; label: string }[]; resolution?: { outcome?: string; note?: string; values?: { action?: string; optionId?: string }; by?: { kind?: string } } };
+export type Intent = { key: string; input: AnswerInput; requestId: string; operationId: string; chatId: string; rowSignature: string; message: string; note: string; outcome: string; optionId?: string; phase: "prepared" | "idleDispatch" | "queueDispatch" | "sent" | "resolving" | "resolved" | "unknown" | "conflict"; resolveOnly: boolean };
 export interface IntentStore { load(requestId: string): Promise<Intent | null>; save(intent: Intent): Promise<void>; }
 export interface ReplyEngine {
   openRow(id: string): Promise<AnswerRow | null>;
@@ -24,6 +24,8 @@ export function decisionMessage(request: string, id: string, outcome: string, no
   return `Re: "${quote}": ${decision.trim()}`;
 }
 function prepare(row: AnswerRow, key: string, input: AnswerInput): Intent {
+  // These cards perform an additional desktop-only approval-rule mutation.
+  if (row.text.startsWith("Review proposed approval rule: ")) throw new Error("approval rule decisions require desktop");
   let note = "", outcome = input.outcome, decision = outcome, optionId: string | undefined;
   if (row.kind === "choose" && input.optionId && input.outcome === "chosen" && !input.text) {
     const option = row.options.find(value => value.id === input.optionId);
@@ -49,18 +51,18 @@ export class ReplyCoordinator {
     const running = this.running.get(requestId);
     if (running) await running.catch(() => undefined);
     const intent = await this.store.load(requestId);
-    if (!intent || intent.key !== key || !["sent", "resolved"].includes(intent.phase)) throw new Error("resolve-only retry unavailable");
+    if (!intent || intent.key !== key || !["sent", "resolving", "resolved"].includes(intent.phase)) throw new Error("resolve-only retry unavailable");
     return this.answer(requestId, key, intent.input);
   }
-  async answer(requestId: string, key: string, input: AnswerInput): Promise<Intent> {
+  async answer(requestId: string, key: string, input: AnswerInput, stopAfterSend = false): Promise<Intent> {
     if (!/^[A-Za-z0-9._-]{16,64}$/.test(key)) throw new Error("invalid idempotency key");
     const current = this.running.get(requestId);
-    if (current) { await current.catch(() => undefined); return this.answer(requestId, key, input); }
-    const task = this.perform(requestId, key, input);
+    if (current) { await current.catch(() => undefined); return this.answer(requestId, key, input, stopAfterSend); }
+    const task = this.perform(requestId, key, input, stopAfterSend);
     this.running.set(requestId, task);
     try { return await task; } finally { this.running.delete(requestId); }
   }
-  private async perform(requestId: string, key: string, input: AnswerInput): Promise<Intent> {
+  private async perform(requestId: string, key: string, input: AnswerInput, stopAfterSend: boolean): Promise<Intent> {
     let intent = await this.store.load(requestId);
     if (intent && (intent.key !== key || JSON.stringify(intent.input) !== JSON.stringify(input))) throw new Error("decision conflict");
     if (!intent) {
@@ -68,12 +70,11 @@ export class ReplyCoordinator {
       if (!row || row.state !== "open") throw new Error("request no longer open");
       intent = prepare(row, key, input); await this.store.save(intent);
     }
-    if (intent.phase === "resolved" || intent.phase === "unknown") return intent;
+    if (intent.phase === "resolved" || intent.phase === "unknown" || intent.phase === "conflict") return intent;
     if (intent.phase === "queueDispatch") { intent.phase = "unknown"; await this.store.save(intent); return intent; }
     if (intent.phase === "prepared") {
       const row = await this.engine.openRow(requestId);
-      if (!row || row.state !== "open") throw new Error("request no longer open");
-      if (rowSignature(row) !== intent.rowSignature) throw new Error("request changed before delivery");
+      if (!row || row.state !== "open" || rowSignature(row) !== intent.rowSignature) { intent.phase = "conflict"; await this.store.save(intent); return intent; }
       if (row.system || !row.chatAvailable) intent.resolveOnly = true;
       if (intent.resolveOnly) { intent.phase = "sent"; await this.store.save(intent); }
       else { intent.phase = await this.engine.isBusy(intent.chatId) ? "queueDispatch" : "idleDispatch"; await this.store.save(intent); }
@@ -85,9 +86,22 @@ export class ReplyCoordinator {
       try { await this.engine.sendQueued(intent); } catch { intent.phase = "unknown"; await this.store.save(intent); return intent; }
       intent.phase = "sent"; await this.store.save(intent);
     }
+    if (intent.phase === "sent" && stopAfterSend) return intent;
     if (intent.phase === "sent") {
+      const row = await this.engine.openRow(requestId);
+      if (!row || row.state !== "open") { intent.phase = "conflict"; await this.store.save(intent); return intent; }
+      intent.phase = "resolving"; await this.store.save(intent);
+    }
+    if (intent.phase === "resolving") {
       try { await this.engine.resolve(intent, deriveId(intent.operationId, "reply-resolve")); }
       catch { return intent; }
+      let row: AnswerRow | null;
+      try { row = await this.engine.openRow(requestId); } catch { return intent; }
+      if (!row || row.state !== "resolved") return intent;
+      const resolution = row.resolution;
+      if (!resolution || resolution.by?.kind !== "user" || resolution.outcome !== intent.outcome || (resolution.note ?? "") !== intent.note || resolution.values?.action !== intent.outcome || (resolution.values?.optionId ?? undefined) !== intent.optionId) {
+        intent.phase = "conflict"; await this.store.save(intent); return intent;
+      }
       intent.phase = "resolved"; await this.store.save(intent);
     }
     return intent;

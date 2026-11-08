@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { snapshot } from "./outline.js";
+import { effectiveKind, snapshot } from "./outline.js";
 import type { AnswerRow, Intent, ReplyEngine } from "./reply.js";
 
 type UnaryMethod = "EngineInfo" | "ContinueChatForWorkItem" | "QueueMessage" | "WorkOutlineMutate";
@@ -32,7 +32,11 @@ export function ipcReplyEngine(url: string): ReplyEngine {
       for (const outline of snapshots) {
         if (!outline.available || !outline.synced || !Array.isArray(outline.userActionRequests)) throw new Error("outline unavailable");
         const row = outline.userActionRequests.find((value: any) => value.id === id && !value.deduped);
-        if (row) return { id: row.id, text: row.text, kind: row.kind ?? "ask", state: row.state ?? "open", chatId: row.chatId ?? "", system: row.originKind === "system", chatAvailable: row.originChatAvailable === true, options: row.options ?? [] };
+        if (row) {
+          const options = row.options ?? [];
+          if (typeof row.text !== "string" || !Array.isArray(options) || !options.every((option: any) => typeof option.id === "string" && typeof option.label === "string")) throw new Error("invalid request snapshot");
+          return { id: row.id, text: row.text, kind: effectiveKind(row), state: row.state ?? "open", chatId: row.chatId ?? "", system: row.originKind === "system", chatAvailable: row.originChatAvailable === true, options, resolution: row.resolution };
+        }
       }
       return null;
     },
@@ -40,6 +44,7 @@ export function ipcReplyEngine(url: string): ReplyEngine {
       const sessions = await snapshot<any[]>(url, "WatchSessions", {});
       if (!Array.isArray(sessions)) throw new Error("invalid sessions");
       const session = sessions.find(value => value.chatId === chatId);
+      if (session && ["working", "awaitingInput"].includes(session.status) && !Number.isFinite(Date.parse(session.updatedAt))) throw new Error("invalid session timestamp");
       const busy = session && ["working", "awaitingInput"].includes(session.status) && Date.now() - Date.parse(session.updatedAt) <= 45_000;
       if (!busy) return false;
       const [info, chats, devices] = await Promise.all([unary(url, "EngineInfo", {}), snapshot<any[]>(url, "WatchChats", {}), snapshot<any[]>(url, "WatchDevices", {})]);

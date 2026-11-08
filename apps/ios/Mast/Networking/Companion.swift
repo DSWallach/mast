@@ -6,6 +6,29 @@ protocol CredentialStore {
     func save(_ token: String) throws
     func clear()
 }
+protocol DecisionStore {
+    func read(_ requestId: String) throws -> PendingDecision?
+    func save(_ requestId: String, decision: PendingDecision) throws
+}
+struct KeychainDecisionStore: DecisionStore {
+    private let service = "computer.mikey.mast.companion.decisions"
+    private func query(_ id: String) -> [String: Any] { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: id] }
+    func read(_ requestId: String) throws -> PendingDecision? {
+        var attributes = query(requestId); attributes[kSecReturnData as String] = true; attributes[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?; let status = SecItemCopyMatching(attributes as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else { throw BridgeError.credential }
+        return try JSONDecoder().decode(PendingDecision.self, from: data)
+    }
+    func save(_ requestId: String, decision: PendingDecision) throws {
+        let data = try JSONEncoder().encode(decision); let attributes = query(requestId)
+        let status = SecItemUpdate(attributes as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = attributes; item[kSecValueData as String] = data; item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw BridgeError.credential }
+        } else if status != errSecSuccess { throw BridgeError.credential }
+    }
+}
 struct Credential: CredentialStore {
     private let service = "computer.mikey.mast.companion.bridge"
     func read() -> String? {
@@ -38,8 +61,9 @@ private final class NoRedirect: NSObject, URLSessionTaskDelegate {
 @MainActor
 final class Companion: ObservableObject {
     private let credential: any CredentialStore
+    private let decisions: any DecisionStore
     private let configuration: URLSessionConfiguration
-    init(credential: any CredentialStore = Credential(), configuration: URLSessionConfiguration = .ephemeral) { self.credential = credential; self.configuration = configuration }
+    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral) { self.credential = credential; self.decisions = decisions; self.configuration = configuration }
     @Published var demo = true
     @Published var address = "http://127.0.0.1:27655"
     @Published var requests = Demo.requests
@@ -47,6 +71,9 @@ final class Companion: ObservableObject {
     @Published var connection = "Demo mode"
     @Published var pairingCode = ""
     @Published var showWorkers = false
+    @Published var replyEnabled = UserDefaults.standard.object(forKey: "replyAndResolveEnabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(replyEnabled, forKey: "replyAndResolveEnabled") }
+    }
     @Published var isLoading = false
     @Published var hasLoaded = false
     @Published var lastUpdated: Date?
@@ -56,11 +83,12 @@ final class Companion: ObservableObject {
         guard components.scheme == "https" || (components.scheme == "http" && local) else { throw BridgeError.address }
         guard let url = components.url else { throw BridgeError.address }; return url
     }
-    private func request<T: Decodable>(_ path: String, body: [String: String]? = nil, authenticated: Bool = true) async throws -> T {
+    private func request<T: Decodable>(_ path: String, body: [String: String]? = nil, authenticated: Bool = true, idempotencyKey: String? = nil) async throws -> T {
         let base = try baseURL()
         guard let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw BridgeError.address }
         var request = URLRequest(url: url); request.timeoutInterval = 20
         if let body { request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONEncoder().encode(body) }
+        if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
         if authenticated { guard let token = credential.read() else { throw BridgeError.credential }; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
@@ -98,6 +126,20 @@ final class Companion: ObservableObject {
         let result: SendReply = try await request("/chats/\(chat.id)/messages", body: ["text": text])
         if result.delivery == "simulated" { return "Fixture only · message was not sent" }
         return result.delivery == "queued" ? "Queued" : "Accepted"
+    }
+    func pendingDecision(_ requestId: String) throws -> PendingDecision? { demo ? nil : try decisions.read(requestId) }
+    func answer(_ requestId: String, outcome: String, text: String? = nil, optionId: String? = nil) async throws -> PendingDecision {
+        let existing = try decisions.read(requestId)
+        var decision = existing ?? PendingDecision(key: UUID().uuidString, outcome: outcome, text: text, optionId: optionId)
+        guard decision.outcome == outcome && decision.text == text && decision.optionId == optionId else { throw BridgeError.response }
+        if demo { guard existing == nil else { throw BridgeError.response }; decision.phase = "resolved"; return decision }
+        try decisions.save(requestId, decision: decision)
+        var body = ["outcome": decision.outcome]
+        if let text = decision.text { body["text"] = text }; if let optionId = decision.optionId { body["optionId"] = optionId }
+        let resolveOnly = decision.phase == "sent" || decision.phase == "resolving"
+        let result: AnswerResult = try await request("/requests/\(requestId)/\(resolveOnly ? "resolve" : "answer")", body: resolveOnly ? [:] : body, idempotencyKey: decision.key)
+        decision.phase = result.state; decision.resolveOnly = result.resolveOnly; try decisions.save(requestId, decision: decision)
+        return decision
     }
     func forget() { credential.clear(); demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
 }

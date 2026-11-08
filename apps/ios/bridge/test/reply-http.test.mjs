@@ -6,9 +6,9 @@ import { ReplyCoordinator } from "../dist/reply.js";
 
 test("allowlisted answer endpoint pairs, sends and retries only resolution", async () => {
   let saved = null, sends = 0, resolves = 0;
-  const row = { id: "r", text: "Ship?", kind: "ask", state: "open", chatId: "c", system: false, chatAvailable: true, options: [] };
+  let row = { id: "r", text: "Ship?", kind: "ask", state: "open", chatId: "c", system: false, chatAvailable: true, options: [] };
   const store = { load: async () => saved, save: async value => { saved = structuredClone(value); } };
-  const engine = { openRow: async () => row, isBusy: async () => false, sendIdle: async () => { sends++; }, sendQueued: async () => { throw Error(); }, resolve: async () => { if (++resolves === 1) throw Error(); } };
+  const engine = { openRow: async () => row, isBusy: async () => false, sendIdle: async () => { sends++; }, sendQueued: async () => { throw Error(); }, resolve: async () => { if (++resolves === 1) throw Error(); row = { ...row, state: "resolved", resolution: { outcome: "answered", note: "yes", values: { action: "answered" }, by: { kind: "user" } } }; } };
   const tokenSet = new Set();
   const tokenStore = { add: async token => tokenSet.add(token), contains: async token => tokenSet.has(token) };
   const backend = { requests: async () => [], chats: async () => [], transcript: async () => [], send: async () => ({}) };
@@ -21,6 +21,8 @@ test("allowlisted answer endpoint pairs, sends and retries only resolution", asy
     const headers = { "content-type": "application/json", authorization: `Bearer ${token}`, "idempotency-key": "fixture-operation-key" };
     const sent = await fetch(base + "/requests/r/answer", { method: "POST", headers, body: JSON.stringify({ outcome: "answered", text: "yes" }) });
     assert.equal((await sent.json()).state, "sent");
+    const firstResolve = await fetch(base + "/requests/r/resolve", { method: "POST", headers, body: "{}" });
+    assert.equal((await firstResolve.json()).state, "resolving");
     const retry = await fetch(base + "/requests/r/resolve", { method: "POST", headers, body: "{}" });
     assert.equal((await retry.json()).state, "resolved");
     assert.equal(sends, 1); assert.equal(resolves, 2);

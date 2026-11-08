@@ -6,7 +6,16 @@ struct ActionRequest: Identifiable, Codable {
     let origin: String
     var priority: String? = nil, item: String? = nil
     var createdAt: Double? = nil
+    var optionChoices: [AnswerOption]? = nil
 }
+struct AnswerOption: Codable, Identifiable { let id: String, label: String; var detail: String? = nil }
+struct PendingDecision: Codable {
+    let key: String, outcome: String
+    var text: String? = nil, optionId: String? = nil
+    var phase: String = "unconfirmed"
+    var resolveOnly: Bool? = nil
+}
+struct AnswerResult: Decodable { let state: String; let resolveOnly: Bool }
 struct Chat: Identifiable, Codable {
     let id: String, title: String, space: String, status: String
     var harness: String? = nil, model: String? = nil, lastMessageAt: String? = nil

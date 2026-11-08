@@ -4,6 +4,9 @@ import { PairingChallenge, generatePairingCode } from "./pairing.js";
 import { createBridge, type BridgeBackend } from "./server.js";
 import { FileTokenStore } from "./token-store.js";
 import { engineBackend } from "./backend.js";
+import { ReplyCoordinator } from "./reply.js";
+import { FileIntentStore } from "./reply-store.js";
+import { ipcReplyEngine } from "./reply-ipc.js";
 
 const directory = join(homedir(), "Library", "Application Support", "MastCompanionBridge");
 const command = process.argv[2];
@@ -20,7 +23,9 @@ if (command === "revoke") {
     send: async () => ({ delivery: "simulated" }),
   };
   const backend = command === "fixture" ? fixture : engineBackend("/Applications/Mast.app/Contents/MacOS/mast", "ws://127.0.0.1:27654");
-  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()));
+  // Fixture mode remains read-only; production uses the private journal and local IPC.
+  const replies = command === "start" ? new ReplyCoordinator(new FileIntentStore(join(directory, "replies")), ipcReplyEngine("ws://127.0.0.1:27654")) : undefined;
+  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies);
   server.listen(27655, "127.0.0.1", () => {
     console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655. Pairing code expires in five minutes:`);
     console.log(code);

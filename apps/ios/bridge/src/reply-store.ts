@@ -10,7 +10,7 @@ export class FileIntentStore implements IntentStore {
   async load(id: string): Promise<Intent | null> {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.path(id), "utf8"));
-      if (!parsed || typeof parsed !== "object" || (parsed as Intent).requestId !== id || !["prepared", "idleDispatch", "queueDispatch", "sent", "resolved", "unknown"].includes((parsed as Intent).phase)) throw new Error("invalid reply journal");
+      if (!parsed || typeof parsed !== "object" || (parsed as Intent).requestId !== id || !["prepared", "idleDispatch", "queueDispatch", "sent", "resolving", "resolved", "unknown", "conflict"].includes((parsed as Intent).phase)) throw new Error("invalid reply journal");
       return parsed as Intent;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

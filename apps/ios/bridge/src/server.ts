@@ -59,7 +59,7 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
         if (answer[2] === "answer") {
           if (typeof body.outcome !== "string" || Object.keys(body).some(key => !["outcome", "text", "optionId"].includes(key)) || (body.text !== undefined && typeof body.text !== "string") || (body.optionId !== undefined && typeof body.optionId !== "string")) return reply(response, 400, { error: "invalid decision" });
           const input: AnswerInput = { outcome: body.outcome, ...(body.text === undefined ? {} : { text: body.text as string }), ...(body.optionId === undefined ? {} : { optionId: body.optionId as string }) };
-          const result = await replies.answer(answer[1], key, input);
+          const result = await replies.answer(answer[1], key, input, true);
           return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
         }
         if (Object.keys(body).length) return reply(response, 400, { error: "invalid retry" });
