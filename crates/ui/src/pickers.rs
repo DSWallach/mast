@@ -6945,7 +6945,7 @@ mod tests {
 
     #[gpui::test]
     fn composer_model_menu_opens_for_each_style(cx: &mut gpui::TestAppContext) {
-        use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
+        use crate::ui_style::{UiStyle, UiStyleId};
         struct MenuFixture(Entity<Pickers>);
         impl Render for MenuFixture {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6955,9 +6955,9 @@ mod tests {
                 })
             }
         }
-        for style in [UiStyleId::Default, UiStyleId::Industrial, UiStyleId::Area] {
+        for style in UiStyleId::ALL.iter().copied() {
             cx.update(|cx| {
-                cx.set_global(Theme::dark().with_ui_style(UiStyle::resolve(style, UiLayout::Minimal)));
+                cx.set_global(Theme::dark().with_ui_style(UiStyle::resolve(style, UiStyle::MINIMAL.layout)));
                 crate::composer::init(cx, Default::default());
             });
             let (fixture, window) = cx.add_window_view(|window, cx| {
@@ -6976,8 +6976,8 @@ mod tests {
             });
             window.run_until_parked();
             let row = window.debug_bounds("model-row-0").expect("model row rendered");
-            if style == UiStyleId::Area {
-                assert_eq!(row.size.height, px(UiStyle::resolve(style, UiLayout::Minimal).tokens.control_size));
+            if style == UiStyle::AREA.id {
+                assert_eq!(row.size.height, px(UiStyle::resolve(style, UiStyle::MINIMAL.layout).tokens.control_size));
             }
             fixture.update(window, |fixture, cx| {
                 fixture.0.update(cx, |pickers, cx| pickers.open_setting(ModelSetting::Reasoning, cx));
