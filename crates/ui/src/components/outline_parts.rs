@@ -171,7 +171,7 @@ pub fn outline_selected_chat_indicator(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    if super::is_area(theme) && selected {
+    if super::is_area(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
         div()
             .size(px(8.0))
             .rounded_full()
@@ -712,7 +712,7 @@ pub fn outline_nested_row(key: &str, depth: u16, previous: u16, next: u16, row: 
         let selector = format!("area-outline-nesting-{key}-{level}");
         div().id(selector.clone()).debug_selector(move || selector.clone())
             .absolute().top_0().bottom_0().right_0().left(px(offset(level)))
-            .bg(theme.text.opacity(0.035))
+            .when(level <= 2, |el| el.bg(theme.text.opacity(0.025)))
             .when(previous < level, |el| el.rounded_tl(px(12.)).rounded_tr(px(12.)))
             .when(next < level, |el| el.rounded_bl(px(12.)).rounded_br(px(12.)))
     });
@@ -746,7 +746,7 @@ pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) ->
 
 pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
     let mut result = theme.clone();
-    if selected && (super::is_area(theme) || theme.ui_style.design_roles.primary_colour.is_some()) {
+    if selected && theme.ui_style.design_roles.primary_colour.is_some() {
         let colour = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(theme.accent);
         result.text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::OutlineRow).page_colour.is_some() { theme.text } else { theme.identity_text(colour) };
         result.text_muted = result.text;
@@ -760,8 +760,8 @@ pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selecte
         element
             .max_w(px(400.0))
             .rounded_full()
-            .bg(theme.accent)
-            .border_color(theme.accent)
+            .bg(theme.text.opacity(0.10))
+            .border_color(gpui::transparent_black())
     } else {
         element
     };
@@ -789,7 +789,7 @@ pub fn outline_attention_color(
 }
 
 pub fn outline_selected_dot_color(theme: &Theme, selected: bool, color: gpui::Hsla) -> gpui::Hsla {
-    if super::is_area(theme) && selected {
+    if super::is_area(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
         theme.identity_text(theme.accent)
     } else {
         color

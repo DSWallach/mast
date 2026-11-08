@@ -212,16 +212,8 @@ fn node(item: &Item, depth: usize, option: usize, theme: &Theme, key: String) ->
                     .px(px(7.))
                     .py(px(2.))
                     .rounded_full()
-                    .bg(if item.selected {
-                        row_theme.text.opacity(0.15)
-                    } else {
-                        theme.warning.opacity(0.16)
-                    })
-                    .text_color(if item.selected {
-                        row_theme.text
-                    } else {
-                        theme.warning
-                    })
+                    .bg(theme.warning.opacity(0.16))
+                    .text_color(theme.text)
                     .text_size(px(11.))
                     .child(format!("{} needs you", item.needs)),
             )
@@ -236,7 +228,7 @@ fn node(item: &Item, depth: usize, option: usize, theme: &Theme, key: String) ->
                 el.ml(px(20.))
                     .p(px(5.))
                     .rounded(px(16.))
-                    .bg(theme.text.opacity(0.035))
+                    .when(depth < 2, |el| el.bg(theme.text.opacity(0.025)))
             })
             .when(option == 1, |el| el.ml(px(30.)))
             .when(option == 2, |el| {
