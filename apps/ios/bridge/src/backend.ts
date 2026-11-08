@@ -1,6 +1,7 @@
 import { callChatTool } from "./mcp.js";
 import { readRequests } from "./outline.js";
 import type { BridgeBackend } from "./server.js";
+import type { SpaceAccess } from "./shared-spaces.js";
 
 type ChatTool = typeof callChatTool;
 type Message = { id: string; role: string; text: string; tools?: string[] };
@@ -13,7 +14,7 @@ export function messageAuthor(message: Message): "user" | "agent" | "system" | "
 }
 
 /** Only projected companion fields leave the bridge. */
-export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = callChatTool, requests: typeof readRequests = readRequests): BridgeBackend {
+export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = callChatTool, requests: typeof readRequests = readRequests, access?: SpaceAccess): BridgeBackend {
   const cache = new Map<string, { revision: string; spoke: boolean }>();
   async function page(chatId: string, offset: number) {
     const result = await call(binary, "read_chat", { chat: chatId, limit: 40, offset, include_tools: true, include_reasoning: false });
@@ -45,11 +46,11 @@ export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = c
     return found;
   }
   return {
-    requests: () => requests(ipcUrl),
-    chats: async () => {
-      const [result, openRequests] = await Promise.all([call(binary, "list_chats", { limit: 500 }), requests(ipcUrl)]);
+    requests: ids => requests(ipcUrl, ids),
+    chats: async ids => {
+      const [result, openRequests] = await Promise.all([call(binary, "list_chats", { limit: 500 }), requests(ipcUrl, ids)]);
       if (!Array.isArray(result.chats)) throw new Error("invalid chats");
-      const chats = result.chats;
+      const chats = result.chats.filter(chat => typeof chat.project?.id === "string" && ids.has(chat.project.id));
       const requestChats = new Set(openRequests.map((row: any) => row.originChatId).filter(Boolean));
       const output = new Array(chats.length);
       let index = 0;
@@ -59,13 +60,14 @@ export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = c
           const hasRequest = requestChats.has(chat.id);
           const isWorker = Boolean(chat.parentChatId);
           const hasUserMessage = isWorker || hasRequest ? false : await spoke(chat);
-          output[current] = { id: chat.id, title: chat.title, space: chat.project?.name ?? "", status: chat.status, harness: chat.harness ?? null, model: chat.model ?? null, lastMessageAt: chat.lastMessageAt ?? null, isWorker, hasUserMessage, hasOpenRequest: hasRequest };
+          output[current] = { id: chat.id, title: chat.title, spaceId: chat.project.id, space: chat.project?.name ?? "", status: chat.status, harness: chat.harness ?? null, model: chat.model ?? null, lastMessageAt: chat.lastMessageAt ?? null, isWorker, hasUserMessage, hasOpenRequest: hasRequest };
         }
       }));
       return output;
     },
     transcript: page,
-    send: async (chatId, text) => {
+    send: async (chatId, text, spaceId) => {
+      if (access && (!spaceId || (await access.chatSpace(chatId)) !== spaceId)) throw new Error("space not shared");
       const result = await call(binary, "send_message", { chat: chatId, text, mode: "auto", wait: false });
       const sent = result.sent as { delivery?: string } | undefined;
       if (!sent || !["run", "steer", "queue"].includes(sent.delivery ?? "")) throw new Error("unknown delivery");

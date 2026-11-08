@@ -117,6 +117,9 @@ struct ChatDetail: View {
     @State private var sending = false
     @State private var localMessages: [TranscriptMessage] = []
     @State private var sendStates: [String: String] = [:]
+    @AppStorage("quickActions") private var quickActions = false
+    @State private var confirmMessage: TranscriptMessage?
+    @State private var showConfirmation = false
     @State private var olderRemaining = 0
     @State private var nextOffset = 0
     @Environment(\.colorScheme) private var scheme
@@ -144,11 +147,19 @@ struct ChatDetail: View {
             sending = false
         }
     }
-    var body: some View { VStack(spacing: 0) {
+    private func requestSend(_ message: TranscriptMessage) {
+        if requiresConfirmation(quickActions: quickActions) { confirmMessage = message; showConfirmation = true } else { confirmAndSend(message) }
+    }
+    private func confirmAndSend(_ message: TranscriptMessage) {
+        guard model.canView(spaceId: chat.spaceId) else { return }
+        if !localMessages.contains(where: { $0.id == message.id }) { localMessages.append(message); text = "" }
+        notice = ""; send(message)
+    }
+    var body: some View { Group { if !model.canView(spaceId: chat.spaceId) { Text("Space is unavailable or no longer shared.").foregroundStyle(Horizon.muted(scheme)).padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(Horizon.surface(scheme)) } else { VStack(spacing: 0) {
         ScrollViewReader { proxy in
             HorizonScroll { VStack(alignment: .leading, spacing: 20) {
                 if olderRemaining > 0 { Button("Load earlier") { Task { let first = messages.first?.id; do { let page = try await model.transcript(chat, offset: nextOffset); messages = page.messages + messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; if let first { proxy.scrollTo(first, anchor: .top) } } catch { notice = "Earlier messages unavailable." } } }.font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme)) }
-                TranscriptContent(messages: messages + localMessages, chat: chat, sendStates: sendStates, retry: send)
+                TranscriptContent(messages: messages + localMessages, chat: chat, sendStates: sendStates, retry: requestSend)
                 Color.clear.frame(height: 1).id("transcript-bottom")
             }.padding(22).frame(maxWidth: .infinity, alignment: .leading) }
             .task { do { let page = try await model.transcript(chat); messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } catch { notice = "Transcript unavailable or stale." } }
@@ -158,8 +169,8 @@ struct ChatDetail: View {
             if !notice.isEmpty { Text(notice).font(.system(size: 12)).foregroundStyle(Horizon.muted(scheme)) }
             HStack(alignment: .bottom, spacing: 12) {
                 if snapshot { Text("Message").font(.system(size: 16)).foregroundStyle(Horizon.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading) } else { TextField("Message", text: $text, axis: .vertical).font(.system(size: 16)).lineLimit(1...5) }
-                Button("SEND") { let message = TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user"); localMessages.append(message); text = ""; notice = ""; send(message) }.font(.system(size: 11, weight: .bold)).tracking(1).foregroundStyle(Horizon.muted(scheme)).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("SEND") { requestSend(TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user")) }.font(.system(size: 11, weight: .bold)).tracking(1).foregroundStyle(Horizon.muted(scheme)).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding(16).background(Horizon.slate.opacity(scheme == .dark ? 0.15 : 0.12), in: RoundedRectangle(cornerRadius: 19))
         }.padding(.horizontal, 18).padding(.bottom, 12).padding(.top, 8)
-    }.background(Horizon.surface(scheme)).navigationTitle(chat.title).navigationBarTitleDisplayMode(.inline) }
+    }.background(Horizon.surface(scheme)) } }.navigationTitle(model.canView(spaceId: chat.spaceId) ? chat.title : "Chat").navigationBarTitleDisplayMode(.inline).confirmationDialog("Send this message?", isPresented: $showConfirmation, titleVisibility: .visible) { Button("Send") { if let message = confirmMessage { confirmAndSend(message) }; confirmMessage = nil }; Button("Cancel", role: .cancel) { confirmMessage = nil } } message: { if let message = confirmMessage { Text(message.text) } } }
 }

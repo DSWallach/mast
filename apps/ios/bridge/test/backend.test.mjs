@@ -6,12 +6,12 @@ test("chat projection excludes extra fields and preserves send delivery", async 
   const calls = [];
   const call = async (_binary, tool, args) => {
     calls.push([tool, args]);
-    if (tool === "list_chats") return { chats: [{ id: "one", title: "Working", status: "working", project: { name: "Space", path: "/private" }, cwd: "/private" }, { id: "two", status: "idle" }] };
+    if (tool === "list_chats") return { chats: [{ id: "one", title: "Working", status: "working", project: { id: "space", name: "Space", path: "/private" }, cwd: "/private" }, { id: "two", title: "Idle", project: { id: "space", name: "Space" }, status: "idle" }] };
     if (tool === "read_chat") return { total: 1, olderRemaining: 0, messages: [{ id: "m", role: "user", text: "hello", tools: ["private"] }] };
     return { sent: { delivery: "queue", id: "command" } };
   };
   const backend = engineBackend("unused", "unused", call, async () => []);
-  const chats = await backend.chats();
+  const chats = await backend.chats(new Set(["space"]));
   assert.equal(chats[0].id, "one");
   assert.equal(chats[0].space, "Space");
   assert.equal("cwd" in chats[0], false);

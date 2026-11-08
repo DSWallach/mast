@@ -7,6 +7,15 @@ private final class MemoryCredential: CredentialStore {
     func save(_ token: String) throws { self.token = token }
     func clear() { token = nil }
 }
+private final class MemoryDecisionStore: DecisionStore {
+    var values: [String: PendingDecision] = [:]
+    func read(_ requestId: String) throws -> PendingDecision? { values[requestId] }
+    func save(_ requestId: String, decision: PendingDecision) throws { values[requestId] = decision }
+}
+private final class MockAuthenticator: DeviceAuthenticator {
+    var completion: ((AuthenticationResult) -> Void)?
+    func authenticate(completion: @escaping (AuthenticationResult) -> Void) { self.completion = completion }
+}
 private final class StubProtocol: URLProtocol {
     static var reply: (URLRequest) throws -> (Int, String) = { _ in (500, "{}") }
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -48,15 +57,19 @@ final class MastTests: XCTestCase {
     func testRefreshLoadsInboxAndChatsAndRetainsStaleData() async throws {
         let credential = MemoryCredential(); try credential.save("token")
         let model = model(credential)
+        defer { model.hiddenSpaceIds.removeAll() }
         StubProtocol.reply = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
-            if request.url!.path == "/requests" { return (200, "[{\"id\":\"r\",\"space\":\"Space\",\"kind\":\"review\",\"text\":\"Review\",\"detail\":\"\",\"options\":[],\"facts\":[],\"links\":[],\"origin\":\"chat\"}]") }
-            return (200, "[{\"id\":\"c\",\"title\":\"Chat\",\"space\":\"Space\",\"status\":\"working\"}]")
+            if request.url!.path == "/spaces" { return (200, "{\"spaces\":[{\"id\":\"s\",\"name\":\"Space\"}],\"noSpacesShared\":false}") }
+            if request.url!.path == "/requests" { return (200, "{\"items\":[{\"id\":\"r\",\"spaceId\":\"s\",\"space\":\"Space\",\"kind\":\"review\",\"text\":\"Review\",\"detail\":\"\",\"options\":[],\"facts\":[],\"links\":[],\"origin\":\"chat\"}],\"noSpacesShared\":false}") }
+            return (200, "{\"items\":[{\"id\":\"c\",\"spaceId\":\"s\",\"title\":\"Chat\",\"space\":\"Space\",\"status\":\"working\"}],\"noSpacesShared\":false}")
         }
         await model.refresh()
         XCTAssertEqual(model.requests.first?.text, "Review")
         XCTAssertEqual(model.chats.first?.title, "Chat")
         XCTAssertTrue(model.connection.hasPrefix("Connected"))
+        XCTAssertEqual(model.visibleRequests.count, 1)
+        model.hiddenSpaceIds.insert("s"); XCTAssertTrue(model.visibleRequests.isEmpty); XCTAssertTrue(model.visibleChats.isEmpty)
         StubProtocol.reply = { _ in throw URLError(.notConnectedToInternet) }
         await model.refresh()
         XCTAssertEqual(model.requests.first?.text, "Review")
@@ -67,12 +80,15 @@ final class MastTests: XCTestCase {
         StubProtocol.reply = { request in
             switch request.url!.path {
             case "/pair": return (200, "{\"token\":\"device\"}")
-            case "/requests", "/chats": return (200, "[]")
+            case "/spaces": return (200, "{\"spaces\":[],\"noSpacesShared\":true}")
+            case "/requests", "/chats": return (200, "{\"items\":[],\"noSpacesShared\":true}")
             default: return (200, "{\"delivery\":\"accepted\"}")
             }
         }
         model.pairingCode = "code"; await model.pair()
         XCTAssertEqual(credential.read(), "device")
+        XCTAssertTrue(model.noSpacesShared)
+        XCTAssertTrue(model.visibleRequests.isEmpty)
         let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working")
         let sent = try await model.send(chat, text: "hello")
         XCTAssertEqual(sent, "Accepted")
@@ -120,6 +136,82 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(link.foregroundColor, .green)
         XCTAssertEqual(link.underlineStyle, .single)
     }
+    func testAnswerPersistsIntentAndRetriesOnlyResolution() async throws {
+        let credential = MemoryCredential(); try credential.save("token")
+        let store = MemoryDecisionStore()
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
+        let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
+        var key: String?
+        StubProtocol.reply = { request in
+            key = request.value(forHTTPHeaderField: "Idempotency-Key")
+            XCTAssertEqual(request.url?.path, "/requests/r/answer")
+            return (200, "{\"state\":\"resolving\",\"resolveOnly\":false}")
+        }
+        let pending = try await model.answer("r", outcome: "answered", text: "yes")
+        XCTAssertEqual(pending.phase, "resolving")
+        XCTAssertEqual(try store.read("r")?.key, key)
+        StubProtocol.reply = { request in
+            XCTAssertEqual(request.url?.path, "/requests/r/resolve")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), key)
+            return (200, "{\"state\":\"resolved\",\"resolveOnly\":false}")
+        }
+        let resolved = try await model.answer("r", outcome: "answered", text: "yes")
+        XCTAssertEqual(resolved.phase, "resolved")
+    }
+    func testAnswerKindsAndDemoCannotOverwriteLiveIntent() async throws {
+        let credential = MemoryCredential(); try credential.save("token")
+        let store = MemoryDecisionStore()
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
+        let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
+        var bodies: [[String: String]] = []
+        StubProtocol.reply = { request in
+            let data: Data
+            if let body = request.httpBody { data = body }
+            else if let stream = request.httpBodyStream {
+                stream.open(); defer { stream.close() }
+                var result = Data(); var buffer = [UInt8](repeating: 0, count: 1024)
+                while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; result.append(contentsOf: buffer.prefix(count)) }
+                data = result
+            } else { throw URLError(.cannotParseResponse) }
+            bodies.append(try JSONDecoder().decode([String: String].self, from: data))
+            return (200, "{\"state\":\"sent\",\"resolveOnly\":false}")
+        }
+        _ = try await model.answer("ask", outcome: "answered", text: "yes")
+        _ = try await model.answer("choose", outcome: "chosen", optionId: "a")
+        _ = try await model.answer("approve", outcome: "approved")
+        _ = try await model.answer("decline", outcome: "declined")
+        XCTAssertEqual(bodies, [["outcome": "answered", "text": "yes"], ["outcome": "chosen", "optionId": "a"], ["outcome": "approved"], ["outcome": "declined"]])
+        model.demo = true
+        do { _ = try await model.answer("ask", outcome: "answered", text: "yes"); XCTFail("Demo must not overwrite a live decision") } catch { }
+        XCTAssertEqual(try store.read("ask")?.phase, "sent")
+    }
+    func testLockOnColdLaunchBackgroundTimeoutAndStaleAuthentication() async {
+        let authenticator = MockAuthenticator(); var now = Date(timeIntervalSince1970: 100)
+        let lock = AppLock(authenticator: authenticator, now: { now })
+        XCTAssertTrue(lock.locked); XCTAssertTrue(lock.obscured)
+        lock.foreground(timeout: 60); XCTAssertTrue(lock.authenticating)
+        authenticator.completion?(.success); await Task.yield()
+        XCTAssertFalse(lock.locked); XCTAssertFalse(lock.obscured)
+        lock.inactive(); XCTAssertTrue(lock.obscured)
+        lock.background(); now.addTimeInterval(59); lock.foreground(timeout: 60)
+        XCTAssertFalse(lock.locked); XCTAssertFalse(lock.obscured)
+        lock.background(); now.addTimeInterval(60); lock.foreground(timeout: 60)
+        XCTAssertTrue(lock.locked); XCTAssertTrue(lock.obscured)
+        let stale = authenticator.completion; lock.background(); stale?(.success); await Task.yield()
+        XCTAssertTrue(lock.locked); XCTAssertTrue(lock.obscured)
+    }
+    func testAuthenticationFailureAndQuickActionsDefault() async {
+        let authenticator = MockAuthenticator(), lock = AppLock(authenticator: MockAuthenticator())
+        let failed = AppLock(authenticator: authenticator)
+        failed.foreground(timeout: 60); authenticator.completion?(.failure); await Task.yield()
+        XCTAssertTrue(failed.locked); XCTAssertTrue(failed.obscured)
+        failed.continueWithoutPasscode(); XCTAssertTrue(failed.locked)
+        failed.unlock(); authenticator.completion?(.noPasscode); await Task.yield()
+        XCTAssertTrue(failed.noPasscode); failed.continueWithoutPasscode(); XCTAssertFalse(failed.locked)
+        XCTAssertTrue(lock.locked)
+        XCTAssertTrue(requiresConfirmation(quickActions: false))
+        XCTAssertFalse(requiresConfirmation(quickActions: true))
+    }
 }
 
 import SwiftUI
@@ -141,7 +233,10 @@ final class HorizonSnapshotTests: XCTestCase {
         let longMessages = (1...40).map { TranscriptMessage(id: "long-\($0)", role: "assistant", text: "Message \($0): The latest update is ready for review.", author: "agent") }
         let screens: [(String, AnyView)] = [
             ("inbox", AnyView(InboxScreen(model: model))),
-            ("request-detail", AnyView(RequestDetail(request: Demo.requests[0]))),
+            ("request-detail", AnyView(RequestDetail(request: Demo.requests[0], model: model))),
+            ("answer-ask", AnyView(RequestDetail(request: ActionRequest(id: "ask", space: "Mast", kind: "ask", text: "What should we do?", detail: "A decision is needed.", options: [], facts: [], links: [], origin: "Chat"), model: model))),
+            ("answer-approve", AnyView(RequestDetail(request: ActionRequest(id: "approve", space: "Mast", kind: "approve", text: "Approve this change?", detail: "Please review.", options: [], facts: [], links: [], origin: "Chat"), model: model))),
+            ("answer-choose", AnyView(RequestDetail(request: ActionRequest(id: "choose", space: "Mast", kind: "choose", text: "Pick an option", detail: "Choose one.", options: ["Alpha", "Beta"], facts: [], links: [], origin: "Chat", optionChoices: [AnswerOption(id: "a", label: "Alpha"), AnswerOption(id: "b", label: "Beta")]), model: model))),
             ("chats", AnyView(ChatsScreen(model: model))),
             ("chat-detail", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Demo.messages))),
             ("long-chat-bottom", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Array(longMessages.suffix(3))))),
@@ -152,6 +247,7 @@ final class HorizonSnapshotTests: XCTestCase {
             ("offline-full", AnyView(InboxScreen(model: offline))),
             ("inbox-ax3", AnyView(InboxScreen(model: model).dynamicTypeSize(.accessibility3))),
             ("app-icon", AnyView(Image(uiImage: icon).resizable().frame(width: 320, height: 320).clipShape(RoundedRectangle(cornerRadius: 72, style: .continuous)).padding(36))),
+            ("locked", AnyView(LockScreen(authenticating: false, unlock: {}))),
             ("offline", AnyView(VStack(spacing: 0) { OfflineBanner(text: offline.connection); InboxScreen(model: offline) }))
         ]
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/snapshots")
