@@ -2532,14 +2532,32 @@ impl OutlineView {
         };
         let focused = self.focus.contains_focused(window, cx);
         range
-            .map(|list_ix| match create {
-                Some((slot, depth)) if list_ix == slot => {
-                    self.render_editor_row(depth, compact, &theme, cx)
+            .map(|list_ix| {
+                let depth_at = |index: usize| match create {
+                    Some((slot, depth)) if index == slot => Some(depth),
+                    Some((slot, _)) if index > slot => self.model.rows.get(index - 1).map(|row| row.depth),
+                    _ => self.model.rows.get(index).map(|row| row.depth),
+                };
+                let depth = depth_at(list_ix).unwrap_or(0);
+                let previous = list_ix.checked_sub(1).and_then(depth_at).unwrap_or(0);
+                let next = depth_at(list_ix + 1).unwrap_or(0);
+                let area = crate::components::outline_uses_rounded_nesting(&theme);
+                let (key, row) = match create {
+                    Some((slot, editor_depth)) if list_ix == slot => (
+                        "editor".to_owned(),
+                        self.render_editor_row(if area { 0 } else { editor_depth }, compact, &theme, cx),
+                    ),
+                    _ => {
+                        let model_ix = if create.is_some_and(|(slot, _)| list_ix > slot) { list_ix - 1 } else { list_ix };
+                        let key = self.model.rows[model_ix].key.clone();
+                        (key, self.render_row(model_ix, compact, focused, &theme, cx))
+                    }
+                };
+                if area {
+                    crate::components::outline_nested_row(&key, depth, previous, next, row, &theme)
+                } else {
+                    row
                 }
-                Some((slot, _)) if list_ix > slot => {
-                    self.render_row(list_ix - 1, compact, focused, &theme, cx)
-                }
-                _ => self.render_row(list_ix, compact, focused, &theme, cx),
             })
             .collect()
     }
@@ -3047,7 +3065,7 @@ impl OutlineView {
         let drop_label = drop_zone.and_then(|_| self.drop_label_element(theme));
         let guides = self.guide_layer(ix, compact, theme, cx);
         let flash = self.move_flash_overlay(&key, theme);
-        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), Self::indent(row.depth), theme)
+        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), if crate::components::outline_uses_rounded_nesting(&theme) { 8.0 } else { Self::indent(row.depth) }, theme)
             .when(highlighted, |el| el.border_color(crate::components::outline_row_highlight(theme)))
             .when((selected || in_group) && focused, |el| {
                 el.bg(theme.element_active)
@@ -3059,6 +3077,7 @@ impl OutlineView {
                 el.hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             })
             .when(true, |el| crate::components::outline_row_selection(el, theme, selected))
+            .when(crate::components::outline_uses_rounded_nesting(&theme), |el| el.max_w(px(10000.)))
             .when(dimmed, |el| el.opacity(0.6))
             .relative()
             .when(drop_zone == Some(DropZone::Into), |el| {
@@ -3181,7 +3200,7 @@ impl OutlineView {
                 }),
             )
             .children(flash)
-            .children(guides.filter(|_| crate::components::outline_row_extras(theme)))
+            .children(guides.filter(|_| !crate::components::outline_uses_rounded_nesting(theme) && crate::components::outline_row_extras(theme)))
             .child(disclosure)
             .child(body)
             .children(start_chat.filter(|_| crate::components::outline_row_extras(theme)))

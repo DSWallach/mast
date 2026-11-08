@@ -515,3 +515,31 @@ fn status_glyph_click_opens_details_and_the_row_still_opens_the_chat(
     assert!(details_events(&events).is_empty());
     assert!(calls.lock().unwrap().is_empty());
 }
+
+#[gpui::test]
+fn area_outline_nesting_tracks_depth_selection_and_collapse(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, outline, _calls, _events, vcx) = compact_overview(
+        cx, dir.path(), crate::work_outline::store::fixture_snapshot("s1"),
+    );
+    use crate::ui_style::UiStyleId::{Area};
+    vcx.update(|window, cx| crate::ui_style::set_style(Area, window, cx));
+    draw(vcx);
+    let launch = item_key(LAUNCH);
+    let api = item_key(API);
+    let auth = item_key(API_AUTH);
+    let root = row_bounds(vcx, format!("outline-row-{launch}")).unwrap();
+    let child = row_bounds(vcx, format!("outline-row-{api}")).unwrap();
+    let grandchild = row_bounds(vcx, format!("outline-row-{auth}")).unwrap();
+    assert_eq!(child.left() - root.left(), px(20.));
+    assert_eq!(grandchild.left() - child.left(), px(20.));
+    assert!(row_bounds(vcx, format!("area-outline-nesting-{auth}-1")).is_some());
+    assert!(row_bounds(vcx, format!("area-outline-nesting-{auth}-2")).is_some());
+    select_key(&outline, vcx, &api);
+    assert_eq!(selected_key(&outline, vcx).as_deref(), Some(api.as_str()));
+    assert_eq!(row_bounds(vcx, format!("outline-row-{api}")).unwrap().left(), child.left());
+    press_keys(vcx, "left");
+    draw(vcx);
+    assert!(!shown(vcx, &auth), "collapsed branch hides descendants");
+    assert!(shown(vcx, &api));
+}

@@ -171,7 +171,7 @@ pub fn outline_selected_chat_indicator(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    if super::is_area(theme) && selected {
+    if super::is_area(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
         div()
             .size(px(8.0))
             .rounded_full()
@@ -701,6 +701,26 @@ pub fn outline_overview_header(theme: &Theme) -> Div {
         .when_some(theme.ui_style.design_roles.outline_page_surface, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
 }
 
+/// Area presents descendants inside a continuous rounded surface per ancestor.
+pub fn outline_uses_rounded_nesting(theme: &Theme) -> bool {
+    super::is_area(theme)
+}
+
+pub fn outline_nested_row(key: &str, depth: u16, previous: u16, next: u16, row: gpui::AnyElement, theme: &Theme) -> gpui::AnyElement {
+    let offset = |level: u16| level as f32 * 20.0;
+    let backgrounds = (1..=depth).map(|level| {
+        let selector = format!("area-outline-nesting-{key}-{level}");
+        div().id(selector.clone()).debug_selector(move || selector.clone())
+            .absolute().top_0().bottom_0().right_0().left(px(offset(level)))
+            .when(level <= 2, |el| el.bg(theme.text.opacity(0.025)))
+            .when(previous < level, |el| el.rounded_tl(px(12.)).rounded_tr(px(12.)))
+            .when(next < level, |el| el.rounded_bl(px(12.)).rounded_br(px(12.)))
+    });
+    div().relative().w_full().children(backgrounds)
+        .child(div().w_full().flex().pl(px(offset(depth))).child(row))
+        .into_any_element()
+}
+
 /// Row chrome; selection, drag handling and content remain with the caller.
 pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) -> Stateful<Div> {
     let selector = id.to_string();
@@ -726,7 +746,7 @@ pub fn outline_row(id: SharedString, height: f32, indent: f32, theme: &Theme) ->
 
 pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
     let mut result = theme.clone();
-    if selected && (super::is_area(theme) || theme.ui_style.design_roles.primary_colour.is_some()) {
+    if selected && theme.ui_style.design_roles.primary_colour.is_some() {
         let colour = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(theme.accent);
         result.text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::OutlineRow).page_colour.is_some() { theme.text } else { theme.identity_text(colour) };
         result.text_muted = result.text;
@@ -740,8 +760,8 @@ pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selecte
         element
             .max_w(px(400.0))
             .rounded_full()
-            .bg(theme.accent)
-            .border_color(theme.accent)
+            .bg(theme.text.opacity(0.10))
+            .border_color(gpui::transparent_black())
     } else {
         element
     };
@@ -769,7 +789,7 @@ pub fn outline_attention_color(
 }
 
 pub fn outline_selected_dot_color(theme: &Theme, selected: bool, color: gpui::Hsla) -> gpui::Hsla {
-    if super::is_area(theme) && selected {
+    if super::is_area(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
         theme.identity_text(theme.accent)
     } else {
         color
@@ -2107,7 +2127,7 @@ pub fn outline_disclosure(id: SharedString, collapsed: bool, theme: &Theme) -> S
             .size(px(10.0))
             .text_color(theme.text_muted)
             .when(super::is_area(theme), |el| {
-                el.opacity(0.0)
+                el.opacity(0.65)
                     .group_hover("outline-row", |el| el.opacity(1.0))
             }),
         )
