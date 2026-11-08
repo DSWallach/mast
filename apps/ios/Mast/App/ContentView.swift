@@ -95,10 +95,10 @@ struct ArtifactScreen: View {
     @ViewBuilder private var artifactBody: some View { Group {
         if let metadata, let data {
             if model.demo || model.canView(spaceId: metadata.spaceId) {
-                switch metadata.kind {
+                switch artifactDisplayKind(metadata.kind) {
                 case "markdown": HorizonScroll { MarkdownReply(text: String(decoding: data, as: UTF8.self), linkColor: style.action(scheme)).padding(22) }
                 case "image": if let image = UIImage(data: data) { if snapshot { Image(uiImage: image).resizable().scaledToFit() } else { ScrollView([.horizontal, .vertical]) { Image(uiImage: image).resizable().scaledToFit().scaleEffect(zoom).gesture(MagnificationGesture().onChanged { zoom = max(1, min($0, 5)) }) } } } else { Text("Image unavailable") }
-                case "htmlPage", "htmlFragment": if snapshot { Text("HTML preview").frame(maxWidth: .infinity, maxHeight: .infinity) } else { SandboxedHTML(html: String(decoding: data, as: UTF8.self)) }
+                case "html": if snapshot { Text("HTML preview").frame(maxWidth: .infinity, maxHeight: .infinity) } else { SandboxedHTML(html: String(decoding: data, as: UTF8.self)) }
                 default: VStack(spacing: 12) { Text("Open on Mac"); Text(metadata.title).foregroundStyle(style.muted(scheme)) }
                 }
             } else { Text("Space is unavailable or no longer shared.") }
@@ -106,6 +106,10 @@ struct ArtifactScreen: View {
     }.frame(maxWidth: .infinity, maxHeight: .infinity).background(style.surface(scheme)) }
     var body: some View { Group { if snapshot { artifactBody } else { NavigationStack { artifactBody.navigationTitle(metadata?.title ?? "Artifact").toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }; ToolbarItem(placement: .primaryAction) { if metadata != nil { ShareLink(item: "mast-artifact:\(id)") } } }.task { if metadata == nil { do { (metadata, data) = try await model.artifact(id) } catch { self.error = "Artifact unavailable." } } } } } } }
 }
+func artifactDisplayKind(_ kind: String) -> String {
+    switch kind.lowercased() { case "htmlpage", "htmlfragment", "html-page", "html-fragment": "html"; case "markdown": "markdown"; case "image": "image"; default: "other" }
+}
+func allowedArtifactNavigation(_ url: URL) -> Bool { url.absoluteString == "about:blank" }
 struct SandboxedHTML: UIViewRepresentable {
     @Environment(\.openURL) private var openURL
     let html: String
@@ -129,7 +133,7 @@ struct SandboxedHTML: UIViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let url = action.request.url else { decisionHandler(.cancel); return }
             if action.navigationType == .linkActivated { decisionHandler(.cancel); open(url); return }
-            guard ["about", "data"].contains(url.scheme?.lowercased() ?? "") else { decisionHandler(.cancel); return }; decisionHandler(.allow)
+            guard allowedArtifactNavigation(url) else { decisionHandler(.cancel); return }; decisionHandler(.allow)
         }
     }
 }

@@ -42,6 +42,13 @@ final class MastTests: XCTestCase {
         model.demo = false
         return model
     }
+    func testArtifactKindsAndNavigationAreRestricted() {
+        for kind in ["htmlPage", "htmlFragment", "html-page", "html-fragment"] { XCTAssertEqual(artifactDisplayKind(kind), "html") }
+        XCTAssertEqual(artifactDisplayKind("image"), "image"); XCTAssertEqual(artifactDisplayKind("mermaid"), "other")
+        XCTAssertTrue(allowedArtifactNavigation(URL(string: "about:blank")!))
+        XCTAssertFalse(allowedArtifactNavigation(URL(string: "data:text/html,hello")!))
+        XCTAssertFalse(allowedArtifactNavigation(URL(string: "https://example.com")!))
+    }
     func testArtifactLinkRouting() {
         if case .artifact(let id) = companionLink(URL(string: "mast-artifact:abc123")!) { XCTAssertEqual(id, "abc123") } else { XCTFail("artifact route") }
         if case .chat(let id) = companionLink(URL(string: "mast-chat:chat1")!) { XCTAssertEqual(id, "chat1") } else { XCTFail("chat route") }

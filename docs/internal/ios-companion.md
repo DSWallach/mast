@@ -112,3 +112,5 @@ Write actions require fresh device-owner authentication and an active app immedi
 Tailscale HTTPS certificate issuance can publish the machine's `*.ts.net` name in certificate-transparency logs. Use a neutral machine name and accept the remaining hostname disclosure before enabling Serve.
 
 The pinned `qrcode-terminal` 0.12.0 encoder is unmaintained. It has no runtime dependencies and is used only for terminal QR output; this remains an accepted supply-chain risk until a maintained replacement is reviewed.
+
+Artifact content requests use the artifact's recorded `targetDeviceId`; a shared artifact can therefore be fetched from another Mast device through the engine. The HTML viewer permits only `about:blank` navigation; data URLs remain available solely as restricted subresources under the content policy.
