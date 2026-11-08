@@ -26,6 +26,8 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 69: Horizon** (2026-11-07): the Area style is renamed Horizon; saved `area` settings, themes and
+  style overrides still load. Horizon list bullets follow the agent colour.
 - **Release 68: Area tweaks** (2026-11-07): Area replies wrap at a reading width with quiet bullets; agent colour
   follows the provider (Claude amber, Codex green); Area outline uses rounded nesting; composer menus are
   style-aware. Details in the 23:10 "In flight" snapshot.
@@ -1010,6 +1012,22 @@ Coordinator tips:
   text, `read_chat` the `originChatId`.
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
+
+## In flight (snapshot 2026-11-07 23:35; coordinator dd899921)
+
+- **Installed and current: release 69** (c118d5cf, 23:35; nextest 35/35, UI 2599/0/13). Backup of release 68:
+  `~/zeron-dev-app-backups/mast-20261107-2335-pre-release69`. Two changes:
+  - **Area is now Horizon** (`rename-area-to-horizon`): `UiStyleId::Horizon`, the `horizon-light`/`horizon-dark`
+    themes, the design-panel key `horizon`, the gallery "Horizon outline tree", `docs/internal/styles/horizon.md`.
+    Legacy values still load: `UiStyleId` deserialises `"area"`, the theme registry maps `area-*` → `horizon-*`, and
+    style overrides accept `area` (`horizon` wins if both exist). Area/area.tech palette attribution is kept.
+  - Horizon list discs use the text foreground (`area-list-bullet-color`), so they follow the agent colour in replies.
+- The standing Horizon worker (chat 8ac73b69, item ab2dc8d0, still titled "Area style tweaks") is idle and waiting
+  for Mikey's next batch. Stale origin branches still exist: `archive/ios` (keep) and `audit-*` (coworker readiness
+  2fda739e decides).
+- **Personal workspace:** `chore/agent-setup-revamp` was pushed for Mikey's review (request 204f55c6). Open question:
+  make personal-workspace a Mast Space, since its new AGENTS.md points tracking at the Work Outline, or soften that
+  line.
 
 ## In flight (snapshot 2026-11-07 23:10; coordinator dd899921)
 
