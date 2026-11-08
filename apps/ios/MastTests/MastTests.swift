@@ -12,6 +12,10 @@ private final class MemoryDecisionStore: DecisionStore {
     func read(_ requestId: String) throws -> PendingDecision? { values[requestId] }
     func save(_ requestId: String, decision: PendingDecision) throws { values[requestId] = decision }
 }
+private final class MockAuthenticator: DeviceAuthenticator {
+    var completion: ((AuthenticationResult) -> Void)?
+    func authenticate(completion: @escaping (AuthenticationResult) -> Void) { self.completion = completion }
+}
 private final class StubProtocol: URLProtocol {
     static var reply: (URLRequest) throws -> (Int, String) = { _ in (500, "{}") }
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -53,15 +57,19 @@ final class MastTests: XCTestCase {
     func testRefreshLoadsInboxAndChatsAndRetainsStaleData() async throws {
         let credential = MemoryCredential(); try credential.save("token")
         let model = model(credential)
+        defer { model.hiddenSpaceIds.removeAll() }
         StubProtocol.reply = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
-            if request.url!.path == "/requests" { return (200, "[{\"id\":\"r\",\"space\":\"Space\",\"kind\":\"review\",\"text\":\"Review\",\"detail\":\"\",\"options\":[],\"facts\":[],\"links\":[],\"origin\":\"chat\"}]") }
-            return (200, "[{\"id\":\"c\",\"title\":\"Chat\",\"space\":\"Space\",\"status\":\"working\"}]")
+            if request.url!.path == "/spaces" { return (200, "{\"spaces\":[{\"id\":\"s\",\"name\":\"Space\"}],\"noSpacesShared\":false}") }
+            if request.url!.path == "/requests" { return (200, "{\"items\":[{\"id\":\"r\",\"spaceId\":\"s\",\"space\":\"Space\",\"kind\":\"review\",\"text\":\"Review\",\"detail\":\"\",\"options\":[],\"facts\":[],\"links\":[],\"origin\":\"chat\"}],\"noSpacesShared\":false}") }
+            return (200, "{\"items\":[{\"id\":\"c\",\"spaceId\":\"s\",\"title\":\"Chat\",\"space\":\"Space\",\"status\":\"working\"}],\"noSpacesShared\":false}")
         }
         await model.refresh()
         XCTAssertEqual(model.requests.first?.text, "Review")
         XCTAssertEqual(model.chats.first?.title, "Chat")
         XCTAssertTrue(model.connection.hasPrefix("Connected"))
+        XCTAssertEqual(model.visibleRequests.count, 1)
+        model.hiddenSpaceIds.insert("s"); XCTAssertTrue(model.visibleRequests.isEmpty); XCTAssertTrue(model.visibleChats.isEmpty)
         StubProtocol.reply = { _ in throw URLError(.notConnectedToInternet) }
         await model.refresh()
         XCTAssertEqual(model.requests.first?.text, "Review")
@@ -72,12 +80,15 @@ final class MastTests: XCTestCase {
         StubProtocol.reply = { request in
             switch request.url!.path {
             case "/pair": return (200, "{\"token\":\"device\"}")
-            case "/requests", "/chats": return (200, "[]")
+            case "/spaces": return (200, "{\"spaces\":[],\"noSpacesShared\":true}")
+            case "/requests", "/chats": return (200, "{\"items\":[],\"noSpacesShared\":true}")
             default: return (200, "{\"delivery\":\"accepted\"}")
             }
         }
         model.pairingCode = "code"; await model.pair()
         XCTAssertEqual(credential.read(), "device")
+        XCTAssertTrue(model.noSpacesShared)
+        XCTAssertTrue(model.visibleRequests.isEmpty)
         let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working")
         let sent = try await model.send(chat, text: "hello")
         XCTAssertEqual(sent, "Accepted")
@@ -174,6 +185,33 @@ final class MastTests: XCTestCase {
         do { _ = try await model.answer("ask", outcome: "answered", text: "yes"); XCTFail("Demo must not overwrite a live decision") } catch { }
         XCTAssertEqual(try store.read("ask")?.phase, "sent")
     }
+    func testLockOnColdLaunchBackgroundTimeoutAndStaleAuthentication() async {
+        let authenticator = MockAuthenticator(); var now = Date(timeIntervalSince1970: 100)
+        let lock = AppLock(authenticator: authenticator, now: { now })
+        XCTAssertTrue(lock.locked); XCTAssertTrue(lock.obscured)
+        lock.foreground(timeout: 60); XCTAssertTrue(lock.authenticating)
+        authenticator.completion?(.success); await Task.yield()
+        XCTAssertFalse(lock.locked); XCTAssertFalse(lock.obscured)
+        lock.inactive(); XCTAssertTrue(lock.obscured)
+        lock.background(); now.addTimeInterval(59); lock.foreground(timeout: 60)
+        XCTAssertFalse(lock.locked); XCTAssertFalse(lock.obscured)
+        lock.background(); now.addTimeInterval(60); lock.foreground(timeout: 60)
+        XCTAssertTrue(lock.locked); XCTAssertTrue(lock.obscured)
+        let stale = authenticator.completion; lock.background(); stale?(.success); await Task.yield()
+        XCTAssertTrue(lock.locked); XCTAssertTrue(lock.obscured)
+    }
+    func testAuthenticationFailureAndQuickActionsDefault() async {
+        let authenticator = MockAuthenticator(), lock = AppLock(authenticator: MockAuthenticator())
+        let failed = AppLock(authenticator: authenticator)
+        failed.foreground(timeout: 60); authenticator.completion?(.failure); await Task.yield()
+        XCTAssertTrue(failed.locked); XCTAssertTrue(failed.obscured)
+        failed.continueWithoutPasscode(); XCTAssertTrue(failed.locked)
+        failed.unlock(); authenticator.completion?(.noPasscode); await Task.yield()
+        XCTAssertTrue(failed.noPasscode); failed.continueWithoutPasscode(); XCTAssertFalse(failed.locked)
+        XCTAssertTrue(lock.locked)
+        XCTAssertTrue(requiresConfirmation(quickActions: false))
+        XCTAssertFalse(requiresConfirmation(quickActions: true))
+    }
 }
 
 import SwiftUI
@@ -209,6 +247,7 @@ final class HorizonSnapshotTests: XCTestCase {
             ("offline-full", AnyView(InboxScreen(model: offline))),
             ("inbox-ax3", AnyView(InboxScreen(model: model).dynamicTypeSize(.accessibility3))),
             ("app-icon", AnyView(Image(uiImage: icon).resizable().frame(width: 320, height: 320).clipShape(RoundedRectangle(cornerRadius: 72, style: .continuous)).padding(36))),
+            ("locked", AnyView(LockScreen(authenticating: false, unlock: {}))),
             ("offline", AnyView(VStack(spacing: 0) { OfflineBanner(text: offline.connection); InboxScreen(model: offline) }))
         ]
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/snapshots")

@@ -1,6 +1,6 @@
 # Mast iOS companion (experimental)
 
-The app in `apps/ios` and bridge are an experimental prototype; the live engine and phone paths await QA. The bridge exposes only companion operations on `127.0.0.1:27655`; the engine IPC on port 27654 is privileged and must never be exposed directly. The app defaults to built-in demo data. There is no push, attachment support, live approval, new chat or artifact viewer. Reply & resolve supports ask, choose, and approve cards and is enabled by default; approval-rule proposals remain desktop-only.
+The app in `apps/ios` and bridge are an experimental prototype. Live iPhone use requires DevOps approval. The bridge exposes only companion operations on `127.0.0.1:27655`; the engine IPC on port 27654 is privileged and must never be exposed directly. The app defaults to built-in demo data. There is no push, attachment support, live approval, new chat or artifact viewer. Reply & resolve supports ask, choose, and approve cards and is enabled by default; approval-rule proposals remain desktop-only.
 
 ## Build and fixture tests
 
@@ -13,31 +13,39 @@ PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH" npm ci
 PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH" npm test
 ```
 
-The generic build passed on this machine. Bridge tests use an isolated fake IPC server and fake MCP process (8 passed), including pairing and fetching inbox and chats through HTTP. This simulator unit-test command passed (4 tests, 0 failures):
+Run the unit tests only on the designated iPhone 15 Pro Max simulator, not the iPhone 15 Pro used for live QA:
 
 ```sh
-xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'platform=iOS Simulator,id=61F7B027-E816-4313-B0A6-975D5A95C44E' -derivedDataPath /tmp/mast-ios-derived CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'platform=iOS Simulator,id=E50FC8FD-69AB-4633-B2C5-49A34B1B6299' -derivedDataPath /tmp/mast-ios-design-derived CODE_SIGNING_ALLOWED=NO test -quiet
 ```
 
-The app targets iOS 17.0. The unit tests ran on the installed iPhone 15 Pro iOS 17.5 simulator. No interactive app session was launched; the live engine connection, signing, phone and Tailscale paths have not been verified.
+The bridge tests use isolated state, fake IPC and fake MCP; they never connect to the live engine. The app targets iOS 17.0. For the Space sharing and lock changes, the Node 18 suite passed 27 tests and the simulator command above passed 13 tests on iOS 17.5. Interactive Face ID, the app switcher, signing and the phone transport still need device QA.
 
-## Morning QA
+## QA and administration
 
-1. Open `apps/ios/Mast.xcodeproj` in Xcode, select the Mast scheme and the installed iPhone 15 Pro iOS 17.5 simulator, and run it. Demo mode displays sample requests and chats; sending in demo mode does not send a message. Check details, links as text, transcript, and the disabled reply control.
-2. With Mast already running, build the bridge as above and run `PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH" node dist/cli.js start` from `apps/ios/bridge`. In the app's Settings, enter `http://127.0.0.1:27655` and the one-time code printed in the terminal, then pair. Check the inbox and running chats first. Send a harmless message to a disposable existing chat and inspect the result on the Mac. An error can mean the send's outcome is unknown; inspect the chat before retrying. Stop the bridge with Control-C. Run `node dist/cli.js revoke` using Node 18 to revoke **all** paired credentials. Restart the bridge to issue a fresh five-minute pairing code.
-3. For an iPhone, sign the app in Xcode with your own team. Install and authenticate Tailscale on both devices separately; Tailscale is not installed or configured by this project. With the bridge running, consult the installed Tailscale version's `tailscale serve --help`, then use `tailscale serve --bg http://127.0.0.1:27655` on the Mac to provide the tailnet HTTPS endpoint, and check `tailscale serve status`. Enter that HTTPS URL and a fresh pairing code on the phone. Review existing Serve configuration before changing it. Stop the configured service using the version-specific Serve help when finished. These commands have not been exercised here.
+1. Open `apps/ios/Mast.xcodeproj` in Xcode and run the Mast scheme on the simulator yourself. Demo mode uses fixtures. Verify the lock on cold launch, background timeout, app switcher cover, and passcode fallback; the locked-screen ImageRenderer fixtures are `apps/ios/build/snapshots/locked-light.png` and `locked-dark.png`.
+2. With approval for the environment and Mast running, build the bridge as above. From `apps/ios/bridge`, use Node 18:
 
-Bridge credentials live in `~/Library/Application Support/MastCompanionBridge/`, separately from the Mast profile. The bridge logs the pairing code but not credentials or message contents. The app stores its device token in Keychain. A running Mac, Mast and bridge are required; refresh is foreground-only and stale state is shown on failure. The fixture command `node dist/cli.js fixture` serves sample content and never connects to Mast.
+   ```sh
+   node dist/cli.js spaces
+   node dist/cli.js spaces share "agent-mode-tools"
+   node dist/cli.js start
+   ```
+
+   Choose only approved Spaces. With none shared the app shows the Mac command and lists no data. Pair with the one-time terminal code at `http://127.0.0.1:27655`; Connect shows shared Spaces and local display filters. Check lists and a disposable chat, then check confirmation before sending a harmless message and answering a disposable request. Quick actions bypasses confirmations only when explicitly enabled. Unshare with `node dist/cli.js spaces unshare "agent-mode-tools"` and verify reads and writes are refused. Stop the bridge with Control-C.
+3. Live iPhone use remains subject to DevOps approval. Once approved, sign with your own Xcode team. Separately install and authenticate Tailscale on both devices; this project does not install or configure it. Review `tailscale serve --help` and current configuration; with the bridge running, `tailscale serve --bg http://127.0.0.1:27655` exposes its HTTPS tailnet endpoint. Check `tailscale serve status`, enter that HTTPS URL and a fresh pairing code on the phone, and stop Serve using the installed version's help when finished. The phone and Serve path have not been verified here.
+
+List devices with `node dist/cli.js devices`, revoke one by ID or unique label with `node dist/cli.js revoke <device>`, or revoke all with `node dist/cli.js revoke --all`. `node dist/cli.js audit 50` displays the last 50 metadata records (maximum 1000). Tokens from older bridge versions remain valid and appear as “Existing device”; revoke them if they are no longer needed.
 
 ## Bridge security self-review
 
-- The CLI binds the HTTP listener to `127.0.0.1` only. Tailscale Serve is a separate HTTPS access layer; never expose engine IPC.
-- The server accepts only pairing, inbox, chat listing, a chat transcript and an existing-chat message. No generic RPC method is accepted. Origin-bearing browser requests are rejected.
-- Pairing codes have 192 bits of entropy, expire after five minutes, permit five attempts, and are consumed once. Device tokens have 256 bits of entropy; only SHA-256 hashes are stored and comparisons use `timingSafeEqual`.
-- `revoke` clears all stored hashes; each authenticated request reloads them. Stop the bridge before revoking: concurrent pairing and revocation do not have a cross-process lock. Pairing and message contents and device tokens are not logged; the one-time pairing code is intentionally printed at startup.
-- The CLI strips inherited Mast agent tokens and IPC port overrides before starting the unscoped MCP process. The app permits HTTPS or loopback HTTP, refuses redirects, and keeps its token in device-only Keychain storage.
-
-The review and fixture tests do not establish live IPC compatibility or replace real-device security testing.
+- The HTTP listener binds `127.0.0.1` only; engine IPC is never exposed. Only explicit pairing, shared Space, request, chat, transcript, send and answer operations are exposed, with no generic forwarding; browser Origin requests are rejected.
+- `shared-spaces.json` in `~/Library/Application Support/MastCompanionBridge/` defaults to empty. The bridge checks the current allowlist and Space association for reads and writes, including direct IDs and both phases of answer. The phone can only narrow the shared list. Changes take effect for subsequent bridge checks; an IPC operation already in flight cannot be recalled. The foreground app polls sharing every 10 seconds and hides an open detail when it detects unsharing or disconnection; previously delivered content cannot be recalled from a device.
+- Pairing codes have 192 bits of entropy, expire after five minutes, permit five attempts and are consumed once. Device tokens have 256 bits of entropy; hashes are compared in constant time. Device labels and per-device revocation are stored separately from Mast's profile. Reads and writes are serialized across bridge and CLI processes. An operation already authorized and dispatched cannot be recalled by revocation.
+- Pairing, revoke and writes append metadata-only JSONL records (timestamp, device ID, action, target ID, Space ID when authorized, and outcome); no token or message text is logged. Denied IDs have no Space recorded if its association is not authorized. A crash can leave a `started` record without a final outcome. The one-time pairing code is intentionally printed at startup.
+- State locks fail closed after a crash. If a lock remains, stop the bridge and all bridge CLI processes, inspect the PID in the relevant `.tokens.lock`, `.spaces.lock`, or `.audit.lock` owner file and verify it is no longer running; remove only that owner file and empty lock directory, then restart. Do not remove state files.
+- The app uses LocalAuthentication device-owner authentication (Face ID or passcode), locks on cold launch and on the configured background timeout (default one minute), and covers content when inactive. Only a device without a configured passcode can explicitly continue without authentication; this exception lasts only for the session. Keychain uses `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`: it requires the device to be unlocked without a separate user-presence prompt on each refresh. The app permits HTTPS or loopback HTTP and refuses redirects.
+- The CLI strips inherited Mast agent tokens and IPC port overrides before starting its unscoped MCP process. Fixture tests and this self-review do not replace live compatibility, DevOps approval or real-device security testing.
 
 ## Horizon design pass
 

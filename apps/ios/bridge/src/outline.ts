@@ -40,15 +40,15 @@ export async function snapshot<T>(url: string, method: "WatchSpaces" | "WatchWor
   });
 }
 
-export async function readRequests(url: string): Promise<unknown[]> {
+export async function readRequests(url: string, sharedIds?: ReadonlySet<string>): Promise<unknown[]> {
   const spaces = await snapshot<Space[]>(url, "WatchSpaces", {});
   if (!Array.isArray(spaces)) throw new Error("invalid spaces");
-  const results = await Promise.all(spaces.map(async space => {
+  const results = await Promise.all(spaces.filter(space => sharedIds === undefined || sharedIds.has(space.id)).map(async space => {
     const outline = await snapshot<Snapshot>(url, "WatchWorkOutline", { spaceId: space.id });
     if (!outline.available || !outline.synced || !Array.isArray(outline.userActionRequests)) throw new Error("outline unavailable");
     const name = space.name?.trim() || space.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || space.path;
     return outline.userActionRequests.filter(row => row.state !== "resolved" && !row.deduped).map(row => ({
-      id: row.id, space: name, kind: effectiveKind(row), text: row.text, detail: row.info ?? "", priority: row.priority ?? null, item: outline.items?.find(item => item.id === row.workItemId)?.title ?? null, createdAt: row.createdAt ?? null,
+      id: row.id, spaceId: space.id, space: name, kind: effectiveKind(row), text: row.text, detail: row.info ?? "", priority: row.priority ?? null, item: outline.items?.find(item => item.id === row.workItemId)?.title ?? null, createdAt: row.createdAt ?? null,
       options: (row.options ?? []).map(option => option.detail ? `${option.label}: ${option.detail}` : option.label), optionChoices: row.options ?? [],
       facts: (row.facts ?? []).map(fact => `${fact.label}: ${fact.value}`),
       links: (row.links ?? []).map(link => `${link.label}: ${JSON.stringify(link.target)}`),

@@ -1,0 +1,57 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readdir, unlink, rmdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WebSocketServer } from "ws";
+import { SharedSpaces, engineSpaceAccess } from "../dist/shared-spaces.js";
+import { createBridge } from "../dist/server.js";
+import { PairingChallenge } from "../dist/pairing.js";
+import { fakeTokens } from "./support.mjs";
+
+test("default deny, hidden IDs, immediate unshare, and moved chats", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mast-spaces-"));
+  const ipc = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise(resolve => ipc.once("listening", resolve));
+  let chatSpace = "personal", sent = 0, answered = 0;
+  ipc.on("connection", socket => socket.on("message", bytes => {
+    const frame = JSON.parse(bytes.toString());
+    const item = frame.method === "WatchSpaces" ? [{ id: "personal", name: "Personal", path: "/personal" }, { id: "work", name: "Work", path: "/work" }] : frame.method === "WatchChats" ? [{ id: "chat", spaceId: chatSpace }, { id: "hidden", spaceId: "work" }] : { available: true, synced: true, userActionRequests: frame.params.spaceId === "personal" ? [{ id: "request" }] : [{ id: "hidden-request" }] };
+    socket.send(JSON.stringify({ id: frame.id, item }));
+  }));
+  const shared = new SharedSpaces(dir), access = engineSpaceAccess(`ws://127.0.0.1:${ipc.address().port}`, shared), events = [];
+  let moveDuringTranscript = false;
+  const backend = { requests: async () => [{ id: "request", spaceId: "personal" }, { id: "hidden-request", spaceId: "work" }], chats: async () => [{ id: "chat", spaceId: chatSpace }, { id: "hidden", spaceId: "work" }], transcript: async () => { if (moveDuringTranscript) chatSpace = "work"; return { messages: ["fixture"] }; }, send: async () => { sent++; return { delivery: "accepted" }; } };
+  const replies = { answer: async () => { answered++; return { phase: "sent", resolveOnly: false }; }, retryResolve: async () => { answered++; return { phase: "resolved", resolveOnly: false }; } };
+  const bridge = createBridge(backend, fakeTokens(), new PairingChallenge("fixture", Date.now()), replies, access, { append: async event => events.push(event) });
+  await new Promise(resolve => bridge.listen(0, "127.0.0.1", resolve));
+  try {
+    const base = `http://127.0.0.1:${bridge.address().port}`;
+    const pair = await fetch(base + "/pair", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: "fixture", label: "Test phone" }) });
+    const { token } = await pair.json(), headers = { authorization: `Bearer ${token}`, "content-type": "application/json", "idempotency-key": "fixture-operation-key" };
+    assert.deepEqual(await (await fetch(base + "/requests", { headers })).json(), { items: [], noSpacesShared: true });
+    assert.deepEqual(await (await fetch(base + "/chats", { headers })).json(), { items: [], noSpacesShared: true });
+    const deniedBeforeSharing = await fetch(base + "/chats/chat/transcript", { headers });
+    assert.equal(deniedBeforeSharing.status, 403); assert.equal((await deniedBeforeSharing.json()).noSpacesShared, true);
+    await shared.set("personal", true);
+    assert.deepEqual((await (await fetch(base + "/requests", { headers })).json()).items.map(row => row.id), ["request"]);
+    assert.deepEqual((await (await fetch(base + "/chats", { headers })).json()).items.map(row => row.id), ["chat"]);
+    assert.equal((await fetch(base + "/chats/chat/messages", { method: "POST", headers, body: JSON.stringify({ text: "secret" }) })).status, 200);
+    assert.equal((await fetch(base + "/requests/request/answer", { method: "POST", headers, body: JSON.stringify({ outcome: "approved" }) })).status, 200);
+    assert.equal((await fetch(base + "/chats/hidden/transcript", { headers })).status, 403);
+    assert.equal((await fetch(base + "/requests/hidden-request", { headers })).status, 403);
+    assert.equal((await fetch(base + "/chats/hidden/messages", { method: "POST", headers, body: JSON.stringify({ text: "secret" }) })).status, 403);
+    assert.equal((await fetch(base + "/requests/hidden-request/answer", { method: "POST", headers, body: JSON.stringify({ outcome: "approved" }) })).status, 403);
+    assert.equal((await fetch(base + "/requests/hidden-request/resolve", { method: "POST", headers, body: "{}" })).status, 403);
+    moveDuringTranscript = true;
+    assert.equal((await fetch(base + "/chats/chat/transcript", { headers })).status, 403);
+    chatSpace = "work";
+    assert.equal((await fetch(base + "/chats/chat/transcript", { headers })).status, 403);
+    assert.equal((await fetch(base + "/chats/chat/messages", { method: "POST", headers, body: JSON.stringify({ text: "secret" }) })).status, 403);
+    await shared.set("personal", false);
+    assert.equal((await fetch(base + "/requests/request/answer", { method: "POST", headers, body: JSON.stringify({ outcome: "approved" }) })).status, 403);
+    assert.equal(sent, 1); assert.equal(answered, 1);
+    assert.ok(events.some(event => event.action === "send" && event.deviceId === "device" && event.spaceId === "personal" && event.outcome === "accepted"));
+    assert.equal(JSON.stringify(events).includes("secret"), false);
+  } finally { bridge.closeAllConnections(); await new Promise(resolve => bridge.close(resolve)); await new Promise(resolve => ipc.close(resolve)); for (const name of await readdir(dir)) await unlink(join(dir, name)); await rmdir(dir); }
+});

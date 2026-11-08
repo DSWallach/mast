@@ -1,5 +1,6 @@
 import SwiftUI
 import Security
+import UIKit
 
 protocol CredentialStore {
     func read() -> String?
@@ -18,13 +19,14 @@ struct KeychainDecisionStore: DecisionStore {
         var result: CFTypeRef?; let status = SecItemCopyMatching(attributes as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data else { throw BridgeError.credential }
+        guard SecItemUpdate(query(requestId) as CFDictionary, [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly] as CFDictionary) == errSecSuccess else { throw BridgeError.credential }
         return try JSONDecoder().decode(PendingDecision.self, from: data)
     }
     func save(_ requestId: String, decision: PendingDecision) throws {
         let data = try JSONEncoder().encode(decision); let attributes = query(requestId)
-        let status = SecItemUpdate(attributes as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        let status = SecItemUpdate(attributes as CFDictionary, [kSecValueData as String: data, kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly] as CFDictionary)
         if status == errSecItemNotFound {
-            var item = attributes; item[kSecValueData as String] = data; item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            var item = attributes; item[kSecValueData as String] = data; item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw BridgeError.credential }
         } else if status != errSecSuccess { throw BridgeError.credential }
     }
@@ -35,6 +37,8 @@ struct Credential: CredentialStore {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device", kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
+        let identity: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"]
+        guard SecItemUpdate(identity as CFDictionary, [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly] as CFDictionary) == errSecSuccess else { return nil }
         return String(data: data, encoding: .utf8)
     }
     func save(_ token: String) throws {
@@ -42,7 +46,7 @@ struct Credential: CredentialStore {
         SecItemDelete(query as CFDictionary)
         var item = query
         item[kSecValueData as String] = Data(token.utf8)
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw BridgeError.credential }
     }
     func clear() { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"] as CFDictionary) }
@@ -77,6 +81,27 @@ final class Companion: ObservableObject {
     @Published var isLoading = false
     @Published var hasLoaded = false
     @Published var lastUpdated: Date?
+    @Published var sharedSpaces: [SharedSpace] = []
+    @Published var noSpacesShared = false
+    @Published var hiddenSpaceIds = Set(UserDefaults.standard.stringArray(forKey: "hiddenSharedSpaces") ?? []) {
+        didSet { UserDefaults.standard.set(Array(hiddenSpaceIds), forKey: "hiddenSharedSpaces") }
+    }
+    var visibleRequests: [ActionRequest] { requests.filter { canView(spaceId: $0.spaceId) } }
+    var visibleChats: [Chat] { chats.filter { canView(spaceId: $0.spaceId) } }
+    func canView(spaceId: String?) -> Bool {
+        if demo { return true }
+        guard !connection.hasPrefix("Disconnected"), let spaceId else { return false }
+        return !hiddenSpaceIds.contains(spaceId) && sharedSpaces.contains(where: { $0.id == spaceId })
+    }
+    func refreshSharedSpaces() async {
+        if demo { return }
+        do {
+            let latest: SharedSpaceList = try await request("/spaces")
+            let changed = Set(latest.spaces.map(\.id)) != Set(sharedSpaces.map(\.id))
+            sharedSpaces = latest.spaces; noSpacesShared = latest.noSpacesShared
+            if changed || connection.hasPrefix("Disconnected") { requests = []; chats = []; await refresh() }
+        } catch { connection = "Disconnected · showing stale data" }
+    }
     private func baseURL() throws -> URL {
         guard let components = URLComponents(string: address), let host = components.host, components.user == nil, components.password == nil, components.query == nil, components.fragment == nil, (components.path.isEmpty || components.path == "/") else { throw BridgeError.address }
         let local = host == "127.0.0.1" || host == "localhost"
@@ -100,18 +125,21 @@ final class Companion: ObservableObject {
     }
     func pair() async {
         do {
-            let reply: PairReply = try await request("/pair", body: ["code": pairingCode], authenticated: false)
+            let reply: PairReply = try await request("/pair", body: ["code": pairingCode, "label": UIDevice.current.name], authenticated: false)
             try credential.save(reply.token); pairingCode = ""; demo = false; hasLoaded = false; requests = []; chats = []; await refresh()
         } catch { connection = "Disconnected · \(error.localizedDescription)" }
     }
     func refresh() async {
-        if demo { requests = Demo.requests; chats = Demo.chats; connection = "Demo mode"; hasLoaded = true; return }
+        if demo { requests = Demo.requests; chats = Demo.chats; sharedSpaces = []; noSpacesShared = false; connection = "Demo mode"; hasLoaded = true; return }
         isLoading = true
         defer { isLoading = false }
         do {
-            async let newRequests: [ActionRequest] = request("/requests")
-            async let newChats: [Chat] = request("/chats")
-            (requests, chats) = try await (newRequests, newChats)
+            async let newSpaces: SharedSpaceList = request("/spaces")
+            async let newRequests: SpaceItems<ActionRequest> = request("/requests")
+            async let newChats: SpaceItems<Chat> = request("/chats")
+            let (spaces, requestsReply, chatsReply) = try await (newSpaces, newRequests, newChats)
+            sharedSpaces = spaces.spaces; noSpacesShared = spaces.noSpacesShared || requestsReply.noSpacesShared || chatsReply.noSpacesShared
+            requests = noSpacesShared ? [] : requestsReply.items; chats = noSpacesShared ? [] : chatsReply.items
             connection = "Connected · updated now"
             hasLoaded = true; lastUpdated = Date()
         } catch BridgeError.unauthorized { connection = "Disconnected · pair again" }

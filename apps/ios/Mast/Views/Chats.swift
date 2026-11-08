@@ -9,9 +9,10 @@ struct ChatsScreen: View {
         HorizonHeader(title: "Chats")
         if !model.demo && model.isLoading && !model.hasLoaded { LoadingPlaceholder() }
         else if !model.demo && model.connection.hasPrefix("Disconnected") { OfflineScreen(model: model) }
-        else { if !model.chats.contains(where: { $0.visible(showWorkers: model.showWorkers) && group($0) == "Running" }) { Text("No running chats").font(.system(size: 14)).foregroundStyle(Horizon.muted(scheme)) }
+        else if model.noSpacesShared { Text("No Spaces shared — run `spaces share` on your Mac").foregroundStyle(Horizon.muted(scheme)) }
+        else { if !model.visibleChats.contains(where: { $0.visible(showWorkers: model.showWorkers) && group($0) == "Running" }) { Text("No running chats").font(.system(size: 14)).foregroundStyle(Horizon.muted(scheme)) }
         ForEach(["Running", "Waiting", "Idle"], id: \.self) { section in
-            let chats = model.chats.filter { chat in group(chat) == section && chat.visible(showWorkers: model.showWorkers) }
+            let chats = model.visibleChats.filter { chat in group(chat) == section && chat.visible(showWorkers: model.showWorkers) }
             if !chats.isEmpty { VStack(alignment: .leading, spacing: 12) {
                 Text(section.uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.3).foregroundStyle(Horizon.muted(scheme))
                 ForEach(chats) { chat in if snapshot { ChatRow(chat: chat) } else { NavigationLink { ChatDetail(chat: chat, model: model) } label: { ChatRow(chat: chat) }.buttonStyle(.plain) } }

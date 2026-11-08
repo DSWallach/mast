@@ -6,14 +6,15 @@ struct InboxScreen: View {
     @Environment(\.snapshotRendering) private var snapshot
     var body: some View {
         HorizonScroll { VStack(alignment: .leading, spacing: 18) {
-            HorizonHeader(title: "Needs you", count: model.requests.count)
+            HorizonHeader(title: "Needs you", count: model.visibleRequests.count)
             if model.demo { Text("DEMO MODE").font(.system(size: 10, weight: .semibold)).tracking(1.3).foregroundStyle(Horizon.muted(scheme)) }
             if !model.demo && model.isLoading && !model.hasLoaded { LoadingPlaceholder() }
             else if !model.demo && model.connection.hasPrefix("Disconnected") { OfflineScreen(model: model) }
-            else { ForEach(model.requests.sorted { ($0.priority == "blocking" ? 0 : 1) < ($1.priority == "blocking" ? 0 : 1) }) { request in
+            else if model.noSpacesShared { Text("No Spaces shared — run `spaces share` on your Mac").foregroundStyle(Horizon.muted(scheme)).padding(.top, 20) }
+            else { ForEach(model.visibleRequests.sorted { ($0.priority == "blocking" ? 0 : 1) < ($1.priority == "blocking" ? 0 : 1) }) { request in
                 if snapshot { RequestCard(request: request) } else { NavigationLink { RequestDetail(request: request, model: model) } label: { RequestCard(request: request) }.buttonStyle(.plain) }
             }
-            if model.requests.isEmpty { Text("Nothing needs you").foregroundStyle(Horizon.muted(scheme)).padding(.top, 20) } }
+            if model.visibleRequests.isEmpty { Text("Nothing needs you").foregroundStyle(Horizon.muted(scheme)).padding(.top, 20) } }
         }.padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 30) }.refreshable { await model.refresh() }.background(Horizon.surface(scheme)).toolbar(.hidden, for: .navigationBar)
     }
 }
