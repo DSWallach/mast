@@ -42,7 +42,9 @@ struct TranscriptContent: View {
     let chat: Chat
     @Environment(\.colorScheme) private var scheme
     var body: some View { VStack(alignment: .leading, spacing: 24) { ForEach(messages) { message in
-        if message.author == "system" || message.author == "relay" {
+        if message.author == "tool" {
+            ToolActivityRow(text: message.text)
+        } else if message.author == "system" || message.author == "relay" {
             SystemMessageRow(message: message)
         } else if message.author == "user" || (message.author == nil && (message.role.lowercased() == "user" || message.role.lowercased() == "you")) {
             HStack { Spacer(minLength: 45); Text(message.text).font(.system(size: 16)).padding(.horizontal, 17).padding(.vertical, 13).background(Horizon.slate.opacity(scheme == .dark ? 0.18 : 0.14), in: RoundedRectangle(cornerRadius: 19)) }
@@ -50,6 +52,21 @@ struct TranscriptContent: View {
             VStack(alignment: .leading, spacing: 9) { Text((chat.model ?? "ASSISTANT").uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.2); MarkdownReply(text: message.text) }.foregroundStyle(Horizon.provider(chat, scheme)).frame(maxWidth: .infinity, alignment: .leading)
         }
     } }.foregroundStyle(Horizon.ink(scheme)) }
+}
+struct ToolActivityRow: View {
+    let text: String
+    @State private var expanded = false
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let tools = text.components(separatedBy: "\n").filter { !$0.isEmpty }
+        let commands = tools.allSatisfy { $0.hasPrefix("exec:") }
+        Button { expanded.toggle() } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(commands ? "Ran \(tools.count) \(tools.count == 1 ? "command" : "commands")" : "Used \(tools.count) \(tools.count == 1 ? "tool" : "tools")", systemImage: expanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .medium))
+                if expanded { ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in Text(tool).font(.system(size: 12, design: .monospaced)).textSelection(.enabled) } }
+            }.foregroundStyle(Horizon.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(13).background(Horizon.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+        }.buttonStyle(.plain)
+    }
 }
 func systemMessagePreview(_ text: String) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

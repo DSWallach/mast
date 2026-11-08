@@ -3,7 +3,7 @@ import { readRequests } from "./outline.js";
 import type { BridgeBackend } from "./server.js";
 
 type ChatTool = typeof callChatTool;
-type Message = { id: string; role: string; text: string };
+type Message = { id: string; role: string; text: string; tools?: string[] };
 export function messageAuthor(message: Message): "user" | "agent" | "system" | "relay" {
   const text = message.text.trimStart();
   if (/^\[Message from Mast chat\b/i.test(text)) return "relay";
@@ -16,10 +16,15 @@ export function messageAuthor(message: Message): "user" | "agent" | "system" | "
 export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = callChatTool, requests: typeof readRequests = readRequests): BridgeBackend {
   const cache = new Map<string, { revision: string; spoke: boolean }>();
   async function page(chatId: string, offset: number) {
-    const result = await call(binary, "read_chat", { chat: chatId, limit: 40, offset, include_tools: false, include_reasoning: false });
+    const result = await call(binary, "read_chat", { chat: chatId, limit: 40, offset, include_tools: true, include_reasoning: false });
     if (!Array.isArray(result.messages) || typeof result.olderRemaining !== "number" || typeof result.total !== "number") throw new Error("invalid transcript");
-    const messages = result.messages.filter((message: Message) => typeof message.text === "string" && message.text.length > 0)
-      .map((message: Message) => ({ id: message.id, role: message.role, text: message.text, author: messageAuthor(message) }));
+    const messages = result.messages.flatMap((message: Message) => {
+      const rows = [];
+      if (typeof message.text === "string" && message.text.length > 0) rows.push({ id: message.id, role: message.role, text: message.text, author: messageAuthor(message) });
+      const tools = (message.tools ?? []).filter(line => typeof line === "string" && !line.startsWith("image:")).map(line => line.split(" → ")[0]);
+      if (message.role === "assistant" && tools.length) rows.push({ id: `${message.id}:tools`, role: "tool", text: tools.join("\n"), author: "tool" });
+      return rows;
+    });
     return { messages, olderRemaining: result.olderRemaining, nextOffset: result.total - result.olderRemaining };
   }
   async function spoke(chat: { id: string; lastMessageAt?: string | null }): Promise<boolean> {

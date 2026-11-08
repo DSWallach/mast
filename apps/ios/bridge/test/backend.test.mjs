@@ -18,5 +18,5 @@ test("chat projection excludes extra fields and preserves send delivery", async 
   assert.equal(chats.length, 2);
   assert.deepEqual((await backend.transcript("one", 0)).messages, [{ id: "m", role: "user", text: "hello", author: "user" }]);
   assert.deepEqual(await backend.send("one", "hello"), { delivery: "queued" });
-  assert.equal(calls.find(call => call[0] === "read_chat")[1].include_tools, false);
+  assert.equal(calls.find(call => call[0] === "read_chat")[1].include_tools, true);
 });
