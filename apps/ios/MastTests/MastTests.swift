@@ -85,6 +85,12 @@ final class MastTests: XCTestCase {
         do { _ = try await model.answer("r", outcome: "answered", text: "yes"); XCTFail("expected authentication failure") } catch {}
         XCTAssertFalse(sent)
     }
+    func testFirstLaunchClearsSurvivingKeychainOnlyOnce() throws {
+        let suite = "mast-first-launch-\(UUID().uuidString)"; let defaults = try XCTUnwrap(UserDefaults(suiteName: suite)); defer { defaults.removePersistentDomain(forName: suite) }
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "https://example.com", token: "old")); var clears = 0
+        clearKeychainOnFirstLaunch(defaults: defaults, credential: credential) { clears += 1 }; XCTAssertNil(credential.read()); XCTAssertEqual(clears, 1)
+        try credential.save(BoundCredential(origin: "https://example.com", token: "new")); clearKeychainOnFirstLaunch(defaults: defaults, credential: credential) { clears += 1 }; XCTAssertEqual(credential.read()?.token, "new"); XCTAssertEqual(clears, 1)
+    }
     func testCredentialIsNeverSentToAnotherOrigin() async throws {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "https://good.ts.net", token: "secret"))
         let model = model(credential); XCTAssertEqual(model.address, "https://good.ts.net")

@@ -13,6 +13,7 @@ protocol DecisionStore {
     func save(_ requestId: String, decision: PendingDecision) throws
 }
 struct KeychainDecisionStore: DecisionStore {
+    static func clearAll() { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "computer.mikey.mast.companion.decisions"] as CFDictionary) }
     private let service = "computer.mikey.mast.companion.decisions"
     private func query(_ id: String) -> [String: Any] { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: id] }
     func read(_ requestId: String) throws -> PendingDecision? {
@@ -52,6 +53,10 @@ struct Credential: CredentialStore {
     }
     func clear() { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"] as CFDictionary) }
 }
+func clearKeychainOnFirstLaunch(defaults: UserDefaults, credential: any CredentialStore, clearDecisions: () -> Void) {
+    guard !defaults.bool(forKey: "companionFirstLaunchComplete") else { return }
+    credential.clear(); clearDecisions(); defaults.set(true, forKey: "companionFirstLaunchComplete")
+}
 enum BridgeError: LocalizedError {
     case address, credential, response, unauthorized
     var errorDescription: String? {
@@ -72,7 +77,7 @@ final class Companion: ObservableObject {
     private let configuration: URLSessionConfiguration
     private let actionAuthenticator: any DeviceAuthenticator
     private let actionAllowed: @MainActor () -> Bool
-    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAuthenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), actionAllowed: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) { self.actionAllowed = actionAllowed; self.actionAuthenticator = actionAuthenticator; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if let stored = credential.read() { address = stored.origin; isPaired = true } }
+    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAuthenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), actionAllowed: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) { self.actionAllowed = actionAllowed; self.actionAuthenticator = actionAuthenticator; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if credential is Credential { clearKeychainOnFirstLaunch(defaults: .standard, credential: credential, clearDecisions: KeychainDecisionStore.clearAll) }; if let stored = credential.read() { address = stored.origin; isPaired = true } }
     @Published var demo = true
     @Published private(set) var isPaired = false
     @Published var address = "http://127.0.0.1:27655"

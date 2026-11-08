@@ -104,3 +104,5 @@ The bridge requires Node 22 or newer; if absent, install a supported LTS using `
 Terminal reply journals redact decision text and keep a fingerprint for idempotency. Resolved/conflict journals older than seven days are pruned at bridge startup. Pending and delivery-unknown journals are retained because deleting one could permit an ambiguous reply to be sent twice; resolve or investigate them before manual removal.
 
 The JSONL audit log includes a SHA-256 `prevHash`/`hash` chain and rotates at approximately 10 MiB; the chain continues across files. This detects changes when verified against a retained trusted checkpoint. A local owner who can rewrite all files and checkpoints can recompute the chain or truncate it; it is not a remote or immutable audit service.
+
+Deleting the app may leave a Keychain item on iOS. The app clears its Keychain items on first launch after installation, but always revoke the device from the Mac too; deletion alone is not revocation. Existing installations also clear their old credential once when this sentinel is first introduced.
