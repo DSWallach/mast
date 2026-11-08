@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { PairingChallenge, tokenDigest } from "./pairing.js";
+import type { ReplyCoordinator, AnswerInput } from "./reply.js";
 
 export interface BridgeBackend {
   requests(): Promise<unknown>;
@@ -30,7 +31,7 @@ function reply(response: ServerResponse, status: number, body: unknown): void {
 }
 
 /** This server exposes fixed operations only; no request can select an RPC method. */
-export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge) {
+export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator) {
   return createServer(async (request, response) => {
     try {
       // Browsers cannot invoke the bridge from an unrelated origin.
@@ -49,6 +50,22 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (!match || !(await tokens.contains(tokenDigest(match[1])))) return reply(response, 401, { error: "unauthorized" });
       if (request.method === "GET" && path === "/requests") return reply(response, 200, await backend.requests());
       if (request.method === "GET" && path === "/chats") return reply(response, 200, await backend.chats());
+      const answer = /^\/requests\/([A-Za-z0-9_.:@/-]{1,128})\/(answer|resolve)$/.exec(path);
+      if (request.method === "POST" && answer && replies) {
+        if (request.headers["content-type"] !== "application/json") return reply(response, 415, { error: "json required" });
+        const key = request.headers["idempotency-key"];
+        if (typeof key !== "string") return reply(response, 400, { error: "idempotency key required" });
+        const body = await readBody(request);
+        if (answer[2] === "answer") {
+          if (typeof body.outcome !== "string" || Object.keys(body).some(key => !["outcome", "text", "optionId"].includes(key)) || (body.text !== undefined && typeof body.text !== "string") || (body.optionId !== undefined && typeof body.optionId !== "string")) return reply(response, 400, { error: "invalid decision" });
+          const input: AnswerInput = { outcome: body.outcome, ...(body.text === undefined ? {} : { text: body.text as string }), ...(body.optionId === undefined ? {} : { optionId: body.optionId as string }) };
+          const result = await replies.answer(answer[1], key, input);
+          return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
+        }
+        if (Object.keys(body).length) return reply(response, 400, { error: "invalid retry" });
+        const result = await replies.retryResolve(answer[1], key);
+        return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
+      }
       const transcript = /^\/chats\/([A-Za-z0-9_-]{1,128})\/transcript(?:\?offset=(\d{1,7}))?$/.exec(path);
       if (request.method === "GET" && transcript) return reply(response, 200, await backend.transcript(transcript[1], Number(transcript[2] ?? 0)));
       const message = /^\/chats\/([A-Za-z0-9_-]{1,128})\/messages$/.exec(path);
