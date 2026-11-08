@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, unlink, rmdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileTokenStore } from "../dist/token-store.js";
@@ -20,5 +20,5 @@ test("stores hashes privately and revokes them across restarts", async () => {
     await reopened.revokeAll();
     assert.equal(await store.contains(hash), false);
     assert.equal(await (await FileTokenStore.open(directory)).contains(hash), false);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await unlink(join(directory, "tokens.json")); await rmdir(directory); }
 });
