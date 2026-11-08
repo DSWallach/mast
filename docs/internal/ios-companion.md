@@ -106,3 +106,5 @@ Terminal reply journals redact decision text and keep a fingerprint for idempote
 The JSONL audit log includes a SHA-256 `prevHash`/`hash` chain and rotates at approximately 10 MiB; the chain continues across files. This detects changes when verified against a retained trusted checkpoint. A local owner who can rewrite all files and checkpoints can recompute the chain or truncate it; it is not a remote or immutable audit service.
 
 Deleting the app may leave a Keychain item on iOS. The app clears its Keychain items on first launch after installation, but always revoke the device from the Mac too; deletion alone is not revocation. Existing installations also clear their old credential once when this sentinel is first introduced.
+
+Write actions require fresh device-owner authentication and an active app immediately before sending; Quick actions skips only the dialog. A request already dispatched cannot be recalled if the app locks or the device is revoked during delivery.
