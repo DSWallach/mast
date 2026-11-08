@@ -40,6 +40,12 @@ final class MastTests: XCTestCase {
         model.demo = false
         return model
     }
+    func testPairingQRValidation() {
+        let pair = parsePairingQR("mast-companion://pair?url=https%3A%2F%2Fexample.ts.net&code=one-time")
+        XCTAssertEqual(pair?.url, "https://example.ts.net"); XCTAssertEqual(pair?.code, "one-time")
+        XCTAssertNil(parsePairingQR("mast-companion://pair?url=http%3A%2F%2Fevil.example&code=x"))
+        XCTAssertNil(parsePairingQR("mast-companion://pair?url=https%3A%2F%2Fexample.ts.net&code=x&code=y"))
+    }
     func testDemoFixturesAndDecoding() throws {
         XCTAssertFalse(Demo.requests.isEmpty)
         XCTAssertFalse(Demo.chats.isEmpty)

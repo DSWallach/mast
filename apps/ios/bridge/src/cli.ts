@@ -1,3 +1,4 @@
+import qr from "qrcode-terminal";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PairingChallenge, generatePairingCode } from "./pairing.js";
@@ -44,6 +45,11 @@ if (command === "spaces") {
   for (const line of await audit.tail(limit)) console.log(line);
 } else if (command === "fixture" || command === "start") {
   const store = await FileTokenStore.open(directory), code = generatePairingCode();
+  const urlIndex = process.argv.indexOf("--url"), publicUrl = urlIndex < 0 ? "http://127.0.0.1:27655" : process.argv[urlIndex + 1];
+  if (!publicUrl) throw new Error("--url requires a bridge URL");
+  const endpoint = new URL(publicUrl);
+  if (!(endpoint.protocol === "https:" || (endpoint.protocol === "http:" && ["127.0.0.1", "localhost"].includes(endpoint.hostname))) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || (endpoint.pathname !== "/" && endpoint.pathname !== "")) throw new Error("URL must be HTTPS or loopback HTTP");
+  const pairing = new URL("mast-companion://pair"); pairing.searchParams.set("url", endpoint.origin); pairing.searchParams.set("code", code);
   const fixture: BridgeBackend = {
     requests: async () => [{ id: "fixture-request", spaceId: "fixture-space", space: "Mast", kind: "review", text: "Review the companion layout", detail: "Fixture request", options: [], facts: [], links: [], origin: "Fixture chat" }],
     chats: async () => [{ id: "fixture-chat", spaceId: "fixture-space", title: "Fixture chat", space: "Mast", status: "working" }],
@@ -60,5 +66,5 @@ if (command === "spaces") {
   const backend = command === "fixture" ? fixture : engineBackend("/Applications/Mast.app/Contents/MacOS/mast", url, undefined, undefined, access);
   const replies = command === "start" ? new ReplyCoordinator(new FileIntentStore(join(directory, "replies")), ipcReplyEngine(url, access)) : undefined;
   const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies, access, audit, command === "start" ? url : undefined);
-  server.listen(27655, "127.0.0.1", () => { console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655. Pairing code expires in five minutes:`); console.log(code); });
+  server.listen(27655, "127.0.0.1", () => { console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655. Pairing code expires in five minutes:`); console.log(code); qr.generate(pairing.toString(), { small: true }); });
 } else { console.error("Usage: node dist/cli.js start | fixture | spaces [share|unshare <id|name>] | devices | revoke <device|--all> | audit [count]"); process.exitCode = 1; }
