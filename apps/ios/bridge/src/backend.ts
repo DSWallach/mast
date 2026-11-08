@@ -73,13 +73,15 @@ export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = c
       if (result.id !== chatId || project?.id !== spaceId) throw new Error("invalid chat");
       return {id: chatId, title: result.title, status: result.status, space: project.name ?? "", spaceId, harness: result.harness ?? null, model: result.model ?? null};
     },
-    interrupt: async (chatId, spaceId) => {
+    interrupt: async (chatId, spaceId, guard) => {
       if (!access || (await access.chatSpace(chatId)) !== spaceId) throw new Error("space not shared");
+      if (guard) await guard();
       await call(binary, "interrupt_chat", { chat: chatId });
       return { status: "accepted" };
     },
-    send: async (chatId, text, spaceId) => {
+    send: async (chatId, text, spaceId, guard) => {
       if (access && (!spaceId || (await access.chatSpace(chatId)) !== spaceId)) throw new Error("space not shared");
+      if (guard) await guard();
       const result = await call(binary, "send_message", { chat: chatId, text, mode: "auto", wait: false });
       const sent = result.sent as { delivery?: string } | undefined;
       if (!sent || !["run", "steer", "queue"].includes(sent.delivery ?? "")) throw new Error("unknown delivery");

@@ -57,3 +57,9 @@ test("a request resolved elsewhere after send is reported as conflict", async ()
   assert.equal(result.phase, "conflict");
   assert.deepEqual(f.calls.map(call => call[0]), ["idle"]);
 });
+
+test('revocation guard prevents dispatch after preparation', async () => {
+ const f=fixtures(); let checks=0; const guard=async()=>{checks++;throw Error('revoked')};
+ await assert.rejects(()=>new ReplyCoordinator(f.store,f.engine).answer('request',key,{outcome:'answered',text:'yes'},false,guard));
+ assert.equal(checks,1); assert.deepEqual(f.calls,[]);
+});

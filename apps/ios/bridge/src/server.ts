@@ -13,8 +13,8 @@ export interface BridgeBackend {
   chats(ids: ReadonlySet<string>): Promise<unknown>;
   transcript(chatId: string, offset: number): Promise<unknown>;
   chat?(chatId: string, spaceId: string): Promise<unknown>;
-  send(chatId: string, text: string, spaceId?: string): Promise<unknown>;
-  interrupt?(chatId: string, spaceId: string): Promise<unknown>;
+  send(chatId: string, text: string, spaceId?: string, guard?: () => Promise<void>): Promise<unknown>;
+  interrupt?(chatId: string, spaceId: string, guard?: () => Promise<void>): Promise<unknown>;
 }
 
 export type DeviceIdentity = { id: string; label: string };
@@ -74,6 +74,10 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       const match = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(authorization);
       const device = match ? await tokens.authenticate(tokenDigest(match[1])) : null;
       if (!device) return reply(response, 401, { error: "unauthorized" });
+      const fresh = (spaceId: string, capability: "answer" | "send", target: () => Promise<string | null>) => async () => {
+        const current = await tokens.authenticate(tokenDigest(match![1]));
+        if (!current || current.id !== device.id || !access.allows || !(await access.allows(spaceId, capability)) || (await target()) !== spaceId) throw new Error("authorization changed");
+      };
       if (["POST", "DELETE"].includes(request.method ?? "")) {
         const now = Date.now(), recent = (writes.get(device.id) ?? []).filter(time => now - time < 86400000);
         if (recent.length >= 200 || recent.filter(time => now - time < 60000).length >= minuteLimit) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "write", outcome: "rate-limited"}); return reply(response, 429, {error: "rate limited"}); }
@@ -145,14 +149,14 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
           const input: AnswerInput = { outcome: body.outcome, ...(body.text === undefined ? {} : { text: body.text as string }), ...(body.optionId === undefined ? {} : { optionId: body.optionId as string }) };
           await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: "started" });
           let result;
-          try { result = await replies.answer(answer[1], key, input, true); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+          try { await fresh(spaceId, "answer", () => access.requestSpace(answer[1]))(); result = await replies.answer(answer[1], key, input, true, fresh(spaceId, "answer", () => access.requestSpace(answer[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: "error-or-unknown" }); throw error; }
           await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: result.phase });
           return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
         }
         if (Object.keys(body).length) return reply(response, 400, { error: "invalid retry" });
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: "started" });
         let result;
-        try { result = await replies.retryResolve(answer[1], key); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+        try { await fresh(spaceId, "answer", () => access.requestSpace(answer[1]))(); result = await replies.retryResolve(answer[1], key, fresh(spaceId, "answer", () => access.requestSpace(answer[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: "error-or-unknown" }); throw error; }
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: result.phase });
         return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
       }
@@ -163,7 +167,7 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
         if (!access.allows || !(await access.allows(spaceId, "send"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "denied"}); return reply(response, 403, {error: "capability denied"}); }
         if (request.headers["content-type"] !== "application/json" || Object.keys(await readBody(request)).length) return reply(response, 400, { error: "invalid request" });
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "started" });
-        try { await backend.interrupt(stop[1], spaceId); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+        try { await fresh(spaceId, "send", () => access.chatSpace(stop[1]))(); await backend.interrupt(stop[1], spaceId, fresh(spaceId, "send", () => access.chatSpace(stop[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "error-or-unknown" }); throw error; }
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "accepted" });
         return reply(response, 200, { status: "accepted" });
       }
@@ -192,7 +196,7 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "started" });
         if ((await access.chatSpace(message[1])) !== spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "denied" }); return reply(response, 403, { error: "space not shared" }); }
         let result;
-        try { result = await backend.send(message[1], body.text, spaceId); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+        try { await fresh(spaceId, "send", () => access.chatSpace(message[1]))(); result = await backend.send(message[1], body.text, spaceId, fresh(spaceId, "send", () => access.chatSpace(message[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "error-or-unknown" }); throw error; }
         const delivery = (result && typeof result === "object" && "delivery" in result && (result.delivery === "queued" || result.delivery === "accepted")) ? result.delivery : "completed";
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: delivery });
         return reply(response, 200, result);

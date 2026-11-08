@@ -7,9 +7,9 @@ export interface IntentStore { load(requestId: string): Promise<Intent | null>; 
 export interface ReplyEngine {
   openRow(id: string): Promise<AnswerRow | null>;
   isBusy(chatId: string): Promise<boolean>;
-  sendIdle(intent: Intent): Promise<void>;
-  sendQueued(intent: Intent): Promise<void>;
-  resolve(intent: Intent, operationId: string): Promise<void>;
+  sendIdle(intent: Intent, guard?: () => Promise<void>): Promise<void>;
+  sendQueued(intent: Intent, guard?: () => Promise<void>): Promise<void>;
+  resolve(intent: Intent, operationId: string, guard?: () => Promise<void>): Promise<void>;
 }
 export function deriveId(operationId: string, role: string): string {
   return createHash("sha256").update(operationId).update(Buffer.from([0])).update(role).digest("hex").slice(0, 32);
@@ -47,23 +47,23 @@ function rowSignature(row: AnswerRow): string {
 export class ReplyCoordinator {
   private readonly running = new Map<string, Promise<Intent>>();
   constructor(private readonly store: IntentStore, private readonly engine: ReplyEngine) {}
-  async retryResolve(requestId: string, key: string): Promise<Intent> {
+  async retryResolve(requestId: string, key: string, guard: () => Promise<void> = async () => {}): Promise<Intent> {
     const running = this.running.get(requestId);
     if (running) await running.catch(() => undefined);
     const intent = await this.store.load(requestId);
     if (!intent || intent.key !== key || !["sent", "resolving", "resolved"].includes(intent.phase)) throw new Error("resolve-only retry unavailable");
     if (intent.phase === "resolved") return intent;
-    return this.answer(requestId, key, intent.input);
+    return this.answer(requestId, key, intent.input, false, guard);
   }
-  async answer(requestId: string, key: string, input: AnswerInput, stopAfterSend = false): Promise<Intent> {
+  async answer(requestId: string, key: string, input: AnswerInput, stopAfterSend = false, guard: () => Promise<void> = async () => {}): Promise<Intent> {
     if (!/^[A-Za-z0-9._-]{16,64}$/.test(key)) throw new Error("invalid idempotency key");
     const current = this.running.get(requestId);
-    if (current) { await current.catch(() => undefined); return this.answer(requestId, key, input, stopAfterSend); }
-    const task = this.perform(requestId, key, input, stopAfterSend);
+    if (current) { await current.catch(() => undefined); return this.answer(requestId, key, input, stopAfterSend, guard); }
+    const task = this.perform(requestId, key, input, stopAfterSend, guard);
     this.running.set(requestId, task);
     try { return await task; } finally { this.running.delete(requestId); }
   }
-  private async perform(requestId: string, key: string, input: AnswerInput, stopAfterSend: boolean): Promise<Intent> {
+  private async perform(requestId: string, key: string, input: AnswerInput, stopAfterSend: boolean, guard: () => Promise<void>): Promise<Intent> {
     let intent = await this.store.load(requestId);
     if (intent && (intent.key !== key || (intent.inputHash ? intent.inputHash !== createHash("sha256").update(JSON.stringify(input)).digest("hex") : JSON.stringify(intent.input) !== JSON.stringify(input)))) throw new Error("decision conflict");
     if (!intent) {
@@ -81,10 +81,10 @@ export class ReplyCoordinator {
       else { intent.phase = await this.engine.isBusy(intent.chatId) ? "queueDispatch" : "idleDispatch"; await this.store.save(intent); }
     }
     if (intent.phase === "idleDispatch") {
-      try { await this.engine.sendIdle(intent); } catch { throw new Error("idle delivery unconfirmed; retry same operation"); }
+      try { await guard(); await this.engine.sendIdle(intent, guard); } catch { throw new Error("idle delivery unconfirmed; retry same operation"); }
       intent.phase = "sent"; await this.store.save(intent);
     } else if (intent.phase === "queueDispatch") {
-      try { await this.engine.sendQueued(intent); } catch { intent.phase = "unknown"; await this.store.save(intent); return intent; }
+      try { await guard(); await this.engine.sendQueued(intent, guard); } catch { intent.phase = "unknown"; await this.store.save(intent); return intent; }
       intent.phase = "sent"; await this.store.save(intent);
     }
     if (intent.phase === "sent" && stopAfterSend) return intent;
@@ -94,7 +94,7 @@ export class ReplyCoordinator {
       intent.phase = "resolving"; await this.store.save(intent);
     }
     if (intent.phase === "resolving") {
-      try { await this.engine.resolve(intent, deriveId(intent.operationId, "reply-resolve")); }
+      try { await guard(); await this.engine.resolve(intent, deriveId(intent.operationId, "reply-resolve"), guard); }
       catch { return intent; }
       let row: AnswerRow | null;
       try { row = await this.engine.openRow(requestId); } catch { return intent; }
