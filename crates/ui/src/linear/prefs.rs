@@ -21,9 +21,9 @@ const PROJECT_EXPANDED_PREFIX: &str = "project:";
 
 /// Column width bounds (px). Below the minimum the column overlays the
 /// body instead of squeezing it (`overview::linear_host::linear_column`).
-pub(crate) const PANEL_MIN_W: f32 = 260.0;
-pub(crate) const PANEL_MAX_W: f32 = 560.0;
-pub(crate) const PANEL_DEFAULT_W: f32 = 340.0;
+pub(crate) const PANEL_MIN_W: f32 = crate::components::linear_parts::PANEL_MIN_WIDTH;
+pub(crate) const PANEL_MAX_W: f32 = crate::components::linear_parts::PANEL_MAX_WIDTH;
+pub(crate) const PANEL_DEFAULT_W: f32 = crate::components::linear_parts::PANEL_DEFAULT_WIDTH;
 
 pub(crate) fn clamp_width(width: f32) -> f32 {
     if width.is_finite() {

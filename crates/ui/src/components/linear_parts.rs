@@ -4,6 +4,194 @@ use crate::theme::Theme;
 use gpui::{SharedString, div, prelude::*, px};
 use mast_proto::linear::LinearIssueSummary;
 
+pub(crate) const OVERVIEW_BODY_MIN_WIDTH: f32 = 360.0;
+pub(crate) const RESIZE_HANDLE_WIDTH: f32 = 6.0;
+pub(crate) const PANEL_MIN_WIDTH: f32 = 260.0;
+pub(crate) const PANEL_MAX_WIDTH: f32 = 560.0;
+pub(crate) const PANEL_DEFAULT_WIDTH: f32 = 340.0;
+
+pub(crate) fn search_input(
+    placeholder: &'static str,
+    cx: &mut gpui::Context<crate::composer::ComposerInput>,
+) -> crate::composer::ComposerInput {
+    crate::composer::ComposerInput::with_context(
+        placeholder,
+        crate::composer::PALETTE_SEARCH_CONTEXT,
+        cx,
+    )
+    .with_single_line()
+    .with_text_metrics(12.0, 18.0)
+}
+
+pub(crate) fn picker_list() -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-add-issues-list")
+        .max_h(px(320.0))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+}
+
+pub(crate) fn picker_header(theme: &Theme, project: &str, item_title: &str) -> gpui::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(
+                            theme.ui_style.type_roles().title.unwrap_or(13.0)
+                                + super::layout_type_adjustment(theme),
+                        ))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(format!("Add issues from {project}"))),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(
+                            theme.ui_style.type_roles().secondary.unwrap_or(11.0)
+                                + super::layout_type_adjustment(theme),
+                        ))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!(
+                            "Open issues become work items under “{item_title}”"
+                        ))),
+                ),
+        )
+}
+
+pub(crate) fn picker_error(theme: &Theme, error: String) -> gpui::Div {
+    div()
+        .debug_selector(|| "linear-add-issues-error".into())
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().secondary.unwrap_or(11.0)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.warning)
+        .child(SharedString::from(error))
+}
+
+pub(crate) fn picker_actions(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+}
+
+pub(crate) fn small_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    super::button(
+        id,
+        label,
+        super::ButtonVariant::Secondary,
+        super::ButtonSize::Sm,
+        theme,
+    )
+    .max_w(px(180.0))
+    .truncate()
+}
+
+pub(crate) fn issue_create_action(button: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+    button.flex_shrink_1().min_w(px(44.0))
+}
+
+pub(crate) fn blocker(theme: &Theme, title: String) -> gpui::Div {
+    div()
+        .debug_selector(|| "linear-panel-blocker".into())
+        .flex()
+        .flex_col()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .py(px(8.0))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(
+                    theme.ui_style.type_roles().body.unwrap_or(12.0)
+                        + super::layout_type_adjustment(theme),
+                ))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(title)),
+        )
+}
+
+pub(crate) fn list_error(theme: &Theme, message: String) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(crate::typography::ui_rems(
+                    theme.ui_style.type_roles().secondary.unwrap_or(11.5)
+                        + super::layout_type_adjustment(theme),
+                ))
+                .text_color(theme.warning)
+                .child(SharedString::from(message)),
+        )
+}
+
+pub(crate) fn selected_actions(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .py(px(4.0))
+}
+
+pub(crate) fn selected_count(theme: &Theme, count: usize, fill: bool) -> gpui::Div {
+    div()
+        .when(fill, |el| el.flex_1())
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().label.unwrap_or(10.5)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("{count} selected")))
+}
+
+pub(crate) fn project_disclosure(theme: &Theme, open: bool) -> impl gpui::IntoElement {
+    crate::icons::icon(if open {
+        crate::icons::ALT_ARROW_DOWN
+    } else {
+        crate::icons::ALT_ARROW_RIGHT
+    })
+    .size(px(10.0))
+    .text_color(theme.text_muted)
+}
+
+pub(crate) fn project_body() -> gpui::Div {
+    div().flex().flex_col().pl(px(14.0))
+}
+
+pub(crate) fn panel_notice(theme: &Theme, text: String, error: bool) -> gpui::Div {
+    div()
+        .debug_selector(|| "linear-panel-notice".into())
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().secondary.unwrap_or(11.5)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(if error {
+            theme.warning
+        } else {
+            theme.text_muted
+        })
+        .child(SharedString::from(text))
+}
+
 pub(crate) fn settings_status(
     theme: &Theme,
     title: String,
@@ -352,12 +540,12 @@ pub(crate) fn team_archive_actions(theme: &Theme, confirmation: bool) -> gpui::D
         ))
 }
 
-pub(crate) fn picker_frame(theme: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn picker_frame(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id("linear-add-issues")
         .debug_selector(|| "linear-add-issues".into())
         .occlude()
-        .w(px(width))
+        .w(px(440.0))
         .flex()
         .flex_col()
         .gap(px(6.0 * super::layout_spacing(theme)))
@@ -603,7 +791,7 @@ pub(crate) fn issue_summary(issue: &LinearIssueSummary, theme: &Theme) -> gpui::
     meta.extend(issue.project.as_ref().map(|p| p.name.clone()));
     div()
         .flex_1()
-        .min_w_0()
+        .min_w(px(90.0))
         .flex()
         .flex_col()
         .gap(px(1.0))
