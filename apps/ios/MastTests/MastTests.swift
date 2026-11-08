@@ -104,6 +104,12 @@ final class MastTests: XCTestCase {
         XCTAssertFalse(Chat(id: "n", title: "No user", space: "", status: "idle", hasUserMessage: false).visible(showWorkers: true))
         XCTAssertTrue(Chat(id: "r", title: "Request", space: "", status: "idle", isWorker: true, hasOpenRequest: true).visible(showWorkers: false))
     }
+    func testSystemMessagePreviewRemovesOnlyHeaders() {
+        XCTAssertEqual(systemMessagePreview("[Message from Mast chat Coordinator (abc123)]\nPlease review"), "Please review")
+        XCTAssertEqual(systemMessagePreview("[Mast system message, not from the user: auto-continue 1/3]\nContinue work"), "Continue work")
+        XCTAssertEqual(systemMessagePreview("Re: \"Approve?\": Yes, proceed"), "Yes, proceed")
+        XCTAssertEqual(systemMessagePreview("Worker updates: one finished"), "Worker updates: one finished")
+    }
 }
 
 import SwiftUI

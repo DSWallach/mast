@@ -248,6 +248,19 @@ struct TranscriptContent: View {
         }
     } }.foregroundStyle(Horizon.ink(scheme)) }
 }
+func systemMessagePreview(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if (trimmed.hasPrefix("[Message from Mast chat ") || trimmed.hasPrefix("[Mast system message,")),
+       let end = trimmed.firstIndex(of: "]") {
+        return String(trimmed[trimmed.index(after: end)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    if trimmed.hasPrefix("Re: "), let expression = try? NSRegularExpression(pattern: #"^Re:\s*[\"“].*?[\"”]:\s*"#),
+       let match = expression.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+       let range = Range(match.range, in: trimmed) {
+        return String(trimmed[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return trimmed
+}
 struct SystemMessageRow: View {
     let message: TranscriptMessage
     @State private var expanded = false
@@ -257,7 +270,7 @@ struct SystemMessageRow: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(message.author == "relay" ? "FROM COORDINATOR" : (message.text.hasPrefix("Worker updates:") ? "WORKER UPDATE" : "MAST"))
                     .font(.system(size: 10, weight: .bold)).tracking(1)
-                Text(message.text).font(.system(size: 13)).lineLimit(expanded ? nil : 1).multilineTextAlignment(.leading)
+                Text(expanded ? message.text : systemMessagePreview(message.text)).font(.system(size: 13)).lineLimit(expanded ? nil : 1).multilineTextAlignment(.leading)
             }.foregroundStyle(Horizon.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(13).background(Horizon.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
         }.buttonStyle(.plain)
     }
