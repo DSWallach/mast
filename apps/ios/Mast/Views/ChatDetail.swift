@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum MarkdownBlock: Equatable {
     case paragraph(String), heading(Int, String), item(String, String), code(String)
@@ -21,6 +22,7 @@ func parseMarkdownBlocks(_ source: String) -> [MarkdownBlock] {
 }
 struct MarkdownReply: View {
     let text: String
+    @Environment(\.snapshotRendering) private var snapshot
     private func inline(_ text: String) -> Text {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         return Text((try? AttributedString(markdown: text, options: options)) ?? AttributedString(text))
@@ -31,7 +33,7 @@ struct MarkdownReply: View {
             case .paragraph(let text): inline(text).font(.system(size: 17, design: .serif)).lineSpacing(5).textSelection(.enabled)
             case .heading(let level, let text): inline(text).font(.system(size: level == 1 ? 22 : 19, weight: .semibold, design: .serif)).textSelection(.enabled)
             case .item(let marker, let text): HStack(alignment: .top, spacing: 9) { Text(marker).frame(minWidth: 17, alignment: .trailing); inline(text).frame(maxWidth: .infinity, alignment: .leading) }.font(.system(size: 17, design: .serif)).lineSpacing(5)
-            case .code(let code): ScrollView(.horizontal) { Text(code).font(.system(size: 13, design: .monospaced)).textSelection(.enabled).padding(14) }.background(Horizon.slate.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+            case .code(let code): Group { if snapshot { Text(code).font(.system(size: 13, design: .monospaced)).padding(14).frame(maxWidth: .infinity, alignment: .leading) } else { ScrollView(.horizontal) { Text(code).font(.system(size: 13, design: .monospaced)).textSelection(.enabled).padding(14) } } }.background(Horizon.slate.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
             }
         }
     }.frame(maxWidth: .infinity, alignment: .leading) }
@@ -40,6 +42,8 @@ struct MarkdownReply: View {
 struct TranscriptContent: View {
     let messages: [TranscriptMessage]
     let chat: Chat
+    var sendStates: [String: String] = [:]
+    var retry: (TranscriptMessage) -> Void = { _ in }
     @Environment(\.colorScheme) private var scheme
     var body: some View { VStack(alignment: .leading, spacing: 24) { ForEach(messages) { message in
         if message.author == "tool" {
@@ -47,7 +51,7 @@ struct TranscriptContent: View {
         } else if message.author == "system" || message.author == "relay" {
             SystemMessageRow(message: message)
         } else if message.author == "user" || (message.author == nil && (message.role.lowercased() == "user" || message.role.lowercased() == "you")) {
-            HStack { Spacer(minLength: 45); Text(message.text).font(.system(size: 16)).padding(.horizontal, 17).padding(.vertical, 13).background(Horizon.slate.opacity(scheme == .dark ? 0.18 : 0.14), in: RoundedRectangle(cornerRadius: 19)) }
+            HStack { Spacer(minLength: 45); VStack(alignment: .trailing, spacing: 5) { Text(message.text).font(.system(size: 16)).padding(.horizontal, 17).padding(.vertical, 13).background(Horizon.slate.opacity(scheme == .dark ? 0.18 : 0.14), in: RoundedRectangle(cornerRadius: 19)); if let state = sendStates[message.id] { if state == "Delivery unknown · Retry" { Button(state) { retry(message) }.font(.system(size: 11)).foregroundStyle(Horizon.muted(scheme)) } else { Text(state).font(.system(size: 11)).foregroundStyle(Horizon.muted(scheme)) } } } }
         } else {
             VStack(alignment: .leading, spacing: 9) { Text((chat.model ?? "ASSISTANT").uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.2); MarkdownReply(text: message.text) }.foregroundStyle(Horizon.provider(chat, scheme)).frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -102,6 +106,8 @@ struct ChatDetail: View {
     @State private var notice = ""
     @State private var messages: [TranscriptMessage]
     @State private var sending = false
+    @State private var localMessages: [TranscriptMessage] = []
+    @State private var sendStates: [String: String] = [:]
     @State private var olderRemaining = 0
     @State private var nextOffset = 0
     @Environment(\.colorScheme) private var scheme
@@ -109,21 +115,35 @@ struct ChatDetail: View {
     init(chat: Chat, model: Companion, initialMessages: [TranscriptMessage] = []) {
         self.chat = chat; self.model = model; _messages = State(initialValue: initialMessages)
     }
+    private func send(_ message: TranscriptMessage) {
+        sending = true; sendStates[message.id] = "Sending"
+        Task {
+            do {
+                let result = try await model.send(chat, text: message.text)
+                sendStates[message.id] = result == "Accepted" ? "Sent" : result == "Queued" ? "Queued" : "Demo"
+                if result == "Accepted" || result == "Queued" { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+            } catch {
+                sendStates[message.id] = "Delivery unknown · Retry"
+                notice = "Check the chat before retrying; the message may have arrived."
+            }
+            sending = false
+        }
+    }
     var body: some View { VStack(spacing: 0) {
         ScrollViewReader { proxy in
             HorizonScroll { VStack(alignment: .leading, spacing: 20) {
                 if olderRemaining > 0 { Button("Load earlier") { Task { let first = messages.first?.id; do { let page = try await model.transcript(chat, offset: nextOffset); messages = page.messages + messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; if let first { proxy.scrollTo(first, anchor: .top) } } catch { notice = "Earlier messages unavailable." } } }.font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme)) }
-                TranscriptContent(messages: messages, chat: chat)
+                TranscriptContent(messages: messages + localMessages, chat: chat, sendStates: sendStates, retry: send)
                 Color.clear.frame(height: 1).id("transcript-bottom")
             }.padding(22).frame(maxWidth: .infinity, alignment: .leading) }
             .task { do { let page = try await model.transcript(chat); messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } catch { notice = "Transcript unavailable or stale." } }
-            .onChange(of: sending) { _, sending in if !sending { Task { if let page = try? await model.transcript(chat) { messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } } } }
+            .onChange(of: sending) { _, _ in DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }
         }
         VStack(alignment: .leading, spacing: 8) {
             if !notice.isEmpty { Text(notice).font(.system(size: 12)).foregroundStyle(Horizon.muted(scheme)) }
             HStack(alignment: .bottom, spacing: 12) {
                 if snapshot { Text("Message").font(.system(size: 16)).foregroundStyle(Horizon.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading) } else { TextField("Message", text: $text, axis: .vertical).font(.system(size: 16)).lineLimit(1...5) }
-                Button("SEND") { let message = text; sending = true; Task { do { notice = try await model.send(chat, text: message); text = "" } catch { notice = "Send failed or outcome unknown. Check the chat before retrying." }; sending = false } }.font(.system(size: 11, weight: .bold)).tracking(1).foregroundStyle(Horizon.muted(scheme)).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("SEND") { let message = TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user"); localMessages.append(message); text = ""; notice = ""; send(message) }.font(.system(size: 11, weight: .bold)).tracking(1).foregroundStyle(Horizon.muted(scheme)).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding(16).background(Horizon.slate.opacity(scheme == .dark ? 0.15 : 0.12), in: RoundedRectangle(cornerRadius: 19))
         }.padding(.horizontal, 18).padding(.bottom, 12).padding(.top, 8)
     }.background(Horizon.surface(scheme)).navigationTitle(chat.title).navigationBarTitleDisplayMode(.inline) }

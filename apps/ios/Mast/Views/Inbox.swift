@@ -23,6 +23,6 @@ struct RequestCard: View {
     var body: some View { VStack(alignment: .leading, spacing: 12) {
         HStack { Text(request.kind.uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.4); Spacer(); if request.priority == "blocking" { Text("BLOCKING").font(.system(size: 10, weight: .semibold)).tracking(0.8) } }.foregroundStyle(Horizon.muted(scheme))
         Text(request.text).font(.system(size: 19, weight: .semibold)).foregroundStyle(Horizon.ink(scheme)).multilineTextAlignment(.leading)
-        HStack { Text([request.space, request.item].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ›  ")); Spacer(); Text(Horizon.relative(request.createdAt)) }.font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme))
+        HStack { Text([request.space, request.item].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ›  ")); Spacer(); TimelineView(.periodic(from: .now, by: 60)) { _ in Text(Horizon.relative(request.createdAt)) } }.font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme))
     }.padding(19).frame(maxWidth: .infinity, alignment: .leading).background(Horizon.slate.opacity(scheme == .dark ? 0.13 : 0.10), in: RoundedRectangle(cornerRadius: 18)) }
 }

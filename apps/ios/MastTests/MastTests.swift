@@ -122,7 +122,10 @@ final class HorizonSnapshotTests: XCTestCase {
     func testRenderScreens() throws {
         let model = Companion(credential: MemoryCredential())
         let offline = Companion(credential: MemoryCredential())
-        offline.connection = "Disconnected · showing stale data"
+        offline.demo = false; offline.connection = "Disconnected · showing stale data"
+        let empty = Companion(credential: MemoryCredential()); empty.requests = []
+        let iconPath = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Mast/Assets.xcassets/AppIcon.appiconset/AppIcon.png")
+        let icon = try XCTUnwrap(UIImage(contentsOfFile: iconPath.path))
         let longMessages = (1...40).map { TranscriptMessage(id: "long-\($0)", role: "assistant", text: "Message \($0): The latest update is ready for review.", author: "agent") }
         let screens: [(String, AnyView)] = [
             ("inbox", AnyView(InboxScreen(model: model))),
@@ -131,6 +134,12 @@ final class HorizonSnapshotTests: XCTestCase {
             ("chat-detail", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Demo.messages))),
             ("long-chat-bottom", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Array(longMessages.suffix(3))))),
             ("connect", AnyView(ConnectScreen(model: model))),
+            ("markdown-reply", AnyView(MarkdownReply(text: "# Release notes\n\nA **bold** and *italic* reply with `code` and a [link](https://example.com).\n\n- First item\n- Second item\n1. Numbered item\n\n```swift\nlet value = 1\n``` ").padding(22).foregroundStyle(Horizon.provider(Demo.chats[0], .light)))),
+            ("tool-row", AnyView(ToolActivityRow(text: "exec: cargo test\nexec: git status").padding(22))),
+            ("empty-inbox", AnyView(InboxScreen(model: empty))),
+            ("offline-full", AnyView(InboxScreen(model: offline))),
+            ("inbox-ax3", AnyView(InboxScreen(model: model).dynamicTypeSize(.accessibility3))),
+            ("app-icon", AnyView(Image(uiImage: icon).resizable().scaledToFit())),
             ("offline", AnyView(VStack(spacing: 0) { OfflineBanner(text: offline.connection); InboxScreen(model: offline) }))
         ]
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/snapshots")
