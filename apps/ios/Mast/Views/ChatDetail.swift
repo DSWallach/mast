@@ -20,16 +20,21 @@ func parseMarkdownBlocks(_ source: String) -> [MarkdownBlock] {
     }
     if fenced { blocks.append(.code(code.joined(separator: "\n"))) }; flush(); return blocks
 }
-struct MarkdownReply: View {
-    let text: String
-    @Environment(\.snapshotRendering) private var snapshot
-    private func inline(_ text: String) -> Text {
+func markdownInline(_ text: String, linkColor: Color) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         var value = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
-        for run in value.runs where run.inlinePresentationIntent?.contains(.code) == true {
-            value[run.range].font = .system(size: 17, design: .monospaced)
+        for run in value.runs {
+            if run.inlinePresentationIntent?.contains(.code) == true { value[run.range].font = .system(size: 17, design: .monospaced) }
+            if run.link != nil { value[run.range].foregroundColor = linkColor; value[run.range].underlineStyle = .single }
         }
-        return Text(value)
+        return value
+}
+struct MarkdownReply: View {
+    let text: String
+    let linkColor: Color
+    @Environment(\.snapshotRendering) private var snapshot
+    private func inline(_ text: String) -> Text {
+        Text(markdownInline(text, linkColor: linkColor))
     }
     var body: some View { VStack(alignment: .leading, spacing: 10) {
         ForEach(Array(parseMarkdownBlocks(text).enumerated()), id: \.offset) { _, block in
@@ -40,7 +45,7 @@ struct MarkdownReply: View {
             case .code(let code): Group { if snapshot { Text(code).font(.system(size: 13, design: .monospaced)).padding(14).frame(maxWidth: .infinity, alignment: .leading) } else { ScrollView(.horizontal) { Text(code).font(.system(size: 13, design: .monospaced)).textSelection(.enabled).padding(14) } } }.background(Horizon.slate.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
             }
         }
-    }.frame(maxWidth: .infinity, alignment: .leading) }
+    }.tint(linkColor).frame(maxWidth: .infinity, alignment: .leading) }
 }
 
 struct TranscriptContent: View {
@@ -57,7 +62,7 @@ struct TranscriptContent: View {
         } else if message.author == "user" || (message.author == nil && (message.role.lowercased() == "user" || message.role.lowercased() == "you")) {
             HStack { Spacer(minLength: 45); VStack(alignment: .trailing, spacing: 5) { Text(message.text).font(.system(size: 16)).padding(.horizontal, 17).padding(.vertical, 13).background(Horizon.slate.opacity(scheme == .dark ? 0.18 : 0.14), in: RoundedRectangle(cornerRadius: 19)); if let state = sendStates[message.id] { if state == "Delivery unknown · Retry" { Button(state) { retry(message) }.font(.system(size: 11)).foregroundStyle(Horizon.muted(scheme)) } else { Text(state).font(.system(size: 11)).foregroundStyle(Horizon.muted(scheme)) } } } }
         } else {
-            VStack(alignment: .leading, spacing: 9) { Text((chat.model ?? "ASSISTANT").uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.2); MarkdownReply(text: message.text) }.foregroundStyle(Horizon.provider(chat, scheme)).frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 9) { Text((chat.model ?? "ASSISTANT").uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.2); MarkdownReply(text: message.text, linkColor: Horizon.provider(chat, scheme)) }.foregroundStyle(Horizon.provider(chat, scheme)).frame(maxWidth: .infinity, alignment: .leading)
         }
     } }.foregroundStyle(Horizon.ink(scheme)) }
 }

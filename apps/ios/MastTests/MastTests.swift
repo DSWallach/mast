@@ -113,13 +113,20 @@ final class MastTests: XCTestCase {
     func testMarkdownBlocks() {
         XCTAssertEqual(parseMarkdownBlocks("# Heading\n\nA **bold** paragraph\n\n- first\n2. second\n\n```swift\nlet x = 1\n```"), [.heading(1, "Heading"), .paragraph("A **bold** paragraph"), .item("•", "first"), .item("2.", "second"), .code("let x = 1")])
     }
+    func testMarkdownLinkKeepsDestinationAndProviderStyle() throws {
+        let result = markdownInline("[Mast](https://example.com)", linkColor: .green)
+        let link = try XCTUnwrap(result.runs.first(where: { $0.link != nil }))
+        XCTAssertEqual(link.link?.absoluteString, "https://example.com")
+        XCTAssertEqual(link.foregroundColor, .green)
+        XCTAssertEqual(link.underlineStyle, .single)
+    }
 }
 
 import SwiftUI
 
 private struct MarkdownPreview: View {
     @Environment(\.colorScheme) private var scheme
-    var body: some View { MarkdownReply(text: "# Release notes\n\nA **bold** and *italic* reply with `code` and a [link](https://example.com).\n\n- First item\n- Second item\n1. Numbered item\n\n```swift\nlet value = 1\n``` ").padding(22).foregroundStyle(Horizon.provider(Demo.chats[0], scheme)) }
+    var body: some View { MarkdownReply(text: "# Release notes\n\nA **bold** and *italic* reply with `code` and a [link](https://example.com).\n\n- First item\n- Second item\n1. Numbered item\n\n```swift\nlet value = 1\n``` ", linkColor: Horizon.provider(Demo.chats[0], scheme)).padding(22).foregroundStyle(Horizon.provider(Demo.chats[0], scheme)) }
 }
 
 @MainActor
@@ -144,7 +151,7 @@ final class HorizonSnapshotTests: XCTestCase {
             ("empty-inbox", AnyView(InboxScreen(model: empty))),
             ("offline-full", AnyView(InboxScreen(model: offline))),
             ("inbox-ax3", AnyView(InboxScreen(model: model).dynamicTypeSize(.accessibility3))),
-            ("app-icon", AnyView(Image(uiImage: icon).resizable().scaledToFit())),
+            ("app-icon", AnyView(Image(uiImage: icon).resizable().frame(width: 320, height: 320).clipShape(RoundedRectangle(cornerRadius: 72, style: .continuous)).padding(36))),
             ("offline", AnyView(VStack(spacing: 0) { OfflineBanner(text: offline.connection); InboxScreen(model: offline) }))
         ]
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/snapshots")
