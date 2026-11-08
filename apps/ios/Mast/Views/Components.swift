@@ -42,3 +42,18 @@ struct OfflineScreen: View {
         Button("Retry") { Task { await model.refresh() } }.font(.system(size: 14, weight: .semibold)).foregroundStyle(style.muted(scheme)).padding(.horizontal, 18).padding(.vertical, 10).background(style.slate.opacity(0.15), in: Capsule())
     }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 30) }
 }
+
+struct RequestLinkView: View {
+    @Environment(\.openURL) private var openURL
+    let link: RequestLink
+    var body: some View {
+        let target = link.target
+        let destination: String = switch target.type {
+        case "artifact": "mast-artifact:\(target.id ?? "")"
+        case "chat": "mast-chat:\(target.id ?? "")"
+        case "url", "pr": target.url ?? ""
+        default: "mast-open-on-mac:"
+        }
+        Button(link.label) { if let url = URL(string: destination) { openURL(url) } }.buttonStyle(.plain).underline()
+    }
+}

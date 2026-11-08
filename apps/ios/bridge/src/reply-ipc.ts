@@ -3,8 +3,8 @@ import { effectiveKind, snapshot } from "./outline.js";
 import type { AnswerRow, Intent, ReplyEngine } from "./reply.js";
 import type { SpaceAccess } from "./shared-spaces.js";
 
-type UnaryMethod = "EngineInfo" | "ContinueChatForWorkItem" | "QueueMessage" | "WorkOutlineMutate";
-async function unary(url: string, method: UnaryMethod, params: object): Promise<any> {
+type UnaryMethod = "ArtifactContent" | "EngineInfo" | "ContinueChatForWorkItem" | "QueueMessage" | "WorkOutlineMutate";
+export async function unary(url: string, method: UnaryMethod, params: object): Promise<any> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url, { maxPayload: 8 * 1024 * 1024 });
     let finished = false;

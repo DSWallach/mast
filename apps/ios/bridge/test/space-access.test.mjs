@@ -21,7 +21,7 @@ test("default deny, hidden IDs, immediate unshare, and moved chats", async () =>
   }));
   const shared = new SharedSpaces(dir), access = engineSpaceAccess(`ws://127.0.0.1:${ipc.address().port}`, shared), events = [];
   let moveDuringTranscript = false;
-  const backend = { requests: async () => [{ id: "request", spaceId: "personal" }, { id: "hidden-request", spaceId: "work" }], chats: async () => [{ id: "chat", spaceId: chatSpace }, { id: "hidden", spaceId: "work" }], transcript: async () => { if (moveDuringTranscript) chatSpace = "work"; return { messages: ["fixture"] }; }, send: async () => { sent++; return { delivery: "accepted" }; }, interrupt: async () => { stopped++; } };
+  const backend = { requests: async () => [{ id: "request", spaceId: "personal" }, { id: "hidden-request", spaceId: "work" }], chats: async () => [{ id: "chat", spaceId: chatSpace }, { id: "hidden", spaceId: "work" }], chat: async (id, spaceId) => ({ id, spaceId, title: "Fixture", status: "idle", space: "Personal" }), transcript: async () => { if (moveDuringTranscript) chatSpace = "work"; return { messages: ["fixture"] }; }, send: async () => { sent++; return { delivery: "accepted" }; }, interrupt: async () => { stopped++; } };
   const replies = { answer: async () => { answered++; return { phase: "sent", resolveOnly: false }; }, retryResolve: async () => { answered++; return { phase: "resolved", resolveOnly: false }; } };
   const bridge = createBridge(backend, fakeTokens(), new PairingChallenge("fixture", Date.now()), replies, access, { append: async event => events.push(event) });
   await new Promise(resolve => bridge.listen(0, "127.0.0.1", resolve));
@@ -40,6 +40,8 @@ test("default deny, hidden IDs, immediate unshare, and moved chats", async () =>
     assert.equal((await fetch(base + "/requests/request/answer", { method: "POST", headers, body: JSON.stringify({ outcome: "approved" }) })).status, 200);
     assert.equal((await fetch(base + "/chats/chat/stop", { method: "POST", headers, body: "{}" })).status, 200);
     assert.equal((await fetch(base + "/chats/hidden/stop", { method: "POST", headers, body: "{}" })).status, 403);
+    assert.equal((await fetch(base + "/chats/hidden", { headers })).status, 403);
+    assert.equal((await fetch(base + "/chats/chat", { headers })).status, 200);
     assert.equal((await fetch(base + "/chats/hidden/transcript", { headers })).status, 403);
     assert.equal((await fetch(base + "/requests/hidden-request", { headers })).status, 403);
     assert.equal((await fetch(base + "/chats/hidden/messages", { method: "POST", headers, body: JSON.stringify({ text: "secret" }) })).status, 403);
