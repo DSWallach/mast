@@ -110,6 +110,9 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(systemMessagePreview("Re: \"Approve?\": Yes, proceed"), "Yes, proceed")
         XCTAssertEqual(systemMessagePreview("Worker updates: one finished"), "Worker updates: one finished")
     }
+    func testMarkdownBlocks() {
+        XCTAssertEqual(parseMarkdownBlocks("# Heading\n\nA **bold** paragraph\n\n- first\n2. second\n\n```swift\nlet x = 1\n```"), [.heading(1, "Heading"), .paragraph("A **bold** paragraph"), .item("•", "first"), .item("2.", "second"), .code("let x = 1")])
+    }
 }
 
 import SwiftUI

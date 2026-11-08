@@ -1,5 +1,42 @@
 import SwiftUI
 
+enum MarkdownBlock: Equatable {
+    case paragraph(String), heading(Int, String), item(String, String), code(String)
+}
+func parseMarkdownBlocks(_ source: String) -> [MarkdownBlock] {
+    var blocks: [MarkdownBlock] = [], paragraph: [String] = [], code: [String] = []
+    var fenced = false
+    func flush() { if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))); paragraph.removeAll() } }
+    for line in source.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("```") { if fenced { blocks.append(.code(code.joined(separator: "\n"))); code.removeAll() } else { flush() }; fenced.toggle(); continue }
+        if fenced { code.append(line); continue }
+        if trimmed.isEmpty { flush(); continue }
+        let hashes = trimmed.prefix(while: { $0 == "#" }).count
+        if (1...6).contains(hashes), trimmed.dropFirst(hashes).first == " " { flush(); blocks.append(.heading(hashes, String(trimmed.dropFirst(hashes + 1)))); continue }
+        if let range = trimmed.range(of: #"^(?:[-*+] |[0-9]+[.)] )"#, options: .regularExpression) { flush(); let marker = String(trimmed[range]).trimmingCharacters(in: .whitespaces); blocks.append(.item(marker == "-" || marker == "*" || marker == "+" ? "•" : marker, String(trimmed[range.upperBound...]))); continue }
+        paragraph.append(line)
+    }
+    if fenced { blocks.append(.code(code.joined(separator: "\n"))) }; flush(); return blocks
+}
+struct MarkdownReply: View {
+    let text: String
+    private func inline(_ text: String) -> Text {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return Text((try? AttributedString(markdown: text, options: options)) ?? AttributedString(text))
+    }
+    var body: some View { VStack(alignment: .leading, spacing: 10) {
+        ForEach(Array(parseMarkdownBlocks(text).enumerated()), id: \.offset) { _, block in
+            switch block {
+            case .paragraph(let text): inline(text).font(.system(size: 17, design: .serif)).lineSpacing(5).textSelection(.enabled)
+            case .heading(let level, let text): inline(text).font(.system(size: level == 1 ? 22 : 19, weight: .semibold, design: .serif)).textSelection(.enabled)
+            case .item(let marker, let text): HStack(alignment: .top, spacing: 9) { Text(marker).frame(minWidth: 17, alignment: .trailing); inline(text).frame(maxWidth: .infinity, alignment: .leading) }.font(.system(size: 17, design: .serif)).lineSpacing(5)
+            case .code(let code): ScrollView(.horizontal) { Text(code).font(.system(size: 13, design: .monospaced)).textSelection(.enabled).padding(14) }.background(Horizon.slate.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+            }
+        }
+    }.frame(maxWidth: .infinity, alignment: .leading) }
+}
+
 struct TranscriptContent: View {
     let messages: [TranscriptMessage]
     let chat: Chat
@@ -10,7 +47,7 @@ struct TranscriptContent: View {
         } else if message.author == "user" || (message.author == nil && (message.role.lowercased() == "user" || message.role.lowercased() == "you")) {
             HStack { Spacer(minLength: 45); Text(message.text).font(.system(size: 16)).padding(.horizontal, 17).padding(.vertical, 13).background(Horizon.slate.opacity(scheme == .dark ? 0.18 : 0.14), in: RoundedRectangle(cornerRadius: 19)) }
         } else {
-            VStack(alignment: .leading, spacing: 9) { Text((chat.model ?? "ASSISTANT").uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.2); Text(message.text).font(.system(size: 17, design: .serif)).lineSpacing(5).textSelection(.enabled) }.foregroundStyle(Horizon.provider(chat, scheme)).frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 9) { Text((chat.model ?? "ASSISTANT").uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.2); MarkdownReply(text: message.text) }.foregroundStyle(Horizon.provider(chat, scheme)).frame(maxWidth: .infinity, alignment: .leading)
         }
     } }.foregroundStyle(Horizon.ink(scheme)) }
 }
