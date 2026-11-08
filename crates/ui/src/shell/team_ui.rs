@@ -15,6 +15,22 @@ use crate::team::{
 };
 
 impl Shell {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_snapshot_team(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, _| {
+            state.chats.push(serde_json::from_value(serde_json::json!({
+                "id": "fixture-worker", "deviceId": "local", "spaceId": "fixture-space",
+                "parentChatId": "fixture-chat", "title": "Validate the release",
+                "archived": false, "createdAt": "2026-09-08T00:00:00Z"
+            })).unwrap());
+        });
+        self.active_chat = "fixture-chat".into();
+        let key = self.panel_key(cx);
+        self.panels.update(&key, |panel| {
+            panel.changes_open = true;
+            panel.right_active = RightSurface::Team;
+        });
+    }
     /// The selected chat's workers. Link statuses (PR checks, diff stats) come
     /// from the header-link cache; missing ones are requested and the tab
     /// repaints when they land.

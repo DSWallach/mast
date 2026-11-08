@@ -1084,11 +1084,7 @@ impl LinearPanel {
     }
 
     fn quiet(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
-        div()
-            .py(px(4.0))
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.text_faint)
-            .child(text.into())
+        crate::components::linear_parts::quiet_message(theme, text, true)
     }
 
     /// The account-wide blocker (no key, rejected key, no Linear on this

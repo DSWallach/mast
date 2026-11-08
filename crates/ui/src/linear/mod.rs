@@ -201,7 +201,7 @@ pub(crate) fn user_name(user: &mast_proto::linear::LinearUser) -> String {
         .unwrap_or_else(|| user.name.clone())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "snapshot"))]
 pub(crate) mod fixture {
     use mast_proto::linear::{
         LinearIssueSummary, LinearProjectRef, LinearProjectSummary, LinearState, LinearStateType,

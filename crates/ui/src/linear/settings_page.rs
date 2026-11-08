@@ -74,6 +74,15 @@ pub(crate) struct LinearSettingsPage {
 
 impl LinearSettingsPage {
     pub(crate) fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::with_status_refresh(state, true, cx)
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn offline_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::with_status_refresh(state, false, cx)
+    }
+
+    fn with_status_refresh(state: Entity<AppState>, refresh: bool, cx: &mut Context<Self>) -> Self {
         let key_input = cx.new(|cx| MaskedKeyInput::new("Paste a Linear personal API key", cx));
         let subscriptions = vec![
             // The page reads only the connection card's view of the status.
@@ -92,7 +101,9 @@ impl LinearSettingsPage {
                 }
             }),
         ];
-        store::refresh_status(&state, false, cx);
+        if refresh {
+            store::refresh_status(&state, false, cx);
+        }
         let seen = ObserveGate::seeded(connection_view(state.read(cx).linear.status.as_ref()));
         Self {
             seen,

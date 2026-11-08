@@ -170,6 +170,30 @@ pub fn overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview> {
     overview
 }
 
+/// Offline Overview with an in-memory Linear panel, without network requests.
+pub fn linear_overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview> {
+    let overview = overview_fixture(cx);
+    overview.update(cx, |overview, cx| overview.show_snapshot_linear(cx));
+    overview
+}
+
+/// Linear settings with an in-memory disconnected status and no RPC.
+pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.linear.status = Some(Ok(mast_proto::linear::LinearConnectionStatus::default()));
+        state
+    });
+    cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
+}
+
+/// Offline chat shell with a single in-memory worker.
+pub fn team_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_team(cx));
+    shell
+}
+
 impl gpui::Render for OutlineFixture {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{div, prelude::*, px};

@@ -441,11 +441,7 @@ impl Render for ProjectIssuePicker {
             .flex_col()
             .gap(px(1.0));
         let quiet = |text: String| {
-            div()
-                .py(px(6.0))
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(text))
+            crate::components::linear_parts::quiet_message(&theme, SharedString::from(text), false)
         };
         match &self.issues {
             Load::Loading => list = list.child(quiet("Loading\u{2026}".into())),
@@ -474,21 +470,8 @@ impl Render for ProjectIssuePicker {
             "One work item per checked issue, as the last children of \u{201c}{item_title}\u{201d}"
         )
         .into();
-        div()
-            .id("linear-add-issues")
-            .debug_selector(|| "linear-add-issues".into())
+        crate::components::linear_parts::picker_frame(&theme, PICKER_W)
             .track_focus(&self.focus)
-            .occlude()
-            .w(px(PICKER_W))
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .p(px(10.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_dialog)
-            .shadow_lg()
             .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();

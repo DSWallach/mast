@@ -4,6 +4,40 @@ use crate::theme::Theme;
 use gpui::{SharedString, div, prelude::*, px};
 use mast_proto::linear::LinearIssueSummary;
 
+pub(crate) fn picker_frame(theme: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-add-issues")
+        .debug_selector(|| "linear-add-issues".into())
+        .occlude()
+        .w(px(width))
+        .flex()
+        .flex_col()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .p(px(10.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(8.0)))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.surface_dialog)
+        .shadow_lg()
+}
+
+pub(crate) fn quiet_message(
+    theme: &Theme,
+    text: impl Into<SharedString>,
+    compact: bool,
+) -> gpui::Div {
+    div()
+        .py(px(
+            (if compact { 4.0 } else { 6.0 }) * super::layout_spacing(theme)
+        ))
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().secondary.unwrap_or(11.5)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_faint)
+        .child(text.into())
+}
+
 pub(crate) fn settings_detail(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
     div()
         .text_size(crate::typography::ui_rems(

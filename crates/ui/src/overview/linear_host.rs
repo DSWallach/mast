@@ -143,6 +143,22 @@ pub(crate) enum LinearSlot {
 }
 
 impl Overview {
+    #[cfg(feature = "snapshot")]
+    pub(super) fn open_snapshot_linear(&mut self, cx: &mut Context<Self>) {
+        let spaces = self.linear_spaces(cx);
+        let panel = self.ensure_linear_panel("fixture-space".into(), cx);
+        panel.update(cx, |panel, _| {
+            panel.set_data(spaces, OutlineSelection::None);
+            panel.my_issues = crate::linear::panel::Load::Ready(vec![
+                crate::linear::fixture::issue("ENG-42", "Review the workspace"),
+                crate::linear::fixture::issue("ENG-43", "Validate the release"),
+            ]);
+            panel.my_projects = crate::linear::panel::Load::Ready(vec![
+                crate::linear::fixture::project("p-launch", "Launch"),
+            ]);
+        });
+        self.linear_column.open = true;
+    }
     /// Every Space with Linear on, in Outline order, with its snapshot.
     pub(crate) fn linear_spaces(&self, cx: &gpui::App) -> Vec<LinearSpace> {
         self.outline_spaces(cx)
