@@ -1016,6 +1016,27 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-08 17:30; coordinator dd899921)
+
+- **iOS companion merged on integration** (a1ac86d6; `apps/ios` + `docs/internal/ios-companion.md` only, no Rust).
+  SwiftUI iOS 17 app + Node 18 bridge (loopback 127.0.0.1:27655 → engine IPC 27654, unscoped `mast mcp` for chat
+  tools). Shipped:
+  - Needs-you inbox, and reply & resolve with desktop parity (live-QA'd: audit shows answer sent + resolved)
+  - chats with tail paging, system/relay rows, worker chats hidden
+  - send, Stop, and SSE live updates
+  - per-Space sharing, default deny (`node dist/cli.js spaces share agent-mode-tools`)
+  - Face ID/passcode lock and app-switcher cover
+  - confirmations unless Quick actions; metadata-only audit log; per-device revoke; QR pairing
+  - Default/Industrial/Horizon styles with Match Mac (read-only `GET /appearance`), fonts EB Garamond + Geist (OFL)
+
+  Mikey QAs in the Simulator (iPhone 15 Pro; workers test on the Pro Max E50FC8FD). Tailscale is set up on the Mac
+  (tailnet tail09fdaf, `tailscale serve --bg http://127.0.0.1:27655` is tailnet-only, Funnel off). His work iPhone
+  13 mini (MDM via Rippling) **blocks dev-signed apps**, so phone use waits on DevOps. The signed build (Personal
+  Team 9PD43XAATA, bundle `computer.mikey.mast.companion.dev`) is installed there via devicectl but can't open.
+  Open items: security pass before DevOps (84df7cc6), photo attachments design (9719a85d; needs a Rust attach
+  path), desktop Settings → Phone page (not started; Rust + release). Proposed approval rule for iOS xcodebuild
+  (e866c323) awaits Mikey.
+
 ## In flight (snapshot 2026-11-08 01:31; coordinator dd899921, overnight)
 
 - **Installed: release 70** (93c138ba, 01:31; nextest 8/8, UI 2601/0/13). Backup of release 69:
