@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>UIAppFonts</key><array><string>Fonts/EBGaramond.ttf</string><string>Fonts/Geist.ttf</string><string>Fonts/Geist-SemiBold.ttf</string></array>
+  <key>NSCameraUsageDescription</key><string>Scan a pairing code from your Mac.</string>
+  <key>NSFaceIDUsageDescription</key><string>Unlock Mast to view your shared Spaces and chats.</string>
+  <key>UILaunchScreen</key><dict><key>UIColorName</key><string>LaunchSurface</string><key>UIImageName</key><string>LaunchMark</string></dict>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict></plist>
