@@ -655,6 +655,11 @@ mod tests {
         assert_eq!(serde_json::to_string(&UiStyleId::Horizon).unwrap(), "\"horizon\"");
         let directory = tempfile::tempdir().unwrap();
         let path = crate::settings::UiSettings::path(directory.path());
+        std::fs::write(&path, r#"{"uiStyle":"area","themeSelection":{"light":"area-light","dark":"area-dark"}}"#).unwrap();
+        let saved = crate::settings::UiSettings::load(directory.path());
+        assert_eq!(saved.ui_style, UiStyleId::Horizon);
+        assert_eq!(saved.theme_selection.variant_id(mast_theme::Appearance::Light), "horizon-light");
+        assert_eq!(saved.theme_selection.variant_id(mast_theme::Appearance::Dark), "horizon-dark");
         for (legacy, style, layout) in [
             ("minimal", UiStyleId::Default, UiLayout::Minimal),
             ("dense", UiStyleId::Default, UiLayout::Compact),
