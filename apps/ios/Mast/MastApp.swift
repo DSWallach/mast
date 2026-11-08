@@ -74,7 +74,7 @@ private struct ContentView: View {
                     }
                 }.navigationTitle("Settings")
             }.tabItem { Label("Settings", systemImage: "gearshape") }
-        }.tint(Color(red: 0.16, green: 0.37, blue: 0.35))
+        }.tint(Color(red: 142 / 255, green: 164 / 255, blue: 184 / 255))
     }
 }
 
