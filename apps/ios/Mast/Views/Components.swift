@@ -11,7 +11,8 @@ struct HorizonHeader: View {
     let title: String
     var count: Int? = nil
     @Environment(\.colorScheme) private var scheme
-    var body: some View { HStack(alignment: .firstTextBaseline, spacing: 10) { Text(title).font(.system(size: 34, weight: .bold)); if let count { Text("\(count)").font(.system(size: 17, weight: .medium)).foregroundStyle(Horizon.muted(scheme)) }; Spacer() }.foregroundStyle(Horizon.ink(scheme)) }
+    @ScaledMetric(relativeTo: .largeTitle) private var titleSize = 34
+    var body: some View { HStack(alignment: .firstTextBaseline, spacing: 10) { Text(title).font(.system(size: titleSize, weight: .bold)); if let count { Text("\(count)").font(.system(size: 17, weight: .medium)).foregroundStyle(Horizon.muted(scheme)) }; Spacer() }.foregroundStyle(Horizon.ink(scheme)) }
 }
 struct OfflineBanner: View {
     let text: String
@@ -30,6 +31,6 @@ struct OfflineScreen: View {
         Text("Mac is offline").font(.system(size: 24, weight: .semibold)).foregroundStyle(Horizon.ink(scheme))
         if let date = model.lastUpdated { Text("Last updated \(date.formatted(.relative(presentation: .named)))").font(.system(size: 14)).foregroundStyle(Horizon.muted(scheme)) }
         else { Text("Connect to your Mac and try again.").font(.system(size: 14)).foregroundStyle(Horizon.muted(scheme)) }
-        Button("Retry") { Task { await model.refresh() } }.font(.system(size: 14, weight: .semibold)).padding(.horizontal, 18).padding(.vertical, 10).background(Horizon.slate.opacity(0.15), in: Capsule())
+        Button("Retry") { Task { await model.refresh() } }.font(.system(size: 14, weight: .semibold)).foregroundStyle(Horizon.muted(scheme)).padding(.horizontal, 18).padding(.vertical, 10).background(Horizon.slate.opacity(0.15), in: Capsule())
     }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 30) }
 }

@@ -25,7 +25,11 @@ struct MarkdownReply: View {
     @Environment(\.snapshotRendering) private var snapshot
     private func inline(_ text: String) -> Text {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return Text((try? AttributedString(markdown: text, options: options)) ?? AttributedString(text))
+        var value = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+        for run in value.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            value[run.range].font = .system(size: 17, design: .monospaced)
+        }
+        return Text(value)
     }
     var body: some View { VStack(alignment: .leading, spacing: 10) {
         ForEach(Array(parseMarkdownBlocks(text).enumerated()), id: \.offset) { _, block in
@@ -122,6 +126,12 @@ struct ChatDetail: View {
                 let result = try await model.send(chat, text: message.text)
                 sendStates[message.id] = result == "Accepted" ? "Sent" : result == "Queued" ? "Queued" : "Demo"
                 if result == "Accepted" || result == "Queued" { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+                if result == "Accepted" || result == "Queued", let page = try? await model.transcript(chat) {
+                    var refreshed = page.messages
+                    let previousIDs = Set(messages.map(\.id))
+                    if let duplicate = refreshed.lastIndex(where: { !previousIDs.contains($0.id) && $0.author == "user" && $0.text == message.text }) { refreshed.remove(at: duplicate) }
+                    messages = refreshed; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset
+                }
             } catch {
                 sendStates[message.id] = "Delivery unknown · Retry"
                 notice = "Check the chat before retrying; the message may have arrived."

@@ -20,9 +20,15 @@ struct InboxScreen: View {
 struct RequestCard: View {
     let request: ActionRequest
     @Environment(\.colorScheme) private var scheme
+    @ScaledMetric(relativeTo: .headline) private var titleSize = 19
+    @ScaledMetric(relativeTo: .caption) private var captionSize = 10
+    @ScaledMetric(relativeTo: .subheadline) private var contextSize = 13
     var body: some View { VStack(alignment: .leading, spacing: 12) {
-        HStack { Text(request.kind.uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.4); Spacer(); if request.priority == "blocking" { Text("BLOCKING").font(.system(size: 10, weight: .semibold)).tracking(0.8) } }.foregroundStyle(Horizon.muted(scheme))
-        Text(request.text).font(.system(size: 19, weight: .semibold)).foregroundStyle(Horizon.ink(scheme)).multilineTextAlignment(.leading)
-        HStack { Text([request.space, request.item].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ›  ")); Spacer(); TimelineView(.periodic(from: .now, by: 60)) { _ in Text(Horizon.relative(request.createdAt)) } }.font(.system(size: 13)).foregroundStyle(Horizon.muted(scheme))
+        HStack { Text(request.kind.uppercased()).font(.system(size: captionSize, weight: .bold)).tracking(1.4); Spacer(); if request.priority == "blocking" { Text("BLOCKING").font(.system(size: captionSize, weight: .semibold)).tracking(0.8) } }.foregroundStyle(Horizon.muted(scheme))
+        Text(request.text).font(.system(size: titleSize, weight: .semibold)).foregroundStyle(Horizon.ink(scheme)).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+        ViewThatFits(in: .horizontal) {
+            HStack { Text([request.space, request.item].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ›  ")); Spacer(); TimelineView(.periodic(from: .now, by: 60)) { _ in Text(Horizon.relative(request.createdAt)) } }
+            VStack(alignment: .leading) { Text([request.space, request.item].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ›  ")); TimelineView(.periodic(from: .now, by: 60)) { _ in Text(Horizon.relative(request.createdAt)) } }
+        }.font(.system(size: contextSize)).foregroundStyle(Horizon.muted(scheme))
     }.padding(19).frame(maxWidth: .infinity, alignment: .leading).background(Horizon.slate.opacity(scheme == .dark ? 0.13 : 0.10), in: RoundedRectangle(cornerRadius: 18)) }
 }

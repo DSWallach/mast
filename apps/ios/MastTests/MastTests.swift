@@ -117,6 +117,11 @@ final class MastTests: XCTestCase {
 
 import SwiftUI
 
+private struct MarkdownPreview: View {
+    @Environment(\.colorScheme) private var scheme
+    var body: some View { MarkdownReply(text: "# Release notes\n\nA **bold** and *italic* reply with `code` and a [link](https://example.com).\n\n- First item\n- Second item\n1. Numbered item\n\n```swift\nlet value = 1\n``` ").padding(22).foregroundStyle(Horizon.provider(Demo.chats[0], scheme)) }
+}
+
 @MainActor
 final class HorizonSnapshotTests: XCTestCase {
     func testRenderScreens() throws {
@@ -134,7 +139,7 @@ final class HorizonSnapshotTests: XCTestCase {
             ("chat-detail", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Demo.messages))),
             ("long-chat-bottom", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Array(longMessages.suffix(3))))),
             ("connect", AnyView(ConnectScreen(model: model))),
-            ("markdown-reply", AnyView(MarkdownReply(text: "# Release notes\n\nA **bold** and *italic* reply with `code` and a [link](https://example.com).\n\n- First item\n- Second item\n1. Numbered item\n\n```swift\nlet value = 1\n``` ").padding(22).foregroundStyle(Horizon.provider(Demo.chats[0], .light)))),
+            ("markdown-reply", AnyView(MarkdownPreview())),
             ("tool-row", AnyView(ToolActivityRow(text: "exec: cargo test\nexec: git status").padding(22))),
             ("empty-inbox", AnyView(InboxScreen(model: empty))),
             ("offline-full", AnyView(InboxScreen(model: offline))),
@@ -146,7 +151,7 @@ final class HorizonSnapshotTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for scheme in [ColorScheme.light, .dark] {
             for (name, screen) in screens {
-                let renderer = ImageRenderer(content: screen.environment(\.colorScheme, scheme).environment(\.snapshotRendering, true).frame(width: 393, height: 852))
+                let renderer = ImageRenderer(content: screen.environment(\.colorScheme, scheme).environment(\.snapshotRendering, true).frame(width: 393, height: 852, alignment: .topLeading).background(Horizon.surface(scheme)))
                 renderer.scale = 1
                 let png = try XCTUnwrap(try XCTUnwrap(renderer.uiImage).pngData())
                 try png.write(to: directory.appendingPathComponent("\(name)-\(scheme == .dark ? "dark" : "light").png"))
