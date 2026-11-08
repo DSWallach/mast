@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 
 type Space = { id: string; name?: string; path: string };
-type Request = { id: string; state?: string; deduped?: boolean; text: string; info?: string; kind?: string; options?: unknown[]; facts?: unknown[]; links?: unknown[]; chatId?: string; originKind?: string };
+type Request = { id: string; state?: string; deduped?: boolean; text: string; info?: string; kind?: string; options?: { label: string; detail?: string }[]; facts?: { label: string; value: string }[]; links?: { label: string; target: Record<string, unknown> }[]; chatId?: string; originKind?: string };
 type Snapshot = { available: boolean; synced: boolean; userActionRequests: Request[] };
 
 /** One opening frame per subscription. The caller supplies a fixture URL in tests. */
@@ -40,7 +40,10 @@ export async function readRequests(url: string): Promise<unknown[]> {
     const name = space.name?.trim() || space.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || space.path;
     return outline.userActionRequests.filter(row => row.state !== "resolved" && !row.deduped).map(row => ({
       id: row.id, space: name, kind: row.kind ?? "ask", text: row.text, detail: row.info ?? "",
-      options: row.options ?? [], facts: row.facts ?? [], links: row.links ?? [], origin: row.originKind === "system" ? "System" : (row.chatId ?? ""),
+      options: (row.options ?? []).map(option => option.detail ? `${option.label}: ${option.detail}` : option.label),
+      facts: (row.facts ?? []).map(fact => `${fact.label}: ${fact.value}`),
+      links: (row.links ?? []).map(link => `${link.label}: ${JSON.stringify(link.target)}`),
+      origin: row.originKind === "system" ? "System" : (row.chatId ?? ""),
     }));
   }));
   return results.flat();

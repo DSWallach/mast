@@ -22,6 +22,7 @@ export class FileTokenStore implements TokenStore {
   }
 
   async add(hash: string): Promise<void> {
+    this.hashes = (await FileTokenStore.open(this.directory)).hashes;
     this.hashes.add(hash);
     try { await this.save(); } catch (error) { this.hashes.delete(hash); throw error; }
   }
