@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { TokenStore } from "./server.js";
 
 /** Credential hashes are stored separately from Mast's profile. */
@@ -30,7 +30,11 @@ export class FileTokenStore implements TokenStore {
   async contains(hash: string): Promise<boolean> {
     // Reload so revocation by a separate CLI process takes effect immediately.
     const current = await FileTokenStore.open(this.directory);
-    return current.hashes.has(hash);
+    const candidate = Buffer.from(hash, "hex");
+    if (candidate.length !== 32) return false;
+    let matched = false;
+    for (const stored of current.hashes) matched = timingSafeEqual(candidate, Buffer.from(stored, "hex")) || matched;
+    return matched;
   }
 
   async revokeAll(): Promise<void> {

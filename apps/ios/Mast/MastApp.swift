@@ -6,32 +6,37 @@ struct MastApp: App {
     var body: some Scene { WindowGroup { ContentView() } }
 }
 
-struct ActionRequest: Identifiable, Decodable {
+struct ActionRequest: Identifiable, Codable {
     let id: String, space: String, kind: String, text: String, detail: String
     let options: [String], facts: [String], links: [String]
     let origin: String
 }
-struct Chat: Identifiable, Decodable {
+struct Chat: Identifiable, Codable {
     let id: String, title: String, space: String, status: String
 }
-struct TranscriptMessage: Identifiable, Decodable {
+struct TranscriptMessage: Identifiable, Codable {
     let id: String, role: String, text: String
 }
-private enum Demo {
+enum Demo {
     static let requests = [ActionRequest(id: "1", space: "Mast", kind: "Review", text: "Review the companion layout", detail: "Check the inbox and transcript before the next release.", options: ["Looks good", "Needs changes"], facts: ["Priority: Normal"], links: ["Review: https://example.com/review"], origin: "Companion design chat")]
     static let chats = [Chat(id: "1", title: "Companion design", space: "Mast", status: "Working"), Chat(id: "2", title: "Release notes", space: "Mast", status: "Waiting for input")]
     static let messages = [TranscriptMessage(id: "1", role: "You", text: "Prepare a compact inbox for the phone."), TranscriptMessage(id: "2", role: "Assistant", text: "The inbox is ready for review.")]
 }
 
-private enum Credential {
-    static let service = "computer.mikey.mast.companion.bridge"
-    static func read() -> String? {
+protocol CredentialStore {
+    func read() -> String?
+    func save(_ token: String) throws
+    func clear()
+}
+struct Credential: CredentialStore {
+    private let service = "computer.mikey.mast.companion.bridge"
+    func read() -> String? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device", kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
     }
-    static func save(_ token: String) throws {
+    func save(_ token: String) throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"]
         SecItemDelete(query as CFDictionary)
         var item = query
@@ -39,12 +44,12 @@ private enum Credential {
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw BridgeError.credential }
     }
-    static func clear() { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"] as CFDictionary) }
+    func clear() { SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "device"] as CFDictionary) }
 }
-private enum BridgeError: LocalizedError {
-    case address, credential, response
+enum BridgeError: LocalizedError {
+    case address, credential, response, unauthorized
     var errorDescription: String? {
-        switch self { case .address: return "Use HTTPS, or HTTP on simulator loopback."; case .credential: return "Could not save the device credential."; case .response: return "Bridge request failed. Check the connection and pairing." }
+        switch self { case .address: return "Use HTTPS, or HTTP on simulator loopback."; case .credential: return "Could not save the device credential."; case .response: return "Bridge request failed. Check the connection and pairing."; case .unauthorized: return "Device credential revoked. Pair again." }
     }
 }
 private struct PairReply: Decodable { let token: String }
@@ -53,7 +58,10 @@ private final class NoRedirect: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
 @MainActor
-private final class Companion: ObservableObject {
+final class Companion: ObservableObject {
+    private let credential: any CredentialStore
+    private let configuration: URLSessionConfiguration
+    init(credential: any CredentialStore = Credential(), configuration: URLSessionConfiguration = .ephemeral) { self.credential = credential; self.configuration = configuration }
     @Published var demo = true
     @Published var address = "http://127.0.0.1:27655"
     @Published var requests = Demo.requests
@@ -71,17 +79,19 @@ private final class Companion: ObservableObject {
         guard let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw BridgeError.address }
         var request = URLRequest(url: url); request.timeoutInterval = 20
         if let body { request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONEncoder().encode(body) }
-        if authenticated { guard let token = Credential.read() else { throw BridgeError.credential }; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        let session = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
+        if authenticated { guard let token = credential.read() else { throw BridgeError.credential }; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw BridgeError.response }
+        guard let http = response as? HTTPURLResponse else { throw BridgeError.response }
+        if http.statusCode == 401 { credential.clear(); connection = "Disconnected · pair again"; throw BridgeError.unauthorized }
+        guard (200..<300).contains(http.statusCode) else { throw BridgeError.response }
         return try JSONDecoder().decode(T.self, from: data)
     }
     func pair() async {
         do {
             let reply: PairReply = try await request("/pair", body: ["code": pairingCode], authenticated: false)
-            try Credential.save(reply.token); pairingCode = ""; demo = false; requests = []; chats = []; await refresh()
+            try credential.save(reply.token); pairingCode = ""; demo = false; requests = []; chats = []; await refresh()
         } catch { connection = "Disconnected · \(error.localizedDescription)" }
     }
     func refresh() async {
@@ -91,7 +101,8 @@ private final class Companion: ObservableObject {
             async let newChats: [Chat] = request("/chats")
             (requests, chats) = try await (newRequests, newChats)
             connection = "Connected · updated now"
-        } catch { connection = "Disconnected · showing stale data" }
+        } catch BridgeError.unauthorized { connection = "Disconnected · pair again" }
+        catch { connection = "Disconnected · showing stale data" }
     }
     func transcript(_ chat: Chat) async throws -> [TranscriptMessage] {
         if demo { return Demo.messages }
@@ -103,7 +114,7 @@ private final class Companion: ObservableObject {
         if result.delivery == "simulated" { return "Fixture only · message was not sent" }
         return result.delivery == "queued" ? "Queued" : "Accepted"
     }
-    func forget() { Credential.clear(); demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
+    func forget() { credential.clear(); demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
 }
 
 private struct ContentView: View {
