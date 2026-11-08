@@ -3,16 +3,17 @@ import type { ServerResponse } from "node:http";
 import type { SpaceAccess } from "./shared-spaces.js";
 
 /** Streams only invalidations, never raw engine frames or unshared identifiers. */
-export async function streamEvents(response: ServerResponse, url: string, access: SpaceAccess, chatId?: string, authorized: () => Promise<boolean> = async () => true, appearance: () => Promise<unknown> = async () => null): Promise<void> {
+export async function streamEvents(response: ServerResponse, url: string, access: SpaceAccess, chatId?: string, authorized: () => Promise<boolean> = async () => true, appearance: () => Promise<unknown> = async () => null, onClose: () => void = () => {}): Promise<void> {
   const spaces = await access.spaces();
   const ids = new Set(spaces.map(space => space.id));
-  if (chatId && !(await access.chatAllowed(chatId))) { response.writeHead(403); response.end(); return; }
+  if (chatId && !(await access.chatAllowed(chatId))) { response.writeHead(403); response.end(); onClose(); return; }
   response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "Connection": "keep-alive", "X-Accel-Buffering": "no" });
   response.write(": connected\n\n");
   let appearanceValue = JSON.stringify(await appearance());
   let closed = false;
+  let chatSpaces = new Map<string, string>();
   const sockets: WebSocket[] = [];
-  const close = () => { if (closed) return; closed = true; clearInterval(heartbeat); for (const ws of sockets) ws.terminate(); response.end(); };
+  const close = () => { if (closed) return; closed = true; clearInterval(heartbeat); for (const ws of sockets) ws.terminate(); onClose(); response.end(); };
   response.on("close", close);
   const heartbeat = setInterval(() => { void (async () => {
     if (!(await authorized())) return close();
@@ -42,13 +43,15 @@ export async function streamEvents(response: ServerResponse, url: string, access
   }
   watch("WatchChats", {}, async item => {
     if (!Array.isArray(item)) throw Error("invalid chats");
-    const visible = []; for (const chat of item) if (typeof chat.id === "string" && ids.has(chat.spaceId) && await access.chatAllowed(chat.id)) visible.push(chat);
-    return visible;
+    const allowed = new Set((await access.spaces()).map(space => space.id));
+    const visible = item.filter(chat => typeof chat.id === "string" && typeof chat.spaceId === "string" && ids.has(chat.spaceId) && allowed.has(chat.spaceId) && !chat.archived);
+    chatSpaces = new Map(visible.map(chat => [chat.id, chat.spaceId])); return visible;
   }, "refresh");
   watch("WatchSessions", {}, async item => {
     if (!Array.isArray(item)) throw Error("invalid sessions");
-    const visible = []; for (const session of item) if (typeof session.chatId === "string" && await access.chatAllowed(session.chatId)) visible.push(session);
-    return visible;
+    const allowed = new Set((await access.spaces()).map(space => space.id));
+    if (access.chatSpaces) chatSpaces = await access.chatSpaces();
+    return item.filter(session => typeof session.chatId === "string" && allowed.has(chatSpaces.get(session.chatId) ?? ""));
   }, "refresh");
   for (const space of spaces) watch("WatchWorkOutline", { spaceId: space.id }, async item => (await access.spaces()).some(row => row.id === space.id) ? item : undefined, "refresh");
   if (chatId) watch("WatchDocMessages", { chatId }, async item => await access.chatAllowed(chatId) ? item : undefined, "transcript");

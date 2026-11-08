@@ -23,7 +23,7 @@ test("default deny, hidden IDs, immediate unshare, and moved chats", async () =>
   let moveDuringTranscript = false;
   const backend = { requests: async () => [{ id: "request", spaceId: "personal" }, { id: "hidden-request", spaceId: "work" }], chats: async () => [{ id: "chat", spaceId: chatSpace }, { id: "hidden", spaceId: "work" }], chat: async (id, spaceId) => ({ id, spaceId, title: "Fixture", status: "idle", space: "Personal" }), transcript: async () => { if (moveDuringTranscript) chatSpace = "work"; return { messages: ["fixture"] }; }, send: async () => { sent++; return { delivery: "accepted" }; }, interrupt: async () => { stopped++; } };
   const replies = { answer: async () => { answered++; return { phase: "sent", resolveOnly: false }; }, retryResolve: async () => { answered++; return { phase: "resolved", resolveOnly: false }; } };
-  const bridge = createBridge(backend, fakeTokens(), new PairingChallenge("fixture", Date.now()), replies, access, { append: async event => events.push(event) });
+  const bridge = createBridge(backend, fakeTokens(), new PairingChallenge("fixture", Date.now()), replies, access, { append: async event => events.push(event) }, undefined, undefined, undefined, 100);
   await new Promise(resolve => bridge.listen(0, "127.0.0.1", resolve));
   try {
     const base = `http://127.0.0.1:${bridge.address().port}`;
@@ -34,6 +34,12 @@ test("default deny, hidden IDs, immediate unshare, and moved chats", async () =>
     const deniedBeforeSharing = await fetch(base + "/chats/chat/transcript", { headers });
     assert.equal(deniedBeforeSharing.status, 403); assert.equal((await deniedBeforeSharing.json()).noSpacesShared, true);
     await shared.set("personal", true);
+    assert.equal((await fetch(base + "/chats/chat/messages", { method: "POST", headers, body: JSON.stringify({ text: "secret" }) })).status, 403);
+    assert.equal((await fetch(base + "/requests/request/answer", { method: "POST", headers, body: JSON.stringify({ outcome: "approved" }) })).status, 403);
+    await shared.set("personal", true, "answer");
+    assert.equal((await fetch(base + "/chats/chat/stop", { method: "POST", headers, body: "{}" })).status, 403);
+    assert.equal(await shared.allows("personal", "answer"), true);
+    await shared.set("personal", true, "send");
     assert.deepEqual((await (await fetch(base + "/requests", { headers })).json()).items.map(row => row.id), ["request"]);
     assert.deepEqual((await (await fetch(base + "/chats", { headers })).json()).items.map(row => row.id), ["chat"]);
     assert.equal((await fetch(base + "/chats/chat/messages", { method: "POST", headers, body: JSON.stringify({ text: "secret" }) })).status, 200);

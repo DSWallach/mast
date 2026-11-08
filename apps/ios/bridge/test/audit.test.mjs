@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtemp, readdir, stat, unlink, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,4 +17,9 @@ test("audit persists only metadata, with private permissions and bounded tail", 
     assert.equal((await stat(join(directory, "audit.jsonl"))).mode & 0o777, 0o600);
     assert.equal((await audit.tail(1)).length, 1);
   } finally { for (const name of await readdir(directory)) await unlink(join(directory, name)); await rmdir(directory); }
+});
+
+test('audit records form a verifiable chain', async () => {
+ const dir=await mkdtemp(join(tmpdir(),'mast-audit-chain-')); try { const log=new FileAuditLog(dir, 1); await log.append({timestamp:'2026-01-01',deviceId:'a',action:'send',outcome:'started'}); await log.append({timestamp:'2026-01-02',deviceId:'a',action:'send',outcome:'accepted'}); const lines=(await log.tail(2)).map(JSON.parse); assert.ok((await readdir(dir)).some(name=>name.startsWith('audit-'))); assert.equal(lines[0].prevHash,'0'.repeat(64)); assert.equal(lines[1].prevHash,lines[0].hash); const {hash,...payload}=lines[1]; assert.equal(hash,createHash('sha256').update(JSON.stringify(payload)).digest('hex')); }
+ finally {for(const name of await readdir(dir))await unlink(join(dir,name));await rmdir(dir)}
 });

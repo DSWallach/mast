@@ -5,5 +5,4 @@
   <key>NSCameraUsageDescription</key><string>Scan a pairing code from your Mac.</string>
   <key>NSFaceIDUsageDescription</key><string>Unlock Mast to view your shared Spaces and chats.</string>
   <key>UILaunchScreen</key><dict><key>UIColorName</key><string>LaunchSurface</string><key>UIImageName</key><string>LaunchMark</string></dict>
-  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>

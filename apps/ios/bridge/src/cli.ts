@@ -1,3 +1,6 @@
+import { ensureStatePermissions } from "./permissions.js";
+import { requireSupportedNode } from "./runtime.js";
+import { ensureNoFunnel } from "./tailscale.js";
 import { ArtifactReader } from "./artifacts.js";
 import { readAppearance } from "./appearance.js";
 import qr from "qrcode-terminal";
@@ -10,29 +13,33 @@ import { engineBackend } from "./backend.js";
 import { ReplyCoordinator } from "./reply.js";
 import { FileIntentStore } from "./reply-store.js";
 import { ipcReplyEngine } from "./reply-ipc.js";
-import { SharedSpaces, engineSpaceAccess, spaceName, type Space } from "./shared-spaces.js";
+import { SharedSpaces, engineSpaceAccess, spaceName, type Space, type Capability } from "./shared-spaces.js";
 import { FileAuditLog } from "./audit.js";
 import { snapshot } from "./outline.js";
 
 const directory = join(homedir(), "Library", "Application Support", "MastCompanionBridge");
 const url = "ws://127.0.0.1:27654";
 const command = process.argv[2];
+if (command === "start") requireSupportedNode(process.versions.node);
+if (command) await ensureStatePermissions(directory);
 const shared = new SharedSpaces(directory), audit = new FileAuditLog(directory);
 if (command === "spaces") {
   const spaces = await snapshot<Space[]>(url, "WatchSpaces", {}), ids = await shared.ids();
   if (!Array.isArray(spaces)) throw new Error("invalid spaces");
   const action = process.argv[3], selector = process.argv[4];
-  if (!action) for (const space of spaces) console.log(`${ids.has(space.id) ? "shared" : "not shared"}\t${space.id}\t${spaceName(space)}\t${space.path}`);
+  const allow = process.argv[5] === "--allow" ? process.argv[6] : "view";
+  if (!["view", "answer", "send"].includes(allow) || (process.argv[5] && process.argv[5] !== "--allow") || (process.argv[5] && !process.argv[6]) || process.argv[7]) throw new Error("invalid capability");
+  if (!action) for (const space of spaces) { const capability = !ids.has(space.id) ? "not shared" : await shared.allows(space.id, "send") ? "shared:send" : await shared.allows(space.id, "answer") ? "shared:answer" : "shared:view"; console.log(`${capability}\t${space.id}\t${spaceName(space)}\t${space.path}`); }
   else if ((action === "share" || action === "unshare") && selector) {
     const matches = spaces.filter(space => space.id === selector || spaceName(space) === selector);
     if (matches.length !== 1) throw new Error("space not found or ambiguous");
     await audit.append({ timestamp: new Date().toISOString(), deviceId: "mac", action: `spaces-${action}`, spaceId: matches[0].id, outcome: "started" });
-    await shared.set(matches[0].id, action === "share");
+    await shared.set(matches[0].id, action === "share", allow as Capability);
     await audit.append({ timestamp: new Date().toISOString(), deviceId: "mac", action: `spaces-${action}`, spaceId: matches[0].id, outcome: "completed" });
     console.log(`${spaceName(matches[0])}: ${action === "share" ? "shared" : "not shared"}`);
   } else throw new Error("Usage: spaces [share|unshare <id|name>]");
 } else if (command === "devices") {
-  for (const device of await (await FileTokenStore.open(directory)).devices()) console.log(`${device.id}\t${device.label}`);
+  for (const device of await (await FileTokenStore.open(directory)).devices()) console.log(`${device.id}\t${device.label}\tcreated=${new Date(device.createdAt).toISOString()}\tlastUsed=${new Date(device.lastUsedAt).toISOString()}\texpires=${new Date(device.expiresAt).toISOString()}`);
 } else if (command === "revoke") {
   const selector = process.argv[3]; if (!selector) throw new Error("Usage: revoke <device-id|label|--all>");
   const store = await FileTokenStore.open(directory);
@@ -46,7 +53,11 @@ if (command === "spaces") {
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("audit count must be 1–1000");
   for (const line of await audit.tail(limit)) console.log(line);
 } else if (command === "fixture" || command === "start") {
-  const store = await FileTokenStore.open(directory), code = generatePairingCode();
+  if (command === "start") await ensureNoFunnel();
+  const userIndex = process.argv.indexOf("--tailscale-user"), tailscaleUser = userIndex < 0 ? undefined : process.argv[userIndex + 1];
+  if (userIndex >= 0 && (!tailscaleUser || tailscaleUser.startsWith("--") || /[\x00-\x20\x7f]/.test(tailscaleUser))) throw new Error("--tailscale-user requires a login");
+  const pairingEnabled = command === "fixture" || process.argv.includes("--pair");
+  const store = await FileTokenStore.open(directory), code = pairingEnabled ? generatePairingCode() : "";
   const urlIndex = process.argv.indexOf("--url"), publicUrl = urlIndex < 0 ? "http://127.0.0.1:27655" : process.argv[urlIndex + 1];
   if (!publicUrl) throw new Error("--url requires a bridge URL");
   const endpoint = new URL(publicUrl);
@@ -66,7 +77,9 @@ if (command === "spaces") {
     requestAllowed: async (id: string) => id === "fixture-request" && (await shared.ids()).has("fixture-space"),
   } : engineSpaceAccess(url, shared);
   const backend = command === "fixture" ? fixture : engineBackend("/Applications/Mast.app/Contents/MacOS/mast", url, undefined, undefined, access);
-  const replies = command === "start" ? new ReplyCoordinator(new FileIntentStore(join(directory, "replies")), ipcReplyEngine(url, access)) : undefined;
-  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies, access, audit, command === "start" ? url : undefined, command === "start" ? () => readAppearance(join(process.env.MAST_DATA_DIR || process.env.ZERON_DATA_DIR || join(homedir(), ".zeron"), "ui-settings.json")) : undefined, command === "start" ? new ArtifactReader(url, access) : undefined);
-  server.listen(27655, "127.0.0.1", () => { console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655. Pairing code expires in five minutes:`); console.log(code); qr.generate(pairing.toString(), { small: true }); });
+  const journal = new FileIntentStore(join(directory, "replies"));
+  if (command === "start") await journal.prune();
+  const replies = command === "start" ? new ReplyCoordinator(journal, ipcReplyEngine(url, access)) : undefined;
+  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies, access, audit, command === "start" ? url : undefined, command === "start" ? () => readAppearance(join(process.env.MAST_DATA_DIR || process.env.ZERON_DATA_DIR || join(homedir(), ".zeron"), "ui-settings.json")) : undefined, command === "start" ? new ArtifactReader(url, access) : undefined, 10, tailscaleUser, endpoint.host, pairingEnabled);
+  server.listen(27655, "127.0.0.1", () => { console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655.`); if (pairingEnabled) { console.log("Pairing code expires in five minutes:"); console.log(code); qr.generate(pairing.toString(), { small: true }); } });
 } else { console.error("Usage: node dist/cli.js start | fixture | spaces [share|unshare <id|name>] | devices | revoke <device|--all> | audit [count]"); process.exitCode = 1; }

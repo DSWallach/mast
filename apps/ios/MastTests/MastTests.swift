@@ -2,9 +2,9 @@ import XCTest
 @testable import Mast
 
 private final class MemoryCredential: CredentialStore {
-    var token: String?
-    func read() -> String? { token }
-    func save(_ token: String) throws { self.token = token }
+    var token: BoundCredential?
+    func read() -> BoundCredential? { token }
+    func save(_ token: BoundCredential) throws { self.token = token }
     func clear() { token = nil }
 }
 private final class MemoryDecisionStore: DecisionStore {
@@ -12,6 +12,8 @@ private final class MemoryDecisionStore: DecisionStore {
     func read(_ requestId: String) throws -> PendingDecision? { values[requestId] }
     func save(_ requestId: String, decision: PendingDecision) throws { values[requestId] = decision }
 }
+private struct RefusingAuthenticator: DeviceAuthenticator { func authenticate(completion: @escaping (AuthenticationResult) -> Void) { completion(.failure) } }
+private struct ImmediateAuthenticator: DeviceAuthenticator { func authenticate(completion: @escaping (AuthenticationResult) -> Void) { completion(.success) } }
 private final class MockAuthenticator: DeviceAuthenticator {
     var completion: ((AuthenticationResult) -> Void)?
     func authenticate(completion: @escaping (AuthenticationResult) -> Void) { self.completion = completion }
@@ -36,9 +38,16 @@ final class MastTests: XCTestCase {
     private func model(_ credential: MemoryCredential) -> Companion {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, configuration: configuration)
+        let model = Companion(credential: credential, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true })
         model.demo = false
         return model
+    }
+    func testArtifactKindsAndNavigationAreRestricted() {
+        for kind in ["htmlPage", "htmlFragment", "html-page", "html-fragment"] { XCTAssertEqual(artifactDisplayKind(kind), "html") }
+        XCTAssertEqual(artifactDisplayKind("image"), "image"); XCTAssertEqual(artifactDisplayKind("mermaid"), "other")
+        XCTAssertTrue(allowedArtifactNavigation(URL(string: "about:blank")!))
+        XCTAssertFalse(allowedArtifactNavigation(URL(string: "data:text/html,hello")!))
+        XCTAssertFalse(allowedArtifactNavigation(URL(string: "https://example.com")!))
     }
     func testArtifactLinkRouting() {
         if case .artifact(let id) = companionLink(URL(string: "mast-artifact:abc123")!) { XCTAssertEqual(id, "abc123") } else { XCTFail("artifact route") }
@@ -72,8 +81,32 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(request.options, ["Yes"])
         XCTAssertEqual(request.origin, "Chat")
     }
+    func testWriteRequiresFreshAuthentication() async throws {
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
+        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAuthenticator: RefusingAuthenticator(), actionAllowed: { true }); model.demo = false
+        var sent = false; StubProtocol.reply = { _ in sent = true; return (200, "{}") }
+        let chat = Chat(id: "c", title: "Chat", space: "S", status: "working")
+        do { _ = try await model.send(chat, text: "hello"); XCTFail("expected authentication failure") } catch {}
+        do { try await model.stop(chat); XCTFail("expected authentication failure") } catch {}
+        do { _ = try await model.answer("r", outcome: "answered", text: "yes"); XCTFail("expected authentication failure") } catch {}
+        XCTAssertFalse(sent)
+    }
+    func testFirstLaunchClearsSurvivingKeychainOnlyOnce() throws {
+        let suite = "mast-first-launch-\(UUID().uuidString)"; let defaults = try XCTUnwrap(UserDefaults(suiteName: suite)); defer { defaults.removePersistentDomain(forName: suite) }
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "https://example.com", token: "old")); var clears = 0
+        clearKeychainOnFirstLaunch(defaults: defaults, credential: credential) { clears += 1 }; XCTAssertNil(credential.read()); XCTAssertEqual(clears, 1)
+        try credential.save(BoundCredential(origin: "https://example.com", token: "new")); clearKeychainOnFirstLaunch(defaults: defaults, credential: credential) { clears += 1 }; XCTAssertEqual(credential.read()?.token, "new"); XCTAssertEqual(clears, 1)
+    }
+    func testCredentialIsNeverSentToAnotherOrigin() async throws {
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "https://good.ts.net", token: "secret"))
+        let model = model(credential); XCTAssertEqual(model.address, "https://good.ts.net")
+        model.address = "https://attacker.example"; var sent = false
+        StubProtocol.reply = { _ in sent = true; return (200, "{}") }
+        await model.refresh(); XCTAssertFalse(sent); XCTAssertNotNil(credential.read())
+    }
     func testRefreshLoadsInboxAndChatsAndRetainsStaleData() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let model = model(credential)
         defer { model.hiddenSpaceIds.removeAll() }
         StubProtocol.reply = { request in
@@ -104,7 +137,7 @@ final class MastTests: XCTestCase {
             }
         }
         model.pairingCode = "code"; await model.pair()
-        XCTAssertEqual(credential.read(), "device")
+        XCTAssertEqual(credential.read()?.token, "device")
         XCTAssertTrue(model.noSpacesShared)
         XCTAssertTrue(model.visibleRequests.isEmpty)
         let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working")
@@ -115,7 +148,7 @@ final class MastTests: XCTestCase {
         model.forget(); XCTAssertNil(credential.read())
     }
     func testUnauthorizedClearsCredentialAndRequiresPairing() async throws {
-        let credential = MemoryCredential(); try credential.save("revoked")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "revoked"))
         let model = model(credential)
         StubProtocol.reply = { _ in (401, "{}") }
         await model.refresh()
@@ -123,7 +156,7 @@ final class MastTests: XCTestCase {
         XCTAssertTrue(model.connection.contains("pair again"))
     }
     func testTranscriptPagesAndChatVisibility() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let model = model(credential)
         StubProtocol.reply = { request in
             XCTAssertEqual(request.url?.query, "offset=40")
@@ -155,10 +188,10 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(link.underlineStyle, .single)
     }
     func testAnswerPersistsIntentAndRetriesOnlyResolution() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false
         var key: String?
         StubProtocol.reply = { request in
             key = request.value(forHTTPHeaderField: "Idempotency-Key")
@@ -177,10 +210,10 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(resolved.phase, "resolved")
     }
     func testAnswerKindsAndDemoCannotOverwriteLiveIntent() async throws {
-        let credential = MemoryCredential(); try credential.save("token")
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false
         var bodies: [[String: String]] = []
         StubProtocol.reply = { request in
             let data: Data
