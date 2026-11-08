@@ -1088,21 +1088,15 @@ impl LinearPanel {
         label: impl Into<SharedString>,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .flex_none()
+        crate::components::button(
+            id,
+            label,
+            crate::components::ButtonVariant::Secondary,
+            crate::components::ButtonSize::Sm,
+            theme,
+        )
             .max_w(px(180.0))
             .truncate()
-            .px(px(6.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_muted)
-            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            .child(label.into())
     }
 
     /// A section header: click (or ↩ / Space) folds and unfolds it; with
