@@ -1,3 +1,4 @@
+import { ensureStatePermissions } from "./permissions.js";
 import { requireSupportedNode } from "./runtime.js";
 import { ensureNoFunnel } from "./tailscale.js";
 import { ArtifactReader } from "./artifacts.js";
@@ -20,6 +21,7 @@ const directory = join(homedir(), "Library", "Application Support", "MastCompani
 const url = "ws://127.0.0.1:27654";
 const command = process.argv[2];
 if (command === "start") requireSupportedNode(process.versions.node);
+if (command) await ensureStatePermissions(directory);
 const shared = new SharedSpaces(directory), audit = new FileAuditLog(directory);
 if (command === "spaces") {
   const spaces = await snapshot<Space[]>(url, "WatchSpaces", {}), ids = await shared.ids();
