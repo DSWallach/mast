@@ -41,6 +41,7 @@ const denySpaces: SpaceAccess = { spaces: async () => [], chatSpace: async () =>
 const denyAudit: AuditLog = { append: async () => { throw new Error("audit unavailable"); } };
 export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, auditSink: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader, minuteLimit = 10, tailscaleUser?: string) {
   const writes = new Map<string, number[]>();
+  const streamCounts = new Map<string, number>(); let totalStreams = 0;
   return createServer(async (request, response) => {
     try {
       const login = request.headers["tailscale-user-login"];
@@ -76,7 +77,12 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
         return reply(response, 200, {status: "revoked"});
       }
       const events = /^\/events(?:\?chat=([A-Za-z0-9_-]{1,128}))?$/.exec(path);
-      if (request.method === "GET" && events && eventsUrl) { await streamEvents(response, eventsUrl, access, events[1], async () => !!(await tokens.authenticate(tokenDigest(match![1]))), appearance); return; }
+      if (request.method === "GET" && events && eventsUrl) {
+        if (totalStreams >= 4 || (streamCounts.get(device.id) ?? 0) >= 2) return reply(response, 429, {error: "too many streams"});
+        totalStreams++; streamCounts.set(device.id, (streamCounts.get(device.id) ?? 0) + 1); let released = false;
+        const release = () => { if (released) return; released = true; totalStreams--; const count = (streamCounts.get(device.id) ?? 1) - 1; if (count) streamCounts.set(device.id, count); else streamCounts.delete(device.id); };
+        try { await streamEvents(response, eventsUrl, access, events[1], async () => !!(await tokens.authenticate(tokenDigest(match![1]))), appearance, release); } catch (error) { release(); throw error; } return;
+      }
       if (request.method === "GET" && path === "/appearance") return reply(response, 200, await appearance());
       if (request.method === "GET" && path === "/spaces") { const spaces = await access.spaces(); return reply(response, 200, { spaces, noSpacesShared: spaces.length === 0 }); }
       if (request.method === "GET" && (path === "/requests" || path === "/chats")) {

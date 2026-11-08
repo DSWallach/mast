@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { TokenStore, DeviceIdentity } from "./server.js";
@@ -7,6 +7,7 @@ import { withStateLock } from "./state-lock.js";
 const DAY = 86400000, ABSOLUTE = 30 * DAY, IDLE = 7 * DAY;
 type DeviceRecord = DeviceIdentity & { hash: string; createdAt: number; lastUsedAt: number; expiresAt: number };
 export class FileTokenStore implements TokenStore {
+  private cachedKey = ""; private cachedValue: unknown;
   private constructor(private readonly directory: string, private readonly now: () => number) {}
   static async open(directory: string, now: () => number = Date.now): Promise<FileTokenStore> {
     await mkdir(directory, { recursive: true, mode: 0o700 }); const store = new FileTokenStore(directory, now);
@@ -14,14 +15,17 @@ export class FileTokenStore implements TokenStore {
   }
   private async records(): Promise<{records: DeviceRecord[]; dirty: boolean}> {
     try {
-      const values: unknown = JSON.parse(await readFile(join(this.directory, "tokens.json"), "utf8"));
+      const path = join(this.directory, "tokens.json"), metadata = await stat(path);
+      const key = `${metadata.ino}:${metadata.mtimeMs}:${metadata.size}`;
+      const values: unknown = this.cachedKey === key ? this.cachedValue : JSON.parse(await readFile(path, "utf8"));
+      this.cachedKey = key; this.cachedValue = values;
       if (!Array.isArray(values)) throw new Error("invalid token store");
       const records: DeviceRecord[] = []; let dirty = false; const now = this.now();
       for (const value of values) {
         if (typeof value === "string" || (value && typeof value === "object" && !("createdAt" in value))) { dirty = true; continue; }
         if (!value || typeof value !== "object" || !/^[a-f0-9]{64}$/.test(value.hash) || !/^[a-f0-9]{24}$/.test(value.id) || typeof value.label !== "string" || !value.label || value.label.length > 80 || !Number.isSafeInteger(value.createdAt) || !Number.isSafeInteger(value.lastUsedAt) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt !== value.createdAt + ABSOLUTE || value.lastUsedAt < value.createdAt || value.createdAt > now || value.lastUsedAt > now) throw new Error("invalid token store");
         if (now >= value.expiresAt || now - value.lastUsedAt >= IDLE) { dirty = true; continue; }
-        records.push(value as DeviceRecord);
+        records.push({ ...(value as DeviceRecord) });
       }
       return { records, dirty };
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return {records: [], dirty: false}; throw error; }
@@ -36,6 +40,10 @@ export class FileTokenStore implements TokenStore {
   }
   async authenticate(hash: string): Promise<DeviceIdentity | null> {
     const candidate = Buffer.from(hash, "hex"); if (candidate.length !== 32) return null;
+    const initial = await this.records(); let found: DeviceRecord | undefined;
+    for (const record of initial.records) if (timingSafeEqual(candidate, Buffer.from(record.hash, "hex"))) found = record;
+    if (!found) return null;
+    if (!initial.dirty && this.now() - found.lastUsedAt < 1000) return {id: found.id, label: found.label};
     return withStateLock(this.directory, "tokens", async () => {
       const {records, dirty} = await this.records(); let matched: DeviceRecord | undefined;
       for (const record of records) if (timingSafeEqual(candidate, Buffer.from(record.hash, "hex"))) matched = record;
@@ -54,5 +62,5 @@ export class FileTokenStore implements TokenStore {
     });
   }
   async revokeAll(): Promise<DeviceIdentity[]> { return withStateLock(this.directory, "tokens", async () => { const {records} = await this.records(); await this.save([]); return records.map(({ id, label }) => ({ id, label })); }); }
-  private async save(records: DeviceRecord[]): Promise<void> { const temporary = join(this.directory, `.tokens-${randomBytes(12).toString("hex")}`); await writeFile(temporary, JSON.stringify(records), { mode: 0o600, flag: "wx" }); await rename(temporary, join(this.directory, "tokens.json")); }
+  private async save(records: DeviceRecord[]): Promise<void> { const temporary = join(this.directory, `.tokens-${randomBytes(12).toString("hex")}`); await writeFile(temporary, JSON.stringify(records), { mode: 0o600, flag: "wx" }); await rename(temporary, join(this.directory, "tokens.json")); this.cachedKey = ""; }
 }
