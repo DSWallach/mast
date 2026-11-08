@@ -1,4 +1,4 @@
-//! Gallery-only alternatives for the Area outline hierarchy.
+//! Gallery-only alternatives for the Horizon outline hierarchy.
 use gpui::{AnyElement, FontWeight, div, prelude::*, px};
 use mast_ui::{
     components as c,
@@ -26,7 +26,7 @@ const ITEMS: &[Item] = &[
         collapsed: false,
         children: &[
             Item {
-                title: "Area interface and interaction design",
+                title: "Horizon interface and interaction design",
                 status: "Active",
                 needs: 2,
                 chats: 1,
@@ -113,7 +113,7 @@ pub fn tree(
     overrides: &mast_ui::style_overrides::Overrides,
     option: usize,
 ) -> impl IntoElement {
-    let theme = ui_style::theme_for_view(theme, UiStyleId::Area, theme.ui_style.layout, overrides);
+    let theme = ui_style::theme_for_view(theme, UiStyleId::Horizon, theme.ui_style.layout, overrides);
     div()
         .w_full()
         .max_w(px(860.))
@@ -155,7 +155,7 @@ fn node(item: &Item, depth: usize, option: usize, theme: &Theme, key: String) ->
     } else {
         theme.text_muted
     };
-    let row = c::outline_row(format!("area-tree-{key}").into(), 42., 8., theme)
+    let row = c::outline_row(format!("horizon-tree-{key}").into(), 42., 8., theme)
         .gap(px(8.))
         .child(
             div()

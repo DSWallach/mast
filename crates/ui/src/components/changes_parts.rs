@@ -21,7 +21,7 @@ pub(crate) fn file_toolbar_selection<T: Styled + FluentBuilder>(
         .when(selected && super::is_industrial(theme), |element| {
             element.bg(theme.industrial_colors().pressed)
         })
-        .when(selected && super::is_area(theme), |element| {
+        .when(selected && super::is_horizon(theme), |element| {
             element.bg(theme.accent.opacity(0.18))
         })
 }
@@ -34,7 +34,7 @@ pub(crate) fn review_text_action<T: Styled + ParentElement + FluentBuilder>(
         element.px(px(8.0)).py(px(4.0))
     });
     let element = super::segmented_key(element, theme, false);
-    element.when(super::is_area(theme), |element| {
+    element.when(super::is_horizon(theme), |element| {
         element
             .px(px(8.0))
             .py(px(4.0))
@@ -57,7 +57,7 @@ pub(crate) fn changes_revision_label<T: Styled + FluentBuilder>(element: T, them
                 .border_1()
                 .border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.rounded_full().bg(theme.accent.opacity(0.10))
         })
 }
@@ -68,7 +68,7 @@ pub(crate) fn changes_tooltip<T: Styled + FluentBuilder>(element: T, theme: &The
         .when(super::is_industrial(theme), |element| {
             element.bg(theme.surface_raised).border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.rounded_full().bg(crate::theme::flatten(
                 theme.accent.opacity(0.10),
                 theme.surface_raised,
@@ -79,7 +79,7 @@ pub(crate) fn changes_tooltip<T: Styled + FluentBuilder>(element: T, theme: &The
 pub(crate) fn file_drag_ghost<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.rounded_full().bg(crate::theme::flatten(
                 theme.accent.opacity(0.10),
                 theme.surface_raised,
@@ -101,7 +101,7 @@ pub(crate) fn file_editor_tooltip(label: gpui::SharedString, theme: &Theme) -> i
         .text_size(px(10.5))
         .text_color(theme.text_muted)
         .child(label)
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.bg(crate::theme::flatten(
                 theme.accent.opacity(0.10),
                 theme.surface_raised,
@@ -119,7 +119,7 @@ pub(crate) fn walkthrough_heading(label: &str, theme: &Theme) -> gpui::SharedStr
 }
 
 pub(crate) fn walkthrough_section_label(label: &'static str, theme: &Theme) -> gpui::SharedString {
-    if super::is_area(theme) {
+    if super::is_horizon(theme) {
         match label {
             "HIGHLIGHTS" => "Highlights",
             "QUESTIONS" => "Questions",
@@ -146,7 +146,7 @@ pub(crate) fn file_save_status<T: Styled + FluentBuilder>(element: T, theme: &Th
                 .border_1()
                 .border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.rounded_full().bg(theme.accent.opacity(0.08))
         })
 }
@@ -172,7 +172,7 @@ pub(crate) fn changes_warning_badge<T: Styled + FluentBuilder>(
         .when(super::is_industrial(theme), |element| {
             element.border_1().border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| element.rounded_full())
+        .when(super::is_horizon(theme), |element| element.rounded_full())
 }
 
 pub(crate) fn changes_suggested_badge<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
@@ -183,7 +183,7 @@ pub(crate) fn changes_suggested_badge<T: Styled + FluentBuilder>(element: T, the
         .when(super::is_industrial(theme), |element| {
             element.border_1().border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| element.rounded_full())
+        .when(super::is_horizon(theme), |element| element.rounded_full())
 }
 
 pub(crate) enum FileCommentAction {
@@ -200,12 +200,12 @@ pub(crate) fn file_comment_action<T: Styled + ParentElement + FluentBuilder>(
     match action {
         FileCommentAction::Add => element
             .bg(theme.solid)
-            .when(super::is_area(theme), |element| {
+            .when(super::is_horizon(theme), |element| {
                 element.rounded_full().bg(theme.accent)
             }),
         FileCommentAction::Remove => {
             let element = super::segmented_key(element, theme, false);
-            element.when(super::is_area(theme), |element| {
+            element.when(super::is_horizon(theme), |element| {
                 element.rounded_full().bg(theme.accent.opacity(0.10))
             })
         }
@@ -221,7 +221,7 @@ pub(crate) fn file_comment_input<T: Styled + FluentBuilder>(element: T, theme: &
         .when(super::is_industrial(theme), |element| {
             element.bg(theme.input_bg)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.bg(theme.accent.opacity(0.06))
         })
 }
@@ -242,7 +242,7 @@ pub(crate) fn file_action<T: Styled + ParentElement + FluentBuilder>(
     };
     let element = element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(radius)));
     let element = super::segmented_key(element, theme, false);
-    element.when(super::is_area(theme), |element| {
+    element.when(super::is_horizon(theme), |element| {
         element.rounded_full().bg(theme.accent.opacity(0.10))
     })
 }
@@ -258,7 +258,7 @@ pub(crate) fn changes_repository_chip<T: Styled + ParentElement + FluentBuilder>
         .border_color(if active { theme.accent } else { theme.border })
         .when(active, |element| element.bg(theme.accent.opacity(0.08)));
     let element = super::segmented_key(element, theme, active);
-    element.when(super::is_area(theme), |element| {
+    element.when(super::is_horizon(theme), |element| {
         element
             .rounded_full()
             .bg(theme.accent.opacity(if active { 0.18 } else { 0.06 }))
@@ -270,13 +270,13 @@ pub(crate) fn changes_diff_header<T: Styled + StatefulInteractiveElement + Fluen
     theme: &Theme,
     default_hover: gpui::Hsla,
 ) -> T {
-    let area_background = crate::theme::flatten(theme.accent.opacity(0.08), theme.surface);
-    let area_hover = crate::theme::flatten(theme.accent.opacity(0.14), theme.surface);
+    let horizon_background = crate::theme::flatten(theme.accent.opacity(0.08), theme.surface);
+    let horizon_hover = crate::theme::flatten(theme.accent.opacity(0.14), theme.surface);
     let industrial_background = theme.surface_raised;
     let hover = if super::is_industrial(theme) {
         theme.element_hover
-    } else if super::is_area(theme) {
-        area_hover
+    } else if super::is_horizon(theme) {
+        horizon_hover
     } else {
         default_hover
     };
@@ -287,7 +287,7 @@ pub(crate) fn changes_diff_header<T: Styled + StatefulInteractiveElement + Fluen
                 .border_b_1()
                 .border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| element.bg(area_background))
+        .when(super::is_horizon(theme), |element| element.bg(horizon_background))
         .hover(move |style| style.bg(hover))
 }
 
@@ -308,7 +308,7 @@ pub(crate) fn changes_selector<T: Styled + ParentElement + FluentBuilder>(
     };
     let element = element.rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(fallback)));
     let element = super::segmented_key(element, theme, false);
-    element.when(super::is_area(theme), |element| {
+    element.when(super::is_horizon(theme), |element| {
         element.rounded_full().bg(theme.accent.opacity(0.10))
     })
 }
@@ -330,7 +330,7 @@ pub(crate) fn file_search_row<T: Styled + StatefulInteractiveElement + FluentBui
                 .border_l_2()
                 .border_color(theme.accent)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element
                 .rounded_full()
                 .when(selected, |element| element.bg(theme.accent.opacity(0.16)))
@@ -347,7 +347,7 @@ pub(crate) fn changes_file_row<T: Styled + StatefulInteractiveElement + FluentBu
         .when(super::is_industrial(theme), |element| {
             element.w_full().border_b_1().border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| element.rounded_full())
+        .when(super::is_horizon(theme), |element| element.rounded_full())
 }
 
 pub(crate) fn changes_file_list<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
@@ -355,7 +355,7 @@ pub(crate) fn changes_file_list<T: Styled + FluentBuilder>(element: T, theme: &T
         .when(super::is_industrial(theme), |element| {
             element.bg(theme.surface)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.bg(theme.accent.opacity(0.06))
         })
 }
@@ -388,7 +388,7 @@ pub(crate) fn file_tree_row<T: Styled + StatefulInteractiveElement + FluentBuild
                 .border_l_2()
                 .border_color(theme.accent)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element
                 .rounded_full()
                 .when(selected, |element| element.bg(theme.accent.opacity(0.16)))
@@ -434,7 +434,7 @@ pub(crate) fn file_toolbar_button(
         .when(true, |element| {
             crate::surface_chrome::icon_key(element, theme, false)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.rounded_full().bg(theme.accent.opacity(0.08))
         })
         .flex()
@@ -483,7 +483,7 @@ pub(crate) fn walkthrough_chip<T: Styled + FluentBuilder>(element: T, theme: &Th
     element
         .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
         .bg(theme.surface_raised)
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.rounded_full().bg(theme.accent.opacity(0.12))
         })
 }
@@ -518,7 +518,7 @@ pub(crate) fn walkthrough_note_more<T: Styled + FluentBuilder>(element: T, theme
                 .border_1()
                 .border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element
                 .self_start()
                 .px(px(8.0))
@@ -632,7 +632,7 @@ pub(crate) fn walkthrough_review_action<T: Styled + ParentElement + FluentBuilde
             };
             element.bg(theme.accent).text_color(foreground)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element
                 .self_start()
                 .px(px(12.0))
@@ -648,7 +648,7 @@ pub(crate) fn walkthrough_progress<T: Styled + FluentBuilder>(element: T, theme:
         .when(super::is_industrial(theme), |element| {
             element.font_family(theme.font_mono.clone())
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element
                 .px(px(8.0))
                 .py(px(4.0))
@@ -679,7 +679,7 @@ pub(crate) fn walkthrough_mode<T: Styled + FluentBuilder>(element: T, theme: &Th
                 .border_b_2()
                 .border_color(theme.border)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element
                 .px(px(8.0))
                 .py(px(4.0))
@@ -701,7 +701,7 @@ pub(crate) fn walkthrough_step_row<T: Styled + FluentBuilder>(
                 .border_color(theme.border)
         })
         .when(selected, |row| row.bg(theme.element_active))
-        .when(super::is_area(theme), |row| {
+        .when(super::is_horizon(theme), |row| {
             row.rounded_full()
                 .when(selected, |row| row.bg(theme.accent.opacity(0.16)))
         })
@@ -711,7 +711,7 @@ pub(crate) fn walkthrough_navigation<T: Styled + FluentBuilder>(element: T, them
     element
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
-                && theme.ui_style.id != crate::ui_style::UiStyleId::Area,
+                && theme.ui_style.id != crate::ui_style::UiStyleId::Horizon,
             |element| {
                 element
                     .bg(theme.surface)
@@ -720,7 +720,7 @@ pub(crate) fn walkthrough_navigation<T: Styled + FluentBuilder>(element: T, them
                     .border_color(theme.border)
             },
         )
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.bg(theme.accent.opacity(0.06))
         })
 }
@@ -737,7 +737,7 @@ pub(crate) fn walkthrough_notes<T: Styled + FluentBuilder>(element: T, theme: &T
                     .border_color(theme.border)
             },
         )
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element.bg(theme.accent.opacity(0.06))
         })
 }
@@ -775,7 +775,7 @@ pub(crate) fn changes_header_toggle(
         .when(super::is_industrial(theme), |el| {
             super::toolbar_control(el, theme, active)
         })
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .when(active, |el| el.bg(theme.accent.opacity(0.18)))
         })
@@ -826,7 +826,7 @@ pub(crate) fn file_comment_button(
         .when(true, |element| {
             super::segmented_key(element, theme, primary)
         })
-        .when(super::is_area(theme), |element| {
+        .when(super::is_horizon(theme), |element| {
             element
                 .rounded_full()
                 .bg(theme.accent.opacity(if primary { 0.20 } else { 0.08 }))

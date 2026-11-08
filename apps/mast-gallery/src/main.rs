@@ -1,4 +1,4 @@
-mod area_outline;
+mod horizon_outline;
 mod screen_stubs;
 #[cfg(target_os = "macos")]
 mod screens;
@@ -33,7 +33,7 @@ enum Story {
     Walkthrough,
     Appearance,
     Board,
-    AreaOutline,
+    HorizonOutline,
     Component(stories::Story),
     #[cfg(target_os = "macos")]
     Screen(screens::Screen),
@@ -46,7 +46,7 @@ const STORIES: [(Story, &str); 7] = [
     (Story::Walkthrough, "PR walkthrough"),
     (Story::Appearance, "Settings → Appearance"),
     (Story::Board, "Board"),
-    (Story::AreaOutline, "Area outline tree"),
+    (Story::HorizonOutline, "Horizon outline tree"),
 ];
 
 struct GalleryState {
@@ -518,13 +518,13 @@ impl Render for Gallery {
                     .when(self.story == Story::Appearance, |el| {
                         el.child(self.appearance_page.clone())
                     })
-                    .when(self.story == Story::AreaOutline, |el| {
+                    .when(self.story == Story::HorizonOutline, |el| {
                         el.child(
                             div().flex().gap(px(8.)).pb(px(16.)).children(
-                                area_outline::LABELS.into_iter().enumerate().map(
+                                horizon_outline::LABELS.into_iter().enumerate().map(
                                     |(index, label)| {
                                         div()
-                                            .id(("area-outline-option", index))
+                                            .id(("horizon-outline-option", index))
                                             .cursor_pointer()
                                             .px(px(12.))
                                             .py(px(8.))
@@ -542,7 +542,7 @@ impl Render for Gallery {
                                 ),
                             ),
                         )
-                        .child(area_outline::tree(
+                        .child(horizon_outline::tree(
                             theme,
                             &overrides,
                             self.tab.min(2),
@@ -824,24 +824,24 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "snapshot"))]
     #[test]
     #[ignore = "requires Metal and macOS services"]
-    fn render_area_outline_options() {
+    fn render_horizon_outline_options() {
         struct Snapshot(usize);
         impl Render for Snapshot {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let theme = Theme::of(cx);
                 let overrides = mast_ui::style_overrides::current(cx);
-                div().size_full().bg(theme.bg).child(area_outline::tree(theme, &overrides, self.0))
+                div().size_full().bg(theme.bg).child(horizon_outline::tree(theme, &overrides, self.0))
             }
         }
         let dir = tempfile::tempdir().unwrap();
         for (appearance_name, appearance) in [("light", mast_ui::theme::Appearance::Light), ("dark", mast_ui::theme::Appearance::Dark)] {
             for option in 0..3 {
                 mast_ui::snapshot::render_to_png(
-                    &format!("area-outline-{}-{appearance_name}", ["a", "b", "c"][option]),
-                    gpui::size(px(900.), px(650.)), ui_style::UiStyleId::Area, appearance,
+                    &format!("horizon-outline-{}-{appearance_name}", ["a", "b", "c"][option]),
+                    gpui::size(px(900.), px(650.)), ui_style::UiStyleId::Horizon, appearance,
                     |_, cx| {
                         init(cx, dir.path(), dir.path());
-                        let themes = mast_theme::ThemeSelection { light: "area-light".into(), dark: "area-dark".into() };
+                        let themes = mast_theme::ThemeSelection { light: "horizon-light".into(), dark: "horizon-dark".into() };
                         let mode = if appearance_name == "dark" { appearance::AppearanceMode::Dark } else { appearance::AppearanceMode::Light };
                         apply_themes(mode, themes, cx);
                         cx.new(|_| Snapshot(option))
@@ -854,16 +854,16 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "snapshot"))]
     #[test]
     #[ignore = "requires Metal and macOS services"]
-    fn render_area_production_outline() {
+    fn render_horizon_production_outline() {
         let dir = tempfile::tempdir().unwrap();
         for (name, appearance) in [("light", mast_ui::theme::Appearance::Light), ("dark", mast_ui::theme::Appearance::Dark)] {
             mast_ui::snapshot::render_to_png(
-                &format!("area-production-outline-{name}"), gpui::size(px(1200.), px(800.)),
-                ui_style::UiStyleId::Area, appearance,
+                &format!("horizon-production-outline-{name}"), gpui::size(px(1200.), px(800.)),
+                ui_style::UiStyleId::Horizon, appearance,
                 |window, cx| {
                     init(cx, dir.path(), dir.path());
-                    ui_style::set_style(ui_style::UiStyleId::Area, window, cx);
-                    let themes = mast_theme::ThemeSelection { light: "area-light".into(), dark: "area-dark".into() };
+                    ui_style::set_style(ui_style::UiStyleId::Horizon, window, cx);
+                    let themes = mast_theme::ThemeSelection { light: "horizon-light".into(), dark: "horizon-dark".into() };
                     let mode = if name == "dark" { appearance::AppearanceMode::Dark } else { appearance::AppearanceMode::Light };
                     apply_themes(mode, themes, cx);
                     mast_ui::snapshot::overview_fixture(cx)
@@ -950,7 +950,7 @@ mod tests {
         let path = dir.path().join("state");
         let mut state = GalleryState::load_from(None);
         state.story = Story::Component(stories::Story::Code);
-        state.style = ui_style::UiStyleId::Area;
+        state.style = ui_style::UiStyleId::Horizon;
         state.layout = ui_style::UiLayout::Guided;
         state.dark = true;
         state.themes.light = "github-light".into();
@@ -1012,7 +1012,7 @@ mod tests {
                 );
                 let area = ui_style::theme_for_view(
                     base,
-                    ui_style::UiStyleId::Area,
+                    ui_style::UiStyleId::Horizon,
                     ui_style::UiLayout::Minimal,
                     &mast_ui::style_overrides::current(cx),
                 );
@@ -1030,8 +1030,8 @@ mod tests {
                         &default,
                     ))
                     .child(button(
-                        "area-button",
-                        "Area",
+                        "horizon-button",
+                        "Horizon",
                         ButtonVariant::Primary,
                         ButtonSize::Md,
                         &area,
@@ -1041,7 +1041,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             mast_ui::style_overrides::Overrides::path(dir.path()),
-            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":23}}}"#,
+            r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"controlRadius":23}}}"#,
         )
         .unwrap();
         cx.update(|cx| {
@@ -1085,7 +1085,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| init(cx, dir.path(), dir.path()));
         cx.run_until_parked();
-        std::fs::write(mast_ui::style_overrides::Overrides::path(dir.path()), r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":25,"surfaces":{"composer":{"border":true}},"layouts":{"compact":{"controlRadius":19}}},"industrial":{"controlRadius":3}}}"#).unwrap();
+        std::fs::write(mast_ui::style_overrides::Overrides::path(dir.path()), r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"controlRadius":25,"surfaces":{"composer":{"border":true}},"layouts":{"compact":{"controlRadius":19}}},"industrial":{"controlRadius":3}}}"#).unwrap();
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(600));
         cx.run_until_parked();
@@ -1094,7 +1094,7 @@ mod tests {
             let overrides = mast_ui::style_overrides::current(cx);
             let area = ui_style::theme_for_view(
                 base,
-                ui_style::UiStyleId::Area,
+                ui_style::UiStyleId::Horizon,
                 ui_style::UiLayout::Compact,
                 &overrides,
             );

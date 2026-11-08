@@ -8,7 +8,7 @@ use gpui::{
 
 pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
     div()
-        .h(px(if theme.ui_style.design_roles.sidebar_border.unwrap_or_else(|| !super::is_area(theme)) {
+        .h(px(if theme.ui_style.design_roles.sidebar_border.unwrap_or_else(|| !super::is_horizon(theme)) {
             theme.ui_style.tokens.rule_width.unwrap_or(1.0)
         } else { 0.0 }))
         .bg(if theme.ui_style.tokens.rule_width.is_some() {
@@ -44,7 +44,7 @@ pub(crate) fn settings_sidebar_row(
         .items_center()
         .gap(px(8.0))
         .rounded(px(8.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .px(px(Theme::SPACE_SM))
         .py(px(6.0))
         .text_size(crate::typography::ui_rems(13.0))
@@ -70,7 +70,7 @@ pub(crate) fn settings_sidebar_back(theme: &Theme) -> gpui::Stateful<gpui::Div> 
         .items_center()
         .gap(px(6.0))
         .rounded(px(8.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .px(px(Theme::SPACE_SM))
         .py(px(6.0))
         .text_size(crate::typography::ui_rems(13.0))
@@ -98,7 +98,7 @@ pub(crate) fn update_strip(
         .px(px(Theme::SPACE_SM))
         .py(px(6.0))
         .rounded(px(Theme::CONTROL_RADIUS))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .bg(background)
         .flex()
         .flex_row()
@@ -131,7 +131,7 @@ pub(crate) fn connection_line(theme: &Theme, label: SharedString, glyph: AnyElem
             .flex()
             .items_center()
             .gap(px(6.0))
-            .when(super::is_area(theme), |el| {
+            .when(super::is_horizon(theme), |el| {
                 el.rounded_full().bg(theme.identity_color("").opacity(0.08))
             })
             .when(super::is_industrial(theme), |el| {
@@ -153,7 +153,7 @@ pub(crate) fn connection_line(theme: &Theme, label: SharedString, glyph: AnyElem
 }
 
 pub(crate) fn sidebar_section_label(theme: &Theme, label: SharedString) -> gpui::Div {
-    let emphasized = super::is_industrial(theme) || super::is_area(theme);
+    let emphasized = super::is_industrial(theme) || super::is_horizon(theme);
     let label = if theme.ui_style.design_roles.tracked_caps.unwrap_or(emphasized) {
         SharedString::from(crate::popover::tracked_upper(&label))
     } else {
@@ -185,7 +185,7 @@ pub(crate) fn chat_header_chip(
         .debug_selector(move || selector.clone())
         .max_w(px(230.0))
         .h(px(20.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .px(px(7.0))
@@ -200,10 +200,10 @@ pub(crate) fn chat_header_chip(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface_raised),
         )
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(text)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.bg(theme.bg)
                 .border_color(theme.bg)
                 .text_color(theme.text_muted)
@@ -227,7 +227,7 @@ pub(crate) fn chat_header_chip_icon_color(
     model: bool,
     link: bool,
 ) -> gpui::Hsla {
-    if super::is_area(theme) {
+    if super::is_horizon(theme) {
         theme.text_muted
     } else if model && super::is_industrial(theme) {
         if theme.appearance.is_dark() {
@@ -255,7 +255,7 @@ pub(crate) fn right_surface_tab(
         .debug_selector(move || format!("right-surface-tab-{index}"))
         .group(group)
         .h(px(24.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .w(px(width))
@@ -263,7 +263,7 @@ pub(crate) fn right_surface_tab(
         .pl(px(4.0))
         .pr(px(8.0))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .flex()
         .flex_row()
         .items_center()
@@ -274,7 +274,7 @@ pub(crate) fn right_surface_tab(
         .when(active, |el| el.bg(crate::theme::wash(0.10)))
         .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
         .when(true, |el| super::segmented_key(el, theme, active))
-        .when(super::is_area(theme), |el| el.bg(theme.bg))
+        .when(super::is_horizon(theme), |el| el.bg(theme.bg))
         .children(crate::surface_chrome::active_key_dot(theme, active))
 }
 
@@ -283,10 +283,10 @@ pub(crate) fn right_panel_frame(theme: &Theme, expanded: bool) -> gpui::Div {
         .size_full()
         .flex()
         .flex_col()
-        .when(!expanded && !super::is_area(theme), |el| {
+        .when(!expanded && !super::is_horizon(theme), |el| {
             el.border_l_1().border_color(theme.border)
         })
-        .bg(if super::is_area(theme) {
+        .bg(if super::is_horizon(theme) {
             theme.bg
         } else {
             theme.panel_bg()
@@ -300,7 +300,7 @@ pub(crate) fn surface_close_slot(theme: &Theme, index: usize) -> gpui::Stateful<
         .flex_none()
         .size(px(18.0))
         .rounded(px(4.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .relative()
         .hover(|el| el.bg(crate::theme::wash(0.12)))
 }
@@ -335,7 +335,7 @@ pub(crate) fn surface_add_button(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .cursor_pointer()
         .bg(motion::hover_blend(
             fade,
@@ -380,7 +380,7 @@ pub(crate) fn chat_header_frame(theme: &Theme) -> gpui::Stateful<gpui::Div> {
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface).border_color(theme.border).px(px(16.0)),
         )
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.bg(theme.bg).border_color(theme.bg)
         })
 }
@@ -426,7 +426,7 @@ pub(crate) fn breadcrumb_segment(
         .min_w_0()
         .truncate()
         .rounded(px(3.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .px(px(2.0))
         .cursor_pointer()
         .when(last, |el| {
@@ -449,7 +449,7 @@ pub(crate) fn header_attention_badge(
         .debug_selector(move || id.into())
         .flex_none()
         .h(px(18.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .px(px(5.0))
@@ -457,13 +457,13 @@ pub(crate) fn header_attention_badge(
         .items_center()
         .gap(px(3.0))
         .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(color)
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(color)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.border_color(theme.bg).text_color(theme.text_muted)
         })
         .hover(|el| el.bg(theme.element_hover))
@@ -493,7 +493,7 @@ pub(crate) fn admin_badge(
         .items_center()
         .gap(px(4.0))
         .rounded(px(5.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(border)
         .text_size(crate::typography::ui_rems(11.0))
@@ -514,7 +514,7 @@ pub(crate) fn admin_revoke_button(
         .flex_none()
         .px(px(5.0))
         .rounded(px(3.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover))
         .role(gpui::Role::Button)
@@ -527,7 +527,7 @@ pub(crate) fn chat_header_menu(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .id("chat-header-menu")
         .debug_selector(|| "chat-header-menu".into())
         .cursor_pointer()
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.size(px(theme.ui_style.tokens.control_size))
                 .flex()
                 .items_center()
@@ -552,7 +552,7 @@ pub(crate) fn review_chip(theme: &Theme, selector: String) -> gpui::Stateful<gpu
         .items_center()
         .gap(px(4.0))
         .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(5.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(theme.border)
         .bg(theme.element_hover.opacity(0.55))
@@ -580,7 +580,7 @@ pub(crate) fn sidebar_frame(
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| {
-                el.bg(if super::is_area(theme) {
+                el.bg(if super::is_horizon(theme) {
                     theme.bg
                 } else {
                     theme.surface
@@ -589,10 +589,10 @@ pub(crate) fn sidebar_frame(
         )
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
-                && !super::is_area(theme),
+                && !super::is_horizon(theme),
             |el| el.border_r_1().border_color(theme.border),
         )
-        .child(if super::is_area(theme) {
+        .child(if super::is_horizon(theme) {
             div()
                 .h_full()
                 .pt(px(Theme::TITLEBAR_HEIGHT))
@@ -609,7 +609,7 @@ pub(crate) fn sidebar_frame(
                 )
                 .child(
                     div()
-                        .id("area-new-session")
+                        .id("horizon-new-session")
                         .mx(px(12.0))
                         .mb(px(12.0))
                         .px(px(12.0))
@@ -674,14 +674,14 @@ pub(crate) fn item_needs_card(theme: &Theme, count: usize) -> gpui::Div {
         .gap(px(4.0))
         .p(px(8.0))
         .rounded(px(6.0))
-        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .when(super::is_horizon(theme), |el| el.rounded(px(12.0)))
         .border_1()
         .border_color(if count > 0 {
             theme.warning.opacity(0.6)
         } else {
             theme.border
         })
-        .when(super::is_area(theme), |el| el.border_color(theme.bg))
+        .when(super::is_horizon(theme), |el| el.border_color(theme.bg))
         .when(super::is_industrial(theme), |el| {
             el.rounded(px(0.0)).bg(theme.industrial_colors().panel)
         })
@@ -692,7 +692,7 @@ pub(crate) fn item_needs_count(theme: &Theme, count: usize) -> gpui::Div {
         .debug_selector(|| "chat-item-needs-you-count".into())
         .text_size(crate::typography::ui_rems(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(if super::is_area(theme) {
+        .text_color(if super::is_horizon(theme) {
             theme.text_muted
         } else {
             theme.warning
@@ -710,7 +710,7 @@ pub(crate) fn item_account_badge(theme: &Theme, account: String) -> gpui::Div {
         .items_center()
         .gap(px(4.0))
         .rounded(px(5.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.element_hover.opacity(0.55))
@@ -784,12 +784,12 @@ pub(crate) fn sidebar_tone(theme: &Theme, width: f32, corner: f32) -> gpui::Div 
             |el| el.bg(theme.surface),
         )
         .border_r_1()
-        .border_color(if super::is_area(theme) {
+        .border_color(if super::is_horizon(theme) {
             theme.bg
         } else {
             theme.border
         })
-        .when(super::is_area(theme), |el| el.bg(theme.bg))
+        .when(super::is_horizon(theme), |el| el.bg(theme.bg))
 }
 
 pub(crate) fn titlebar_overlay(theme: &Theme, title_bar: AnyElement) -> gpui::Div {
@@ -801,7 +801,7 @@ pub(crate) fn titlebar_overlay(theme: &Theme, title_bar: AnyElement) -> gpui::Di
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| {
-                el.bg(if super::is_area(theme) {
+                el.bg(if super::is_horizon(theme) {
                     theme.bg
                 } else {
                     theme.surface
@@ -810,14 +810,14 @@ pub(crate) fn titlebar_overlay(theme: &Theme, title_bar: AnyElement) -> gpui::Di
         )
         .when(
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque
-                && !super::is_area(theme),
+                && !super::is_horizon(theme),
             |el| el.border_b_1().border_color(theme.border),
         )
         .child(title_bar)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn area_sidebar_chat_row(
+pub(crate) fn horizon_sidebar_chat_row(
     theme: &Theme,
     row_id: String,
     chat_id: &str,
@@ -835,7 +835,7 @@ pub(crate) fn area_sidebar_chat_row(
     archived: bool,
     on_archive: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Option<gpui::Stateful<gpui::Div>> {
-    if !super::is_area(theme) || searching {
+    if !super::is_horizon(theme) || searching {
         return None;
     }
     let foreground = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
@@ -1052,7 +1052,7 @@ pub(crate) fn sidebar_jump_badge(theme: &Theme, label: SharedString) -> AnyEleme
         .items_center()
         .px(px(4.0))
         .rounded(px(4.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .bg(tone.opacity(0.08))
         .text_size(crate::typography::ui_rems(10.0))
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -1151,7 +1151,7 @@ pub(crate) fn sidebar_row_colors(
     identity: gpui::Hsla,
     selected: bool,
 ) -> (gpui::Hsla, gpui::Hsla, Option<gpui::Div>) {
-    let area = super::is_area(theme);
+    let area = super::is_horizon(theme);
     let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
         theme.text
     } else if area && selected {
@@ -1320,7 +1320,7 @@ pub(crate) fn window_control_button(
     div()
         .id(id)
         .size(px(24.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.size(px(theme.ui_style.tokens.control_size))
         })
         .flex_none()
@@ -1335,7 +1335,7 @@ pub(crate) fn window_control_button(
             theme.glass_hover().opacity(0.0),
             theme.glass_hover(),
         ))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(gpui::transparent_black())
         })
         .when(true, |el| super::segmented_key(el, theme, false))
@@ -1375,7 +1375,7 @@ pub(crate) fn nav_history_button(
     if !enabled {
         return div()
             .size(px(24.0))
-            .when(super::is_area(theme), |el| {
+            .when(super::is_horizon(theme), |el| {
                 el.size(px(theme.ui_style.tokens.control_size))
             })
             .flex_none()
@@ -1420,7 +1420,7 @@ pub(crate) fn header_icon_button(
         .items_center()
         .justify_center()
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .when(true, |el| super::segmented_key(el, theme, false))
         .when(true, |el| super::toolbar_control(el, theme, false))
         .cursor_pointer()
@@ -1496,7 +1496,7 @@ pub(crate) fn rail_tick(
                 .w(px(width))
                 .rounded(px(1.0))
                 .bg(color)
-                .when(super::is_area(theme), |el| {
+                .when(super::is_horizon(theme), |el| {
                     el.h(px(4.0)).rounded_full().bg(if active {
                         theme.identity_color("")
                     } else {
@@ -1564,13 +1564,13 @@ pub(crate) fn panel_tab(
         .id(id)
         .debug_selector(move || id.into())
         .h(px(24.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .flex_none()
         .px(px(8.0))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .flex()
         .items_center()
         .gap(px(5.0))
@@ -1582,12 +1582,12 @@ pub(crate) fn panel_tab(
         .when(active, |el| el.bg(crate::theme::wash(0.10)))
         .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
         .when(true, |el| super::segmented_key(el, theme, active))
-        .when(super::is_area(theme), |el| el.bg(theme.bg))
+        .when(super::is_horizon(theme), |el| el.bg(theme.bg))
         .children(crate::surface_chrome::active_key_dot(theme, active))
         .child(
             div()
                 .text_size(crate::typography::ui_rems(11.5))
-                .text_color(if active && !super::is_area(theme) {
+                .text_color(if active && !super::is_horizon(theme) {
                     theme.text
                 } else {
                     theme.text_muted
@@ -1628,7 +1628,7 @@ pub(crate) fn titlebar_title(theme: &Theme, title: SharedString, on_canvas: bool
         .when(super::is_industrial(theme), |el| {
             el.font_family(theme.font_mono.clone())
         })
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.font_weight(gpui::FontWeight::SEMIBOLD)
         })
         .child(title)
@@ -1675,7 +1675,7 @@ pub(crate) fn panel_chip(
         .flex()
         .items_center()
         .rounded(px(5.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(border)
         .text_size(crate::typography::ui_rems(10.5))
@@ -1702,7 +1702,7 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         .border_color(theme.border)
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded(px(12.0)).border_color(theme.bg)
         })
         .when(super::is_industrial(theme), |el| {
@@ -1752,7 +1752,7 @@ pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .items_center()
         .gap(px(4.0))
         .child("Team ·")
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(row, theme, false)
 }
 
@@ -1763,7 +1763,7 @@ pub(crate) fn item_team_all(theme: &Theme, count: usize) -> gpui::Stateful<gpui:
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.accent)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(SharedString::from(format!("All {count} workers → Team")))
 }
 
@@ -1850,7 +1850,7 @@ pub(crate) fn worker_jump_button(
         .flex_none()
         .px(px(6.0))
         .rounded(px(4.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(color.opacity(0.5))
         .text_size(crate::typography::ui_rems(10.5))
@@ -1869,7 +1869,7 @@ pub(crate) fn archive_confirmation(theme: &Theme, count: usize) -> gpui::Div {
         .gap(px(3.0))
         .p(px(6.0))
         .rounded(px(5.0))
-        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .when(super::is_horizon(theme), |el| el.rounded(px(12.0)))
         .border_1()
         .border_color(theme.border)
         .when(super::is_industrial(theme), |el| {
@@ -1962,7 +1962,7 @@ pub(crate) fn worker_unseen_badge(theme: &Theme, selector: String) -> gpui::Stat
         .text_color(theme.warning)
         .child(div().size(px(5.0)).rounded_full().bg(theme.warning))
         .child("unseen")
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.warning.opacity(0.12))
         });
     super::segmented_key(badge, theme, false)
@@ -1980,7 +1980,7 @@ pub(crate) fn archived_worker_toggle(
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
         .hover(|el| el.text_color(theme.text))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(SharedString::from(format!(
             "{} archived ({count})",
             if shown { "Hide" } else { "Show" }
@@ -1997,7 +1997,7 @@ pub(crate) fn archived_worker_row(theme: &Theme, selector: String) -> gpui::Stat
         .gap(px(6.0))
         .px(px(6.0))
         .py(px(3.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .when(super::is_industrial(theme), |el| {
             el.border_1().border_color(theme.industrial_colors().rule)
         })
@@ -2027,7 +2027,7 @@ pub(crate) fn item_accordion_header(
         .gap(px(5.0))
         .cursor_pointer()
         .rounded(px(4.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .when(super::is_industrial(theme), |el| {
             el.border_1().border_color(theme.industrial_colors().rule)
         })
@@ -2083,10 +2083,10 @@ pub(crate) fn panel_link(
         .flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(11.5))
-        .text_color(if super::is_area(theme) {
+        .text_color(if super::is_horizon(theme) {
             theme.text_muted
         } else {
             color
@@ -2107,7 +2107,7 @@ pub(crate) fn identifier_copy_button(
         .flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .cursor_pointer()
         .text_color(theme.accent)
         .hover(|el| el.bg(theme.element_hover))
@@ -2137,7 +2137,7 @@ pub(crate) fn item_path_segment(
         .id(("chat-item-path-segment", index))
         .debug_selector(move || format!("chat-item-path-segment-{index}"))
         .rounded(px(3.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .px(px(2.0))
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(11.5))
@@ -2161,7 +2161,7 @@ pub(crate) fn panel_reference_row(theme: &Theme, id: String) -> gpui::Stateful<g
         .gap(px(6.0))
         .px(px(4.0))
         .rounded(px(3.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .when(super::is_industrial(theme), |el| {
             el.border_1().border_color(theme.industrial_colors().rule)
         })
@@ -2205,7 +2205,7 @@ pub(crate) fn wake_toggle(
         .flex()
         .items_center()
         .rounded(px(5.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(border)
         .text_size(crate::typography::ui_rems(11.0))
@@ -2234,7 +2234,7 @@ pub(crate) fn held_wake_badge(
         .flex()
         .items_center()
         .rounded(px(5.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(border)
         .text_size(crate::typography::ui_rems(10.5))
@@ -2259,7 +2259,7 @@ pub(crate) fn deliver_wake_button(theme: &Theme, selector: String) -> gpui::Stat
         .flex_none()
         .px(px(6.0))
         .rounded(px(4.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(theme.accent.opacity(0.5))
         .text_size(crate::typography::ui_rems(10.5))
@@ -2298,7 +2298,7 @@ pub(crate) fn spaces_filter(theme: &Theme, open: bool) -> gpui::Stateful<gpui::D
                 theme.glass_hover(),
             )
         })
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .on_hover(motion::hover_listener("spaces-filter"))
         .cursor_pointer();
     super::segmented_key(frame, theme, open)
@@ -2316,7 +2316,7 @@ pub(crate) fn account_menu_trigger(
         .flex_none()
         .rounded_full()
         .bg(theme.text)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.bg(theme.identity_color(user_line))
         })
         .flex()
@@ -2327,7 +2327,7 @@ pub(crate) fn account_menu_trigger(
         .line_height(px(icon_size))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.bg)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.text_color(theme.identity_text(theme.identity_color(user_line)))
         })
         .child(div().w_full().text_center().child(initial));
@@ -2432,7 +2432,7 @@ pub(crate) fn linux_caption_button(
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.identity_color("").opacity(0.12))
         })
         .when(true, |el| super::segmented_key(el, theme, false))
@@ -2483,7 +2483,7 @@ pub(crate) fn section_label(
                 .when(super::is_industrial(theme), |el| {
                     el.font_family(theme.font_mono.clone())
                 })
-                .child(SharedString::from(if super::is_area(theme) {
+                .child(SharedString::from(if super::is_horizon(theme) {
                     label.to_owned()
                 } else {
                     label.to_uppercase()
@@ -2545,7 +2545,7 @@ pub(crate) fn start_chat_worktree_input(theme: &Theme) -> gpui::Div {
         .px(px(8.0))
         .py(px(4.0))
         .rounded(px(6.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.input_bg)
@@ -2565,7 +2565,7 @@ pub(crate) fn start_chat_prompt(theme: &Theme) -> gpui::Div {
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .when(super::is_area(theme), |el| el.rounded(px(12.0)))
+        .when(super::is_horizon(theme), |el| el.rounded(px(12.0)))
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.input_bg)
@@ -2592,7 +2592,7 @@ pub(crate) fn start_chat_instructions_toggle(
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text_muted)
         .hover(|el| el.text_color(theme.text))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(
             icon(if open {
                 crate::icons::ALT_ARROW_DOWN
@@ -2643,7 +2643,7 @@ pub(crate) fn start_chat_readout(theme: &Theme, selector: &'static str, text: St
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.input_bg)
@@ -2672,7 +2672,7 @@ pub(crate) fn start_chat_account_toggle(
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text_muted)
         .hover(|el| el.text_color(theme.text))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(
             icon(if open {
                 crate::icons::ALT_ARROW_DOWN
@@ -2706,7 +2706,7 @@ pub(crate) fn team_button(
         .px(px(7.0))
         .py(px(2.0))
         .rounded(px(4.0))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(color.opacity(0.5))
         .text_size(crate::typography::ui_rems(11.0))
@@ -2751,7 +2751,7 @@ pub(crate) fn running_button(
             .border_color(theme.border_strong)
             .hover(|el| el.bg(theme.glass_hover()))
     }
-    .when(super::is_area(theme), |el| el.rounded_full())
+    .when(super::is_horizon(theme), |el| el.rounded_full())
     .child(SharedString::from(label));
     super::segmented_key(button, theme, primary)
 }
@@ -2771,7 +2771,7 @@ pub(crate) fn chat_identity_button(
     div()
         .id("chat-identity-copy")
         .h(px(22.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .px(px(6.0))
@@ -2789,10 +2789,10 @@ pub(crate) fn chat_identity_button(
             crate::theme::wash(0.05),
             crate::theme::wash(0.13),
         ))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .when(true, |el| super::segmented_key(el, theme, false))
         .when(true, |el| super::toolbar_control(el, theme, false))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.bg(theme.bg).border_color(theme.bg)
         })
         .on_hover(motion::hover_listener(fade_key))
@@ -2843,11 +2843,11 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let mut theme = Theme::default();
             theme.ui_style = crate::ui_style::UiStyle::resolve(
-                crate::ui_style::UiStyleId::Area,
+                crate::ui_style::UiStyleId::Horizon,
                 crate::ui_style::UiLayout::Guided,
             );
             let archived = self.archived.clone();
-            area_sidebar_chat_row(
+            horizon_sidebar_chat_row(
                 &theme,
                 "chat-test".into(),
                 "test",
@@ -2872,7 +2872,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn area_row_archive_action_is_clickable(cx: &mut TestAppContext) {
+    fn horizon_row_archive_action_is_clickable(cx: &mut TestAppContext) {
         let archived = Arc::new(AtomicBool::new(false));
         let recorded = archived.clone();
         let (_, cx) = cx.add_window_view(move |_, _| AreaRow {
@@ -2891,7 +2891,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn area_row_shows_status_and_account(cx: &mut TestAppContext) {
+    fn horizon_row_shows_status_and_account(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(move |_, _| AreaRow {
             archived: Arc::new(AtomicBool::new(false)),
             hovered: false,
@@ -2910,13 +2910,13 @@ pub(crate) fn action_control(theme: &Theme) -> gpui::Div {
         .flex_row()
         .items_center()
         .h(px(24.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .rounded(px(6.0))
         .border_1()
         .border_color(theme.border)
-        .when(super::is_area(theme), |el| el.border_color(theme.bg))
+        .when(super::is_horizon(theme), |el| el.border_color(theme.bg))
         .occlude()
 }
 
@@ -2930,8 +2930,8 @@ pub(crate) fn action_segment(theme: &Theme, id: &'static str) -> gpui::Stateful<
         .gap(px(5.0))
         .text_size(px(11.5))
         .text_color(theme.text.opacity(0.9))
-        .when(super::is_area(theme), |el| el.text_color(theme.text_muted))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.text_color(theme.text_muted))
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .when(super::is_industrial(theme), |el| {
             el.font_family(theme.font_mono.clone())
         })
@@ -2952,7 +2952,7 @@ pub(crate) fn action_chevron(
         .justify_center()
         .border_l_1()
         .border_color(theme.border)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().border_color(theme.bg)
         })
         .cursor_pointer()

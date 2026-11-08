@@ -8,36 +8,36 @@ pub enum UiStyleId {
     #[default]
     Default,
     Industrial,
-    Area,
+    Horizon,
 }
 
 impl UiStyleId {
-    pub const ALL: &'static [Self] = &[Self::Default, Self::Industrial, Self::Area];
+    pub const ALL: &'static [Self] = &[Self::Default, Self::Industrial, Self::Horizon];
     pub const fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
             Self::Industrial => "Industrial",
-            Self::Area => "Area",
+            Self::Horizon => "Horizon",
         }
     }
     pub const fn recommended_themes(self) -> (&'static str, &'static str) {
         match self {
             Self::Default => ("mast-light", "mast-dark"),
             Self::Industrial => ("industrial-light", "industrial-dark"),
-            Self::Area => ("area-light", "area-dark"),
+            Self::Horizon => ("horizon-light", "horizon-dark"),
         }
     }
     pub const fn description(self) -> &'static str {
         match self {
             Self::Default => "Standard controls",
             Self::Industrial => "Instrument panel",
-            Self::Area => "Character conversation",
+            Self::Horizon => "Character conversation",
         }
     }
     pub const fn preview_gap(self) -> f32 {
         match self {
             Self::Default => 4.0,
-            Self::Industrial | Self::Area => 8.0,
+            Self::Industrial | Self::Horizon => 8.0,
         }
     }
 }
@@ -46,7 +46,7 @@ impl<'de> Deserialize<'de> for UiStyleId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match String::deserialize(deserializer)?.as_str() {
             "industrial" => Self::Industrial,
-            "area" => Self::Area,
+            "horizon" | "area" => Self::Horizon,
             _ => Self::Default,
         })
     }
@@ -140,7 +140,7 @@ pub enum ControlVariant {
 pub enum ConversationVariant {
     Standard,
     Industrial,
-    Area,
+    Horizon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,8 +355,8 @@ impl UiStyle {
             ..Self::MINIMAL.behavior
         },
     };
-    pub const AREA: Self = Self {
-        id: UiStyleId::Area,
+    pub const HORIZON: Self = Self {
+        id: UiStyleId::Horizon,
         layout: UiLayout::Minimal,
         tokens: StyleTokens {
             sidebar_row_compact_h: 36.0,
@@ -376,7 +376,7 @@ impl UiStyle {
         },
         surface: SurfaceModel::Opaque,
         controls: ControlVariant::Minimal,
-        conversation: ConversationVariant::Area,
+        conversation: ConversationVariant::Horizon,
         status_indicator: StatusIndicator::Dot,
         font_preference: FontPreference::Geist,
         design_roles: crate::style_overrides::DesignRoles::NONE,
@@ -389,7 +389,7 @@ impl UiStyle {
         match id {
             UiStyleId::Default => Self::MINIMAL,
             UiStyleId::Industrial => Self::INDUSTRIAL,
-            UiStyleId::Area => Self::AREA,
+            UiStyleId::Horizon => Self::HORIZON,
         }
     }
 
@@ -568,7 +568,7 @@ pub fn help_card(
             .p(px(8.0))
             .rounded(px(6.0))
             .when(
-                theme.ui_style.id != UiStyleId::Area,
+                theme.ui_style.id != UiStyleId::Horizon,
                 |el| el.bg(theme.surface_raised),
             )
             .text_size(crate::typography::ui_rems(11.0))
@@ -651,6 +651,8 @@ mod tests {
 
     #[test]
     fn legacy_settings_migrate_and_explicit_layout_wins() {
+        assert_eq!(serde_json::from_str::<UiStyleId>("\"area\"").unwrap(), UiStyleId::Horizon);
+        assert_eq!(serde_json::to_string(&UiStyleId::Horizon).unwrap(), "\"horizon\"");
         let directory = tempfile::tempdir().unwrap();
         let path = crate::settings::UiSettings::path(directory.path());
         for (legacy, style, layout) in [
@@ -658,7 +660,8 @@ mod tests {
             ("dense", UiStyleId::Default, UiLayout::Compact),
             ("guided", UiStyleId::Default, UiLayout::Guided),
             ("industrial", UiStyleId::Industrial, UiLayout::Minimal),
-            ("area", UiStyleId::Area, UiLayout::Minimal),
+            ("horizon", UiStyleId::Horizon, UiLayout::Minimal),
+            ("area", UiStyleId::Horizon, UiLayout::Minimal),
         ] {
             std::fs::write(&path, format!(r#"{{"uiStyle":"{legacy}"}}"#)).unwrap();
             let settings = crate::settings::UiSettings::load(directory.path());
@@ -679,7 +682,7 @@ mod tests {
     fn styles_recommend_their_theme_pairs() {
         assert_eq!(UiStyleId::Default.recommended_themes(), ("mast-light", "mast-dark"));
         assert_eq!(UiStyleId::Industrial.recommended_themes(), ("industrial-light", "industrial-dark"));
-        assert_eq!(UiStyleId::Area.recommended_themes(), ("area-light", "area-dark"));
+        assert_eq!(UiStyleId::Horizon.recommended_themes(), ("horizon-light", "horizon-dark"));
     }
 
     #[test]
@@ -689,7 +692,7 @@ mod tests {
             UiStyle::INDUSTRIAL.conversation,
             ConversationVariant::Industrial
         );
-        assert_eq!(UiStyle::AREA.conversation, ConversationVariant::Area);
+        assert_eq!(UiStyle::HORIZON.conversation, ConversationVariant::Horizon);
     }
     #[test]
     fn registry_has_unique_labels_and_round_trips() {
@@ -739,7 +742,7 @@ mod tests {
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
                 "github-light"
             );
-            set_style(UiStyleId::Area, window, cx);
+            set_style(UiStyleId::Horizon, window, cx);
             assert_eq!(
                 crate::theme::Theme::of(cx).variant_id.as_ref(),
                 "github-light"
@@ -759,8 +762,8 @@ mod tests {
     }
 
     #[test]
-    fn area_uses_soft_character_geometry() {
-        let style = UiStyle::AREA;
+    fn horizon_uses_soft_character_geometry() {
+        let style = UiStyle::HORIZON;
         assert_eq!(style.tokens.control_radius, Some(12.0));
         assert_eq!(style.tokens.panel_radius, Some(14.0));
         assert_eq!(style.tokens.rule_width, None);

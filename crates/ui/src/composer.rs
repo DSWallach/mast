@@ -8616,7 +8616,7 @@ impl Render for Composer {
         let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
         let model_offset = (model_side - compact_target) * model_travel + model_drift;
         let measured_model_bounds = self.model_bounds.clone();
-        let (model_picker, area_picker) = crate::components::conversation_model_picker(
+        let (model_picker, horizon_picker) = crate::components::conversation_model_picker(
             &theme, surface_width, model_offset, model_opacity, self.pickers.clone().into_any_element(),
                 gpui::canvas(
                     move |bounds, _, _| measured_model_bounds.set(Some(bounds)),
@@ -8625,14 +8625,14 @@ impl Render for Composer {
                 .absolute()
                 .inset_0().into_any_element(),
         );
-        let area_tabs = {
+        let horizon_tabs = {
             let selected = self.pickers.read(cx).effective_harness(cx);
-            let harnesses = self.pickers.read(cx).area_harnesses(cx);
+            let harnesses = self.pickers.read(cx).horizon_harnesses(cx);
             let tabs = harnesses.into_iter().map(|harness| {
                 let (path, _) = crate::pickers::harness_brand_icon(harness);
                 let selected = selected == Some(harness);
                 let tab_identity = theme.agent_identity_color(Some(harness), Some("selected"));
-                crate::components::conversation_harness_tab(&theme, SharedString::from(format!("area-harness-{harness:?}")), tab_identity, identity, path, selected)
+                crate::components::conversation_harness_tab(&theme, SharedString::from(format!("horizon-harness-{harness:?}")), tab_identity, identity, path, selected)
                     .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
                         pickers.pick_harness(harness, cx);
                         pickers.open_model_menu(window, cx);
@@ -8660,7 +8660,7 @@ impl Render for Composer {
             pill, input: self.render_input_with_completion().into_any_element(), strips,
             attach: attach.into_any_element(), send: send_button,
             model: model_picker.map(|el| el.into_any_element()),
-            area_model: area_picker.map(|el| el.into_any_element()),
+            horizon_model: horizon_picker.map(|el| el.into_any_element()),
             send_hint: send_hint.map(|el| el.into_any_element()),
             expanded, pill_height, textarea_height, text_padding: text_pt,
             cluster_offset: cluster_dy,
@@ -8697,7 +8697,7 @@ impl Render for Composer {
             .id("composer-surface")
             .debug_selector(|| "composer-surface".into())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
-            .children(area_tabs)
+            .children(horizon_tabs)
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background

@@ -116,7 +116,7 @@ fn style_name(id: UiStyleId) -> &'static str {
     match id {
         UiStyleId::Default => "default",
         UiStyleId::Industrial => "industrial",
-        UiStyleId::Area => "area",
+        UiStyleId::Horizon => "horizon",
     }
 }
 fn layout_name(layout: UiLayout) -> &'static str {
@@ -407,19 +407,19 @@ impl Render for DesignPanel {
             let selected = if index == 0 {
                 roles
                     .details_border
-                    .unwrap_or(current.id != UiStyleId::Area)
+                    .unwrap_or(current.id != UiStyleId::Horizon)
             } else if index == 1 {
                 roles
                     .details_page_surface
-                    .unwrap_or(current.id == UiStyleId::Area)
+                    .unwrap_or(current.id == UiStyleId::Horizon)
             } else if index == 2 {
                 roles
                     .outline_page_surface
-                    .unwrap_or(current.id == UiStyleId::Area)
+                    .unwrap_or(current.id == UiStyleId::Horizon)
             } else {
                 roles
                     .sidebar_border
-                    .unwrap_or(current.id != UiStyleId::Area)
+                    .unwrap_or(current.id != UiStyleId::Horizon)
             };
             content = content.child(
                 div()
@@ -592,28 +592,28 @@ impl Render for DesignPanel {
                         if let Some(value) = tokens.details_border {
                             patch.push_str(&format!(
                                 "Details border: {} → {}\n",
-                                style.id != UiStyleId::Area,
+                                style.id != UiStyleId::Horizon,
                                 value
                             ));
                         }
                         if let Some(value) = tokens.details_page_surface {
                             patch.push_str(&format!(
                                 "Details uses page colour: {} → {}\n",
-                                style.id == UiStyleId::Area,
+                                style.id == UiStyleId::Horizon,
                                 value
                             ));
                         }
                         if let Some(value) = tokens.sidebar_border {
                             patch.push_str(&format!(
                                 "Sidebar separator: {} → {}\n",
-                                style.id != UiStyleId::Area,
+                                style.id != UiStyleId::Horizon,
                                 value
                             ));
                         }
                         if let Some(value) = tokens.outline_page_surface {
                             patch.push_str(&format!(
                                 "Outline uses page colour: {} → {}\n",
-                                style.id == UiStyleId::Area,
+                                style.id == UiStyleId::Horizon,
                                 value
                             ));
                         }

@@ -5,7 +5,7 @@ This is a preliminary index of style-specific references, not a complete compone
 ## Target appearance model (not implemented yet)
 
 Style, layout, and theme are independent settings. Style selects element design:
-Default, Industrial, or Area. Layout selects density and guidance: Minimal,
+Default, Industrial, or Horizon. Layout selects density and guidance: Minimal,
 Compact, or Guided. Theme supplies semantic colours. Components must resolve
 look tokens and variants from style, density and guidance from layout, and
 colours from the selected theme; no pairing may be assumed. Screens must not
@@ -13,7 +13,7 @@ branch on either style or layout. The planned lint must cover both.
 
 The existing `uiStyle` combines these axes. Migration must map `minimal` to
 Default + Minimal, `dense` to Default + Compact, `guided` to Default + Guided,
-`industrial` to Industrial + Minimal, and `area` to Area + Minimal, then
+`industrial` to Industrial + Minimal, and `horizon` to Horizon + Minimal, then
 persist separate `uiStyle` and `uiLayout` values. An explicit `uiLayout` must
 remain authoritative on subsequent loads. Appearance needs separate Style,
 Layout and Theme pickers. Gallery and preview need independent style and layout
@@ -721,7 +721,7 @@ This mechanical index lists a filtered set of functions whose names match contro
 - `crates/ui/src/shell/start_chat_ui.rs:1682` `pr_start_chat_card` — 1 textual calls
 - `crates/ui/src/changes/explanation.rs:1065` `explanation_reply_renders_in_anchored_panel` — 0 textual calls
 - `crates/ui/src/markdown/link_destination.rs:26` `destination_card` — 2 textual calls
-- `crates/ui/src/markdown/render.rs:3034` `area_code_tokens_remain_readable_on_inverse_panel` — 0 textual calls
+- `crates/ui/src/markdown/render.rs:3034` `horizon_code_tokens_remain_readable_on_inverse_panel` — 0 textual calls
 - `crates/ui/src/linear/prefs.rs:91` `panel_state_from_set` — 2 textual calls
 - `crates/ui/src/linear/prefs.rs:105` `panel_state_to_set` — 2 textual calls
 - `crates/ui/src/linear/prefs.rs:161` `panel_state_round_trips_and_ignores_unknown_entries` — 0 textual calls
@@ -977,9 +977,9 @@ This mechanical index lists a filtered set of functions whose names match contro
 - `crates/ui/src/appearance.rs:159`: `crate::ui_style::SurfaceModel::ThemeDefault => surface,`
 - `crates/ui/src/appearance.rs:160`: `crate::ui_style::SurfaceModel::Opaque => SurfacePreference::Opaque,`
 - `crates/ui/src/appearance.rs:161`: `crate::ui_style::SurfaceModel::Glass => SurfacePreference::Frosted,`
-- `crates/ui/src/artifacts/tab.rs:1062`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded_full().border_1().border_color(theme.border_strong))`
-- `crates/ui/src/artifacts/tab.rs:1098`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |toolbar| {`
-- `crates/ui/src/artifacts/tab.rs:1199`: `if theme.ui_style.id != crate::ui_style::UiStyleId::Area { return None; }`
+- `crates/ui/src/artifacts/tab.rs:1062`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Horizon, |el| el.rounded_full().border_1().border_color(theme.border_strong))`
+- `crates/ui/src/artifacts/tab.rs:1098`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Horizon, |toolbar| {`
+- `crates/ui/src/artifacts/tab.rs:1199`: `if theme.ui_style.id != crate::ui_style::UiStyleId::Horizon { return None; }`
 - `crates/ui/src/changes/explanation.rs:451`: `theme.ui_style.controls == crate::ui_style::ControlVariant::Key,`
 - `crates/ui/src/changes/explanation.rs:491`: `== crate::ui_style::StatusIndicator::Dot`
 - `crates/ui/src/changes/walkthrough.rs:748`: `theme.ui_style.controls == crate::ui_style::ControlVariant::Key,`
@@ -992,25 +992,25 @@ This mechanical index lists a filtered set of functions whose names match contro
 - `crates/ui/src/changes/walkthrough.rs:1181`: `.when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))`
 - `crates/ui/src/changes/walkthrough.rs:1182`: `.child(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { crate::surface_chrome::display(&theme).child(progress).into_any_element() } else { div().child(progress).into_any_element() })`
 - `crates/ui/src/changes/walkthrough.rs:1188`: `theme.ui_style.controls == crate::ui_style::ControlVariant::Key,`
-- `crates/ui/src/changes/walkthrough.rs:1223`: `theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area,`
+- `crates/ui/src/changes/walkthrough.rs:1223`: `theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Horizon,`
 - `crates/ui/src/changes/walkthrough.rs:1255`: `== crate::ui_style::SurfaceModel::Opaque,`
 - `crates/ui/src/composer.rs:7989`: `.when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg())`
-- `crates/ui/src/composer.rs:8105`: `crate::ui_style::ConversationVariant::Area => (true, false),`
+- `crates/ui/src/composer.rs:8105`: `crate::ui_style::ConversationVariant::Horizon => (true, false),`
 - `crates/ui/src/composer.rs:8106`: `crate::ui_style::ConversationVariant::Industrial => (false, true),`
 - `crates/ui/src/composer.rs:8107`: `crate::ui_style::ConversationVariant::Standard => (false, false),`
-- `crates/ui/src/composer.rs:8200`: `let area = matches!(theme.ui_style.conversation, crate::ui_style::ConversationVariant::Area);`
+- `crates/ui/src/composer.rs:8200`: `let area = matches!(theme.ui_style.conversation, crate::ui_style::ConversationVariant::Horizon);`
 - `crates/ui/src/composer.rs:8693`: `.when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| crate::surface_chrome::icon_key(el, &theme, false))`
 - `crates/ui/src/composer.rs:8742`: `.when(!theme.is_frost() && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_lg());`
 - `crates/ui/src/composer.rs:8803`: `.when(theme.ui_style.conversation == crate::ui_style::ConversationVariant::Industrial, |el| el.child(`
-- `crates/ui/src/composer.rs:8847`: `crate::ui_style::ConversationVariant::Area => {`
+- `crates/ui/src/composer.rs:8847`: `crate::ui_style::ConversationVariant::Horizon => {`
 - `crates/ui/src/composer.rs:8858`: `crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Industrial => if expanded {`
 - `crates/ui/src/context_usage.rs:15`: `let industrial = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;`
 - `crates/ui/src/files/mod.rs:50`: `.when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |element| element.size(px(theme.ui_style.tokens.control_size)))`
-- `crates/ui/src/markdown/render.rs:2458`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Area {`
-- `crates/ui/src/markdown/render.rs:2585`: `.when(!copied && theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.child("Copy"))`
-- `crates/ui/src/markdown/render.rs:2598`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Area {`
-- `crates/ui/src/markdown/render.rs:2654`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded(px(14.0)).bg(theme.bg).border_color(theme.bg).p(px(4.0)))`
-- `crates/ui/src/markdown/render.rs:2975`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Area {`
+- `crates/ui/src/markdown/render.rs:2458`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {`
+- `crates/ui/src/markdown/render.rs:2585`: `.when(!copied && theme.ui_style.id == crate::ui_style::UiStyleId::Horizon, |el| el.child("Copy"))`
+- `crates/ui/src/markdown/render.rs:2598`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {`
+- `crates/ui/src/markdown/render.rs:2654`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Horizon, |el| el.rounded(px(14.0)).bg(theme.bg).border_color(theme.bg).p(px(4.0)))`
+- `crates/ui/src/markdown/render.rs:2975`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {`
 - `crates/ui/src/overview.rs:3271`: `let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
 - `crates/ui/src/overview.rs:5522`: `let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
 - `crates/ui/src/popover.rs:335`: `&& theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,`
@@ -1030,18 +1030,18 @@ This mechanical index lists a filtered set of functions whose names match contro
 - `crates/ui/src/shell/chat_item_ui.rs:673`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault, |el| el.shadow_md())`
 - `crates/ui/src/shell/perf_tests.rs:63`: `crate::ui_style::init(crate::ui_style::UiStyleId::Industrial, cx);`
 - `crates/ui/src/shell/running_ui.rs:1043`: `let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
-- `crates/ui/src/shell/spaces.rs:2067`: `div().h(px(if theme.ui_style.id == crate::ui_style::UiStyleId::Area { 0.0 } else { theme.ui_style.tokens.rule_width.unwrap_or(1.0) })).bg(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { theme.border.opacity(0.6) })`
-- `crates/ui/src/shell/spaces.rs:2071`: `let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key || theme.ui_style.id == crate::ui_style::UiStyleId::Area;`
+- `crates/ui/src/shell/spaces.rs:2067`: `div().h(px(if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon { 0.0 } else { theme.ui_style.tokens.rule_width.unwrap_or(1.0) })).bg(if theme.ui_style.tokens.rule_width.is_some() { theme.border } else { theme.border.opacity(0.6) })`
+- `crates/ui/src/shell/spaces.rs:2071`: `let key = theme.ui_style.controls == crate::ui_style::ControlVariant::Key || theme.ui_style.id == crate::ui_style::UiStyleId::Horizon;`
 - `crates/ui/src/shell/team_ui.rs:326`: `let indicator = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
 - `crates/ui/src/shell.rs:7118`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))`
-- `crates/ui/src/shell.rs:7119`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_r_1().border_color(theme.border))`
-- `crates/ui/src/shell.rs:7120`: `.child(if theme.ui_style.id == crate::ui_style::UiStyleId::Area {`
-- `crates/ui/src/shell.rs:7299`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Area && search_query.is_none() {`
+- `crates/ui/src/shell.rs:7119`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Horizon, |el| el.border_r_1().border_color(theme.border))`
+- `crates/ui/src/shell.rs:7120`: `.child(if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {`
+- `crates/ui/src/shell.rs:7299`: `if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon && search_query.is_none() {`
 - `crates/ui/src/shell.rs:7387`: `let glyph = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
 - `crates/ui/src/shell.rs:7508`: `let glyph: AnyElement = if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
 - `crates/ui/src/shell.rs:7549`: `.when(theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot, |el| el.flex().items_center().gap(px(8.0)).child(crate::status_style::indicator_for_theme(crate::status_style::Status::Idle, &theme)))`
 - `crates/ui/src/shell.rs:7550`: `.when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))`
-- `crates/ui/src/shell.rs:7602`: `let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;`
+- `crates/ui/src/shell.rs:7602`: `let area = theme.ui_style.id == crate::ui_style::UiStyleId::Horizon;`
 - `crates/ui/src/shell.rs:7605`: `let selected_wash = if area { identity } else if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque { theme.element_active } else { crate::theme::glass_selected_bg() };`
 - `crates/ui/src/shell.rs:7841`: `.when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.font_family(theme.font_mono.clone()))`
 - `crates/ui/src/shell.rs:8462`: `.when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.child(`
@@ -1051,7 +1051,7 @@ This mechanical index lists a filtered set of functions whose names match contro
 - `crates/ui/src/shell.rs:12765`: `.when(theme.ui_style.controls == crate::ui_style::ControlVariant::Key, |el| el.p(px(8.0)).rounded(px(12.0)).bg(theme.surface))`
 - `crates/ui/src/shell.rs:12833`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))`
 - `crates/ui/src/shell.rs:12873`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque, |el| el.bg(theme.surface))`
-- `crates/ui/src/shell.rs:12874`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Area, |el| el.border_b_1().border_color(theme.border))`
+- `crates/ui/src/shell.rs:12874`: `.when(theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque && theme.ui_style.id != crate::ui_style::UiStyleId::Horizon, |el| el.border_b_1().border_color(theme.border))`
 - `crates/ui/src/status_style.rs:116`: `if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
 - `crates/ui/src/status_style.rs:124`: `if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {`
 - `crates/ui/src/status_style.rs:140`: `&& theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot`
@@ -1060,12 +1060,12 @@ This mechanical index lists a filtered set of functions whose names match contro
 - `crates/ui/src/surface_chrome.rs:59`: `if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {`
 - `crates/ui/src/surface_chrome.rs:66`: `(active && theme.ui_style.controls == crate::ui_style::ControlVariant::Key)`
 - `crates/ui/src/surface_chrome.rs:79`: `.when(theme.ui_style.controls != crate::ui_style::ControlVariant::Minimal, |el| el.bg(theme.input_bg).border_1().border_color(theme.border))`
-- `crates/ui/src/transcript.rs:6212`: `let area = matches!(conversation, crate::ui_style::ConversationVariant::Area);`
-- `crates/ui/src/transcript.rs:6334`: `if matches!(conversation, crate::ui_style::ConversationVariant::Area) {`
+- `crates/ui/src/transcript.rs:6212`: `let area = matches!(conversation, crate::ui_style::ConversationVariant::Horizon);`
+- `crates/ui/src/transcript.rs:6334`: `if matches!(conversation, crate::ui_style::ConversationVariant::Horizon) {`
 - `crates/ui/src/transcript.rs:6344`: `.when(matches!(conversation, crate::ui_style::ConversationVariant::Industrial), |el| el.bg(theme.surface).py(px(8.0)).border_1().border_color(theme.border))`
-- `crates/ui/src/transcript.rs:6345`: `.when(matches!(conversation, crate::ui_style::ConversationVariant::Area), |el| el.bg(identity).max_w_full().w_full())`
+- `crates/ui/src/transcript.rs:6345`: `.when(matches!(conversation, crate::ui_style::ConversationVariant::Horizon), |el| el.bg(identity).max_w_full().w_full())`
 - `crates/ui/src/transcript.rs:6351`: `crate::ui_style::ConversationVariant::Industrial => div().min_w_0().max_w(px(self.content_width * 0.8)).flex().flex_col().items_end().gap(px(4.0))`
-- `crates/ui/src/transcript.rs:6354`: `crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Area => bubble.into_any_element(),`
+- `crates/ui/src/transcript.rs:6354`: `crate::ui_style::ConversationVariant::Standard | crate::ui_style::ConversationVariant::Horizon => bubble.into_any_element(),`
 - `crates/ui/src/transcript.rs:6573`: `let inner = if matches!(conversation, crate::ui_style::ConversationVariant::Industrial)`
 - `crates/ui/src/work_outline/compact_rows_tests.rs:95`: `crate::ui_style::set_style(crate::ui_style::UiStyleId::Industrial, window, cx);`
 - `crates/ui/src/work_outline/details_panel.rs:1325`: `.border_color(if theme.ui_style.controls == crate::ui_style::ControlVariant::Key { theme.border } else { theme.accent })`
@@ -1164,11 +1164,11 @@ The titlebar's sidebar toggle and new-conversation action use
 use `header_icon_button` (`shell.rs:12112`, `shell/tabs.rs:393`, `426`,
 `446`, `517`). Windows and Linux captions have separate button builders at
 `shell.rs:11992` and `12038`. The title and target text are built inline at
-`shell/tabs.rs:474` and `535`. The sidebar has an Area-only wordmark and
+`shell/tabs.rs:474` and `535`. The sidebar has an Horizon-only wordmark and
 new-conversation button at `shell.rs:7122` and `7123`; settings navigation
 rows and Back are inline at `shell.rs:7180` and `7234`.
 
-Area chat rows take an early return at `shell.rs:7299`; this omits the normal
+Horizon chat rows take an early return at `shell.rs:7299`; this omits the normal
 status, account and change-request elements built later in the function.
 The normal row contains status glyph/word (`shell.rs:7387`, `7508`), jump
 badge (`shell.rs:7435`), archive action (`shell.rs:7454`), selected fill
@@ -1176,10 +1176,10 @@ badge (`shell.rs:7435`), archive action (`shell.rs:7454`), selected fill
 (`shell.rs:7810`). Preserve their behavior when consolidating the row.
 
 The shell branch has since moved titlebar controls, sidebar frame and section
-chrome, Area row, chat-header frame and chips, Item/Team tabs, right-surface
+chrome, Horizon row, chat-header frame and chips, Item/Team tabs, right-surface
 tab frame, activity indicators, account trigger and rail into
-`components/shell_parts.rs`. Area rows now show send-status overrides, account
-and pull-request badges, jump hints and an archive action. The separate Area
+`components/shell_parts.rs`. Horizon rows now show send-status overrides, account
+and pull-request badges, jump hints and an archive action. The separate Horizon
 row still needs a complete comparison with the normal row for project, branch,
 remote and other metadata. Remaining inline controls in the shell and its
 submodules are not yet inventoried or migrated; this slice is not complete.
@@ -1209,7 +1209,7 @@ not a completed screen-by-screen audit. All listed renderers still need their
 inline elements checked against the shared components.
 
 - `work_outline/outline_view.rs:2524,2587,2718,2776,2824,3365,3549,3597,3803,3848`: row geometry, first-use prompt, artifact/drift/proposal chips, row body, totals and status indicators. Style/layout branches occur at 2624, 3145, 3152, 3565, 3649, 3895 and 4100; style tokens also control row geometry at 2673 and 3211–3219. Tree guide geometry is in `work_outline/outline_view/tree_guides_view.rs:180`.
-- `work_outline/details_panel.rs:1224`: collapsible section header applies tracked caps whenever a label-size token exists, including Area. Controls and layout branch at 1317–1318, 1338, 1380, 1394, 1488, 1540–1542, 1578, 1590, 1827 and 2026–2046; the title and status control are at 1509 and 1540. Check Archive in the same renderer.
+- `work_outline/details_panel.rs:1224`: collapsible section header applies tracked caps whenever a label-size token exists, including Horizon. Controls and layout branch at 1317–1318, 1338, 1380, 1394, 1488, 1540–1542, 1578, 1590, 1827 and 2026–2046; the title and status control are at 1509 and 1540. Check Archive in the same renderer.
 - `work_outline/details_instructions.rs:441,757,958,1082,1138`: instruction, effective instruction, PR prompt and approval rule sections. `details_templates.rs:231,309,405`, `details_container_template.rs:509,649`, and `details_template_review.rs:283,377`: template controls, editor rows and review.
 - `work_outline/details_user_actions.rs:456,502,585,678,707,899,1184`: required-action and proposal sections and rows. `required_actions_view.rs:1022,1052,1107,1127,1823`: ad-hoc buttons, links and action cards. `chips.rs:38,218` and `hints.rs:24,479`: chips, details buttons and shortcut badge. Check `context_menu.rs` and the other `details_*` modules for inline controls.
 - `overview.rs:3271,5522`: status-indicator branches; 3390, 3450, 4534, 4884: buttons; 3481: item/chat panel content; 5303, 5449, 5494: lane header and list rows; 5831, 5988: outline toolbar and filter. Inspect `overview_grouping.rs` and `overview_positions.rs` for remaining presentation decisions.
@@ -1262,7 +1262,7 @@ conversation, and behavior variants.
 
 ### Shell follow-ups
 
-- Restore project, branch and remote metadata parity in Area sidebar rows.
+- Restore project, branch and remote metadata parity in Horizon sidebar rows.
 - Triage the remaining mechanical candidate ledger below; Item/Team panels were not visually checked in the chat preview.
 
 ### Shell mechanical candidate ledger (untriaged)
@@ -1319,7 +1319,7 @@ not a complete inventory of every inline element.
   `:8627`, `:8693`, `:8742`, `:8774`, `:8803`, `:8846`; dock `composer_dock.rs:323`.
 - Markdown: block layout and body tokens `markdown/render.rs:478`, `:2332`;
   code panel and actions `:2448`, `:2507`, `:2542`, `:2590`, `:2637`,
-  `:2684`; Area-specific code treatments `:2458`, `:2585`, `:2598`, `:2654`,
+  `:2684`; Horizon-specific code treatments `:2458`, `:2585`, `:2598`, `:2654`,
   `:2975`; question cards `:675`.
 - Further audit is needed for inline message actions, all tool details, composer
   tabs and selectors, and the rest of `composer/` and `markdown/`.
@@ -1357,7 +1357,7 @@ function or its first inline element, rather than every child `div`.
   code source and selection `:2536`, `:2558`; link preview card
   `markdown/link_destination.rs:26`.
 - The production slice has no direct style or layout variant comparisons at
-  this revision. `markdown/render.rs:2906` is an Area-specific test setup.
+  this revision. `markdown/render.rs:2906` is an Horizon-specific test setup.
   Theme-only and semantic state branches remain; a component wrapper does not
   by itself migrate all of the child elements listed above.
 - Composer-facing picker audit (`0401e0448`): approval chip `pickers.rs:1389`,
@@ -1525,11 +1525,11 @@ This historical index records presentation candidates and style references at th
 - `crates/ui/src/artifacts/tab.rs:951`: `.border_b_1()`
 - `crates/ui/src/artifacts/tab.rs:952`: `.border_color(theme.border)`
 - `crates/ui/src/artifacts/tab.rs:1054`: `crate::files::toolbar_button(id, label, theme)`
-- `crates/ui/src/artifacts/tab.rs:1062`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.rounded_full().border_1().border_color(theme.border_strong))`
+- `crates/ui/src/artifacts/tab.rs:1062`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Horizon, |el| el.rounded_full().border_1().border_color(theme.border_strong))`
 - `crates/ui/src/artifacts/tab.rs:1084`: `.rounded(px(surface_chrome::CONTROL_RADIUS))`
 - `crates/ui/src/artifacts/tab.rs:1091`: `.when(open, |el| el.bg(crate::theme::wash(0.10)))`
 - `crates/ui/src/artifacts/tab.rs:1092`: `.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))`
-- `crates/ui/src/artifacts/tab.rs:1098`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |toolbar| {`
+- `crates/ui/src/artifacts/tab.rs:1098`: `.when(theme.ui_style.id == crate::ui_style::UiStyleId::Horizon, |toolbar| {`
 - `crates/ui/src/artifacts/tab.rs:1099`: `toolbar.child(div().flex().items_center().rounded(px(12.0)).border_1().border_color(theme.border_strong).overflow_hidden()`
 - `crates/ui/src/artifacts/tab.rs:1102`: `.when(revision.is_some() && id == "artifact-previous-revision", |el| el.bg(theme.accent))`
 - `crates/ui/src/artifacts/tab.rs:1147`: `button(`
@@ -1538,9 +1538,9 @@ This historical index records presentation candidates and style references at th
 - `crates/ui/src/artifacts/tab.rs:1169`: `button(`
 - `crates/ui/src/artifacts/tab.rs:1175`: `.when(pinned, |el| el.bg(crate::theme::wash(0.10)))`
 - `crates/ui/src/artifacts/tab.rs:1183`: `button(`
-- `crates/ui/src/artifacts/tab.rs:1199`: `if theme.ui_style.id != crate::ui_style::UiStyleId::Area { return None; }`
-- `crates/ui/src/artifacts/tab.rs:1210`: `.when(local, |el| el.child(div().id("area-artifact-reveal").debug_selector(|| "area-artifact-reveal".into()).px(px(10.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border_strong).cursor_pointer().child("Reveal")`
-- `crates/ui/src/artifacts/tab.rs:1212`: `.when(standalone, |el| el.child(div().id("area-artifact-open").debug_selector(|| "area-artifact-open".into()).px(px(10.0)).py(px(5.0)).rounded_full().bg(theme.accent).text_color(theme.identity_text(theme.accent)).cursor_pointer().child("Open")`
+- `crates/ui/src/artifacts/tab.rs:1199`: `if theme.ui_style.id != crate::ui_style::UiStyleId::Horizon { return None; }`
+- `crates/ui/src/artifacts/tab.rs:1210`: `.when(local, |el| el.child(div().id("horizon-artifact-reveal").debug_selector(|| "horizon-artifact-reveal".into()).px(px(10.0)).py(px(5.0)).rounded_full().border_1().border_color(theme.border_strong).cursor_pointer().child("Reveal")`
+- `crates/ui/src/artifacts/tab.rs:1212`: `.when(standalone, |el| el.child(div().id("horizon-artifact-open").debug_selector(|| "horizon-artifact-open".into()).px(px(10.0)).py(px(5.0)).rounded_full().bg(theme.accent).text_color(theme.identity_text(theme.accent)).cursor_pointer().child("Open")`
 - `crates/ui/src/artifacts/tab.rs:1238`: `.hover(|el| el.bg(theme.element_hover))`
 - `crates/ui/src/artifacts/tab.rs:1268`: `.hover(|el| el.bg(theme.element_hover))`
 - `crates/ui/src/artifacts/tab.rs:1270`: `el.bg(crate::theme::wash(0.08))`

@@ -13,7 +13,7 @@ pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
         .items_center()
         .gap(px(6.0 * super::layout_spacing(theme)))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .bg(theme.accent.opacity(0.12))
                 .text_color(theme.accent)
@@ -32,7 +32,7 @@ pub(crate) fn settings_ghost_action(theme: &Theme) -> gpui::Div {
         .text_size(crate::typography::ui_rems(
             12.0 + super::layout_type_adjustment(theme),
         ))
-        .text_color(if super::is_area(theme) {
+        .text_color(if super::is_horizon(theme) {
             theme.accent
         } else {
             theme.text_muted
@@ -163,7 +163,7 @@ pub(crate) fn settings_option_card(
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .when(super::is_area(theme), |el| {
+                .when(super::is_horizon(theme), |el| {
                     el.rounded_full()
                         .px(px(10.0))
                         .py(px(4.0))
@@ -198,10 +198,10 @@ pub(crate) fn settings_row_tile_tinted(
         .flex_none()
         .size(px(36.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(10.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .border_color(theme.border)
-        .bg(if super::is_area(theme) {
+        .bg(if super::is_horizon(theme) {
             theme.accent.opacity(0.12)
         } else {
             ink(0.03)
@@ -215,7 +215,7 @@ pub(crate) fn settings_row_tile_tinted(
         .child(
             crate::icons::icon(icon_path)
                 .size(px(16.0))
-                .text_color(tint.unwrap_or(if super::is_area(theme) {
+                .text_color(tint.unwrap_or(if super::is_horizon(theme) {
                     theme.accent
                 } else {
                     theme.text_muted
@@ -232,7 +232,7 @@ pub(crate) fn settings_choice(
     compact: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let industrial = super::is_industrial(theme);
-    let area = super::is_area(theme);
+    let area = super::is_horizon(theme);
     let label = if industrial {
         crate::popover::tracked_upper(label)
     } else {
@@ -284,7 +284,7 @@ pub(crate) fn settings_shortcut_key(
     index: usize,
     recording: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_area(theme);
+    let area = super::is_horizon(theme);
     let industrial = super::is_industrial(theme);
     let key = div()
         .id(("shortcut-combo", index))
@@ -325,7 +325,7 @@ pub(crate) fn settings_destination(
     index: usize,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_area(theme);
+    let area = super::is_horizon(theme);
     div()
         .id(("appshot-destination", index))
         .px(px(10.0))
@@ -363,7 +363,7 @@ pub(crate) fn settings_picker(
     open: bool,
     palette: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_area(theme);
+    let area = super::is_horizon(theme);
     let industrial = super::is_industrial(theme);
     let control = div()
         .id(id)
@@ -579,7 +579,7 @@ pub(crate) fn settings_accent_swatch(
                 .radius_roles()
                 .control
                 .unwrap_or(6.0)))
-            .when(super::is_area(page_theme), |el| el.rounded_full())
+            .when(super::is_horizon(page_theme), |el| el.rounded_full())
             .bg(swatch_theme.accent_wash)
             .flex()
             .items_center()
@@ -613,7 +613,7 @@ pub(crate) fn settings_accent_swatch(
                 .radius_roles()
                 .control
                 .unwrap_or(6.0)))
-            .when(super::is_area(page_theme), |el| el.rounded_full())
+            .when(super::is_horizon(page_theme), |el| el.rounded_full())
             .bg(swatch_theme.accent),
     };
     div()
@@ -638,7 +638,7 @@ pub(crate) fn settings_accent_swatch(
                     .radius_roles()
                     .control
                     .unwrap_or(8.0)))
-                .when(super::is_area(page_theme), |el| el.rounded_full())
+                .when(super::is_horizon(page_theme), |el| el.rounded_full())
                 .border_1()
                 .when(super::is_industrial(page_theme), |el| el.border_b_2())
                 .border_color(if selected {
@@ -663,11 +663,11 @@ pub(crate) fn settings_compact_action(
         .px(px(9.0))
         .py(px(0.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .when(super::is_industrial(theme), |el| el.border_b_2())
         .border_color(theme.border)
-        .bg(if super::is_area(theme) {
+        .bg(if super::is_horizon(theme) {
             theme.accent.opacity(0.12)
         } else {
             theme.surface_raised.opacity(0.34)
@@ -701,7 +701,7 @@ pub(crate) fn settings_import_mode(
         .border_color(if active { theme.accent } else { theme.border })
         .bg(if active {
             theme.accent_wash
-        } else if super::is_area(theme) {
+        } else if super::is_horizon(theme) {
             theme.accent.opacity(0.08)
         } else {
             theme.surface_raised.opacity(0.28)
@@ -756,7 +756,7 @@ pub(crate) fn settings_device_switcher(
     id: &'static str,
     open: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_area(theme);
+    let area = super::is_horizon(theme);
     div()
         .id(id)
         .flex_none()
@@ -793,7 +793,7 @@ pub(crate) fn settings_autosave_choice(
     id: SharedString,
     active: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_area(theme);
+    let area = super::is_horizon(theme);
     div()
         .id(id)
         .h(px(28.0))
@@ -829,9 +829,9 @@ pub(crate) fn settings_send_behavior_group(theme: &Theme) -> gpui::Stateful<gpui
         .flex()
         .flex_row()
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(9.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .p(px(2.0))
-        .bg(if super::is_area(theme) {
+        .bg(if super::is_horizon(theme) {
             theme.accent.opacity(0.08)
         } else {
             ink(0.04)
@@ -848,7 +848,7 @@ pub(crate) fn settings_send_behavior_option(
         .px(px(12.0))
         .py(px(6.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .flex()
         .items_center()
         .justify_center()
@@ -860,7 +860,7 @@ pub(crate) fn settings_send_behavior_option(
             theme.text_muted
         })
         .when(selected, |el| {
-            el.bg(if super::is_area(theme) {
+            el.bg(if super::is_horizon(theme) {
                 theme.accent.opacity(0.18)
             } else {
                 theme.bg
@@ -889,7 +889,7 @@ pub(crate) fn settings_archive_tile(theme: &Theme) -> gpui::Div {
         .flex_none()
         .size(px(32.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent.opacity(0.1))
         })
         .border_1()
@@ -922,7 +922,7 @@ pub(crate) fn settings_unarchive_action(
         .px(px(10.0))
         .py(px(4.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent.opacity(0.1))
         })
         .border_1()
@@ -947,7 +947,7 @@ pub(crate) fn settings_account_forget(
     div()
         .id(("account-forget", index))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent.opacity(0.1))
         })
         .when(super::is_industrial(theme), |el| {
@@ -973,7 +973,7 @@ pub(crate) fn settings_account_switch(
         .px(px(8.0))
         .py(px(4.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .bg(theme.accent_strong)
                 .text_color(theme.on_accent)
@@ -999,13 +999,13 @@ pub(crate) fn settings_team_visibility(
         .px(px(10.0))
         .py(px(5.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .when(super::is_industrial(theme), |el| {
             el.border_1().border_b_2().border_color(theme.border)
         })
         .bg(if active {
             theme.accent.opacity(0.15)
-        } else if super::is_area(theme) {
+        } else if super::is_horizon(theme) {
             theme.accent.opacity(0.06)
         } else {
             crate::theme::wash(0.025)
@@ -1033,7 +1033,7 @@ pub(crate) fn settings_theme_import_row(
         })
         .bg(if selected {
             theme.accent_wash.opacity(0.42)
-        } else if super::is_area(theme) {
+        } else if super::is_horizon(theme) {
             theme.accent.opacity(0.08)
         } else {
             theme.surface_raised.opacity(0.22)
@@ -1106,7 +1106,7 @@ pub(crate) fn settings_theme_import_checkbox(
         .id(id)
         .size(px(18.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(5.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .when(super::is_industrial(theme), |el| el.border_b_2())
         .border_color(if selected {
@@ -1134,7 +1134,7 @@ pub(crate) fn settings_background_thumbnail(theme: &Theme, path: std::path::Path
         .flex_none()
         .size(px(36.0))
         .rounded(px(radius.unwrap_or(10.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .overflow_hidden()
         .border_1()
         .border_color(crate::theme::hairline(0.10))
@@ -1142,7 +1142,7 @@ pub(crate) fn settings_background_thumbnail(theme: &Theme, path: std::path::Path
             gpui::img(path)
                 .size(px(34.0))
                 .rounded(px(radius.unwrap_or(9.0)))
-                .when(super::is_area(theme), |el| el.rounded_full())
+                .when(super::is_horizon(theme), |el| el.rounded_full())
                 .object_fit(gpui::ObjectFit::Cover),
         )
 }
@@ -1219,11 +1219,11 @@ pub(crate) fn settings_import_close(theme: &Theme) -> gpui::Stateful<gpui::Div> 
         .id("theme-import-close")
         .size(px(28.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .border_1()
         .when(super::is_industrial(theme), |el| el.border_b_2())
         .border_color(theme.border)
-        .bg(if super::is_area(theme) {
+        .bg(if super::is_horizon(theme) {
             theme.accent.opacity(0.1)
         } else {
             theme.surface_raised.opacity(0.28)
@@ -1291,7 +1291,7 @@ pub(crate) fn settings_send_behavior_reset(theme: &Theme) -> gpui::Stateful<gpui
         .id("composer-send-reset")
         .size(px(26.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent.opacity(0.08))
         })
         .when(super::is_industrial(theme), |el| {

@@ -40,7 +40,7 @@ fn visit(path: &Path, counts: &mut [usize; 4]) {
             counts[1] += count_numeric_call(&source, ".rounded(", "px(");
             for pattern in [
                 "UiStyleId::Industrial",
-                "UiStyleId::Area",
+                "UiStyleId::Horizon",
                 "ConversationVariant::",
             ] {
                 counts[2] += source.matches(pattern).count();

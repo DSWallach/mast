@@ -199,7 +199,7 @@ pub fn conversation_picker_footer_chip(
         .on_hover(crate::motion::hover_listener(id))
         .cursor_pointer();
     let chip = super::segmented_key(chip, theme, open);
-    let chip = if super::is_area(theme) {
+    let chip = if super::is_horizon(theme) {
         super::toolbar_control(chip, theme, false)
     } else {
         chip
@@ -263,7 +263,7 @@ pub fn conversation_picker_approval(
             crate::icons::icon(icon)
                 .size(px(12.0))
                 .flex_none()
-                .text_color(if super::is_area(theme) {
+                .text_color(if super::is_horizon(theme) {
                     theme.text_muted
                 } else {
                     icon_color
@@ -291,7 +291,7 @@ pub fn conversation_picker_footer_label(
     let label = if theme.ui_style.design_roles.tracked_caps == Some(true) { SharedString::from(crate::popover::tracked_upper(&label)) } else { label };
     div()
         .h(px(20.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .max_w(px(160.0))
@@ -895,7 +895,7 @@ pub fn conversation_error_chip(theme: &Theme, message: SharedString) -> AnyEleme
 
 pub fn conversation_add_harness_key(theme: &Theme) -> gpui::Stateful<Div> {
     div()
-        .id("area-add-harness")
+        .id("horizon-add-harness")
         .role(gpui::Role::Button)
         .aria_label("Add harness")
         .size(px(28.0))
@@ -926,11 +926,11 @@ pub fn conversation_markdown_gap(theme: &Theme, fallback: f32) -> f32 {
 }
 
 pub fn conversation_markdown_bullet_size(theme: &Theme) -> f32 {
-    if theme.ui_style.conversation == ConversationVariant::Area { 3.0 } else { 5.0 }
+    if theme.ui_style.conversation == ConversationVariant::Horizon { 3.0 } else { 5.0 }
 }
 
 pub fn conversation_markdown_bullet_color(theme: &Theme) -> Hsla {
-    if theme.ui_style.conversation == ConversationVariant::Area { theme.text } else { theme.accent }
+    if theme.ui_style.conversation == ConversationVariant::Horizon { theme.text } else { theme.accent }
 }
 
 pub fn conversation_markdown_text_size(theme: &Theme, size: f32, body_size: f32) -> f32 {
@@ -942,7 +942,7 @@ pub fn conversation_markdown_text_size(theme: &Theme, size: f32, body_size: f32)
 }
 
 pub fn conversation_skill_chip(theme: &Theme, index: usize) -> gpui::Stateful<Div> {
-    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
     div()
         .id(("composer-skill-chip", index))
         .flex_none()
@@ -1007,7 +1007,7 @@ pub struct ConversationComposerBody {
     pub attach: AnyElement,
     pub send: AnyElement,
     pub model: Option<AnyElement>,
-    pub area_model: Option<AnyElement>,
+    pub horizon_model: Option<AnyElement>,
     pub send_hint: Option<AnyElement>,
     pub expanded: bool,
     pub pill_height: f32,
@@ -1032,7 +1032,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
         attach,
         send,
         model,
-        area_model,
+        horizon_model,
         send_hint,
         expanded,
         pill_height,
@@ -1044,7 +1044,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
         text_glide,
         surface_width,
     } = body;
-    if theme.ui_style.conversation == ConversationVariant::Area {
+    if theme.ui_style.conversation == ConversationVariant::Horizon {
         return div()
             .flex()
             .flex_col()
@@ -1087,7 +1087,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
                         div()
                             .min_w_0()
                             .max_w(px(surface_width * 0.55))
-                            .children(area_model),
+                            .children(horizon_model),
                     )
                     .child(send),
             )
@@ -1202,7 +1202,7 @@ pub fn conversation_composer_body(theme: &Theme, body: ConversationComposerBody)
 }
 
 pub fn conversation_input_text_color(theme: &Theme, identity: Hsla) -> Option<Hsla> {
-    (theme.ui_style.conversation == ConversationVariant::Area)
+    (theme.ui_style.conversation == ConversationVariant::Horizon)
         .then(|| theme.identity_text(identity))
 }
 
@@ -1235,7 +1235,7 @@ pub fn conversation_model_picker(
     picker: AnyElement,
     measure: AnyElement,
 ) -> (Option<Div>, Option<Div>) {
-    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
     let picker = div()
         .min_w_0()
         .max_w(px(width
@@ -1263,7 +1263,7 @@ pub fn conversation_harness_tabs(
     tabs: Vec<AnyElement>,
     add: AnyElement,
 ) -> Option<Div> {
-    (theme.ui_style.conversation == ConversationVariant::Area).then(|| {
+    (theme.ui_style.conversation == ConversationVariant::Horizon).then(|| {
         div()
             .absolute()
             .left(px(16.0))
@@ -1341,7 +1341,7 @@ pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
         .id("composer-attach")
         .size(px(28.0))
         .when(
-            theme.ui_style.conversation == ConversationVariant::Industrial || super::is_area(theme),
+            theme.ui_style.conversation == ConversationVariant::Industrial || super::is_horizon(theme),
             |el| el.size(px(theme.ui_style.tokens.control_size)),
         )
         .flex_none()
@@ -1372,7 +1372,7 @@ pub fn conversation_attach_key(theme: &Theme) -> gpui::Stateful<Div> {
 }
 
 pub fn conversation_composer_content_height(theme: &Theme, content: f32, line: f32) -> f32 {
-    if theme.ui_style.conversation == ConversationVariant::Area {
+    if theme.ui_style.conversation == ConversationVariant::Horizon {
         content.max(3.0 * line)
     } else {
         content
@@ -1381,13 +1381,13 @@ pub fn conversation_composer_content_height(theme: &Theme, content: f32, line: f
 
 pub fn conversation_composer_expanded(theme: &Theme, expanded: bool, width: Option<f32>) -> bool {
     expanded
-        || theme.ui_style.conversation == ConversationVariant::Area
+        || theme.ui_style.conversation == ConversationVariant::Horizon
         || (theme.ui_style.conversation == ConversationVariant::Industrial
             && width.is_some_and(|width| width < 500.0))
 }
 
 pub fn conversation_composer_text_size(theme: &Theme, size: f32) -> f32 {
-    if theme.ui_style.conversation == ConversationVariant::Area {
+    if theme.ui_style.conversation == ConversationVariant::Horizon {
         15.0
     } else {
         size
@@ -1405,7 +1405,7 @@ pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder
     fallback_radius: f32,
     border: Hsla,
 ) -> T {
-    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
     let element = element
         .rounded(px(conversation_panel_radius(theme, fallback_radius)))
         .border_1()
@@ -1434,7 +1434,7 @@ pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder
 }
 
 pub fn conversation_composer_width(theme: &Theme, width: f32, gutter: f32) -> f32 {
-    if theme.ui_style.conversation == ConversationVariant::Area {
+    if theme.ui_style.conversation == ConversationVariant::Horizon {
         width.min(720.0 + 2.0 * gutter)
     } else {
         width
@@ -1446,9 +1446,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn area_composer_has_three_lines_and_matches_conversation_width() {
+    fn horizon_composer_has_three_lines_and_matches_conversation_width() {
         let mut theme = Theme::light();
-        theme.ui_style = crate::ui_style::UiStyle::AREA;
+        theme.ui_style = crate::ui_style::UiStyle::HORIZON;
         assert!(conversation_composer_expanded(&theme, false, None));
         assert_eq!(
             conversation_composer_content_height(&theme, 22.0, 22.0),
@@ -1476,7 +1476,7 @@ pub fn conversation_send_key(
     queue: bool,
 ) -> gpui::Stateful<Div> {
     use crate::ui_style::{ConversationVariant, UiLayout};
-    let area = theme.ui_style.conversation == ConversationVariant::Area;
+    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
     let key = theme.ui_style.conversation == ConversationVariant::Industrial;
     let guided = theme.ui_style.layout == UiLayout::Guided;
     let fill = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(if area { theme.accent } else { theme.text });
@@ -1550,7 +1550,7 @@ pub fn conversation_send_key(
 
 pub fn conversation_code_theme(theme: &Theme) -> Theme {
     let mut result = theme.clone();
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+    if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {
         result.bg = theme.surface_raised;
         result.text = theme.text_muted;
     }
@@ -1560,7 +1560,7 @@ pub fn conversation_code_theme(theme: &Theme) -> Theme {
 fn conversation_code_copy_label(theme: &Theme, copied: bool) -> Option<&'static str> {
     if copied {
         Some("Copied")
-    } else if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+    } else if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {
         Some("Copy")
     } else {
         None
@@ -1568,7 +1568,7 @@ fn conversation_code_copy_label(theme: &Theme, copied: bool) -> Option<&'static 
 }
 
 pub fn conversation_code_token_color(theme: &Theme, color: Hsla) -> Hsla {
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+    if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {
         (0..=100)
             .map(|step| crate::theme::flatten(color.opacity(1.0 - step as f32 / 100.0), theme.text))
             .find(|candidate| crate::theme::contrast_ratio(*candidate, theme.bg) >= 7.0)
@@ -1581,7 +1581,7 @@ pub fn conversation_code_token_color(theme: &Theme, color: Hsla) -> Hsla {
 /// Theme used while rendering the contents of a user message.
 pub fn user_message_theme(theme: &Theme, identity: Hsla) -> Theme {
     let mut result = theme.clone();
-    if theme.ui_style.conversation == ConversationVariant::Area {
+    if theme.ui_style.conversation == ConversationVariant::Horizon {
         result.text = theme.identity_text(identity);
         result.code_wash = result.text;
         result.code_text = identity;
@@ -1592,7 +1592,7 @@ pub fn user_message_theme(theme: &Theme, identity: Hsla) -> Theme {
 /// Theme used while rendering the contents of an agent message.
 pub fn agent_message_theme(theme: &Theme, identity: Hsla) -> Theme {
     let mut result = theme.clone();
-    if theme.ui_style.conversation == ConversationVariant::Area {
+    if theme.ui_style.conversation == ConversationVariant::Horizon {
         result.font_sans = "EB Garamond".into();
         result.text = theme.identity_foreground(identity);
         result.ui_style.tokens.body_size = Some(17.5);
@@ -1610,7 +1610,7 @@ pub fn conversation_user_bubble(
     content: AnyElement,
 ) -> AnyElement {
     let mut bubble_theme = theme.clone();
-    if theme.ui_style.conversation == ConversationVariant::Area {
+    if theme.ui_style.conversation == ConversationVariant::Horizon {
         bubble_theme.ui_style.tokens.body_size = Some(16.5);
     }
     super::user_message_bubble(
@@ -1625,7 +1625,7 @@ pub fn conversation_user_bubble(
 
 /// The centered content column shared by a transcript row and its metadata.
 pub fn conversation_column(theme: &Theme, width: f32) -> Div {
-    let width = if theme.ui_style.conversation == ConversationVariant::Area {
+    let width = if theme.ui_style.conversation == ConversationVariant::Horizon {
         width.min(720.0)
     } else {
         width
@@ -1653,7 +1653,7 @@ fn code_block_header(
     if language.is_none() && actions.is_empty() {
         return None;
     }
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+    if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {
         return Some(
             div()
                 .h(crate::typography::ui_rems(28.0 + 8.0))
@@ -1734,7 +1734,7 @@ pub fn conversation_code_frame(
         .border_1()
         .border_color(theme.border)
         .when(
-            theme.ui_style.id == crate::ui_style::UiStyleId::Area,
+            theme.ui_style.id == crate::ui_style::UiStyleId::Horizon,
             |el| {
                 el.rounded(px(14.0))
                     .bg(theme.surface_raised)

@@ -1975,7 +1975,7 @@ mod tests {
     #[test]
     fn agent_identity_uses_provider_palette_and_guards_danger() {
         use mast_proto::HarnessId;
-        for (appearance, id) in [(Appearance::Light, "area-light"), (Appearance::Dark, "area-dark")] {
+        for (appearance, id) in [(Appearance::Light, "horizon-light"), (Appearance::Dark, "horizon-dark")] {
             let mut theme = Theme::for_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque);
             let color = |harness, model| theme.agent_identity_color(harness, model);
             assert_eq!(color(Some(HarnessId::ClaudeCode), Some("opus")), flatten(theme.terminal.ansi[3], theme.bg));
@@ -1993,8 +1993,8 @@ mod tests {
     }
 
     #[test]
-    fn area_agent_reply_uses_provider_foreground() {
-        let theme = Theme::dark().with_ui_style(crate::ui_style::UiStyle::AREA);
+    fn horizon_agent_reply_uses_provider_foreground() {
+        let theme = Theme::dark().with_ui_style(crate::ui_style::UiStyle::HORIZON);
         let claude = theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus"));
         let codex = theme.agent_identity_color(Some(mast_proto::HarnessId::Codex), Some("astra"));
         let claude_reply = crate::components::agent_message_theme(&theme, claude);
@@ -2013,8 +2013,8 @@ mod tests {
     }
 
     #[test]
-    fn area_identity_defaults_to_blue_and_preserves_text_contrast() {
-        for (appearance, id) in [(Appearance::Light, "area-light"), (Appearance::Dark, "area-dark")] {
+    fn horizon_identity_defaults_to_blue_and_preserves_text_contrast() {
+        for (appearance, id) in [(Appearance::Light, "horizon-light"), (Appearance::Dark, "horizon-dark")] {
             let theme = Theme::for_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque);
             assert_eq!(theme.identity_color(""), flatten(theme.terminal.ansi[4], theme.bg));
             assert_eq!(theme.identity_color("harness:ClaudeCode"), theme.identity_color(""));

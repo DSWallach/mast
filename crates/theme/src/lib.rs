@@ -275,6 +275,8 @@ pub fn canonical_variant_id(id: &str) -> &str {
     match id {
         "zeron-dark" => "mast-dark",
         "zeron-light" => "mast-light",
+        "area-light" => "horizon-light",
+        "area-dark" => "horizon-dark",
         other => other,
     }
 }
@@ -845,6 +847,9 @@ mod tests {
         };
         assert_eq!(old.variant_id(Appearance::Dark), "mast-dark");
         assert_eq!(old.variant_id(Appearance::Light), "mast-light");
+        let old_area = ThemeSelection { light: "area-light".into(), dark: "area-dark".into() };
+        assert_eq!(registry.resolve(&old_area, Appearance::Light).id, "horizon-light");
+        assert_eq!(registry.resolve(&old_area, Appearance::Dark).id, "horizon-dark");
         let errors: Vec<_> = registry
             .validate()
             .into_iter()
@@ -866,9 +871,9 @@ mod tests {
     }
 
     #[test]
-    fn area_identity_palette_is_theme_owned() {
+    fn horizon_identity_palette_is_theme_owned() {
         let registry = ThemeRegistry::builtin();
-        for id in ["area-light", "area-dark"] {
+        for id in ["horizon-light", "horizon-dark"] {
             let variant = registry.variant(id).unwrap();
             let palette = variant.identity_palette();
             assert_eq!(palette[0], "#0BA7FF".parse().unwrap());
@@ -880,8 +885,8 @@ mod tests {
     }
 
     #[test]
-    fn area_diff_colours_are_distinct_and_readable() {
-        for id in ["area-light", "area-dark"] {
+    fn horizon_diff_colours_are_distinct_and_readable() {
+        for id in ["horizon-light", "horizon-dark"] {
             let variant = ThemeRegistry::builtin().variant(id).unwrap();
             let add = variant.colors.diff_add;
             let delete = variant.colors.diff_delete;

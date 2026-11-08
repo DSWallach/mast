@@ -32,7 +32,7 @@ an override; deleting the file removes all overrides.
 {
   "version": "mast.style-overrides/v1",
   "styles": {
-    "area": {
+    "horizon": {
       "controlRadius": 16,
       "detailsBorder": true,
       "primaryColour": "accent",
@@ -59,7 +59,7 @@ non-default profile directory for reading overrides.
 Surface overrides can also be supplied under `surfaces`, for example:
 
 ```json
-{ "version": "mast.style-overrides/v1", "styles": { "area": {
+{ "version": "mast.style-overrides/v1", "styles": { "horizon": {
   "surfaces": { "composer": { "border": true, "pageColour": false } }
 } } }
 ```

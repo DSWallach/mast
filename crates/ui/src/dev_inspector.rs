@@ -203,7 +203,7 @@ mod tests {
             bounds: Default::default(),
             content_size: Default::default(),
         };
-        format_details(&id, &state, "Area, Dark")
+        format_details(&id, &state, "Horizon, Dark")
     }
 
     #[test]

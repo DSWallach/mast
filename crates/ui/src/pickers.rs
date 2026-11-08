@@ -1478,7 +1478,7 @@ impl Pickers {
         }
     }
 
-    pub(crate) fn area_harnesses(&self, cx: &App) -> Vec<HarnessId> {
+    pub(crate) fn horizon_harnesses(&self, cx: &App) -> Vec<HarnessId> {
         let mut ids: Vec<_> = self.harnesses.ready().map(|list| offered_harnesses(list).into_iter().map(|item| item.id).collect()).unwrap_or_default();
         if let Some(selected) = self.effective_harness(cx) && !ids.contains(&selected) { ids.insert(0, selected); }
         ids
@@ -6976,7 +6976,7 @@ mod tests {
             });
             window.run_until_parked();
             let row = window.debug_bounds("model-row-0").expect("model row rendered");
-            if style == UiStyle::AREA.id {
+            if style == UiStyle::HORIZON.id {
                 assert_eq!(row.size.height, px(UiStyle::resolve(style, UiStyle::MINIMAL.layout).tokens.control_size));
             }
             fixture.update(window, |fixture, cx| {

@@ -13,7 +13,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     REGISTRY.get_or_init(|| ThemeRegistry {
         families: vec![
             family("mast", "Mast", vec![zeron_light(), zeron_dark()]),
-            family("area", "Area", vec![area(false), area(true)]),
+            family("horizon", "Horizon", vec![horizon(false), horizon(true)]),
             family(
                 "industrial",
                 "Industrial",
@@ -276,11 +276,11 @@ fn zeron_dark() -> ThemeVariant {
     })
 }
 
-fn area(dark: bool) -> ThemeVariant {
+fn horizon(dark: bool) -> ThemeVariant {
     let (id, name, appearance, background, shell, text, muted, ansi) = if dark {
         (
-            "area-dark",
-            "Area Dark",
+            "horizon-dark",
+            "Horizon Dark",
             Appearance::Dark,
             "#18191B",
             "#18191B",
@@ -290,8 +290,8 @@ fn area(dark: bool) -> ThemeVariant {
         )
     } else {
         (
-            "area-light",
-            "Area Light",
+            "horizon-light",
+            "Horizon Light",
             Appearance::Light,
             "#FFFFFF",
             "#FFFFFF",
@@ -302,7 +302,7 @@ fn area(dark: bool) -> ThemeVariant {
     };
     let mut result = variant(Seeds {
         id,
-        family_id: "area",
+        family_id: "horizon",
         name,
         appearance,
         treatment: SurfaceTreatment::Opaque,

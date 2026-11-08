@@ -18,7 +18,7 @@ pub(crate) fn browser_toolbar_button(
                 .size(px(surface_chrome::ICON_SIZE))
                 .text_color(theme.text_muted),
         )
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .border_1()
                 .border_color(theme.border_strong)
@@ -29,7 +29,7 @@ pub(crate) fn artifact_revision_navigation(
     theme: &Theme,
     children: Vec<AnyElement>,
 ) -> Option<AnyElement> {
-    super::is_area(theme).then(|| {
+    super::is_horizon(theme).then(|| {
         div()
             .flex()
             .items_center()
@@ -76,7 +76,7 @@ pub(crate) fn artifact_footer(
     author: SharedString,
     actions: Vec<AnyElement>,
 ) -> Option<AnyElement> {
-    super::is_area(theme).then(|| {
+    super::is_horizon(theme).then(|| {
         div()
             .w_full()
             .h(px(40.0))
@@ -141,7 +141,7 @@ pub(crate) fn browser_preview_row(
                     .border_color(border_strong)
             })
         })
-        .when(super::is_area(theme), |el| el.bg(theme.accent_wash));
+        .when(super::is_horizon(theme), |el| el.bg(theme.accent_wash));
     super::segmented_key(row, theme, false)
 }
 
@@ -169,7 +169,7 @@ pub(crate) fn artifact_action_button(
         .text_size(crate::typography::ui_rems(11.0))
         .cursor_pointer()
         .child(label)
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, primary)
 }
 
@@ -199,7 +199,7 @@ pub(crate) fn artifact_compare_button(
         .when(active, |el| el.bg(crate::theme::wash(0.12)))
         .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
         .child(label)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .when(active, |el| el.bg(theme.accent_wash))
         });
@@ -235,7 +235,7 @@ pub(crate) fn artifact_option_button(
         })
         .when(busy, |el| el.opacity(0.5))
         .child(label)
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, primary)
 }
 
@@ -257,7 +257,7 @@ pub(crate) fn artifact_option_toggle(
         .border_color(if active { theme.accent } else { theme.border })
         .text_color(if active { theme.text } else { theme.text_muted })
         .child(SharedString::from(label))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .when(active, |el| el.bg(theme.accent_wash))
         });
@@ -291,7 +291,7 @@ pub(crate) fn artifact_find_button(
                 .size(px(11.0))
                 .text_color(theme.text_muted),
         )
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, false)
 }
 
@@ -324,7 +324,7 @@ pub(crate) fn artifact_zoom_button(
         })
         .when(!enabled, |el| el.cursor_default().opacity(0.35))
         .child(text)
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, false)
 }
 
@@ -350,7 +350,7 @@ pub(crate) fn browser_status_button(
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text)
         .child(label)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent_wash)
         });
     super::segmented_key(button, theme, false)
@@ -388,7 +388,7 @@ pub(crate) fn artifact_picker_button(
         .hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
         .child(label)
         .child(icons::icon(icons::ALT_ARROW_DOWN).size(px(9.0)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().when(open, |el| el.bg(theme.accent_wash))
         });
     super::segmented_key(button, theme, open)
@@ -414,7 +414,7 @@ pub(crate) fn artifact_card_frame(id: SharedString, label: String, theme: &Theme
         .role(gpui::Role::Button)
         .aria_label(label)
         .hover(|card| card.bg(theme.element_hover))
-        .when(super::is_area(theme), |el| el.bg(theme.accent_wash));
+        .when(super::is_horizon(theme), |el| el.bg(theme.accent_wash));
     super::segmented_key(card, theme, false)
 }
 
@@ -428,7 +428,7 @@ pub(crate) fn artifact_card_icon(glyph: &'static str, theme: &Theme) -> Div {
         .items_center()
         .justify_center()
         .child(icons::icon(glyph).size(px(15.0)).text_color(theme.accent))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
 }
 
 pub(crate) fn artifact_card_open(id: SharedString, theme: &Theme) -> Stateful<Div> {
@@ -444,7 +444,7 @@ pub(crate) fn artifact_card_open(id: SharedString, theme: &Theme) -> Stateful<Di
         .text_color(theme.text)
         .hover(|el| el.bg(theme.element_hover))
         .child("Open")
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, false)
 }
 
@@ -463,7 +463,7 @@ pub(crate) fn browser_empty_icon(theme: &Theme) -> Div {
                 .size(px(22.0))
                 .text_color(theme.text_muted),
         )
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent_wash)
         })
         .when(super::is_industrial(theme), |el| {
@@ -496,7 +496,7 @@ pub(crate) fn browser_empty_action(has_error: bool, theme: &Theme) -> Stateful<D
         .gap(px(8.0))
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent_wash)
         });
     super::segmented_key(button, theme, false)
@@ -515,7 +515,7 @@ pub(crate) fn browser_go_button(theme: &Theme) -> Stateful<Div> {
         .role(gpui::Role::Button)
         .aria_label("Go to address")
         .hover(|s| s.bg(crate::theme::wash(0.10)))
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, false)
 }
 
@@ -549,7 +549,7 @@ pub(crate) fn artifact_comment_control(
             el.hover(|el| el.bg(crate::theme::wash(0.14)).text_color(theme.text))
         })
         .child(text)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .when(active, |el| el.bg(theme.accent_wash))
         });
@@ -571,7 +571,7 @@ pub(crate) fn artifact_option_row(id: SharedString, theme: &Theme) -> Stateful<D
         .gap(px(8.0))
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent_wash)
         });
     super::segmented_key(row, theme, false)
@@ -587,7 +587,7 @@ pub(crate) fn artifact_metadata_chip(text: String, color: gpui::Hsla, theme: &Th
         .text_size(crate::typography::ui_rems(10.0))
         .text_color(color)
         .child(SharedString::from(text))
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(chip, theme, false).into_any_element()
 }
 
@@ -616,7 +616,7 @@ pub(crate) fn artifact_comment_card(
             theme.border
         })
         .when(resolved, |el| el.opacity(0.65))
-        .when(super::is_area(theme), |el| el.bg(theme.accent_wash));
+        .when(super::is_horizon(theme), |el| el.bg(theme.accent_wash));
     super::segmented_key(card, theme, focused)
 }
 
@@ -636,7 +636,7 @@ pub(crate) fn artifact_plan_frame(id: SharedString, theme: &Theme) -> Stateful<D
         .bg(theme.surface_card)
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
-        .when(super::is_area(theme), |el| el.bg(theme.accent_wash))
+        .when(super::is_horizon(theme), |el| el.bg(theme.accent_wash))
         .when(super::is_industrial(theme), |el| {
             el.border_color(theme.industrial_colors().rule)
                 .bg(theme.industrial_colors().key)
@@ -670,7 +670,7 @@ pub(crate) fn artifact_index_row(
             el.bg(crate::theme::wash(if focused { 0.20 } else { 0.10 }))
         })
         .hover(|el| el.bg(crate::theme::wash(0.14)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .when(active, |el| el.bg(theme.accent_wash))
         });
@@ -703,7 +703,7 @@ pub(crate) fn browser_preview_open(
         })
         .when(!available, |el| el.opacity(0.4))
         .child("Open")
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, false)
 }
 
@@ -716,7 +716,7 @@ pub(crate) fn browser_empty_notice(theme: &Theme) -> Div {
         .text_size(crate::typography::ui_rems(12.0))
         .line_height(px(19.0))
         .text_color(theme.text_muted)
-        .when(super::is_area(theme), |el| el.bg(theme.accent_wash))
+        .when(super::is_horizon(theme), |el| el.bg(theme.accent_wash))
         .when(super::is_industrial(theme), |el| {
             el.bg(theme.industrial_colors().key)
                 .border_color(theme.industrial_colors().rule)
@@ -747,7 +747,7 @@ pub(crate) fn artifact_index_toggle(
                 .size(px(icon_size))
                 .text_color(theme.text_muted),
         )
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(button, theme, false)
 }
 
@@ -772,7 +772,7 @@ pub(crate) fn artifact_question_badge(
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(color)
         .child(SharedString::from(label))
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(badge, theme, false)
 }
 
@@ -789,7 +789,7 @@ pub(crate) fn artifact_comment_badge(label: &'static str, color: gpui::Hsla, the
         .text_size(crate::typography::ui_rems(10.0))
         .text_color(color)
         .child(label)
-        .when(super::is_area(theme), |el| el.rounded_full());
+        .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(badge, theme, false)
 }
 
@@ -805,7 +805,7 @@ pub(crate) fn artifact_review_card(id: SharedString, theme: &Theme) -> Stateful<
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .when(super::is_area(theme), |el| el.bg(theme.accent_wash))
+        .when(super::is_horizon(theme), |el| el.bg(theme.accent_wash))
         .when(super::is_industrial(theme), |el| {
             el.bg(theme.industrial_colors().key)
                 .border_color(theme.industrial_colors().rule)
@@ -821,7 +821,7 @@ pub(crate) fn artifact_review_warning(theme: &Theme) -> Div {
         .border_color(theme.warning)
         .text_color(theme.warning)
         .text_size(crate::typography::ui_rems(12.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.bg(theme.warning.opacity(0.1))
         })
 }
@@ -842,7 +842,7 @@ pub(crate) fn artifact_plan_state(
         .text_size(crate::typography::ui_rems(10.0))
         .text_color(color)
         .child(SharedString::from(label))
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
 }
 
 pub(crate) fn artifact_progress(fraction: f32, theme: &Theme) -> Div {
@@ -871,7 +871,7 @@ pub(crate) fn artifact_picked_chip(label: String, theme: &Theme) -> Div {
         .border_color(theme.accent)
         .text_color(theme.accent)
         .child(SharedString::from(label))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent_wash)
         })
 }
@@ -884,7 +884,7 @@ pub(crate) fn artifact_pick_note(theme: &Theme) -> Div {
         .border_color(theme.border)
         .px(px(6.0))
         .py(px(2.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.accent_wash)
         })
         .when(super::is_industrial(theme), |el| {
@@ -912,7 +912,7 @@ pub(crate) fn artifact_picker_row(
         .text_color(theme.text)
         .hover(|el| el.bg(theme.element_hover))
         .when(selected, |el| el.bg(crate::theme::wash(0.08)))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .when(selected, |el| el.bg(theme.accent_wash))
         });

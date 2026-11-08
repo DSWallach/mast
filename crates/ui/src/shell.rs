@@ -7236,9 +7236,9 @@ impl Shell {
             let config = chat.and_then(|chat| chat.config.as_ref());
             theme.agent_identity_color(config.map(|config| config.harness).or(harness), config.and_then(|config| config.model.as_deref()).or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())))
         };
-        let area_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let horizon_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archive_id = id.clone();
-        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, identity, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), jump_label.clone(), preview, area_hovered, archived, cx.listener(move |this, _, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))) {
+        if let Some(row) = crate::components::shell_parts::horizon_sidebar_chat_row(theme, row_id.clone(), &id, identity, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), jump_label.clone(), preview, horizon_hovered, archived, cx.listener(move |this, _, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))) {
             let select_id = id.clone();
             let menu_id = id.clone();
             return row

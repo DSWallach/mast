@@ -315,10 +315,10 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
         ("industrial-dark", UiStyleId::Industrial, Appearance::Dark, "industrial-dark"),
         ("industrial-github-dark", UiStyleId::Industrial, Appearance::Dark, "github-dark"),
         ("minimal-industrial-light", UiStyleId::Default, Appearance::Light, "industrial-light"),
-        ("area-default", UiStyleId::Area, Appearance::Light, "mast-light"),
-        ("area-light", UiStyleId::Area, Appearance::Light, "area-light"),
-        ("area-dark", UiStyleId::Area, Appearance::Dark, "area-dark"),
-        ("area-industrial-light", UiStyleId::Area, Appearance::Light, "industrial-light"),
+        ("horizon-default", UiStyleId::Horizon, Appearance::Light, "mast-light"),
+        ("horizon-light", UiStyleId::Horizon, Appearance::Light, "horizon-light"),
+        ("horizon-dark", UiStyleId::Horizon, Appearance::Dark, "horizon-dark"),
+        ("horizon-industrial-light", UiStyleId::Horizon, Appearance::Light, "industrial-light"),
     ] {
         let data_dir = directory.path().to_path_buf();
         mast_ui::snapshot::render_to_png(&format!("matrix-chat-{name}"), size(px(1100.), px(800.)), style, appearance,
