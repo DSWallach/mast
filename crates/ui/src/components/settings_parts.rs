@@ -135,6 +135,7 @@ pub(crate) fn settings_option_card(
     } else {
         label
     };
+    let selected_selector = format!("settings-option-selected-{label}");
     div()
         .flex_1()
         .min_w_0()
@@ -145,6 +146,7 @@ pub(crate) fn settings_option_card(
         .cursor_pointer()
         .child(
             div()
+                .when(super::is_horizon(theme), |el| el.relative())
                 .h(px(crate::settings::widgets::OPTION_CARD_HEIGHT))
                 .w_full()
                 .rounded(px(theme
@@ -156,7 +158,18 @@ pub(crate) fn settings_option_card(
                 .border_1()
                 .border_color(if selected { theme.accent } else { theme.border })
                 .when(super::is_industrial(theme), |el| el.border_b_2())
-                .child(preview),
+                .child(preview)
+                .when(selected && super::is_horizon(theme), |card| {
+                    card.child(
+                        div().absolute().inset_0().bg(theme.accent.opacity(0.10))
+                            .child(
+                                div().debug_selector(move || selected_selector.clone()).absolute().top(px(8.0)).right(px(8.0))
+                                    .size(px(20.0)).rounded_full().bg(theme.accent)
+                                    .flex().items_center().justify_center()
+                                    .child(crate::icons::icon(crate::icons::CHECK).size(px(12.0)).text_color(theme.identity_text(theme.accent))),
+                            ),
+                    )
+                }),
         )
         .child(
             div()

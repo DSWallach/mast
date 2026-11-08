@@ -1479,11 +1479,11 @@ pub fn conversation_send_key(
     let horizon = theme.ui_style.conversation == ConversationVariant::Horizon;
     let key = theme.ui_style.conversation == ConversationVariant::Industrial;
     let guided = theme.ui_style.layout == UiLayout::Guided;
-    let fill = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(if horizon { theme.accent } else { theme.text });
+    let fill = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(if horizon { super::horizon_primary_fill(theme) } else { theme.text });
     let text = if theme.ui_style.design_roles.primary_colour.is_some() {
         theme.identity_text(fill)
     } else if horizon {
-        theme.identity_text(fill)
+        super::horizon_primary_text(theme, fill)
     } else if key {
         theme.on_accent
     } else {

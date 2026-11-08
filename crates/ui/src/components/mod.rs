@@ -99,6 +99,21 @@ fn is_industrial(theme: &Theme) -> bool {
     theme.ui_style.controls == crate::ui_style::ControlVariant::Key
 }
 
+/// A quiet theme-derived accent for Horizon chrome, distinct from agent identity.
+pub(crate) fn horizon_primary_fill(theme: &Theme) -> gpui::Hsla {
+    let mut fill = theme.accent;
+    fill.s = fill.s.min(0.22);
+    fill
+}
+
+pub(crate) fn horizon_primary_text(theme: &Theme, fill: gpui::Hsla) -> gpui::Hsla {
+    let preferred = theme.identity_text(fill);
+    if crate::theme::contrast_ratio(preferred, fill) >= 4.5 { return preferred; }
+    let dark = gpui::hsla(0.0, 0.0, 0.0, 1.0);
+    let light = gpui::hsla(0.0, 0.0, 1.0, 1.0);
+    if crate::theme::contrast_ratio(dark, fill) >= crate::theme::contrast_ratio(light, fill) { dark } else { light }
+}
+
 fn layout_type_adjustment(theme: &Theme) -> f32 {
     match theme.ui_style.layout {
         crate::ui_style::UiLayout::Minimal => 0.0,
@@ -686,7 +701,7 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             .items_center()
     } else if is_horizon(theme) {
         let fill = if primary {
-            theme.accent
+            horizon_primary_fill(theme)
         } else {
             gpui::transparent_black()
         };
@@ -700,7 +715,7 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             .bg(fill)
             .border_color(gpui::transparent_black())
             .text_color(if primary {
-                theme.identity_text(fill)
+                horizon_primary_text(theme, fill)
             } else {
                 theme.text_muted
             })
@@ -1102,6 +1117,49 @@ pub fn section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizon_primary_chrome_uses_a_muted_theme_colour() {
+        for (appearance, id) in [(crate::theme::Appearance::Light, "mast-light"), (crate::theme::Appearance::Dark, "mast-dark"), (crate::theme::Appearance::Light, "horizon-light"), (crate::theme::Appearance::Dark, "horizon-dark")] {
+            let theme = Theme::for_selection(appearance, id, Default::default(), mast_theme::SurfacePreference::Opaque).with_ui_style(crate::ui_style::UiStyle::HORIZON);
+            let fill = horizon_primary_fill(&theme);
+            assert!(fill.s <= 0.22);
+            assert_eq!(fill.h, theme.accent.h);
+            assert!(crate::theme::contrast_ratio(horizon_primary_text(&theme, fill), fill) >= 4.5);
+            let mut expected = div().bg(fill);
+            let mut send = conversation_send_key(&theme, theme.accent, false, false);
+            let mut toolbar = toolbar_control(div(), &theme, true);
+            assert_eq!(send.style().background, expected.style().background);
+            assert_eq!(toolbar.style().background, expected.style().background);
+            let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"primaryColour":"accent"}}}"#);
+            let override_theme = theme.clone().with_ui_style(overrides.apply(theme.ui_style));
+            let mut override_send = conversation_send_key(&override_theme, override_theme.accent, false, false);
+            let mut accent = div().bg(override_theme.accent);
+            assert_eq!(override_send.style().background, accent.style().background);
+        }
+    }
+
+    #[gpui::test]
+    fn horizon_option_cards_mark_selection(cx: &mut gpui::TestAppContext) {
+        struct Cards;
+        impl gpui::Render for Cards {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                let theme = Theme::of(cx);
+                div().flex().children([("Selected", true), ("Other", false)].into_iter().map(|(label, selected)| {
+                    settings_option_card(theme, crate::icons::MONITOR, label, selected, div().size_full().into_any_element())
+                }))
+            }
+        }
+        for (appearance, id) in [(crate::theme::Appearance::Light, "horizon-light"), (crate::theme::Appearance::Dark, "horizon-dark")] {
+            for style in crate::ui_style::UiStyleId::ALL {
+                cx.update(|cx| cx.set_global(Theme::for_selection(appearance, id, Default::default(), mast_theme::SurfacePreference::Opaque).with_ui_style(crate::ui_style::UiStyle::of(*style))));
+                let (_, window) = cx.add_window_view(|_, _| Cards);
+                window.run_until_parked();
+                assert_eq!(window.debug_bounds("settings-option-selected-Selected").is_some(), *style == crate::ui_style::UiStyle::HORIZON.id);
+                assert!(window.debug_bounds("settings-option-selected-Other").is_none());
+            }
+        }
+    }
 
     #[test]
     fn horizon_list_bullets_follow_agent_reply_foreground() {
