@@ -28,6 +28,8 @@ polled and applied while Mast runs. An absent or empty file has no effect. Inval
 fields and unknown names are ignored with warnings. Use Reset and Save to remove
 an override; deleting the file removes all overrides.
 
+Legacy `area` style keys load as `horizon`; if both are present, `horizon` wins.
+
 ```json
 {
   "version": "mast.style-overrides/v1",

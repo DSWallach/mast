@@ -1151,24 +1151,24 @@ pub(crate) fn sidebar_row_colors(
     identity: gpui::Hsla,
     selected: bool,
 ) -> (gpui::Hsla, gpui::Hsla, Option<gpui::Div>) {
-    let area = super::is_horizon(theme);
+    let horizon = super::is_horizon(theme);
     let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
         theme.text
-    } else if area && selected {
+    } else if horizon && selected {
         theme.identity_text(theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(identity))
     } else {
         theme.text
     };
     let selected_wash = if selected && theme.ui_style.design_roles.primary_colour.is_some() {
         theme.ui_style.design_roles.primary_colour.unwrap().colour(theme)
-    } else if area {
+    } else if horizon {
         identity
     } else if theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque {
         theme.element_active
     } else {
         crate::theme::glass_selected_bg()
     };
-    let dot = area.then(|| {
+    let dot = horizon.then(|| {
         div()
             .flex_none()
             .size(px(8.0))
@@ -2834,12 +2834,12 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    struct AreaRow {
+    struct HorizonRow {
         archived: Arc<AtomicBool>,
         hovered: bool,
     }
 
-    impl Render for AreaRow {
+    impl Render for HorizonRow {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let mut theme = Theme::default();
             theme.ui_style = crate::ui_style::UiStyle::resolve(
@@ -2875,7 +2875,7 @@ mod tests {
     fn horizon_row_archive_action_is_clickable(cx: &mut TestAppContext) {
         let archived = Arc::new(AtomicBool::new(false));
         let recorded = archived.clone();
-        let (_, cx) = cx.add_window_view(move |_, _| AreaRow {
+        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
             archived: recorded,
             hovered: true,
         });
@@ -2892,7 +2892,7 @@ mod tests {
 
     #[gpui::test]
     fn horizon_row_shows_status_and_account(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(move |_, _| AreaRow {
+        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
             archived: Arc::new(AtomicBool::new(false)),
             hovered: false,
         });

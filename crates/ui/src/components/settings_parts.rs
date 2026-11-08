@@ -232,7 +232,7 @@ pub(crate) fn settings_choice(
     compact: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let industrial = super::is_industrial(theme);
-    let area = super::is_horizon(theme);
+    let horizon = super::is_horizon(theme);
     let label = if industrial {
         crate::popover::tracked_upper(label)
     } else {
@@ -243,13 +243,13 @@ pub(crate) fn settings_choice(
         .h(px(if compact { 28.0 } else { 30.0 }))
         .px(px(if compact { 9.0 } else { 10.0 }))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
-        .when(area, |el| el.rounded_full())
+        .when(horizon, |el| el.rounded_full())
         .border_1()
         .when(industrial, |el| el.border_b_2())
         .border_color(if selected { theme.accent } else { theme.border })
         .bg(if selected {
             theme.accent_wash
-        } else if area {
+        } else if horizon {
             theme.accent.opacity(0.08)
         } else {
             theme.surface_raised.opacity(0.28)
@@ -284,7 +284,7 @@ pub(crate) fn settings_shortcut_key(
     index: usize,
     recording: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_horizon(theme);
+    let horizon = super::is_horizon(theme);
     let industrial = super::is_industrial(theme);
     let key = div()
         .id(("shortcut-combo", index))
@@ -292,7 +292,7 @@ pub(crate) fn settings_shortcut_key(
         .px(px(12.0))
         .py(px(6.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(8.0)))
-        .when(area, |el| el.rounded_full())
+        .when(horizon, |el| el.rounded_full())
         .border_1()
         .when(industrial, |el| el.border_b_2())
         .flex()
@@ -306,7 +306,7 @@ pub(crate) fn settings_shortcut_key(
             .text_color(theme.on_solid)
     } else {
         key.border_color(theme.border)
-            .bg(if area {
+            .bg(if horizon {
                 theme.accent.opacity(0.1)
             } else {
                 theme.bg
@@ -325,13 +325,13 @@ pub(crate) fn settings_destination(
     index: usize,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_horizon(theme);
+    let horizon = super::is_horizon(theme);
     div()
         .id(("appshot-destination", index))
         .px(px(10.0))
         .py(px(7.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
-        .when(area, |el| el.rounded_full())
+        .when(horizon, |el| el.rounded_full())
         .border_1()
         .when(super::is_industrial(theme), |el| el.border_b_2())
         .border_color(if selected {
@@ -339,7 +339,7 @@ pub(crate) fn settings_destination(
         } else {
             theme.border
         })
-        .bg(if area {
+        .bg(if horizon {
             theme.accent.opacity(if selected { 0.2 } else { 0.08 })
         } else if selected {
             ink(0.09)
@@ -363,7 +363,7 @@ pub(crate) fn settings_picker(
     open: bool,
     palette: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_horizon(theme);
+    let horizon = super::is_horizon(theme);
     let industrial = super::is_industrial(theme);
     let control = div()
         .id(id)
@@ -377,7 +377,7 @@ pub(crate) fn settings_picker(
             .radius_roles()
             .control
             .unwrap_or(if palette { 8.0 } else { 9.0 })))
-        .when(area, |el| el.rounded_full())
+        .when(horizon, |el| el.rounded_full())
         .border_1()
         .when(industrial, |el| el.border_b_2())
         .border_color(if open {
@@ -385,7 +385,7 @@ pub(crate) fn settings_picker(
         } else {
             theme.border
         })
-        .bg(if area {
+        .bg(if horizon {
             theme.accent.opacity(if open { 0.16 } else { 0.08 })
         } else if palette {
             theme.surface_raised.opacity(if open { 0.75 } else { 0.42 })
@@ -756,14 +756,14 @@ pub(crate) fn settings_device_switcher(
     id: &'static str,
     open: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_horizon(theme);
+    let horizon = super::is_horizon(theme);
     div()
         .id(id)
         .flex_none()
         .h(px(28.0))
         .px(px(8.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
-        .when(area, |el| el.rounded_full())
+        .when(horizon, |el| el.rounded_full())
         .when(super::is_industrial(theme), |el| {
             el.border_1()
                 .border_b_2()
@@ -775,7 +775,7 @@ pub(crate) fn settings_device_switcher(
         .items_center()
         .gap(px(6.0))
         .cursor_pointer()
-        .bg(if area {
+        .bg(if horizon {
             theme.accent.opacity(if open { 0.18 } else { 0.08 })
         } else if open {
             ink(0.06)
@@ -793,13 +793,13 @@ pub(crate) fn settings_autosave_choice(
     id: SharedString,
     active: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let area = super::is_horizon(theme);
+    let horizon = super::is_horizon(theme);
     div()
         .id(id)
         .h(px(28.0))
         .px(px(10.0))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(7.0)))
-        .when(area, |el| el.rounded_full())
+        .when(horizon, |el| el.rounded_full())
         .border_1()
         .when(super::is_industrial(theme), |el| el.border_b_2())
         .border_color(if active {
@@ -809,7 +809,7 @@ pub(crate) fn settings_autosave_choice(
         })
         .bg(if active {
             theme.accent.opacity(0.11)
-        } else if area {
+        } else if horizon {
             theme.accent.opacity(0.06)
         } else {
             crate::theme::wash(0.025)

@@ -2821,9 +2821,9 @@ mod tests {
     use crate::markdown::parser::{InlineStyle, parse_full};
     use gpui::TestAppContext;
 
-    struct AreaReplyHarness;
+    struct HorizonReplyHarness;
 
-    impl Render for AreaReplyHarness {
+    impl Render for HorizonReplyHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let text = format!(
@@ -2850,7 +2850,7 @@ mod tests {
     fn horizon_reply_wraps_and_list_text_keeps_its_indent(cx: &mut TestAppContext) {
         let _selection = super::super::selection::test_state_lock();
         cx.update(|cx| cx.set_global(Theme::dark().with_ui_style(crate::ui_style::UiStyle::HORIZON)));
-        let (_, cx) = cx.add_window_view(|_, _| AreaReplyHarness);
+        let (_, cx) = cx.add_window_view(|_, _| HorizonReplyHarness);
         for width in [320.0, 1000.0] {
             cx.simulate_resize(size(px(width), px(900.0)));
             cx.update(|window, cx| { window.refresh(); let _ = window.draw(cx); });

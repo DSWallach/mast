@@ -942,7 +942,7 @@ pub fn conversation_markdown_text_size(theme: &Theme, size: f32, body_size: f32)
 }
 
 pub fn conversation_skill_chip(theme: &Theme, index: usize) -> gpui::Stateful<Div> {
-    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
+    let horizon = theme.ui_style.conversation == ConversationVariant::Horizon;
     div()
         .id(("composer-skill-chip", index))
         .flex_none()
@@ -953,7 +953,7 @@ pub fn conversation_skill_chip(theme: &Theme, index: usize) -> gpui::Stateful<Di
         .gap(px(4.0))
         .pl(px(8.0))
         .pr(px(4.0))
-        .rounded(px(if area { 12.0 } else { 8.0 }))
+        .rounded(px(if horizon { 12.0 } else { 8.0 }))
         .bg(crate::theme::ink(0.06))
         .text_size(px(12.0))
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -1235,11 +1235,11 @@ pub fn conversation_model_picker(
     picker: AnyElement,
     measure: AnyElement,
 ) -> (Option<Div>, Option<Div>) {
-    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
+    let horizon = theme.ui_style.conversation == ConversationVariant::Horizon;
     let picker = div()
         .min_w_0()
         .max_w(px(width
-            * if area {
+            * if horizon {
                 0.55
             } else if theme.ui_style.conversation == ConversationVariant::Industrial {
                 1.0
@@ -1247,11 +1247,11 @@ pub fn conversation_model_picker(
                 0.45
             }))
         .relative()
-        .left(px(if area { 0.0 } else { offset }))
-        .opacity(if area { 1.0 } else { opacity })
+        .left(px(if horizon { 0.0 } else { offset }))
+        .opacity(if horizon { 1.0 } else { opacity })
         .child(picker)
         .child(measure);
-    if area {
+    if horizon {
         (None, Some(picker))
     } else {
         (Some(picker), None)
@@ -1405,12 +1405,12 @@ pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder
     fallback_radius: f32,
     border: Hsla,
 ) -> T {
-    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
+    let horizon = theme.ui_style.conversation == ConversationVariant::Horizon;
     let element = element
         .rounded(px(conversation_panel_radius(theme, fallback_radius)))
         .border_1()
-        .border_color(if area { identity } else { border })
-        .bg(if area {
+        .border_color(if horizon { identity } else { border })
+        .bg(if horizon {
             identity
         } else if theme.is_frost() {
             theme.composer_sidebar_tint()
@@ -1425,7 +1425,7 @@ pub fn conversation_input_surface<T: gpui::Styled + gpui::prelude::FluentBuilder
             },
         )
         .when(
-            !area
+            !horizon
                 && !theme.is_frost()
                 && theme.ui_style.surface == crate::ui_style::SurfaceModel::ThemeDefault,
             |el| el.shadow_lg(),
@@ -1476,13 +1476,13 @@ pub fn conversation_send_key(
     queue: bool,
 ) -> gpui::Stateful<Div> {
     use crate::ui_style::{ConversationVariant, UiLayout};
-    let area = theme.ui_style.conversation == ConversationVariant::Horizon;
+    let horizon = theme.ui_style.conversation == ConversationVariant::Horizon;
     let key = theme.ui_style.conversation == ConversationVariant::Industrial;
     let guided = theme.ui_style.layout == UiLayout::Guided;
-    let fill = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(if area { theme.accent } else { theme.text });
+    let fill = theme.ui_style.design_roles.primary_colour.map(|role| role.colour(theme)).unwrap_or(if horizon { theme.accent } else { theme.text });
     let text = if theme.ui_style.design_roles.primary_colour.is_some() {
         theme.identity_text(fill)
-    } else if area {
+    } else if horizon {
         theme.identity_text(fill)
     } else if key {
         theme.on_accent
@@ -1519,7 +1519,7 @@ pub fn conversation_send_key(
         .when(guided, |el| {
             el.h(px(32.0)).w_auto().px(px(10.0)).gap(px(5.0))
         })
-        .when(area, |el| {
+        .when(horizon, |el| {
             el.h(px(theme.ui_style.tokens.control_size))
                 .w(px(96.0))
                 .gap(px(6.0))
@@ -1529,7 +1529,7 @@ pub fn conversation_send_key(
         .when_some(theme.ui_style.tokens.control_radius, |el, radius| {
             el.rounded(px(radius))
         })
-        .when(area, |el| el.rounded_full())
+        .when(horizon, |el| el.rounded_full())
         .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
         .bg(fill)
         .when(key, |el| conversation_industrial_icon_key(el, theme, true))
@@ -1538,12 +1538,12 @@ pub fn conversation_send_key(
         .items_center()
         .justify_center()
         .child(icon)
-        .when(guided || area, |el| {
+        .when(guided || horizon, |el| {
             el.child(
                 div()
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(text)
-                    .child(match theme.ui_style.design_roles.tracked_caps { Some(true) => crate::popover::tracked_upper(label), Some(false) => label.to_string(), None if area && !stop => label.to_uppercase(), None => label.to_string() }),
+                    .child(match theme.ui_style.design_roles.tracked_caps { Some(true) => crate::popover::tracked_upper(label), Some(false) => label.to_string(), None if horizon && !stop => label.to_uppercase(), None => label.to_string() }),
             )
         })
 }

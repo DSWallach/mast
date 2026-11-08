@@ -140,7 +140,7 @@ pub fn button_with_identity(
     identity: gpui::Hsla,
 ) -> Stateful<Div> {
     let label = label.into();
-    let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon;
+    let horizon = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon;
     let (horizontal, vertical, font, radius) = match size {
         ButtonSize::Sm => (6.0, 1.0, 10.5, 4.0),
         ButtonSize::Md => (12.0, 6.0, 13.0, 8.0),
@@ -156,7 +156,7 @@ pub fn button_with_identity(
         .px(px(horizontal * spacing_scale))
         .py(px(vertical * spacing_scale))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(radius)))
-        .when(area, |el| {
+        .when(horizon, |el| {
             el.rounded_full().font_weight(gpui::FontWeight::SEMIBOLD)
         })
         .when(size == ButtonSize::Md, |el| {
@@ -185,7 +185,7 @@ pub fn button_with_identity(
                 .text_color(theme.on_solid)
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .hover(|el| el.opacity(0.9));
-            let button = if area {
+            let button = if horizon {
                 button
                     .bg(identity)
                     .text_color(theme.identity_text(identity))
@@ -845,19 +845,19 @@ fn tab_horizontal_inset(style: crate::ui_style::UiStyle) -> f32 {
 
 /// A single selectable segment. The caller owns selection and activation.
 pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div {
-    let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon;
+    let horizon = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon;
     let identity = theme.identity_color("");
     let horizontal_inset = tab_horizontal_inset(theme.ui_style);
     let item = div()
-        .when(selected || area, |el| {
+        .when(selected || horizon, |el| {
             el.px(px(horizontal_inset))
                 .py(px(5.0 * layout_spacing(theme)))
         })
-        .when(selected && !area, |el| el.bg(theme.surface_raised))
-        .when(area, |el| {
+        .when(selected && !horizon, |el| el.bg(theme.surface_raised))
+        .when(horizon, |el| {
             el.rounded_full().font_weight(gpui::FontWeight::SEMIBOLD)
         })
-        .when(area && selected, |el| {
+        .when(horizon && selected, |el| {
             el.bg(identity).text_color(theme.identity_text(identity))
         })
         .when(
@@ -883,10 +883,10 @@ pub fn user_message_bubble(
 ) -> AnyElement {
     use crate::ui_style::ConversationVariant;
     let variant = theme.ui_style.conversation;
-    let area = variant == ConversationVariant::Horizon;
+    let horizon = variant == ConversationVariant::Horizon;
     let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour.is_some() {
         theme.text
-    } else if area {
+    } else if horizon {
         theme.identity_text(identity)
     } else {
         theme.text
@@ -908,7 +908,7 @@ pub fn user_message_bubble(
                 .border_1()
                 .border_color(theme.border)
         })
-        .when(area, |el| el.bg(identity).max_w_full().w_full())
+        .when(horizon, |el| el.bg(identity).max_w_full().w_full())
         .text_size(crate::typography::ui_rems(
             theme.ui_style.type_roles().body.unwrap_or(14.0) + layout_type_adjustment(theme),
         ))
@@ -1108,10 +1108,10 @@ mod tests {
         use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
         for appearance in [crate::theme::Appearance::Light, crate::theme::Appearance::Dark] {
             let base = Theme::for_selection(appearance, if appearance == crate::theme::Appearance::Light { "horizon-light" } else { "horizon-dark" }, Default::default(), mast_theme::SurfacePreference::Opaque);
-            let area = base.clone().with_ui_style(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
+            let horizon = base.clone().with_ui_style(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
             for harness in [mast_proto::HarnessId::ClaudeCode, mast_proto::HarnessId::Codex] {
-                let identity = area.agent_identity_color(Some(harness), Some("model"));
-                let reply = agent_message_theme(&area, identity);
+                let identity = horizon.agent_identity_color(Some(harness), Some("model"));
+                let reply = agent_message_theme(&horizon, identity);
                 assert_eq!(conversation_markdown_bullet_color(&reply), reply.text);
             }
             for style in [UiStyleId::Default, UiStyleId::Industrial] {
@@ -1124,11 +1124,11 @@ mod tests {
     #[test]
     fn conversation_menu_geometry_matches_style_tokens() {
         use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
-        let area = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
-        let mut card = conversation_menu_card(&area, false);
+        let horizon = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
+        let mut card = conversation_menu_card(&horizon, false);
         assert_eq!(card.style().corner_radii, div().rounded(px(14.0)).style().corner_radii);
-        let mut row = conversation_menu_row(&area, false, "geometry-test");
-        assert_eq!(row.style().size.height, div().h(px(area.ui_style.tokens.control_size)).style().size.height);
+        let mut row = conversation_menu_row(&horizon, false, "geometry-test");
+        assert_eq!(row.style().size.height, div().h(px(horizon.ui_style.tokens.control_size)).style().size.height);
         let default = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Default, UiLayout::Minimal));
         assert_eq!(conversation_menu_card(&default, false).style(), crate::popover::popover_card(&default).style());
     }

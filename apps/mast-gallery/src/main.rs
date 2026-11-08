@@ -1010,15 +1010,15 @@ mod tests {
                     ui_style::UiLayout::Minimal,
                     &mast_ui::style_overrides::current(cx),
                 );
-                let area = ui_style::theme_for_view(
+                let horizon = ui_style::theme_for_view(
                     base,
                     ui_style::UiStyleId::Horizon,
                     ui_style::UiLayout::Minimal,
                     &mast_ui::style_overrides::current(cx),
                 );
-                assert_ne!(default.ui_style.conversation, area.ui_style.conversation);
+                assert_ne!(default.ui_style.conversation, horizon.ui_style.conversation);
                 assert_eq!(default.ui_style.tokens.control_radius, None);
-                assert_eq!(area.ui_style.tokens.control_radius, Some(23.0));
+                assert_eq!(horizon.ui_style.tokens.control_radius, Some(23.0));
                 assert_eq!(ui_style::current(cx).id, ui_style::UiStyleId::Default);
                 div()
                     .flex()
@@ -1034,7 +1034,7 @@ mod tests {
                         "Horizon",
                         ButtonVariant::Primary,
                         ButtonSize::Md,
-                        &area,
+                        &horizon,
                     ))
             }
         }
@@ -1092,7 +1092,7 @@ mod tests {
         cx.update(|cx| {
             let base = Theme::of(cx);
             let overrides = mast_ui::style_overrides::current(cx);
-            let area = ui_style::theme_for_view(
+            let horizon = ui_style::theme_for_view(
                 base,
                 ui_style::UiStyleId::Horizon,
                 ui_style::UiLayout::Compact,
@@ -1110,10 +1110,10 @@ mod tests {
                 ui_style::UiLayout::Compact,
                 &overrides,
             );
-            assert_eq!(area.ui_style.tokens.control_radius, Some(19.0));
+            assert_eq!(horizon.ui_style.tokens.control_radius, Some(19.0));
             let surface = mast_ui::style_overrides::DesignSurface::Composer;
             assert_eq!(
-                area.ui_style.design_roles.surface(surface).border,
+                horizon.ui_style.design_roles.surface(surface).border,
                 Some(true)
             );
             assert_eq!(

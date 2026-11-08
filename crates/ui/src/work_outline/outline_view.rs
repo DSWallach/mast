@@ -2541,11 +2541,11 @@ impl OutlineView {
                 let depth = depth_at(list_ix).unwrap_or(0);
                 let previous = list_ix.checked_sub(1).and_then(depth_at).unwrap_or(0);
                 let next = depth_at(list_ix + 1).unwrap_or(0);
-                let area = crate::components::outline_uses_rounded_nesting(&theme);
+                let horizon = crate::components::outline_uses_rounded_nesting(&theme);
                 let (key, row) = match create {
                     Some((slot, editor_depth)) if list_ix == slot => (
                         "editor".to_owned(),
-                        self.render_editor_row(if area { 0 } else { editor_depth }, compact, &theme, cx),
+                        self.render_editor_row(if horizon { 0 } else { editor_depth }, compact, &theme, cx),
                     ),
                     _ => {
                         let model_ix = if create.is_some_and(|(slot, _)| list_ix > slot) { list_ix - 1 } else { list_ix };
@@ -2553,7 +2553,7 @@ impl OutlineView {
                         (key, self.render_row(model_ix, compact, focused, &theme, cx))
                     }
                 };
-                if area {
+                if horizon {
                     crate::components::outline_nested_row(&key, depth, previous, next, row, &theme)
                 } else {
                     row
