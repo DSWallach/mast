@@ -76,85 +76,7 @@ pub(crate) fn create_label(destination: Option<&str>, fallback: &str) -> SharedS
     }
 }
 
-/// The issue text block every issue row shows: identifier + title, then the
-/// state dot and state · priority · assignee · project.
-pub(crate) fn issue_summary(issue: &LinearIssueSummary, theme: &Theme) -> gpui::Div {
-    let state_color = super::hex_color(&issue.state.color, theme.text_muted);
-    let mut meta = vec![issue.state.name.clone()];
-    meta.extend(super::priority_text(issue.priority, &issue.priority_label));
-    meta.extend(issue.assignee.as_ref().map(super::user_name));
-    meta.extend(issue.project.as_ref().map(|p| p.name.clone()));
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(1.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(issue.identifier.clone())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(theme.text)
-                        .child(SharedString::from(issue.title.clone())),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_faint)
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(7.0))
-                        .rounded_full()
-                        .bg(state_color),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(meta.join(" \u{00b7} "))),
-                ),
-        )
-}
-
-/// An issue row's checkbox (`disabled`: checked and inert, e.g. an issue
-/// already added). The caller adds the click.
-pub(crate) fn issue_checkbox(
-    selector: String,
-    checked: bool,
-    disabled: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let id = selector.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .size(px(13.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(if checked { theme.accent } else { theme.border })
-        .when(checked, |el| el.bg(theme.accent))
-        .when(disabled, |el| el.opacity(0.45))
-        .when(!disabled, |el| el.cursor_pointer())
-}
+pub(crate) use crate::components::linear_parts::{issue_checkbox, issue_summary};
 
 /// One Linear-enabled Space the panel can show.
 #[derive(Debug, Clone)]
@@ -1118,35 +1040,8 @@ impl LinearPanel {
         };
         let selector = format!("linear-section-{}", section.key());
         let click_focus = focus.clone();
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
+        crate::components::linear_parts::section_header(selector, label, open, focused, theme)
             .track_focus(&focus)
-            .mt(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .px(px(2.0))
-            .py(px(2.0))
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(11.0))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text_muted)
-            .when(focused, |el| {
-                el.bg(theme.element_hover).text_color(theme.text)
-            })
-            .hover(|el| el.text_color(theme.text))
-            .child(
-                crate::icons::icon(if open {
-                    crate::icons::ALT_ARROW_DOWN
-                } else {
-                    crate::icons::ALT_ARROW_RIGHT
-                })
-                .size(px(10.0))
-                .text_color(theme.text_muted),
-            )
-            .child(SharedString::from(label))
             .tooltip(move |_, cx| {
                 cx.new(|_| {
                     TextTooltip(if open {

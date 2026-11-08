@@ -2,6 +2,7 @@
 //! appearance determines their treatment.
 
 pub(crate) mod browser_parts;
+pub(crate) mod linear_parts;
 mod settings_parts;
 pub(crate) use settings_parts::{
     settings_accent_swatch, settings_account_forget, settings_account_switch,

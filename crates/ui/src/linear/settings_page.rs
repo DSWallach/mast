@@ -167,21 +167,7 @@ impl LinearSettingsPage {
         primary: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .debug_selector(move || id.into())
-            .flex_none()
-            .px(px(12.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(12.0))
-            .when(primary, |el| el.bg(theme.element_active))
-            .text_color(theme.text)
-            .hover(|el| el.bg(theme.element_hover))
-            .child(label)
+        crate::components::linear_parts::settings_button(id, label, primary, theme)
     }
 }
 

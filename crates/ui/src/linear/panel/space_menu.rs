@@ -89,19 +89,9 @@ impl LinearPanel {
             .map(|space| space.label.clone())
             .unwrap_or_default();
         let multi = self.spaces.len() > 1;
-        let chip = div()
-            .id("linear-panel-space")
-            .debug_selector(|| "linear-panel-space".into())
-            .min_w_0()
-            .truncate()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted);
+        let chip = crate::components::linear_parts::space_chip(multi, theme);
         let chip = if multi {
-            chip.px(px(4.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .hover(|el| el.text_color(theme.text).bg(theme.element_hover))
-                .child(SharedString::from(format!("{label} \u{25be}")))
+            chip.child(SharedString::from(format!("{label} \u{25be}")))
                 .tooltip(|_, cx| cx.new(|_| TextTooltip("Choose the project".into())).into())
                 .on_mouse_down(
                     gpui::MouseButton::Left,
