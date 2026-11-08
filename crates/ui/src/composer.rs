@@ -8045,7 +8045,8 @@ impl Render for Composer {
         }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
-        let identity = theme.identity_color(&self.current_key);
+        let pickers = self.pickers.read(cx);
+        let identity = theme.agent_identity_color(pickers.effective_harness(cx), pickers.identity_model_id(cx));
         let identity_text = crate::components::conversation_input_text_color(&theme, identity);
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
@@ -8630,7 +8631,7 @@ impl Render for Composer {
             let tabs = harnesses.into_iter().map(|harness| {
                 let (path, _) = crate::pickers::harness_brand_icon(harness);
                 let selected = selected == Some(harness);
-                let tab_identity = theme.identity_color(&format!("harness:{harness:?}"));
+                let tab_identity = theme.agent_identity_color(Some(harness), Some("selected"));
                 crate::components::conversation_harness_tab(&theme, SharedString::from(format!("area-harness-{harness:?}")), tab_identity, identity, path, selected)
                     .on_click(cx.listener(move |this, _, window, cx| this.pickers.update(cx, |pickers, cx| {
                         pickers.pick_harness(harness, cx);

@@ -79,6 +79,8 @@ pub fn populated_walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>
 
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let codex = std::env::var("MAST_PREVIEW_HARNESS").is_ok_and(|value| value == "codex");
+    let (harness, model) = if codex { ("codex", "gpt-6-astra") } else { ("claude-code", "Claude Opus 5.5 — Extended reasoning") };
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
         state.connection = mast_proto::view::ConnectionStatus::Ready;
@@ -94,7 +96,7 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
             ("fixture-chat", "Review the workspace"),
             ("fixture-design", "Design review"),
             ("fixture-tests", "Verify the changes"),
-        ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"Claude Opus 5.5 — Extended reasoning","reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
+        ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
         preview_chat_outline(&mut state);
         state
     });

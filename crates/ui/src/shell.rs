@@ -7230,9 +7230,15 @@ impl Shell {
             }
         };
         let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+        let identity = {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == id);
+            let config = chat.and_then(|chat| chat.config.as_ref());
+            theme.agent_identity_color(config.map(|config| config.harness).or(harness), config.and_then(|config| config.model.as_deref()).or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())))
+        };
         let area_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archive_id = id.clone();
-        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), jump_label.clone(), preview, area_hovered, archived, cx.listener(move |this, _, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))) {
+        if let Some(row) = crate::components::shell_parts::area_sidebar_chat_row(theme, row_id.clone(), &id, identity, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), jump_label.clone(), preview, area_hovered, archived, cx.listener(move |this, _, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))) {
             let select_id = id.clone();
             let menu_id = id.clone();
             return row
@@ -7378,7 +7384,7 @@ impl Shell {
                 .into_any_element()
         };
         let mut corner = Some(corner);
-        let (text, selected_wash, identity_dot) = crate::components::shell_parts::sidebar_row_colors(theme, &id, selected);
+        let (text, selected_wash, identity_dot) = crate::components::shell_parts::sidebar_row_colors(theme, identity, selected);
         let hover = theme.glass_hover();
         let subline = if search_query.is_some() {
             theme.text_muted

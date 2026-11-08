@@ -3042,6 +3042,7 @@ pub struct Transcript {
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
+    last_identity: Option<(Option<mast_proto::HarnessId>, Option<String>)>,
     chat_id: Option<String>,
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
@@ -3391,6 +3392,7 @@ impl Transcript {
             list,
             rows: Vec::new(),
             last_source: None,
+            last_identity: None,
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
@@ -4536,6 +4538,18 @@ impl Transcript {
             replay,
             self.state.read(cx).transcript_revision,
         );
+        let identity = {
+            let state = self.state.read(cx);
+            let chat = selected.as_deref().and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+            let config = chat.and_then(|chat| chat.config.as_ref());
+            (config.map(|config| config.harness), config.and_then(|config| config.model.clone()).or_else(|| chat.and_then(|chat| chat.actual_model.clone())))
+        };
+        if self.last_identity.as_ref() != Some(&identity) {
+            self.last_identity = Some(identity);
+            self.render_cache.borrow_mut().clear();
+            self.list.remeasure_items(0..self.rows.len());
+            cx.notify();
+        }
         if self.last_source.as_ref() == Some(&source) {
             return;
         }
@@ -6184,7 +6198,14 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        let identity = theme.identity_color(self.chat_id.as_deref().unwrap_or(""));
+        let identity = {
+            let state = self.state.read(cx);
+            let chat = self.chat_id.as_deref()
+                .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                .or_else(|| self.chat_id.is_none().then(|| state.selected_chat_row()).flatten());
+            let config = chat.and_then(|chat| chat.config.as_ref());
+            theme.agent_identity_color(config.map(|config| config.harness), config.and_then(|config| config.model.as_deref()).or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())))
+        };
         let workspace_root = {
             let state = self.state.read(cx);
             self.chat_id
@@ -8703,6 +8724,36 @@ mod tests {
         });
     }
     use mast_doc::MessagePart;
+
+    #[gpui::test]
+    fn chat_identity_updates_without_a_transcript_revision(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.chats.push(serde_json::from_value(serde_json::json!({
+                    "id":"chat", "deviceId":"local", "archived":false,
+                    "createdAt":"2026-09-08T00:00:00Z",
+                    "config":{"harness":"claude-code", "model":"opus", "reasoning":null, "sandbox":"workspace-write"}
+                })).unwrap());
+            });
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            assert_eq!(transcript.read(cx).last_identity, Some((Some(mast_proto::HarnessId::ClaudeCode), Some("opus".into()))));
+            state.update(cx, |state, _| {
+                let config = state.chats[0].config.as_mut().unwrap();
+                config.harness = mast_proto::HarnessId::Codex;
+                config.model = Some("astra".into());
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            assert_eq!(transcript.read(cx).last_identity, Some((Some(mast_proto::HarnessId::Codex), Some("astra".into()))));
+        });
+    }
 
     fn with_tool_group_navigation(
         cx: &mut gpui::TestAppContext,
