@@ -26,6 +26,9 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 68: Area tweaks** (2026-11-07): Area replies wrap at a reading width with quiet bullets; agent colour
+  follows the provider (Claude amber, Codex green); Area outline uses rounded nesting; composer menus are
+  style-aware. Details in the 23:10 "In flight" snapshot.
 - **Claude Default reauthentication** (2026-11-07): signing in again to the active Claude account updates the live OAuth credentials before the account list snapshots them, preserving shared credentials. Distinct accounts remain saved separately. Release suite passed (2,480 non-UI and 2,581 UI tests); installed build has not yet been verified with a real login. Use Settings → Agent Accounts → Add Claude account, then retry the existing chat after restarting Mast.
 
 All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/work-outline.md`,
@@ -1007,6 +1010,32 @@ Coordinator tips:
   text, `read_chat` the `originChatId`.
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
+
+## In flight (snapshot 2026-11-07 23:10; coordinator dd899921)
+
+- **Installed and current: release 68** (9437ef38, 23:10; nextest 8/8 for the touched crates, UI 2597/0/13). Backup of
+  release 67: `~/zeron-dev-app-backups/mast-20261107-2310-pre-release68`. Area tweaks from Mikey, all built by Terra:
+  - `area-tweaks-1`: Area replies wrap in a 720 px reading column. A flex wrapper had caused intrinsic-width
+    overflow. The first-block identity dot is gone, and lists use small discs with a hanging indent.
+  - `area-tweaks-2`: agent colour follows the provider, not a chat-id hash (`agent_identity_color`). Claude is ANSI
+    amber, Codex green, other harnesses blue, an unknown model slate. The danger-hue guard falls back to slate (Claude
+    on Mast Light). Applies to replies, composer, sidebar chat rows and harness tabs. Transcripts store no per-message
+    model, so replies follow the chat's current config.
+  - `area-outline-tree`: Mikey picked option A, rounded nesting. Area's outline draws soft rounded containers per depth,
+    with tint capped at two levels and a neutral selection tint. The gallery story "Area outline tree" keeps A/B/C.
+  - `area-tweaks-3`: shared style-aware composer menus cover model/harness, reasoning/options, branch/project pickers,
+    file mentions and slash/skill completion. Area is one surface with a soft shadow and pill highlights; Industrial
+    uses its panel sizing; Default is pixel-identical. This was the "menus" slice.
+  - Gallery inspector **Copy details** (`inspector-copy-details`, gallery-only): copies source file:line, id path,
+    bounds, the set style fields as hex, and the global UI style/appearance. It cannot see the gallery story.
+- **Queued on the standing Area worker** (chat 8ac73b69, item ab2dc8d0): batch 4 makes Area list discs follow the
+  agent colour. Batch 5 is `rename-area-to-horizon`: Mikey chose **Horizon** ("aspirational, broad, futuristic,
+  optimistic"), item db9d6b22, with serde aliases or migration so saved `area*` values keep loading.
+- **Personal workspace agent setup** (item ded4ca6d, Sonnet chat 6ad9a893; repo `~/Projects/personal-workspace`, not
+  a Mast Space): proposal mast-artifact:7d7cc861 rev 7 is answered by Mikey. Implementation goes on branch
+  `chore/agent-setup-revamp`. The worker waits for Mikey's own "go" in its chat; it won't take the coordinator's.
+- **iOS**: upstream's SwiftUI phone client is on `origin/archive/ios`. It needs the removed edge relay. Mikey asked what
+  it was; any revival would be research-first and Needs-you-centred. Don't delete `archive/ios` without asking.
 
 ## In flight (snapshot 2026-11-07 17:20; coordinator e81de680)
 
