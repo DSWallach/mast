@@ -47,6 +47,9 @@ final class Companion: ObservableObject {
     @Published var connection = "Demo mode"
     @Published var pairingCode = ""
     @Published var showWorkers = false
+    @Published var isLoading = false
+    @Published var hasLoaded = false
+    @Published var lastUpdated: Date?
     private func baseURL() throws -> URL {
         guard let components = URLComponents(string: address), let host = components.host, components.user == nil, components.password == nil, components.query == nil, components.fragment == nil, (components.path.isEmpty || components.path == "/") else { throw BridgeError.address }
         let local = host == "127.0.0.1" || host == "localhost"
@@ -70,16 +73,19 @@ final class Companion: ObservableObject {
     func pair() async {
         do {
             let reply: PairReply = try await request("/pair", body: ["code": pairingCode], authenticated: false)
-            try credential.save(reply.token); pairingCode = ""; demo = false; requests = []; chats = []; await refresh()
+            try credential.save(reply.token); pairingCode = ""; demo = false; hasLoaded = false; requests = []; chats = []; await refresh()
         } catch { connection = "Disconnected · \(error.localizedDescription)" }
     }
     func refresh() async {
-        if demo { requests = Demo.requests; chats = Demo.chats; connection = "Demo mode"; return }
+        if demo { requests = Demo.requests; chats = Demo.chats; connection = "Demo mode"; hasLoaded = true; return }
+        isLoading = true
+        defer { isLoading = false }
         do {
             async let newRequests: [ActionRequest] = request("/requests")
             async let newChats: [Chat] = request("/chats")
             (requests, chats) = try await (newRequests, newChats)
             connection = "Connected · updated now"
+            hasLoaded = true; lastUpdated = Date()
         } catch BridgeError.unauthorized { connection = "Disconnected · pair again" }
         catch { connection = "Disconnected · showing stale data" }
     }

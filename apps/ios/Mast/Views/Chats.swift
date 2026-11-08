@@ -7,13 +7,16 @@ struct ChatsScreen: View {
     private func group(_ chat: Chat) -> String { let status = chat.status.lowercased(); return status.hasPrefix("working") ? "Running" : (status.contains("awaiting") || status.contains("waiting") ? "Waiting" : "Idle") }
     var body: some View { HorizonScroll { VStack(alignment: .leading, spacing: 25) {
         HorizonHeader(title: "Chats")
+        if !model.demo && model.isLoading && !model.hasLoaded { LoadingPlaceholder() }
+        else if !model.demo && model.connection.hasPrefix("Disconnected") { OfflineScreen(model: model) }
+        else { if !model.chats.contains(where: { $0.visible(showWorkers: model.showWorkers) && group($0) == "Running" }) { Text("No running chats").font(.system(size: 14)).foregroundStyle(Horizon.muted(scheme)) }
         ForEach(["Running", "Waiting", "Idle"], id: \.self) { section in
             let chats = model.chats.filter { chat in group(chat) == section && chat.visible(showWorkers: model.showWorkers) }
             if !chats.isEmpty { VStack(alignment: .leading, spacing: 12) {
                 Text(section.uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.3).foregroundStyle(Horizon.muted(scheme))
                 ForEach(chats) { chat in if snapshot { ChatRow(chat: chat) } else { NavigationLink { ChatDetail(chat: chat, model: model) } label: { ChatRow(chat: chat) }.buttonStyle(.plain) } }
             } }
-        }
+        } }
     }.padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 30) }.refreshable { await model.refresh() }.background(Horizon.surface(scheme)).toolbar(.hidden, for: .navigationBar) }
 }
 struct ChatRow: View {
