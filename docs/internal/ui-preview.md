@@ -12,6 +12,7 @@ The command renders the chat shell, outline and item details, walkthrough, Setti
 The command prints a contact sheet for each screen and an index under `$CARGO_TARGET_DIR/ui-preview/<timestamp>/` (default: the checkout's `target`). Rows are style/layout combinations, columns are themes, and each cell has a GPUI-rendered label. Sheets are capped at 4096 pixels per side. The render is offscreen and does not open an app window or capture the screen.
 
 Set `MAST_PREVIEW_WIDTH` to a value from 320 to 4096 to render a different window width (default 1440 pixels). The height remains 900 pixels.
+Set `MAST_PREVIEW_HARNESS=codex` to render the chat fixture with Codex instead of Claude Code.
 
 Each output directory also contains `manifest.json`, listing the selected axes,
 sheet paths, index path, and regular cell dimensions. Component matrix sheets

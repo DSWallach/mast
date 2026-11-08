@@ -1158,7 +1158,7 @@ impl Pickers {
 
     /// Effective model id: the draft pick, the selected chat's config, or (on
     /// the new-chat canvas) the remembered last-used model for the harness.
-    fn effective_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
+    pub(crate) fn effective_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
         if let Some(id) = self.config.model.as_deref() {
             return Some(id);
         }
@@ -1167,6 +1167,10 @@ impl Pickers {
         }
         let harness = self.effective_harness(cx)?;
         self.defaults.model_for(harness).map(|m| m.id.as_str())
+    }
+
+    pub(crate) fn identity_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
+        self.effective_model_id(cx).or_else(|| self.selected_model(cx).map(|model| model.id.as_str()))
     }
 
     /// Effective reasoning — always concrete once the model is known: the

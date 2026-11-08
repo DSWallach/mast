@@ -5,7 +5,7 @@ use gpui::{AnyElement, div, prelude::*, px};
 /// The same row frame and colors used by the session sidebar.
 pub fn sidebar_row(theme: &Theme, id: String, label: &str, selected: bool) -> AnyElement {
     let (text, selected_background, dot) =
-        shell_parts::sidebar_row_colors(theme, "fixture", selected);
+        shell_parts::sidebar_row_colors(theme, theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus")), selected);
     let background = if selected {
         selected_background
     } else {

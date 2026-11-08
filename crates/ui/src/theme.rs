@@ -799,6 +799,23 @@ impl TerminalColors {
 }
 
 impl Theme {
+    /// Provider identity uses the active theme's ANSI palette. Missing models
+    /// use slate until a selection is known; model variants share one shade.
+    pub fn agent_identity_color(&self, harness: Option<mast_proto::HarnessId>, model: Option<&str>) -> Hsla {
+        let slot = match harness {
+                Some(mast_proto::HarnessId::ClaudeCode) => 3, // amber
+                Some(mast_proto::HarnessId::Codex) => 2, // green
+                _ => 4, // blue
+        };
+        let safe = |color: Hsla| {
+            let distance = (color.h - self.danger.h).abs();
+            color.s < 0.15 || self.danger.s < 0.15 || distance.min(1.0 - distance) > 0.08
+        };
+        let slate = flatten(self.text_muted, self.bg);
+        let preferred = if model.is_none_or(|model| model.trim().is_empty()) { slate } else { flatten(self.terminal.ansi[slot], self.bg) };
+        if safe(preferred) { preferred } else if safe(slate) { slate } else { hsla(0.0, 0.0, slate.l, 1.0) }
+    }
+
     /// Stable character colour derived solely from the active theme palette.
     pub fn identity_color(&self, chat_id: &str) -> Hsla {
         let hash = chat_id.bytes().fold(14695981039346656037_u64, |hash, byte| {
@@ -1954,6 +1971,46 @@ pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_identity_uses_provider_palette_and_guards_danger() {
+        use mast_proto::HarnessId;
+        for (appearance, id) in [(Appearance::Light, "area-light"), (Appearance::Dark, "area-dark")] {
+            let mut theme = Theme::for_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque);
+            let color = |harness, model| theme.agent_identity_color(harness, model);
+            assert_eq!(color(Some(HarnessId::ClaudeCode), Some("opus")), flatten(theme.terminal.ansi[3], theme.bg));
+            assert_eq!(color(Some(HarnessId::ClaudeCode), Some("haiku")), color(Some(HarnessId::ClaudeCode), Some("opus")));
+            assert_eq!(color(Some(HarnessId::Codex), Some("astra")), flatten(theme.terminal.ansi[2], theme.bg));
+            assert_eq!(color(None, Some("model")), flatten(theme.terminal.ansi[4], theme.bg));
+            assert_eq!(color(Some(HarnessId::Codex), None), flatten(theme.text_muted, theme.bg));
+            for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Cursor] {
+                let fill = color(Some(harness), Some("model"));
+                assert!(contrast_ratio(theme.identity_foreground(fill), theme.bg) >= 4.5);
+            }
+            theme.terminal.ansi[3] = theme.danger;
+            assert_ne!(theme.agent_identity_color(Some(HarnessId::ClaudeCode), Some("opus")), flatten(theme.danger, theme.bg));
+        }
+    }
+
+    #[test]
+    fn area_agent_reply_uses_provider_foreground() {
+        let theme = Theme::dark().with_ui_style(crate::ui_style::UiStyle::AREA);
+        let claude = theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus"));
+        let codex = theme.agent_identity_color(Some(mast_proto::HarnessId::Codex), Some("astra"));
+        let claude_reply = crate::components::agent_message_theme(&theme, claude);
+        let codex_reply = crate::components::agent_message_theme(&theme, codex);
+        assert_eq!(claude_reply.text, theme.identity_foreground(claude));
+        assert_eq!(codex_reply.text, theme.identity_foreground(codex));
+        assert_ne!(claude_reply.text, codex_reply.text);
+        let runs = vec![crate::markdown::parser::InlineRun {
+            text: "Reply".into(),
+            style: Default::default(),
+        }];
+        let claude_text = crate::markdown::render::flatten_runs(&runs, &claude_reply, false);
+        let codex_text = crate::markdown::render::flatten_runs(&runs, &codex_reply, false);
+        assert_eq!(claude_text.runs[0].color, claude_reply.text);
+        assert_eq!(codex_text.runs[0].color, codex_reply.text);
+    }
 
     #[test]
     fn area_identity_defaults_to_blue_and_preserves_text_contrast() {

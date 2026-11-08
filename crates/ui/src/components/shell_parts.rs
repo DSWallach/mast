@@ -821,6 +821,7 @@ pub(crate) fn area_sidebar_chat_row(
     theme: &Theme,
     row_id: String,
     chat_id: &str,
+    identity: gpui::Hsla,
     title: SharedString,
     _status: crate::status_style::Status,
     status_label: &'static str,
@@ -837,7 +838,6 @@ pub(crate) fn area_sidebar_chat_row(
     if !super::is_area(theme) || searching {
         return None;
     }
-    let identity = theme.identity_color(chat_id);
     let foreground = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
         theme.text
     } else if selected {
@@ -1148,10 +1148,9 @@ pub(crate) fn sidebar_compact_time(
 
 pub(crate) fn sidebar_row_colors(
     theme: &Theme,
-    id: &str,
+    identity: gpui::Hsla,
     selected: bool,
 ) -> (gpui::Hsla, gpui::Hsla, Option<gpui::Div>) {
-    let identity = theme.identity_color(id);
     let area = super::is_area(theme);
     let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::SidebarRow).page_colour.is_some() {
         theme.text
@@ -2852,6 +2851,7 @@ mod tests {
                 &theme,
                 "chat-test".into(),
                 "test",
+                theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus")),
                 "Session".into(),
                 crate::status_style::Status::Waiting,
                 "Queued",
