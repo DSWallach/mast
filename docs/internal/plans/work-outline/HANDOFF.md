@@ -1027,7 +1027,8 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
     and Team UI are on shared components, with offline previews (`linear`, `linear-settings`, `team`). Ratchet
     442/227/3/2 → 410/205/3/2; Default+Minimal compare 1.0 / 1.0 / 0.9999996. Follow-up: the Horizon Inbox panel
     still draws a divider rule.
-- **iOS companion** (item 14c99c51, Terra chat 3c892a57, branch `ios-companion`, **not merged**): native SwiftUI app
+- **iOS companion** (item 14c99c51, Terra chat 3c892a57, branch `ios-companion` at 94255e81, **not merged; Ready to
+  QA** request 5fe60698; iOS unit 4/4, bridge 8/8; live engine/phone/Tailscale unverified): native SwiftUI app
   (bundle `computer.mikey.mast.companion`, iOS 17 target) plus a Node bridge under `apps/ios/`. It must not change any
   Rust/Cargo files. The bridge binds to loopback, connects to the engine IPC on 127.0.0.1:27654, and exposes only
   allowlisted HTTP endpoints. Pairing uses a one-time code and a Keychain token; Tailscale Serve is the phone path.
