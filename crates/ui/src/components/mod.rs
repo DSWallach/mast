@@ -70,8 +70,8 @@ pub enum ButtonSize {
     Md,
 }
 
-fn is_area(theme: &Theme) -> bool {
-    theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area
+fn is_horizon(theme: &Theme) -> bool {
+    theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon
 }
 
 /// Preserve a red danger role; neutral theme danger roles fall back to the
@@ -130,7 +130,7 @@ pub fn button(
     button_with_identity(id, label, variant, size, theme, theme.identity_color(""))
 }
 
-/// Use the caller's agent identity for Area's filled primary action.
+/// Use the caller's agent identity for Horizon's filled primary action.
 pub fn button_with_identity(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -140,7 +140,7 @@ pub fn button_with_identity(
     identity: gpui::Hsla,
 ) -> Stateful<Div> {
     let label = label.into();
-    let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area;
+    let horizon = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon;
     let (horizontal, vertical, font, radius) = match size {
         ButtonSize::Sm => (6.0, 1.0, 10.5, 4.0),
         ButtonSize::Md => (12.0, 6.0, 13.0, 8.0),
@@ -156,7 +156,7 @@ pub fn button_with_identity(
         .px(px(horizontal * spacing_scale))
         .py(px(vertical * spacing_scale))
         .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(radius)))
-        .when(area, |el| {
+        .when(horizon, |el| {
             el.rounded_full().font_weight(gpui::FontWeight::SEMIBOLD)
         })
         .when(size == ButtonSize::Md, |el| {
@@ -185,7 +185,7 @@ pub fn button_with_identity(
                 .text_color(theme.on_solid)
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .hover(|el| el.opacity(0.9));
-            let button = if area {
+            let button = if horizon {
                 button
                     .bg(identity)
                     .text_color(theme.identity_text(identity))
@@ -227,7 +227,7 @@ pub fn section_card(theme: &Theme) -> gpui::Div {
         .border_1()
         .border_color(theme.border)
         .bg(theme.card_glass_bg())
-        .when(is_area(theme), |el| {
+        .when(is_horizon(theme), |el| {
             el.bg(theme.identity_color("").opacity(0.08))
                 .border_color(gpui::transparent_black())
         })
@@ -265,7 +265,7 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
             el.rounded(px(radius))
         })
         .when(
-            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area,
+            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon,
             |el| el.rounded_full(),
         )
         .border_1()
@@ -274,7 +274,7 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
             10.5 + layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .when(is_area(theme), |el| {
+        .when(is_horizon(theme), |el| {
             el.bg(theme.identity_color("").opacity(0.12))
                 .border_color(gpui::transparent_black())
                 .text_color(identity_foreground_on(
@@ -298,7 +298,7 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
             el.rounded(px(radius))
         })
         .when(
-            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area,
+            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon,
             |el| el.rounded_full(),
         )
         .bg(emerald.opacity(0.12))
@@ -381,7 +381,7 @@ pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
         .w(px(32.0 * scale))
         .h(px(18.0 * scale))
         .rounded_full()
-        .bg(if on && is_area(theme) {
+        .bg(if on && is_horizon(theme) {
             theme.identity_color("")
         } else if on {
             theme.text
@@ -426,7 +426,7 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
 pub fn list_row(theme: &Theme, selected: bool) -> Div {
     let identity = theme.identity_color("");
     let white = gpui::hsla(0.0, 0.0, 1.0, 1.0);
-    let selected_fill = if selected && is_area(theme) {
+    let selected_fill = if selected && is_horizon(theme) {
         (0..=100)
             .map(|step| {
                 gpui::hsla(
@@ -444,10 +444,10 @@ pub fn list_row(theme: &Theme, selected: bool) -> Div {
     let colors = theme.industrial_colors();
     card_row(theme, true)
         .px(px(12.0 * layout_spacing(theme)))
-        .when(selected && !is_area(theme) && !is_industrial(theme), |el| {
+        .when(selected && !is_horizon(theme) && !is_industrial(theme), |el| {
             el.bg(theme.element_active)
         })
-        .when(selected && is_area(theme), |el| {
+        .when(selected && is_horizon(theme), |el| {
             el.rounded_full()
                 .bg(selected_fill)
                 .text_color(white)
@@ -478,7 +478,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .text_size(crate::typography::ui_rems(
             theme.ui_style.tokens.body_size.unwrap_or(13.0) + layout_type_adjustment(theme),
         ))
-        .when(is_area(theme), |el| el.rounded_full())
+        .when(is_horizon(theme), |el| el.rounded_full())
         .cursor_pointer();
     if theme.ui_style.controls == crate::ui_style::ControlVariant::Key {
         let fade_key = fade_key.into();
@@ -522,7 +522,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
 /// Composer menus share a surface and row treatment without changing other popovers.
 pub fn conversation_menu_card(theme: &Theme, flush: bool) -> Div {
     let card = if flush { crate::popover::popover_card_flush(theme) } else { crate::popover::popover_card(theme) };
-    if is_area(theme) {
+    if is_horizon(theme) {
         card.bg(theme.surface).border_color(gpui::transparent_black()).shadow_sm()
     } else if is_industrial(theme) {
         card.bg(theme.industrial_colors().panel).border_color(theme.industrial_colors().rule).shadow(Vec::new())
@@ -530,11 +530,11 @@ pub fn conversation_menu_card(theme: &Theme, flush: bool) -> Div {
 }
 
 pub fn conversation_menu_row_height(theme: &Theme, fallback: f32) -> f32 {
-    if is_area(theme) || is_industrial(theme) { theme.ui_style.tokens.control_size } else { fallback }
+    if is_horizon(theme) || is_industrial(theme) { theme.ui_style.tokens.control_size } else { fallback }
 }
 
 pub fn conversation_menu_row_style<T: gpui::Styled>(row: T, theme: &Theme, selected: bool, active: bool) -> T {
-    if is_area(theme) {
+    if is_horizon(theme) {
         row.rounded_full().border_color(gpui::transparent_black()).shadow(Vec::new())
             .bg(if selected || active { theme.text.opacity(0.07) } else { gpui::transparent_black() })
             .text_color(theme.text)
@@ -546,10 +546,10 @@ pub fn conversation_menu_row_style<T: gpui::Styled>(row: T, theme: &Theme, selec
 pub fn conversation_menu_row(theme: &Theme, active: bool, key: impl Into<SharedString>) -> Div {
     let key = key.into();
     let row = menu_row(theme, active, key.clone());
-    if is_area(theme) || is_industrial(theme) {
+    if is_horizon(theme) || is_industrial(theme) {
         let row = conversation_menu_row_style(row, theme, active, false)
             .h(px(theme.ui_style.tokens.control_size)).py_0();
-        if is_area(theme) && !active {
+        if is_horizon(theme) && !active {
             row.bg(motion::hover_blend(&key, gpui::transparent_black(), theme.text.opacity(0.07)))
         } else { row }
     } else { row }
@@ -558,35 +558,35 @@ pub fn conversation_menu_row(theme: &Theme, active: bool, key: impl Into<SharedS
 pub fn conversation_menu_row_nav(theme: &Theme, selected: bool, highlighted: bool, key: impl Into<SharedString>) -> Div {
     let key = key.into();
     let row = crate::popover::menu_row_nav(theme, selected, highlighted, key.clone());
-    if is_area(theme) || is_industrial(theme) {
+    if is_horizon(theme) || is_industrial(theme) {
         let row = conversation_menu_row_style(row, theme, selected, highlighted)
             .h(px(theme.ui_style.tokens.control_size)).py_0();
-        if is_area(theme) && !selected && !highlighted {
+        if is_horizon(theme) && !selected && !highlighted {
             row.bg(motion::hover_blend(&key, gpui::transparent_black(), theme.text.opacity(0.07)))
         } else { row }
     } else { row }
 }
 
 pub fn conversation_menu_rule(theme: &Theme, fallback: gpui::Hsla) -> gpui::Hsla {
-    if is_area(theme) { gpui::transparent_black() } else if is_industrial(theme) { theme.industrial_colors().rule } else { fallback }
+    if is_horizon(theme) { gpui::transparent_black() } else if is_industrial(theme) { theme.industrial_colors().rule } else { fallback }
 }
 
 pub fn conversation_menu_band(theme: &Theme, fallback: gpui::Hsla) -> gpui::Hsla {
-    if is_area(theme) { gpui::transparent_black() } else { fallback }
+    if is_horizon(theme) { gpui::transparent_black() } else { fallback }
 }
 
 pub fn conversation_menu_tab<T: gpui::Styled>(tab: T, theme: &Theme, selected: bool) -> T {
-    if is_area(theme) {
+    if is_horizon(theme) {
         tab.rounded_full().bg(if selected { theme.text.opacity(0.07) } else { gpui::transparent_black() })
     } else if is_industrial(theme) {
         toolbar_control(tab, theme, false).bg(if selected { theme.industrial_colors().pressed } else { theme.industrial_colors().key })
     } else { tab }
 }
 
-pub fn conversation_menu_tab_indicator(theme: &Theme) -> bool { !is_area(theme) && !is_industrial(theme) }
+pub fn conversation_menu_tab_indicator(theme: &Theme) -> bool { !is_horizon(theme) && !is_industrial(theme) }
 
 pub fn conversation_menu_model_row<T: gpui::Styled>(row: T, theme: &Theme, selected: bool, active: bool, compact: bool) -> T {
-    if is_area(theme) || is_industrial(theme) {
+    if is_horizon(theme) || is_industrial(theme) {
         let row = conversation_menu_row_style(row, theme, selected, active);
         if compact { row.h(px(theme.ui_style.tokens.control_size)).py_0() } else { row.min_h(px(theme.ui_style.tokens.control_size)) }
     } else { row }
@@ -598,7 +598,7 @@ pub fn conversation_menu_section(theme: &Theme) -> Div {
 
 pub fn conversation_menu_search(theme: &Theme, input: AnyElement) -> Div {
     let frame = crate::popover::search_input_frame(theme, input);
-    if is_area(theme) { frame.bg(gpui::transparent_black()).border_color(gpui::transparent_black()) } else { frame }
+    if is_horizon(theme) { frame.bg(gpui::transparent_black()).border_color(gpui::transparent_black()) } else { frame }
 }
 
 pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
@@ -618,7 +618,7 @@ pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
 
 pub fn toolbar_search_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
     let frame = search_input_frame(theme, input);
-    let frame = if is_industrial(theme) || is_area(theme) {
+    let frame = if is_industrial(theme) || is_horizon(theme) {
         toolbar_control(frame.mb(px(0.0)), theme, false)
     } else {
         frame
@@ -684,7 +684,7 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             .shadow(Vec::new())
             .flex()
             .items_center()
-    } else if is_area(theme) {
+    } else if is_horizon(theme) {
         let fill = if primary {
             theme.accent
         } else {
@@ -799,7 +799,7 @@ pub enum Status {
 }
 
 pub fn status_dot(theme: &Theme, status: Status) -> Div {
-    let color = if is_area(theme) {
+    let color = if is_horizon(theme) {
         theme.identity_color("")
     } else {
         match status {
@@ -845,19 +845,19 @@ fn tab_horizontal_inset(style: crate::ui_style::UiStyle) -> f32 {
 
 /// A single selectable segment. The caller owns selection and activation.
 pub fn tab(theme: &Theme, label: impl Into<SharedString>, selected: bool) -> Div {
-    let area = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area;
+    let horizon = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon;
     let identity = theme.identity_color("");
     let horizontal_inset = tab_horizontal_inset(theme.ui_style);
     let item = div()
-        .when(selected || area, |el| {
+        .when(selected || horizon, |el| {
             el.px(px(horizontal_inset))
                 .py(px(5.0 * layout_spacing(theme)))
         })
-        .when(selected && !area, |el| el.bg(theme.surface_raised))
-        .when(area, |el| {
+        .when(selected && !horizon, |el| el.bg(theme.surface_raised))
+        .when(horizon, |el| {
             el.rounded_full().font_weight(gpui::FontWeight::SEMIBOLD)
         })
-        .when(area && selected, |el| {
+        .when(horizon && selected, |el| {
             el.bg(identity).text_color(theme.identity_text(identity))
         })
         .when(
@@ -883,10 +883,10 @@ pub fn user_message_bubble(
 ) -> AnyElement {
     use crate::ui_style::ConversationVariant;
     let variant = theme.ui_style.conversation;
-    let area = variant == ConversationVariant::Area;
+    let horizon = variant == ConversationVariant::Horizon;
     let text = if theme.ui_style.design_roles.surface(crate::style_overrides::DesignSurface::Message).page_colour.is_some() {
         theme.text
-    } else if area {
+    } else if horizon {
         theme.identity_text(identity)
     } else {
         theme.text
@@ -908,7 +908,7 @@ pub fn user_message_bubble(
                 .border_1()
                 .border_color(theme.border)
         })
-        .when(area, |el| el.bg(identity).max_w_full().w_full())
+        .when(horizon, |el| el.bg(identity).max_w_full().w_full())
         .text_size(crate::typography::ui_rems(
             theme.ui_style.type_roles().body.unwrap_or(14.0) + layout_type_adjustment(theme),
         ))
@@ -995,7 +995,7 @@ pub fn agent_message_bubble(
                     .child(content),
             )
             .into_any_element()
-    } else if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area {
+    } else if theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon {
         div()
             .min_w_0()
             .w_full()
@@ -1038,7 +1038,7 @@ pub fn text_input(theme: &Theme, input: AnyElement) -> Div {
             |el| el.bg(theme.input_bg),
         )
         .when(
-            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Area,
+            theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon,
             |el| el.bg(theme.identity_color("").opacity(0.12)),
         )
         .child(input)
@@ -1060,7 +1060,7 @@ pub fn icon_button(
         .justify_center()
         .gap(px(4.0))
         .size(px(theme.ui_style.tokens.control_size))
-        .when(is_area(theme), |el| {
+        .when(is_horizon(theme), |el| {
             el.rounded_full().bg(theme.identity_color("").opacity(0.12))
         })
         .text_color(theme.text)
@@ -1104,14 +1104,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn area_list_bullets_follow_agent_reply_foreground() {
+    fn horizon_list_bullets_follow_agent_reply_foreground() {
         use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
         for appearance in [crate::theme::Appearance::Light, crate::theme::Appearance::Dark] {
-            let base = Theme::for_selection(appearance, if appearance == crate::theme::Appearance::Light { "area-light" } else { "area-dark" }, Default::default(), mast_theme::SurfacePreference::Opaque);
-            let area = base.clone().with_ui_style(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+            let base = Theme::for_selection(appearance, if appearance == crate::theme::Appearance::Light { "horizon-light" } else { "horizon-dark" }, Default::default(), mast_theme::SurfacePreference::Opaque);
+            let horizon = base.clone().with_ui_style(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
             for harness in [mast_proto::HarnessId::ClaudeCode, mast_proto::HarnessId::Codex] {
-                let identity = area.agent_identity_color(Some(harness), Some("model"));
-                let reply = agent_message_theme(&area, identity);
+                let identity = horizon.agent_identity_color(Some(harness), Some("model"));
+                let reply = agent_message_theme(&horizon, identity);
                 assert_eq!(conversation_markdown_bullet_color(&reply), reply.text);
             }
             for style in [UiStyleId::Default, UiStyleId::Industrial] {
@@ -1124,11 +1124,11 @@ mod tests {
     #[test]
     fn conversation_menu_geometry_matches_style_tokens() {
         use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
-        let area = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
-        let mut card = conversation_menu_card(&area, false);
+        let horizon = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
+        let mut card = conversation_menu_card(&horizon, false);
         assert_eq!(card.style().corner_radii, div().rounded(px(14.0)).style().corner_radii);
-        let mut row = conversation_menu_row(&area, false, "geometry-test");
-        assert_eq!(row.style().size.height, div().h(px(area.ui_style.tokens.control_size)).style().size.height);
+        let mut row = conversation_menu_row(&horizon, false, "geometry-test");
+        assert_eq!(row.style().size.height, div().h(px(horizon.ui_style.tokens.control_size)).style().size.height);
         let default = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Default, UiLayout::Minimal));
         assert_eq!(conversation_menu_card(&default, false).style(), crate::popover::popover_card(&default).style());
     }
@@ -1138,7 +1138,7 @@ mod tests {
         use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
         use gpui::Styled as _;
         let empty = crate::style_overrides::Overrides::default();
-        let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":3,"primaryColour":"success","surfaces":{"toolbar":{"border":true,"pageColour":true},"composer":{"border":true},"code":{"pageColour":true},"tool":{"border":true,"pageColour":true}}}}}"#);
+        let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"controlRadius":3,"primaryColour":"success","surfaces":{"toolbar":{"border":true,"pageColour":true},"composer":{"border":true},"code":{"pageColour":true},"tool":{"border":true,"pageColour":true}}}}}"#);
         for id in UiStyleId::ALL {
             let base_style = UiStyle::resolve(*id, UiLayout::Minimal);
             let base = Theme::dark().with_ui_style(base_style);
@@ -1146,7 +1146,7 @@ mod tests {
             assert_eq!(toolbar_control(div(), &base, true).style(), toolbar_control(div(), &no_override, true).style());
             assert_eq!(conversation_parts::conversation_input_surface(div(), &base, base.accent, 8.0, base.border).style(), conversation_parts::conversation_input_surface(div(), &no_override, base.accent, 8.0, base.border).style());
         }
-        let base = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        let base = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
         let changed = Theme::dark().with_ui_style(overrides.apply(base.ui_style));
         assert_ne!(toolbar_control(div(), &base, true).style(), toolbar_control(div(), &changed, true).style());
         assert_ne!(conversation_parts::conversation_input_surface(div(), &base, base.accent, 8.0, base.border).style(), conversation_parts::conversation_input_surface(div(), &changed, base.accent, 8.0, base.border).style());
@@ -1160,7 +1160,7 @@ mod tests {
         for (style, expected) in [
             (UiStyleId::Default, [8.0, 9.0, 15.0]),
             (UiStyleId::Industrial, [12.0, 9.0, 15.0]),
-            (UiStyleId::Area, [12.0, 9.0, 15.0]),
+            (UiStyleId::Horizon, [12.0, 9.0, 15.0]),
         ] {
             for (&layout, inset) in UiLayout::ALL.iter().zip(expected) {
                 assert_eq!(tab_horizontal_inset(UiStyle::resolve(style, layout)), inset);
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn dark_theme_component_foregrounds_contrast() {
-        for id in ["mast-dark", "industrial-dark", "area-dark"] {
+        for id in ["mast-dark", "industrial-dark", "horizon-dark"] {
             let theme = Theme::for_selection(
                 crate::theme::Appearance::Dark,
                 id,

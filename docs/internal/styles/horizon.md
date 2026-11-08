@@ -1,4 +1,4 @@
-# Area interface references
+# Horizon interface references
 
 The [OpenAI case study](https://www.area.tech/openai) describes Area's 2023
 identity and ChatGPT interface explorations. Its [sidebar](https://pub-c9496d20dacb40f4874f191a2686b638.r2.dev/openai/Sidebar.png)
@@ -25,7 +25,7 @@ Theme and style remain independent; neither the source palette nor a fixed hue
 is required by the shape of the interface. Motion is not established by these
 still images.
 
-The optional Area themes use colours sampled from the character-tag reference: white
+The optional Horizon themes use colours sampled from the character-tag reference: white
 #FFFFFF, blue #0BA7FF, amber #FFB800, coral #FF7759, lavender #B388E4,
-green #1DCB43, and blue-grey #8EA4B8. Area Dark adapts these hues to a
+green #1DCB43, and blue-grey #8EA4B8. Horizon Dark adapts these hues to a
 near-black surface.

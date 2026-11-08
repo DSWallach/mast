@@ -28,11 +28,13 @@ polled and applied while Mast runs. An absent or empty file has no effect. Inval
 fields and unknown names are ignored with warnings. Use Reset and Save to remove
 an override; deleting the file removes all overrides.
 
+Legacy `area` style keys load as `horizon`; if both are present, `horizon` wins.
+
 ```json
 {
   "version": "mast.style-overrides/v1",
   "styles": {
-    "area": {
+    "horizon": {
       "controlRadius": 16,
       "detailsBorder": true,
       "primaryColour": "accent",
@@ -59,7 +61,7 @@ non-default profile directory for reading overrides.
 Surface overrides can also be supplied under `surfaces`, for example:
 
 ```json
-{ "version": "mast.style-overrides/v1", "styles": { "area": {
+{ "version": "mast.style-overrides/v1", "styles": { "horizon": {
   "surfaces": { "composer": { "border": true, "pageColour": false } }
 } } }
 ```

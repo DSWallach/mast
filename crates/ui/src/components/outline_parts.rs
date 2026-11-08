@@ -3,9 +3,9 @@
 use crate::theme::Theme;
 use gpui::{Div, SharedString, Stateful, div, prelude::*, px};
 
-/// Primary actions in the Area details surface.
+/// Primary actions in the Horizon details surface.
 pub fn outline_details_primary(theme: &Theme, label: &str) -> bool {
-    super::is_area(theme) && matches!(label, "Start Chat" | "Save" | "Add" | "Set date")
+    super::is_horizon(theme) && matches!(label, "Start Chat" | "Save" | "Add" | "Set date")
 }
 
 pub fn overview_group_button(id: SharedString, active: bool, theme: &Theme) -> Stateful<Div> {
@@ -20,7 +20,7 @@ pub fn overview_group_button(id: SharedString, active: bool, theme: &Theme) -> S
             el.bg(theme.element_active).text_color(theme.text)
         })
         .when(!active, |el| el.text_color(theme.text_muted));
-    if super::is_area(theme) {
+    if super::is_horizon(theme) {
         super::toolbar_control(button, theme, false)
     } else {
         button
@@ -35,7 +35,7 @@ pub fn overview_group_frame(theme: &Theme) -> Div {
         .p(px(2.0))
         .rounded(px(6.0))
         .bg(theme.element_hover.opacity(0.3));
-    if super::is_area(theme) {
+    if super::is_horizon(theme) {
         super::toolbar_control(frame, theme, false)
     } else {
         frame
@@ -57,7 +57,7 @@ pub fn overview_work_item_filter(theme: &Theme, active: bool) -> Stateful<Div> {
         })
         .when(!active, |el| el.text_color(theme.text_muted))
         .hover(|el| el.text_color(theme.text));
-    if super::is_area(theme) {
+    if super::is_horizon(theme) {
         super::toolbar_control(trigger, theme, false)
     } else {
         trigger
@@ -96,13 +96,13 @@ pub fn outline_section_header(
     div()
         .id(id)
         .group("outline-section")
-        .when(super::is_area(theme), |el| el.relative().ml(px(-14.0)).pl(px(14.0)))
+        .when(super::is_horizon(theme), |el| el.relative().ml(px(-14.0)).pl(px(14.0)))
         .flex()
         .items_center()
         .gap(px(4.0 * super::layout_spacing(theme)))
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(
-            if super::is_area(theme) {
+            if super::is_horizon(theme) {
                 theme.ui_style.tokens.body_size.unwrap_or(13.0)
             } else {
                 theme.ui_style.tokens.label_size.unwrap_or(11.0)
@@ -120,7 +120,7 @@ pub fn outline_section_header(
             })
             .size(px(10.0))
             .text_color(theme.text_muted)
-            .when(super::is_area(theme), |el| {
+            .when(super::is_horizon(theme), |el| {
                 el.absolute()
                     .left(px(0.0))
                     .top(px(2.0))
@@ -147,7 +147,7 @@ pub fn outline_chat_indicator(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    if super::is_area(theme) && status == crate::status_style::Status::Waiting {
+    if super::is_horizon(theme) && status == crate::status_style::Status::Waiting {
         div()
             .size(px(8.0))
             .rounded_full()
@@ -171,7 +171,7 @@ pub fn outline_selected_chat_indicator(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    if super::is_area(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
+    if super::is_horizon(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
         div()
             .size(px(8.0))
             .rounded_full()
@@ -201,7 +201,7 @@ pub fn outline_item_indicator(
 
 /// Status word shown when the layout requests it.
 pub fn outline_status_word(label: &'static str, color: gpui::Hsla, theme: &Theme) -> Option<Div> {
-    (theme.ui_style.behavior.status_words && !super::is_area(theme)).then(|| {
+    (theme.ui_style.behavior.status_words && !super::is_horizon(theme)).then(|| {
         div()
             .flex_none()
             .text_size(crate::typography::ui_rems(10.0))
@@ -238,7 +238,7 @@ pub fn outline_first_use_button(id: &'static str, primary: bool, theme: &Theme) 
             },
         );
     crate::surface_chrome::segmented_key(button, theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
 }
 
 /// Start-chat action for an outline row.
@@ -269,7 +269,7 @@ pub fn outline_start_chat_button(id: SharedString, theme: &Theme) -> Stateful<Di
                 .hover(|el| el.bg(theme.solid).text_color(theme.on_solid).opacity(0.85))
         });
     crate::surface_chrome::segmented_key(button, theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(
             crate::icons::icon(crate::icons::ACTION_PLAY)
                 .size(px(10.0))
@@ -310,7 +310,7 @@ pub fn outline_toolbar_button(
         theme,
         false,
     )
-    .when(super::is_area(theme), |el| el.rounded_full())
+    .when(super::is_horizon(theme), |el| el.rounded_full())
     .child(SharedString::from(label))
 }
 
@@ -335,7 +335,7 @@ pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
         theme,
         false,
     )
-    .when(super::is_area(theme), |el| el.rounded_full())
+    .when(super::is_horizon(theme), |el| el.rounded_full())
     .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
     .child("?")
 }
@@ -394,7 +394,7 @@ pub fn outline_date_input_frame(
     theme: &Theme,
     focused: bool,
 ) -> Div {
-    outline_input_frame(input, theme).when(super::is_area(theme) && !focused, |el| {
+    outline_input_frame(input, theme).when(super::is_horizon(theme) && !focused, |el| {
         el.border_color(theme.border)
     })
 }
@@ -409,7 +409,7 @@ pub fn outline_details_close(theme: &Theme) -> Stateful<Div> {
         .when(labels, |el| {
             el.h(px(32.0)).w_auto().px(px(6.0)).gap(px(4.0))
         })
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .flex()
@@ -474,7 +474,7 @@ pub fn outline_action_button(
         theme,
         false,
     )
-    .when(super::is_area(theme), |el| {
+    .when(super::is_horizon(theme), |el| {
         if enabled && (primary || matches!(label, "Approve" | "Accept rule" | "Send")) {
             el.rounded_full()
                 .bg(theme.accent)
@@ -488,7 +488,7 @@ pub fn outline_action_button(
     })
     .when_some(if enabled { if primary { theme.ui_style.design_roles.primary_colour } else { theme.ui_style.design_roles.secondary_colour } } else { None }, |el, role| {
         let colour = role.colour(theme);
-        if super::is_area(theme) && enabled && primary {
+        if super::is_horizon(theme) && enabled && primary {
             el.bg(colour).border_color(colour).text_color(theme.identity_text(colour))
         } else {
             el.border_color(colour).text_color(colour)
@@ -534,14 +534,14 @@ pub fn outline_status_segment(
             el.bg(theme.success).text_color(foreground)
         })
         .when(true, |el| super::toolbar_control(el, theme, false))
-        .when(super::is_area(theme) && active, |el| {
+        .when(super::is_horizon(theme) && active, |el| {
             el.bg(theme.accent)
                 .text_color(theme.identity_text(theme.accent))
         })
         .when(active && completed && key, |el| {
             el.text_color(theme.success)
         })
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .children(crate::surface_chrome::active_key_dot(
             theme,
             active && !completed,
@@ -562,7 +562,7 @@ pub fn outline_status_group(theme: &Theme) -> Div {
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface),
         )
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full().bg(theme.element_hover.opacity(0.3))
         })
 }
@@ -602,12 +602,12 @@ pub fn outline_details_frame(theme: &Theme) -> Stateful<Div> {
         .when(super::is_industrial(theme), |el| {
             el.border_l_2().border_color(theme.industrial_colors().rule)
         })
-        .bg(if theme.ui_style.design_roles.details_page_surface.unwrap_or_else(|| super::is_area(theme)) {
+        .bg(if theme.ui_style.design_roles.details_page_surface.unwrap_or_else(|| super::is_horizon(theme)) {
             theme.bg
         } else {
             theme.surface
         })
-        .when(super::is_area(theme), |el| el.border_color(theme.bg))
+        .when(super::is_horizon(theme), |el| el.border_color(theme.bg))
         .when_some(theme.ui_style.design_roles.details_border, |el, visible| {
             el.border_color(if visible { theme.border } else { gpui::transparent_black() })
         })
@@ -657,7 +657,7 @@ pub fn outline_list_heading(label: String, theme: &Theme) -> Div {
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.text_size(crate::typography::ui_rems(
                 theme.ui_style.tokens.body_size.unwrap_or(13.0)
                     + super::layout_type_adjustment(theme),
@@ -692,24 +692,24 @@ pub fn outline_tree(theme: &Theme) -> Stateful<Div> {
             theme.ui_style.surface == crate::ui_style::SurfaceModel::Opaque,
             |el| el.bg(theme.surface),
         )
-        .when(super::is_area(theme), |el| el.bg(theme.bg))
+        .when(super::is_horizon(theme), |el| el.bg(theme.bg))
         .when_some(theme.ui_style.design_roles.outline_page_surface, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
 }
 
 pub fn outline_overview_header(theme: &Theme) -> Div {
-    div().when(super::is_area(theme), |el| el.bg(theme.bg))
+    div().when(super::is_horizon(theme), |el| el.bg(theme.bg))
         .when_some(theme.ui_style.design_roles.outline_page_surface, |el, page| el.bg(if page { theme.bg } else { theme.surface }))
 }
 
-/// Area presents descendants inside a continuous rounded surface per ancestor.
+/// Horizon presents descendants inside a continuous rounded surface per ancestor.
 pub fn outline_uses_rounded_nesting(theme: &Theme) -> bool {
-    super::is_area(theme)
+    super::is_horizon(theme)
 }
 
 pub fn outline_nested_row(key: &str, depth: u16, previous: u16, next: u16, row: gpui::AnyElement, theme: &Theme) -> gpui::AnyElement {
     let offset = |level: u16| level as f32 * 20.0;
     let backgrounds = (1..=depth).map(|level| {
-        let selector = format!("area-outline-nesting-{key}-{level}");
+        let selector = format!("horizon-outline-nesting-{key}-{level}");
         div().id(selector.clone()).debug_selector(move || selector.clone())
             .absolute().top_0().bottom_0().right_0().left(px(offset(level)))
             .when(level <= 2, |el| el.bg(theme.text.opacity(0.025)))
@@ -756,7 +756,7 @@ pub fn outline_row_theme(theme: &Theme, selected: bool) -> Theme {
 }
 
 pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selected: bool) -> T {
-    let element = if super::is_area(theme) && selected {
+    let element = if super::is_horizon(theme) && selected {
         element
             .max_w(px(400.0))
             .rounded_full()
@@ -773,7 +773,7 @@ pub fn outline_row_selection<T: gpui::Styled>(element: T, theme: &Theme, selecte
 }
 
 pub fn outline_row_extras(theme: &Theme) -> bool {
-    !super::is_area(theme)
+    !super::is_horizon(theme)
 }
 
 pub fn outline_attention_color(
@@ -781,7 +781,7 @@ pub fn outline_attention_color(
     needs_attention: bool,
     color: gpui::Hsla,
 ) -> gpui::Hsla {
-    if super::is_area(theme) && needs_attention {
+    if super::is_horizon(theme) && needs_attention {
         theme.accent
     } else {
         color
@@ -789,7 +789,7 @@ pub fn outline_attention_color(
 }
 
 pub fn outline_selected_dot_color(theme: &Theme, selected: bool, color: gpui::Hsla) -> gpui::Hsla {
-    if super::is_area(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
+    if super::is_horizon(theme) && selected && theme.ui_style.design_roles.primary_colour.is_some() {
         theme.identity_text(theme.accent)
     } else {
         color
@@ -797,7 +797,7 @@ pub fn outline_selected_dot_color(theme: &Theme, selected: bool, color: gpui::Hs
 }
 
 pub fn outline_row_highlight(theme: &Theme) -> gpui::Hsla {
-    if super::is_area(theme) {
+    if super::is_horizon(theme) {
         gpui::transparent_black()
     } else {
         theme.accent.opacity(0.6)
@@ -810,7 +810,7 @@ pub fn outline_space_dot(
     needs_attention: bool,
     selected: bool,
 ) -> Option<Div> {
-    super::is_area(theme).then(|| {
+    super::is_horizon(theme).then(|| {
         div()
             .flex_none()
             .size(px(8.0))
@@ -828,7 +828,7 @@ pub fn outline_space_dot(
 }
 
 pub fn outline_missing_chat(theme: &Theme, id: &str) -> Option<gpui::AnyElement> {
-    super::is_area(theme).then(|| {
+    super::is_horizon(theme).then(|| {
         div()
             .flex_1()
             .min_w_0()
@@ -857,7 +857,7 @@ pub fn outline_filter_trigger(theme: &Theme) -> Stateful<Div> {
         theme,
         false,
     )
-    .when(super::is_area(theme), |el| el.rounded_full())
+    .when(super::is_horizon(theme), |el| el.rounded_full())
     .child("⋯")
 }
 
@@ -882,7 +882,7 @@ pub fn outline_filter_row(
         .text_color(theme.text)
         .hover(|el| el.bg(theme.element_hover));
     crate::surface_chrome::segmented_key(row, theme, checked)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(format!("{}  {}", if checked { "✓" } else { "　" }, label))
 }
 
@@ -967,7 +967,7 @@ pub fn outline_required_action_row(id: SharedString, theme: &Theme) -> Stateful<
         .when(super::is_industrial(theme), |el| {
             el.border_1().border_color(theme.industrial_colors().rule)
         })
-        .when(super::is_area(theme), |el| el.py(px(8.0 * scale)))
+        .when(super::is_horizon(theme), |el| el.py(px(8.0 * scale)))
 }
 
 /// Template editor node header.
@@ -1030,7 +1030,7 @@ pub fn outline_waiting_section(theme: &Theme) -> Div {
                 .text_size(crate::typography::ui_rems(
                     11.0 + super::layout_type_adjustment(theme),
                 ))
-                .when(super::is_area(theme), |el| {
+                .when(super::is_horizon(theme), |el| {
                     el.text_size(crate::typography::ui_rems(
                         theme.ui_style.tokens.body_size.unwrap_or(13.0)
                             + super::layout_type_adjustment(theme),
@@ -1202,7 +1202,7 @@ pub fn outline_move_flash(selector: String, theme: &Theme) -> Div {
 
 /// Metadata row beneath a required action.
 pub fn outline_request_attention(theme: &Theme, color: gpui::Hsla) -> gpui::Hsla {
-    if super::is_area(theme) {
+    if super::is_horizon(theme) {
         theme.text_muted
     } else {
         color
@@ -1240,7 +1240,7 @@ pub fn outline_request_link(id: SharedString, label: String, theme: &Theme) -> S
         .cursor_pointer()
         .hover(|el| el.bg(theme.element_hover));
     crate::surface_chrome::segmented_key(button, theme, false)
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded_full()
                 .border_color(theme.bg)
                 .text_color(theme.text_muted)
@@ -1294,7 +1294,7 @@ pub fn outline_needs_heading(
             10.5 + super::layout_type_adjustment(theme),
         ))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(if super::is_area(theme) {
+        .text_color(if super::is_horizon(theme) {
             theme.text_muted
         } else {
             color
@@ -1319,7 +1319,7 @@ pub fn outline_approval_card(selector: String, theme: &Theme) -> Div {
             el.bg(theme.industrial_colors().panel)
                 .border_color(theme.industrial_colors().rule)
         })
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(12.0)))
                 .border_color(theme.bg)
                 .bg(theme.bg)
@@ -1503,7 +1503,7 @@ pub fn outline_section_action_heading(label: &'static str, theme: &Theme) -> Div
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.text_size(crate::typography::ui_rems(
                 theme.ui_style.tokens.body_size.unwrap_or(13.0)
                     + super::layout_type_adjustment(theme),
@@ -1540,7 +1540,7 @@ pub fn outline_detail_heading(label: &'static str, theme: &Theme) -> Div {
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.text_size(crate::typography::ui_rems(
                 theme.ui_style.tokens.body_size.unwrap_or(13.0)
                     + super::layout_type_adjustment(theme),
@@ -1838,7 +1838,7 @@ pub fn outline_binding_choice(
         .text_color(if active { theme.text } else { theme.text_muted })
         .hover(|el| el.bg(theme.element_hover));
     crate::surface_chrome::segmented_key(button, theme, active)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(SharedString::from(label))
 }
 
@@ -1933,7 +1933,7 @@ pub fn outline_conversion_choice(
         })
         .hover(|el| el.bg(theme.element_hover));
     crate::surface_chrome::segmented_key(button, theme, selected)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(SharedString::from(label))
 }
 
@@ -2006,7 +2006,7 @@ pub fn outline_details_chat_label(
         } else {
             theme.text
         })
-        .when(missing && !super::is_area(theme), |el| el.italic())
+        .when(missing && !super::is_horizon(theme), |el| el.italic())
         .when(!missing, |el| el.cursor_pointer())
         .child(SharedString::from(label))
 }
@@ -2069,7 +2069,7 @@ pub fn outline_destination_choice(
         })
         .hover(|el| el.bg(theme.element_hover));
     crate::surface_chrome::segmented_key(choice, theme, selected)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(SharedString::from(title))
 }
 
@@ -2126,7 +2126,7 @@ pub fn outline_disclosure(id: SharedString, collapsed: bool, theme: &Theme) -> S
             })
             .size(px(10.0))
             .text_color(theme.text_muted)
-            .when(super::is_area(theme), |el| {
+            .when(super::is_horizon(theme), |el| {
                 el.opacity(0.65)
                     .group_hover("outline-row", |el| el.opacity(1.0))
             }),
@@ -2157,7 +2157,7 @@ pub fn outline_inline_action(
         .text_color(color)
         .hover(|el| el.bg(theme.element_hover).text_color(theme.text));
     crate::surface_chrome::segmented_key(button, theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(label)
 }
 
@@ -2395,7 +2395,7 @@ pub fn outline_linear_retained(id: String, text: String, theme: &Theme) -> State
 /// Heading for an overview list lane.
 pub fn outline_lane_heading(text: String, color: gpui::Hsla, depth: usize, theme: &Theme) -> Div {
     let top = depth == 0;
-    let label = if top && !super::is_area(theme) {
+    let label = if top && !super::is_horizon(theme) {
         text.to_uppercase()
     } else {
         text
@@ -2435,12 +2435,12 @@ pub fn outline_required_panel(theme: &Theme) -> Stateful<Div> {
         .flex_col()
         .border_l_1()
         .border_color(theme.border)
-        .bg(if super::is_area(theme) {
+        .bg(if super::is_horizon(theme) {
             theme.bg
         } else {
             theme.surface
         })
-        .when(super::is_area(theme), |el| el.border_color(theme.bg))
+        .when(super::is_horizon(theme), |el| el.border_color(theme.bg))
         .when(super::is_industrial(theme), |el| {
             el.border_l_2().border_color(theme.industrial_colors().rule)
         })
@@ -2451,7 +2451,7 @@ pub fn outline_required_close(theme: &Theme) -> Stateful<Div> {
         .debug_selector(|| "required-actions-close".into())
         .flex_none()
         .size(px(22.0))
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.h(px(theme.ui_style.tokens.control_size))
         })
         .flex()
@@ -3140,7 +3140,7 @@ pub fn outline_artifact_menu_entry(id: &str, label: &'static str, theme: &Theme)
         .text_color(theme.text)
         .hover(|el| el.bg(theme.element_hover));
     crate::surface_chrome::segmented_key(button, theme, false)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(label)
 }
 
@@ -3231,16 +3231,16 @@ pub fn outline_details_attention(
         .text_size(crate::typography::ui_rems(
             11.0 + super::layout_type_adjustment(theme),
         ))
-        .text_color(if super::is_area(theme) {
+        .text_color(if super::is_horizon(theme) {
             theme.accent
         } else {
             color
         })
-        .when(super::is_area(theme), |el| {
+        .when(super::is_horizon(theme), |el| {
             el.child(SharedString::from(suffix.clone()))
         })
         .when(
-            !super::is_area(theme)
+            !super::is_horizon(theme)
                 && theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot,
             |el| {
                 el.flex()
@@ -3254,7 +3254,7 @@ pub fn outline_details_attention(
             },
         )
         .when(
-            !super::is_area(theme)
+            !super::is_horizon(theme)
                 && theme.ui_style.status_indicator != crate::ui_style::StatusIndicator::Dot,
             |el| el.child(SharedString::from(format!("{glyph} {suffix}"))),
         )
@@ -3441,7 +3441,7 @@ pub fn outline_picker_place(label: &'static str, active: bool, theme: &Theme) ->
         })
         .when(!active, |el| el.hover(|el| el.bg(theme.element_hover)));
     crate::surface_chrome::segmented_key(button, theme, active)
-        .when(super::is_area(theme), |el| el.rounded_full())
+        .when(super::is_horizon(theme), |el| el.rounded_full())
         .child(label)
 }
 

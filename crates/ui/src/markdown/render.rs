@@ -2821,9 +2821,9 @@ mod tests {
     use crate::markdown::parser::{InlineStyle, parse_full};
     use gpui::TestAppContext;
 
-    struct AreaReplyHarness;
+    struct HorizonReplyHarness;
 
-    impl Render for AreaReplyHarness {
+    impl Render for HorizonReplyHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let text = format!(
@@ -2832,7 +2832,7 @@ mod tests {
                 "A list item wraps and keeps its hanging indent. ".repeat(5),
             );
             let tree = parse_full(&text);
-            let opts = RenderOptions::settled("area-reply".into());
+            let opts = RenderOptions::settled("horizon-reply".into());
             let blocks = tree.blocks.iter().enumerate().map(|(ix, block)| {
                 let body = render_block(&block.block, ix, ix, &opts, &theme, window, None);
                 crate::components::agent_message_bubble(
@@ -2847,23 +2847,23 @@ mod tests {
     }
 
     #[gpui::test]
-    fn area_reply_wraps_and_list_text_keeps_its_indent(cx: &mut TestAppContext) {
+    fn horizon_reply_wraps_and_list_text_keeps_its_indent(cx: &mut TestAppContext) {
         let _selection = super::super::selection::test_state_lock();
-        cx.update(|cx| cx.set_global(Theme::dark().with_ui_style(crate::ui_style::UiStyle::AREA)));
-        let (_, cx) = cx.add_window_view(|_, _| AreaReplyHarness);
+        cx.update(|cx| cx.set_global(Theme::dark().with_ui_style(crate::ui_style::UiStyle::HORIZON)));
+        let (_, cx) = cx.add_window_view(|_, _| HorizonReplyHarness);
         for width in [320.0, 1000.0] {
             cx.simulate_resize(size(px(width), px(900.0)));
             cx.update(|window, cx| { window.refresh(); let _ = window.draw(cx); });
-            let paragraph = selection_test_bounds("area-reply:0");
-            let first = selection_test_bounds("area-reply:100");
-            let second = selection_test_bounds("area-reply:110");
+            let paragraph = selection_test_bounds("horizon-reply:0");
+            let first = selection_test_bounds("horizon-reply:100");
+            let second = selection_test_bounds("horizon-reply:110");
             assert!(paragraph.right() <= px(width));
             assert!(paragraph.size.width <= px(720.0));
             assert!(first.right() <= px(width));
             assert_eq!(first.origin.x, second.origin.x);
             assert!(first.origin.x > paragraph.origin.x);
             if width == 320.0 {
-                let (text, layout, _) = selection_test_snapshot("area-reply:100");
+                let (text, layout, _) = selection_test_snapshot("horizon-reply:100");
                 let lines = range_rects(&layout, &(0..text.len()), 0.0, 0.0);
                 assert!(lines.len() > 1, "list item should wrap");
                 assert_eq!(lines[0].left(), lines[1].left(), "continuation aligns with the first line");
@@ -2872,10 +2872,10 @@ mod tests {
     }
 
     #[test]
-    fn area_code_tokens_remain_readable_on_inverse_panel() {
-        for id in ["area-light", "industrial-light"] {
+    fn horizon_code_tokens_remain_readable_on_inverse_panel() {
+        for id in ["horizon-light", "industrial-light"] {
         let mut theme = Theme::for_selection(crate::theme::Appearance::Light, id, Default::default(), mast_theme::SurfacePreference::Opaque)
-            .with_ui_style(crate::ui_style::UiStyle::AREA);
+            .with_ui_style(crate::ui_style::UiStyle::HORIZON);
         theme.bg = theme.solid;
         theme.text = theme.identity_text(theme.bg);
         for kind in [HighlightKind::Comment, HighlightKind::Keyword, HighlightKind::String, HighlightKind::Function] {

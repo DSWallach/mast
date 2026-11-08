@@ -475,16 +475,16 @@ fn revision_picker_loads_that_revision(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn area_footer_and_revision_navigation_use_existing_actions(cx: &mut TestAppContext) {
+fn horizon_footer_and_revision_navigation_use_existing_actions(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
-    cx.update(|cx| cx.set_global(Theme::default().with_ui_style(crate::ui_style::UiStyle::AREA)));
+    cx.update(|cx| cx.set_global(Theme::default().with_ui_style(crate::ui_style::UiStyle::HORIZON)));
     let reply: Reply = Arc::new(|_, params| {
         let revision = params["revision"].as_u64().unwrap_or(2) as u32;
         Ok(content_reply(ArtifactKind::HtmlPage, revision, "<p>Review</p>", ArtifactContentEncoding::Utf8))
     });
     let (tab, calls, _, vcx) = open_tab(cx, artifact(&id(1), "Review", ArtifactKind::HtmlPage), reply);
-    assert!(vcx.debug_bounds("area-artifact-reveal").is_some());
-    assert!(vcx.debug_bounds("area-artifact-open").is_some());
+    assert!(vcx.debug_bounds("horizon-artifact-reveal").is_some());
+    assert!(vcx.debug_bounds("horizon-artifact-open").is_some());
     let previous = vcx.debug_bounds("artifact-previous-revision").expect("previous revision");
     vcx.simulate_click(previous.center(), gpui::Modifiers::default());
     vcx.run_until_parked();

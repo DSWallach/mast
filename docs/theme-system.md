@@ -44,7 +44,7 @@ The preference remains portable even where a particular surface cannot honor blu
 The built-in registry contains 34 variants across 21 families:
 
 - Mast Light and Dark
-- Area Light and Dark
+- Horizon Light and Dark
 - Industrial Light and Dark
 - VS Code Light+ and Dark+
 - Catppuccin Latte and Mocha
@@ -78,7 +78,7 @@ Glass is an adjacent conventional settings row with a compact
 ## Appearance axes under development
 
 The component foundation is moving to three independent selections: Style
-(Default, Industrial, Area) for element design, Layout (Minimal, Compact,
+(Default, Industrial, Horizon) for element design, Layout (Minimal, Compact,
 Guided) for density and guidance, and Theme for colours. Any combination must
 work. The current implementation still combines style and layout in `uiStyle`;
 this is the target model, not a description of the current settings UI. See

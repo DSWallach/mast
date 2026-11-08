@@ -367,7 +367,10 @@ impl Overrides {
         let mut result = Self::default();
         if let Some(styles) = root.get("styles").and_then(Value::as_object) {
             for (name, entry) in styles {
-                if !["default", "industrial", "area"].contains(&name.as_str()) {
+                // The new key wins when both spellings are present.
+                if name == "area" && styles.contains_key("horizon") { continue; }
+                let name = if name == "area" { "horizon" } else { name.as_str() };
+                if !["default", "industrial", "horizon"].contains(&name) {
                     tracing::warn!(style = %name, "unknown style");
                     continue;
                 }
@@ -396,7 +399,7 @@ impl Overrides {
                 } else if object.contains_key("layouts") {
                     tracing::warn!("layouts must be an object");
                 }
-                result.styles.insert(name.clone(), style);
+                result.styles.insert(name.to_owned(), style);
             }
         } else if root.contains_key("styles") {
             tracing::warn!("styles must be an object");
@@ -419,7 +422,7 @@ impl Overrides {
         let name = match style.id {
             UiStyleId::Default => "default",
             UiStyleId::Industrial => "industrial",
-            UiStyleId::Area => "area",
+            UiStyleId::Horizon => "horizon",
         };
         let layout = match style.layout {
             UiLayout::Minimal => "minimal",
@@ -570,6 +573,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_area_overrides_load_and_horizon_takes_precedence() {
+        let legacy = Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":9}}}"#);
+        let style = UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal);
+        assert_eq!(legacy.apply(style).tokens.control_radius, Some(9.0));
+        let both = Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":9},"horizon":{"controlRadius":12}}}"#);
+        assert_eq!(both.apply(style).tokens.control_radius, Some(12.0));
+    }
+
+    #[test]
     fn empty_overrides_preserve_default_minimal() {
         let directory = tempfile::tempdir().unwrap();
         let original = UiStyle::resolve(UiStyleId::Default, UiLayout::Minimal);
@@ -580,12 +592,12 @@ mod tests {
     #[test]
     fn valid_values_survive_invalid_values_and_layout_wins() {
         let overrides = Overrides::parse(
-            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":8,"panelRadius":"bad","unknown":5,"layouts":{"compact":{"controlRadius":12,"rowHeight":40}}}}}"#,
+            r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"controlRadius":8,"panelRadius":"bad","unknown":5,"layouts":{"compact":{"controlRadius":12,"rowHeight":40}}}}}"#,
         );
-        let compact = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Compact));
+        let compact = overrides.apply(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Compact));
         assert_eq!(compact.tokens.control_radius, Some(12.0));
         assert_eq!(compact.tokens.sidebar_row_compact_h, 40.0);
-        let minimal = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        let minimal = overrides.apply(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
         assert_eq!(minimal.tokens.control_radius, Some(8.0));
         assert_eq!(minimal.tokens.panel_radius, Some(14.0));
     }
@@ -617,9 +629,9 @@ mod tests {
 
     #[test]
     fn surface_overrides_merge_independently_and_ignore_invalid_fields() {
-        let input = r#"{"version":"mast.style-overrides/v1","styles":{"area":{"surfaces":{"composer":{"border":true,"pageColour":false,"unknown":1},"code":{"border":"bad","pageColour":true},"missing":{"border":true}},"layouts":{"compact":{"surfaces":{"composer":{"border":false}}}}}}}"#;
+        let input = r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"surfaces":{"composer":{"border":true,"pageColour":false,"unknown":1},"code":{"border":"bad","pageColour":true},"missing":{"border":true}},"layouts":{"compact":{"surfaces":{"composer":{"border":false}}}}}}}"#;
         let overrides = Overrides::parse(input);
-        let style = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Compact));
+        let style = overrides.apply(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Compact));
         let composer = style.design_roles.surface(DesignSurface::Composer);
         assert_eq!(composer.border, Some(false));
         assert_eq!(composer.page_colour, Some(false));
@@ -637,21 +649,21 @@ mod tests {
     #[test]
     fn small_spacing_changes_the_resolved_scale() {
         let overrides = Overrides::parse(
-            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"spacingSmall":7}}}"#,
+            r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"spacingSmall":7}}}"#,
         );
-        let style = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        let style = overrides.apply(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
         assert_eq!(style.spacing_scale().small, 7.0);
     }
 
     #[test]
     fn component_roles_merge_with_layout_precedence() {
         let overrides = Overrides::parse(
-            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"detailsBorder":true,"detailsPageSurface":false,"layouts":{"compact":{"detailsBorder":false}}}}}"#,
+            r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"detailsBorder":true,"detailsPageSurface":false,"layouts":{"compact":{"detailsBorder":false}}}}}"#,
         );
-        let minimal = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        let minimal = overrides.apply(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
         assert_eq!(minimal.design_roles.details_border, Some(true));
         assert_eq!(minimal.design_roles.details_page_surface, Some(false));
-        let compact = overrides.apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Compact));
+        let compact = overrides.apply(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Compact));
         assert_eq!(compact.design_roles.details_border, Some(false));
         assert_eq!(compact.design_roles.details_page_surface, Some(false));
     }
@@ -776,14 +788,14 @@ mod watch_tests {
         let replacement = dir.path().join("replacement");
         std::fs::write(
             &replacement,
-            r#"{"version":"mast.style-overrides/v1","styles":{"area":{"controlRadius":9}}}"#,
+            r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"controlRadius":9}}}"#,
         )
         .unwrap();
         std::fs::rename(&replacement, &path).unwrap();
         let result = watch
             .poll()
             .unwrap()
-            .apply(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+            .apply(UiStyle::resolve(UiStyleId::Horizon, UiLayout::Minimal));
         assert_eq!(result.tokens.control_radius, Some(9.0));
         assert!(watch.poll().is_none());
         std::fs::remove_file(path).unwrap();

@@ -1982,7 +1982,7 @@ impl UiSettings {
                             Some("guided") => ("default", "guided"),
                             Some("minimal") => ("default", "minimal"),
                             Some("industrial") => ("industrial", "minimal"),
-                            Some("area") => ("area", "minimal"),
+                            Some("horizon") => ("horizon", "minimal"),
                             _ => ("default", "minimal"),
                         };
                         if matches!(legacy.as_deref(), Some("dense" | "guided" | "minimal")) {

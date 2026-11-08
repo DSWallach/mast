@@ -55,7 +55,7 @@ fn adjacent_revisions(ids: impl Iterator<Item = u32>, shown: u32) -> (Option<u32
 }
 
 #[cfg(test)]
-mod area_revision_tests {
+mod horizon_revision_tests {
     use super::adjacent_revisions;
 
     #[test]
@@ -1168,7 +1168,7 @@ impl ArtifactTab {
             .into_any_element()
     }
 
-    fn render_area_footer(&self, artifact: &ArtifactView, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_horizon_footer(&self, artifact: &ArtifactView, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let revision = self.shown.unwrap_or(artifact.current_revision);
         let author = artifact.revisions.iter().find(|entry| entry.id == revision).map(|entry| {
             entry.by.chat_id.as_ref().and_then(|id| self.state.read(cx).chats.iter().find(|chat| &chat.id == id).and_then(|chat| chat.title.clone()))
@@ -1178,11 +1178,11 @@ impl ArtifactTab {
         let local = self.is_local(artifact, cx);
         let mut actions = Vec::new();
         if local {
-            actions.push(crate::components::browser_parts::artifact_footer_button("area-artifact-reveal", "Reveal", false, theme)
+            actions.push(crate::components::browser_parts::artifact_footer_button("horizon-artifact-reveal", "Reveal", false, theme)
                 .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))).into_any_element());
         }
         if standalone {
-            actions.push(crate::components::browser_parts::artifact_footer_button("area-artifact-open", "Open", true, theme)
+            actions.push(crate::components::browser_parts::artifact_footer_button("horizon-artifact-open", "Open", true, theme)
                 .on_click(cx.listener(|this, _, _, cx| this.open_standalone(cx))).into_any_element());
         }
         crate::components::browser_parts::artifact_footer(theme,
@@ -1620,7 +1620,7 @@ impl gpui::Render for ArtifactTab {
         let find_bar = self.render_find_bar(&theme, cx);
         let body = self.with_section_index(body, &theme, window, cx);
         let body = self.with_comments_panel(body, &artifact, &theme, cx);
-        let area_footer = self.render_area_footer(&artifact, &theme, cx);
+        let horizon_footer = self.render_horizon_footer(&artifact, &theme, cx);
         self.with_find_keys(root, cx)
             .on_action(cx.listener(|this, _: &super::zoom::ZoomIn, _, cx| {
                 if !this.zoom_step(1, cx) {
@@ -1645,7 +1645,7 @@ impl gpui::Render for ArtifactTab {
             .children(notice)
             .children(find_bar)
             .child(div().flex_1().min_h_0().relative().child(body))
-            .children(area_footer)
+            .children(horizon_footer)
     }
 }
 
