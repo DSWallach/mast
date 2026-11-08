@@ -876,24 +876,7 @@ impl Overview {
         }
         let active = self.column_shown();
         Some(
-            div()
-                .id("outline-linear")
-                .debug_selector(|| "outline-linear".into())
-                .px(gpui::px(8.0))
-                .py(gpui::px(3.0))
-                .rounded(gpui::px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .bg(theme.element_hover.opacity(0.5))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .hover(|el| el.text_color(theme.text))
-                .when(true, |el| {
-                    crate::components::toolbar_control(el, theme, false)
-                })
-                .child("Inbox")
+            crate::components::linear_parts::inbox_toolbar_button(active, theme)
                 .hint(
                     if active {
                         "Hide the Inbox column"

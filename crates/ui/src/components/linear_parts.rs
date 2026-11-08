@@ -4,6 +4,26 @@ use crate::theme::Theme;
 use gpui::{SharedString, div, prelude::*, px};
 use mast_proto::linear::LinearIssueSummary;
 
+pub(crate) fn inbox_toolbar_button(active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let control = div()
+        .id("outline-linear")
+        .debug_selector(|| "outline-linear".into())
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            11.0 + super::layout_type_adjustment(theme),
+        ))
+        .bg(theme.element_hover.opacity(0.5))
+        .when(active, |el| {
+            el.bg(theme.element_active).text_color(theme.text)
+        })
+        .when(!active, |el| el.text_color(theme.text_muted))
+        .hover(|el| el.text_color(theme.text));
+    super::toolbar_control(control, theme, false).child("Inbox")
+}
+
 pub(crate) fn space_chip(multiple: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let chip = div()
         .id("linear-panel-space")
