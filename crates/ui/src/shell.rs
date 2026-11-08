@@ -15305,6 +15305,10 @@ impl Shell {
         self.splash = SplashPhase::Gone;
     }
 
+    pub fn fixture_snapshot_model_catalog(&mut self, cx: &mut Context<Self>) {
+        self.composer.read(cx).pickers().clone().update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
+    }
+
     pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
     }

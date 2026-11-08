@@ -650,7 +650,7 @@ impl Render for SkillCompletion {
             .map_or(320.0, |width| width + 16.0)
             .max(240.0);
         let commands = self.commands();
-        let mut card = crate::popover::popover_card(theme)
+        let mut card = crate::components::conversation_menu_card(theme, false)
             .debug_selector(|| "skill-completion".into())
             .w(px(width))
             .max_h(px(260.0))
@@ -705,7 +705,7 @@ impl Render for SkillCompletion {
                 };
                 let selected = self.active == Some(row_ix);
                 rows.push(
-                    crate::popover::menu_row(
+                    crate::components::conversation_menu_row(
                         theme,
                         selected,
                         format!("skill-completion-{entity}-{row_ix}"),
