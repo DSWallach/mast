@@ -46,6 +46,11 @@ final class MastTests: XCTestCase {
         XCTAssertNil(parsePairingQR("mast-companion://pair?url=http%3A%2F%2Fevil.example&code=x"))
         XCTAssertNil(parsePairingQR("mast-companion://pair?url=https%3A%2F%2Fexample.ts.net&code=x&code=y"))
     }
+    func testBundledDesktopFonts() {
+        XCTAssertNotNil(UIFont(name: "EBGaramond-Regular", size: 17.5))
+        XCTAssertNotNil(UIFont(name: "Geist-Regular", size: 13))
+        XCTAssertNotNil(UIFont(name: "Geist-SemiBold", size: 13))
+    }
     func testDemoFixturesAndDecoding() throws {
         XCTAssertFalse(Demo.requests.isEmpty)
         XCTAssertFalse(Demo.chats.isEmpty)

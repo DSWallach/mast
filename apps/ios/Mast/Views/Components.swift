@@ -5,14 +5,17 @@ extension EnvironmentValues { var snapshotRendering: Bool { get { self[SnapshotR
 struct HorizonScroll<Content: View>: View {
     @Environment(\.snapshotRendering) private var snapshot
     @ViewBuilder var content: Content
-    var body: some View { if snapshot { content.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top) } else { ScrollView { content } } }
+    var body: some View { if snapshot { content.fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top) } else { ScrollView { content } } }
 }
 struct HorizonHeader: View {
     let title: String
     var count: Int? = nil
     @Environment(\.colorScheme) private var scheme
     @ScaledMetric(relativeTo: .largeTitle) private var titleSize = 34
-    var body: some View { HStack(alignment: .firstTextBaseline, spacing: 10) { Text(title).font(.system(size: titleSize, weight: .bold)); if let count { Text("\(count)").font(.system(size: 17, weight: .medium)).foregroundStyle(Horizon.muted(scheme)) }; Spacer() }.foregroundStyle(Horizon.ink(scheme)) }
+    var body: some View { VStack(alignment: .leading, spacing: 16) {
+        Text("Mast").font(Horizon.serif(26)).foregroundStyle(Horizon.muted(scheme)).accessibilityAddTraits(.isHeader)
+        HStack(alignment: .firstTextBaseline, spacing: 10) { Text(title).font(Horizon.semibold(24)); if let count { Text("\(count)").font(Horizon.ui(14)).foregroundStyle(Horizon.muted(scheme)) }; Spacer() }.foregroundStyle(Horizon.ink(scheme))
+    } }
 }
 struct OfflineBanner: View {
     let text: String

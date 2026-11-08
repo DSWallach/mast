@@ -39,9 +39,9 @@ struct MarkdownReply: View {
     var body: some View { VStack(alignment: .leading, spacing: 10) {
         ForEach(Array(parseMarkdownBlocks(text).enumerated()), id: \.offset) { _, block in
             switch block {
-            case .paragraph(let text): inline(text).font(.system(size: 17, design: .serif)).lineSpacing(5).textSelection(.enabled)
-            case .heading(let level, let text): inline(text).font(.system(size: level == 1 ? 22 : 19, weight: .semibold, design: .serif)).textSelection(.enabled)
-            case .item(let marker, let text): HStack(alignment: .top, spacing: 9) { Text(marker).frame(minWidth: 17, alignment: .trailing); inline(text).frame(maxWidth: .infinity, alignment: .leading) }.font(.system(size: 17, design: .serif)).lineSpacing(5)
+            case .paragraph(let text): inline(text).font(Horizon.serif(Horizon.replySize)).lineSpacing(5).textSelection(.enabled)
+            case .heading(let level, let text): inline(text).font(Horizon.serif(level == 1 ? 22 : 19)).textSelection(.enabled)
+            case .item(let marker, let text): HStack(alignment: .top, spacing: 9) { Text(marker).frame(minWidth: 17, alignment: .trailing); inline(text).frame(maxWidth: .infinity, alignment: .leading) }.font(Horizon.serif(Horizon.replySize)).lineSpacing(5)
             case .code(let code): Group { if snapshot { Text(code).font(.system(size: 13, design: .monospaced)).padding(14).frame(maxWidth: .infinity, alignment: .leading) } else { ScrollView(.horizontal) { Text(code).font(.system(size: 13, design: .monospaced)).textSelection(.enabled).padding(14) } } }.background(Horizon.slate.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
             }
         }
@@ -174,11 +174,20 @@ struct ChatDetail: View {
         }
         VStack(alignment: .leading, spacing: 8) {
             if !notice.isEmpty { Text(notice).font(.system(size: 12)).foregroundStyle(Horizon.muted(scheme)) }
-            HStack(alignment: .bottom, spacing: 12) {
-                if (model.chats.first(where: { $0.id == chat.id })?.status ?? chat.status).lowercased().hasPrefix("working") { Button("STOP") { if requiresConfirmation(quickActions: quickActions) { confirmStop = true } else { stop() } }.font(.system(size: 11, weight: .bold)).foregroundStyle(Horizon.muted(scheme)) }
-                if snapshot { Text("Message").font(.system(size: 16)).foregroundStyle(Horizon.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading) } else { TextField("Message", text: $text, axis: .vertical).font(.system(size: 16)).lineLimit(1...5) }
-                Button("SEND") { requestSend(TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user")) }.font(.system(size: 11, weight: .bold)).tracking(1).foregroundStyle(Horizon.muted(scheme)).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }.padding(16).background(Horizon.slate.opacity(scheme == .dark ? 0.15 : 0.12), in: RoundedRectangle(cornerRadius: 19))
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Image(systemName: Horizon.providerSymbol(chat)).font(.system(size: 16)).foregroundStyle(.white).padding(8).background(Color(red: 24/255, green: 48/255, blue: 40/255), in: RoundedRectangle(cornerRadius: 8))
+                    if snapshot { Text("Do anything…").frame(maxWidth: .infinity, alignment: .leading) } else { TextField("Do anything…", text: $text, axis: .vertical).lineLimit(3...6) }
+                }.font(Horizon.ui(15)).foregroundStyle(.black.opacity(0.8)).frame(maxWidth: .infinity, minHeight: 88, alignment: .topLeading).padding(16).background(Horizon.identity(chat), in: RoundedRectangle(cornerRadius: Horizon.panelRadius)).overlay(alignment: .topLeading) { Image(systemName: Horizon.providerSymbol(chat)).font(.system(size: 10)).foregroundStyle(.black).padding(6).background(Horizon.identity(chat), in: Capsule()).offset(x: 12, y: -10) }
+                HStack(spacing: 8) {
+                    Label("Attach", systemImage: "paperclip").accessibilityLabel("Attachments unavailable").opacity(0.6)
+                    Spacer()
+                    Label(chat.model ?? "Assistant", systemImage: Horizon.providerSymbol(chat)).lineLimit(1).padding(.horizontal, 9).padding(.vertical, 7).background(Horizon.slate.opacity(0.13), in: Capsule())
+                    Text("Ask").opacity(0.6)
+                    if (model.chats.first(where: { $0.id == chat.id })?.status ?? chat.status).lowercased().hasPrefix("working") { Button("STOP") { if requiresConfirmation(quickActions: quickActions) { confirmStop = true } else { stop() } } }
+                    Button("SEND") { requestSend(TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user")) }.disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).foregroundStyle(Horizon.surface(scheme)).padding(.horizontal, 14).padding(.vertical, 8).background(Horizon.muted(scheme), in: Capsule())
+                }.font(Horizon.semibold(10)).foregroundStyle(Horizon.muted(scheme)).padding(.top, 8)
+            }
         }.padding(.horizontal, 18).padding(.bottom, 12).padding(.top, 8)
     }.background(Horizon.surface(scheme)) } }.navigationTitle(model.canView(spaceId: chat.spaceId) ? chat.title : "Chat").navigationBarTitleDisplayMode(.inline).confirmationDialog("Stop this chat?", isPresented: $confirmStop, titleVisibility: .visible) { Button("Stop") { stop() }; Button("Cancel", role: .cancel) {} }.confirmationDialog("Send this message?", isPresented: $showConfirmation, titleVisibility: .visible) { Button("Send") { if let message = confirmMessage { confirmAndSend(message) }; confirmMessage = nil }; Button("Cancel", role: .cancel) { confirmMessage = nil } } message: { if let message = confirmMessage { Text(message.text) } } }
 }
