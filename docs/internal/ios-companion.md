@@ -102,3 +102,5 @@ A tailnet administrator can restrict the phone to the Mac's HTTPS port with a gr
 The bridge requires Node 22 or newer; if absent, install a supported LTS using `nvm install 22` and select it with `nvm use 22`. Do not use an end-of-life runtime. Install bridge dependencies with `npm ci --ignore-scripts`.
 
 Terminal reply journals redact decision text and keep a fingerprint for idempotency. Resolved/conflict journals older than seven days are pruned at bridge startup. Pending and delivery-unknown journals are retained because deleting one could permit an ambiguous reply to be sent twice; resolve or investigate them before manual removal.
+
+The JSONL audit log includes a SHA-256 `prevHash`/`hash` chain and rotates at approximately 10 MiB; the chain continues across files. This detects changes when verified against a retained trusted checkpoint. A local owner who can rewrite all files and checkpoints can recompute the chain or truncate it; it is not a remote or immutable audit service.
