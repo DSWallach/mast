@@ -4,6 +4,354 @@ use crate::theme::Theme;
 use gpui::{SharedString, div, prelude::*, px};
 use mast_proto::linear::LinearIssueSummary;
 
+pub(crate) fn settings_status(
+    theme: &Theme,
+    title: String,
+    detail: Option<String>,
+    color: gpui::Hsla,
+) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(div().size(px(7.0)).rounded_full().bg(color))
+                .child(
+                    crate::settings::widgets::row_title(theme, title)
+                        .debug_selector(|| "linear-settings-status".into()),
+                ),
+        )
+        .when_some(detail, |el, detail| {
+            el.child(settings_detail(theme, SharedString::from(detail)))
+        })
+}
+
+pub(crate) fn settings_key_row(theme: &Theme) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.0 * super::layout_spacing(theme)))
+}
+
+pub(crate) fn settings_key_help(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().secondary.unwrap_or(12.0)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child("Create one in Linear under Settings → Security & access.")
+}
+
+pub(crate) fn settings_key_link(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-settings-open-keys")
+        .debug_selector(|| "linear-settings-open-keys".into())
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .cursor_pointer()
+        .text_color(theme.accent)
+        .child("Open Linear")
+        .child(
+            crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                .size(px(11.0))
+                .text_color(theme.accent),
+        )
+}
+
+pub(crate) fn picker_backdrop(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-add-issues-backdrop")
+        .absolute()
+        .inset_0()
+        .flex()
+        .justify_center()
+        .items_start()
+        .pt(px(64.0))
+        .bg(theme.scrim())
+        .occlude()
+}
+
+pub(crate) fn inbox_header(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(14.0))
+        .pt(px(8.0))
+        .child(
+            div()
+                .flex_1()
+                .text_size(crate::typography::ui_rems(
+                    theme.ui_style.type_roles().label.unwrap_or(10.5)
+                        + super::layout_type_adjustment(theme),
+                ))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_faint)
+                .child("INBOX"),
+        )
+}
+
+pub(crate) fn inbox_close(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let button = div()
+        .id("inbox-column-close")
+        .debug_selector(|| "inbox-column-close".into())
+        .flex_none()
+        .size(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .child(
+            crate::icons::icon(crate::icons::CLOSE)
+                .size(px(11.0))
+                .text_color(theme.text_muted),
+        );
+    super::toolbar_control(button, theme, false)
+}
+
+pub(crate) fn space_menu_card(theme: &Theme) -> gpui::Div {
+    crate::popover::popover_card(theme)
+        .debug_selector(|| "linear-space-menu".into())
+        .w(px(220.0))
+}
+
+pub(crate) fn space_menu_list(body: impl gpui::IntoElement) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-space-menu-list")
+        .max_h(px(280.0))
+        .overflow_y_scroll()
+        .child(body)
+}
+
+pub(crate) fn parent_row(
+    index: usize,
+    selector: String,
+    label: String,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("linear-parent", index))
+        .debug_selector(move || selector.clone())
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(4.0)))
+        .cursor_pointer()
+        .truncate()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().secondary.unwrap_or(11.5)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .hover(|el| el.bg(theme.element_hover))
+        .child(SharedString::from(label))
+}
+
+pub(crate) fn parent_picker(theme: &Theme) -> gpui::Div {
+    div()
+        .debug_selector(|| "linear-parent-picker".into())
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .p(px(6.0))
+        .rounded(px(theme.ui_style.radius_roles().panel.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.accent.opacity(0.6))
+}
+
+pub(crate) fn parent_picker_title(count: usize, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_1()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().label.unwrap_or(11.0)
+                + super::layout_type_adjustment(theme),
+        ))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(SharedString::from(if count == 1 {
+            "Create under…".to_owned()
+        } else {
+            format!("Create {count} items under…")
+        }))
+}
+
+pub(crate) fn parent_list(
+    rows: impl IntoIterator<Item = gpui::Stateful<gpui::Div>>,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-parent-list")
+        .max_h(px(220.0))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .children(rows)
+}
+
+pub(crate) fn drag_ghost(title: SharedString, theme: &Theme) -> gpui::Div {
+    div()
+        .max_w(px(260.0))
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.surface_raised)
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().body.unwrap_or(12.0) + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text)
+        .truncate()
+        .child(title)
+}
+
+pub(crate) fn panel_header(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(14.0))
+        .pt(px(10.0))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(
+                    theme.ui_style.type_roles().title.unwrap_or(13.0)
+                        + super::layout_type_adjustment(theme),
+                ))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child("Linear"),
+        )
+}
+
+pub(crate) fn panel_search(theme: &Theme) -> gpui::Div {
+    search_frame(theme).mx(px(14.0)).mt(px(8.0))
+}
+
+pub(crate) fn panel_body(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-panel-body")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(2.0 * super::layout_spacing(theme)))
+        .px(px(14.0))
+        .py(px(8.0))
+}
+
+pub(crate) fn project_summary(name: String, metadata: String, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(
+            div()
+                .truncate()
+                .text_size(crate::typography::ui_rems(
+                    theme.ui_style.type_roles().body.unwrap_or(12.0)
+                        + super::layout_type_adjustment(theme),
+                ))
+                .text_color(theme.text)
+                .child(SharedString::from(name)),
+        )
+        .child(
+            div()
+                .truncate()
+                .text_size(crate::typography::ui_rems(
+                    theme.ui_style.type_roles().label.unwrap_or(10.5)
+                        + super::layout_type_adjustment(theme),
+                ))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(metadata)),
+        )
+}
+
+pub(crate) fn linked_marker(id: String, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .px(px(4.0))
+        .rounded(px(theme.ui_style.radius_roles().chip.unwrap_or(3.0)))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().label.unwrap_or(10.0)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.accent)
+        .hover(|el| el.bg(theme.element_hover))
+        .child("Linked · Reveal")
+}
+
+pub(crate) fn team_summary(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0 * super::layout_spacing(theme)))
+}
+
+pub(crate) fn team_column(theme: &Theme, compact: bool) -> gpui::Div {
+    div().flex().flex_col().gap(px(
+        (if compact { 4.0 } else { 8.0 }) * super::layout_spacing(theme)
+    ))
+}
+
+pub(crate) fn team_worker_header(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+}
+
+pub(crate) fn team_worker_metadata(theme: &Theme, wrap: bool) -> gpui::Div {
+    div()
+        .pl(px(13.0))
+        .flex()
+        .items_center()
+        .when(wrap, |el| el.flex_wrap())
+        .gap(px(
+            (if wrap { 4.0 } else { 6.0 }) * super::layout_spacing(theme)
+        ))
+}
+
+pub(crate) fn team_archive_block(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0 * super::layout_spacing(theme)))
+}
+
+pub(crate) fn team_archive_actions(theme: &Theme, confirmation: bool) -> gpui::Div {
+    div()
+        .flex()
+        .when(!confirmation, |el| el.items_center())
+        .gap(px(
+            (if confirmation { 6.0 } else { 8.0 }) * super::layout_spacing(theme)
+        ))
+}
+
 pub(crate) fn picker_frame(theme: &Theme, width: f32) -> gpui::Stateful<gpui::Div> {
     div()
         .id("linear-add-issues")

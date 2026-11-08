@@ -23,6 +23,8 @@ impl Shell {
                 "parentChatId": "fixture-chat", "title": "Validate the release",
                 "archived": false, "createdAt": "2026-09-08T00:00:00Z"
             })).unwrap());
+            // Keep the in-memory send active throughout the multi-cell render.
+            state.begin_pending_send("fixture-worker", "fixture-message", chrono::Utc::now() + chrono::Duration::hours(1));
         });
         self.active_chat = "fixture-chat".into();
         let key = self.panel_key(cx);
@@ -126,7 +128,7 @@ impl Shell {
     fn render_team_summary(team: &TeamFacts, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let parts = team.roll_up_parts();
         if parts.is_empty() { return div().child("No active workers").into_any_element(); }
-        let mut summary = div().flex().items_center().gap(px(4.0));
+        let mut summary = crate::components::linear_parts::team_summary(theme);
         for (index, (status, label)) in parts.into_iter().enumerate() {
             if index > 0 { summary = summary.child("·"); }
             let indicator = crate::status_style::animated_indicator(status, theme.appearance, format!("team-summary-{index}"), cx.entity_id(), cx);
@@ -141,7 +143,7 @@ impl Shell {
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
         let focus = self.team_panel_focus(cx);
-        let mut col = div().flex().flex_col().gap(px(8.0));
+        let mut col = crate::components::linear_parts::team_column(&theme, false);
         if self
             .state
             .read(cx)
@@ -208,11 +210,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut block = div()
+        let mut block = crate::components::linear_parts::team_column(theme, true)
             .debug_selector(|| "chat-item-team".into())
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
             .child(
                 crate::components::shell_parts::item_team_rollup(theme)
                     .child(Self::render_team_summary(team, theme, cx))
@@ -290,10 +289,7 @@ impl Shell {
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::linear_parts::team_worker_header(theme)
                     .child(div().flex_none().child(indicator))
                     .child(
                         crate::components::shell_parts::worker_title(theme, worker.title.clone()),
@@ -348,12 +344,7 @@ impl Shell {
             );
         }
         if !compact {
-            let mut chips = div()
-                .pl(px(13.0))
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(4.0));
+            let mut chips = crate::components::linear_parts::team_worker_metadata(theme, true);
             let mut any = false;
             if let Some(branch) = &worker.branch {
                 any = true;
@@ -510,11 +501,7 @@ impl Shell {
             };
             let ready_color = crate::status_style::status_style(crate::status_style::Status::Ready, theme.appearance).color;
             row = row.child(
-                div()
-                    .pl(px(13.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::linear_parts::team_worker_metadata(theme, false)
                     .child(
                         crate::components::shell_parts::worker_ready_label(text, ready_color),
                     )
@@ -551,7 +538,7 @@ impl Shell {
     ) -> AnyElement {
         let finished = team.finished();
         let n = finished.len();
-        let block = div().flex().flex_col().gap(px(5.0));
+        let block = crate::components::linear_parts::team_archive_block(theme);
         if n == 0 {
             self.wakes.archive_confirm.remove(chat_id);
             return block.into_any_element();
@@ -576,9 +563,7 @@ impl Shell {
                     crate::components::shell_parts::archive_confirmation_note(theme),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
+                    crate::components::linear_parts::team_archive_actions(theme, true)
                         .child(
                             team_button(
                                 theme,
@@ -608,7 +593,7 @@ impl Shell {
             return block.child(confirm).into_any_element();
         }
         let ask_chat = chat_id.to_owned();
-        let mut line = div().flex().items_center().gap(px(8.0));
+        let mut line = crate::components::linear_parts::team_archive_actions(theme, false);
         if n >= SUGGEST_ARCHIVE_AT {
             line = line.child(
                 crate::components::shell_parts::archive_suggestion(theme, n),

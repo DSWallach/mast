@@ -574,16 +574,7 @@ impl Overview {
         }
         let theme = Theme::of(cx).clone();
         Some(
-            div()
-                .id("linear-add-issues-backdrop")
-                .absolute()
-                .inset_0()
-                .flex()
-                .justify_center()
-                .items_start()
-                .pt(px(64.0))
-                .bg(theme.scrim())
-                .occlude()
+            crate::components::linear_parts::picker_backdrop(&theme)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| this.close_project_issue_picker(cx)),
@@ -791,38 +782,9 @@ impl Overview {
     /// The column's own header: "Inbox" and the close button (the toggle's
     /// hint).
     fn column_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(14.0))
-            .pt(px(8.0))
+        crate::components::linear_parts::inbox_header(theme)
             .child(
-                div()
-                    .flex_1()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_faint)
-                    .child("INBOX"),
-            )
-            .child(
-                div()
-                    .id("inbox-column-close")
-                    .debug_selector(|| "inbox-column-close".into())
-                    .flex_none()
-                    .size(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(
-                        crate::icons::icon(crate::icons::CLOSE)
-                            .size(px(11.0))
-                            .text_color(theme.text_muted),
-                    )
+                crate::components::linear_parts::inbox_close(theme)
                     .hint(
                         "Hide the Inbox column",
                         HintKey::Command(WorkOutlineCommand::OpenLinear),
