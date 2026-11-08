@@ -54,7 +54,8 @@ if (command === "spaces") {
   if (command === "start") await ensureNoFunnel();
   const userIndex = process.argv.indexOf("--tailscale-user"), tailscaleUser = userIndex < 0 ? undefined : process.argv[userIndex + 1];
   if (userIndex >= 0 && (!tailscaleUser || tailscaleUser.startsWith("--") || /[\x00-\x20\x7f]/.test(tailscaleUser))) throw new Error("--tailscale-user requires a login");
-  const store = await FileTokenStore.open(directory), code = generatePairingCode();
+  const pairingEnabled = command === "fixture" || process.argv.includes("--pair");
+  const store = await FileTokenStore.open(directory), code = pairingEnabled ? generatePairingCode() : "";
   const urlIndex = process.argv.indexOf("--url"), publicUrl = urlIndex < 0 ? "http://127.0.0.1:27655" : process.argv[urlIndex + 1];
   if (!publicUrl) throw new Error("--url requires a bridge URL");
   const endpoint = new URL(publicUrl);
@@ -75,6 +76,6 @@ if (command === "spaces") {
   } : engineSpaceAccess(url, shared);
   const backend = command === "fixture" ? fixture : engineBackend("/Applications/Mast.app/Contents/MacOS/mast", url, undefined, undefined, access);
   const replies = command === "start" ? new ReplyCoordinator(new FileIntentStore(join(directory, "replies")), ipcReplyEngine(url, access)) : undefined;
-  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies, access, audit, command === "start" ? url : undefined, command === "start" ? () => readAppearance(join(process.env.MAST_DATA_DIR || process.env.ZERON_DATA_DIR || join(homedir(), ".zeron"), "ui-settings.json")) : undefined, command === "start" ? new ArtifactReader(url, access) : undefined, 10, tailscaleUser, endpoint.host);
-  server.listen(27655, "127.0.0.1", () => { console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655. Pairing code expires in five minutes:`); console.log(code); qr.generate(pairing.toString(), { small: true }); });
+  const server = createBridge(backend, store, new PairingChallenge(code, Date.now()), replies, access, audit, command === "start" ? url : undefined, command === "start" ? () => readAppearance(join(process.env.MAST_DATA_DIR || process.env.ZERON_DATA_DIR || join(homedir(), ".zeron"), "ui-settings.json")) : undefined, command === "start" ? new ArtifactReader(url, access) : undefined, 10, tailscaleUser, endpoint.host, pairingEnabled);
+  server.listen(27655, "127.0.0.1", () => { console.log(`${command === "fixture" ? "Fixture" : "Mast"} bridge listening on 127.0.0.1:27655.`); if (pairingEnabled) { console.log("Pairing code expires in five minutes:"); console.log(code); qr.generate(pairing.toString(), { small: true }); } });
 } else { console.error("Usage: node dist/cli.js start | fixture | spaces [share|unshare <id|name>] | devices | revoke <device|--all> | audit [count]"); process.exitCode = 1; }
