@@ -854,6 +854,27 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "snapshot"))]
     #[test]
     #[ignore = "requires Metal and macOS services"]
+    fn render_area_production_outline() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, appearance) in [("light", mast_ui::theme::Appearance::Light), ("dark", mast_ui::theme::Appearance::Dark)] {
+            mast_ui::snapshot::render_to_png(
+                &format!("area-production-outline-{name}"), gpui::size(px(1200.), px(800.)),
+                ui_style::UiStyleId::Area, appearance,
+                |window, cx| {
+                    init(cx, dir.path(), dir.path());
+                    ui_style::set_style(ui_style::UiStyleId::Area, window, cx);
+                    let themes = mast_theme::ThemeSelection { light: "area-light".into(), dark: "area-dark".into() };
+                    let mode = if name == "dark" { appearance::AppearanceMode::Dark } else { appearance::AppearanceMode::Light };
+                    apply_themes(mode, themes, cx);
+                    mast_ui::snapshot::overview_fixture(cx)
+                },
+            ).unwrap();
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "snapshot"))]
+    #[test]
+    #[ignore = "requires Metal and macOS services"]
     fn render_gallery_snapshots() {
         struct Snapshot(Story);
         impl Render for Snapshot {

@@ -2107,7 +2107,7 @@ pub fn outline_disclosure(id: SharedString, collapsed: bool, theme: &Theme) -> S
             .size(px(10.0))
             .text_color(theme.text_muted)
             .when(super::is_area(theme), |el| {
-                el.opacity(0.0)
+                el.opacity(0.65)
                     .group_hover("outline-row", |el| el.opacity(1.0))
             }),
         )

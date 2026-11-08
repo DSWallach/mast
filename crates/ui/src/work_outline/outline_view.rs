@@ -2533,16 +2533,28 @@ impl OutlineView {
         let focused = self.focus.contains_focused(window, cx);
         range
             .map(|list_ix| {
-                let model_ix = match create {
-                    Some((slot, depth)) if list_ix == slot => {
-                        return self.render_editor_row(depth, compact, &theme, cx);
-                    }
-                    Some((slot, _)) if list_ix > slot => list_ix - 1,
-                    _ => list_ix,
+                let depth_at = |index: usize| match create {
+                    Some((slot, depth)) if index == slot => Some(depth),
+                    Some((slot, _)) if index > slot => self.model.rows.get(index - 1).map(|row| row.depth),
+                    _ => self.model.rows.get(index).map(|row| row.depth),
                 };
-                let row = self.render_row(model_ix, compact, focused, &theme, cx);
-                if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
-                    self.area_nested_row(model_ix, row, &theme)
+                let depth = depth_at(list_ix).unwrap_or(0);
+                let previous = list_ix.checked_sub(1).and_then(depth_at).unwrap_or(0);
+                let next = depth_at(list_ix + 1).unwrap_or(0);
+                let area = theme.ui_style.id == crate::ui_style::UiStyleId::Area;
+                let (key, row) = match create {
+                    Some((slot, editor_depth)) if list_ix == slot => (
+                        "editor".to_owned(),
+                        self.render_editor_row(if area { 0 } else { editor_depth }, compact, &theme, cx),
+                    ),
+                    _ => {
+                        let model_ix = if create.is_some_and(|(slot, _)| list_ix > slot) { list_ix - 1 } else { list_ix };
+                        let key = self.model.rows[model_ix].key.clone();
+                        (key, self.render_row(model_ix, compact, focused, &theme, cx))
+                    }
+                };
+                if area {
+                    Self::area_nested_row(&key, depth, previous, next, row, &theme)
                 } else {
                     row
                 }
@@ -2552,13 +2564,9 @@ impl OutlineView {
 
     /// Paint each open ancestor's surface as consecutive row-sized segments.
     /// This keeps the virtualized list and its scrolling behaviour intact.
-    fn area_nested_row(&self, ix: usize, row: AnyElement, theme: &Theme) -> AnyElement {
-        let Some(current) = self.model.rows.get(ix) else { return row; };
-        let depth = current.depth;
-        let previous = ix.checked_sub(1).and_then(|i| self.model.rows.get(i)).map(|r| r.depth).unwrap_or(0);
-        let next = self.model.rows.get(ix + 1).map(|r| r.depth).unwrap_or(0);
+    fn area_nested_row(key: &str, depth: u16, previous: u16, next: u16, row: AnyElement, theme: &Theme) -> AnyElement {
         let backgrounds = (1..=depth).map(|level| {
-            let selector = format!("area-outline-nesting-{}-{level}", current.key);
+            let selector = format!("area-outline-nesting-{key}-{level}");
             div().id(selector.clone()).debug_selector(move || selector.clone())
                 .absolute().top_0().bottom_0().right_0().left(px(area_nesting_offset(level)))
                 .bg(theme.text.opacity(0.035))
