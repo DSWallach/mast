@@ -5833,7 +5833,7 @@ impl Composer {
     ) -> Option<gpui::AnyElement> {
         let theme = &theme.for_popup();
         let token = self.mention.token.as_ref()?;
-        let mut card = crate::popover::popover_card(theme)
+        let mut card = crate::components::conversation_menu_card(theme, false)
             .w_full()
             .max_h(px(320.0))
             .overflow_hidden()
@@ -5885,7 +5885,7 @@ impl Composer {
                     None => (String::new(), result.path.clone()),
                 };
                 rows.push(
-                    crate::popover::menu_row(theme, selected, format!("file-mention-result-{ix}"))
+                    crate::components::conversation_menu_row(theme, selected, format!("file-mention-result-{ix}"))
                         .id(("file-mention-result", ix))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.mention.active = Some(ix);
@@ -6227,7 +6227,7 @@ impl Composer {
             .unwrap_or_default();
         // Full pill width at the mention card's height budget — both composer
         // completions share the same surface shape.
-        let mut card = crate::popover::popover_card(theme)
+        let mut card = crate::components::conversation_menu_card(theme, false)
             .w_full()
             .max_h(px(320.0))
             .overflow_hidden()
@@ -6280,7 +6280,7 @@ impl Composer {
                 let selected = self.slash.active == Some(row_ix);
                 let row_group: SharedString = format!("slash-row-{row_ix}").into();
                 rows.push(
-                    crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
+                    crate::components::conversation_menu_row(theme, selected, format!("slash-result-{row_ix}"))
                         .group(row_group.clone())
                         .id(("slash-result", row_ix))
                         .on_click(cx.listener(move |this, _, _, cx| {

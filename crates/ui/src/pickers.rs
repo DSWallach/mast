@@ -3138,7 +3138,7 @@ impl Pickers {
                                 let label: SharedString = device.name.clone().into();
                                 let is_selected = effective.as_deref() == Some(device.id.as_str());
                                 let pick_id = device.id.clone();
-                                popover::menu_row_nav(
+                                crate::components::conversation_menu_row_nav(
                                     &theme,
                                     is_selected,
                                     ix == active,
@@ -3261,7 +3261,7 @@ impl Pickers {
                             let pick = candidate.clone();
                             let checkbox_id = candidate.session_id.clone();
                             let toggle_entity = entity.clone();
-                            popover::menu_row_nav(&theme, false, ix == active, format!("import-row-{ix}"))
+                            crate::components::conversation_menu_row_nav(&theme, false, ix == active, format!("import-row-{ix}"))
                                 .id(("import-row", ix))
                                 .when(!is_busy, |el| {
                                     el.on_click(cx.listener(move |this, _, _, cx| {
@@ -3389,7 +3389,7 @@ impl Pickers {
                 .px(px(Theme::SPACE_SM))
                 .py(px(6.0))
                 .border_t_1()
-                .border_color(theme.border)
+                .border_color(crate::components::conversation_menu_rule(theme, theme.border))
                 .child(
                     div()
                         .w_full()
@@ -3425,7 +3425,7 @@ impl Pickers {
                 .px(px(Theme::SPACE_SM))
                 .py(px(6.0))
                 .border_t_1()
-                .border_color(theme.border)
+                .border_color(crate::components::conversation_menu_rule(theme, theme.border))
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(theme.text_muted)
                 .child(SharedString::from(format!("Importing {done} of {total}…")))
@@ -3442,7 +3442,7 @@ impl Pickers {
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .border_t_1()
-            .border_color(theme.border)
+            .border_color(crate::components::conversation_menu_rule(theme, theme.border))
             .child(
                 div()
                     .text_size(crate::typography::ui_rems(11.0))
@@ -3510,7 +3510,7 @@ impl Pickers {
                             let label: SharedString = space.display_name().to_string().into();
                             let is_selected = selected.as_deref() == Some(space.id.as_str());
                             let pick_id = space.id.clone();
-                            popover::menu_row_nav(
+                            crate::components::conversation_menu_row_nav(
                                 &theme,
                                 is_selected,
                                 ix == active,
@@ -3526,7 +3526,7 @@ impl Pickers {
                 .children(scrollbar)
                 .into_any_element()
         };
-        let no_project = popover::menu_row_nav(
+        let no_project = crate::components::conversation_menu_row_nav(
             &theme,
             self.state.read(cx).no_project,
             active == no_project_index,
@@ -3548,7 +3548,7 @@ impl Pickers {
                 .child("Don't work in a Space"),
         );
         // Action row under a hairline: mint a project.
-        let new_project = popover::menu_row_nav(&theme, false, false, "project-new".to_string())
+        let new_project = crate::components::conversation_menu_row_nav(&theme, false, false, "project-new".to_string())
             .id("project-new")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.dismiss(cx);
@@ -3583,7 +3583,7 @@ impl Pickers {
                     .mx(px(-popover::CARD_INSET))
                     .h(px(1.0))
                     .flex_none()
-                    .bg(theme.border.opacity(0.6)),
+                    .bg(crate::components::conversation_menu_rule(&theme, theme.border.opacity(0.6))),
             )
             .child(new_project)
             .child(no_project)
@@ -4268,7 +4268,7 @@ impl Pickers {
 
     fn popover_frame(&self, width: f32, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        popover::popover_card(&theme)
+        crate::components::conversation_menu_card(&theme, false)
             .w(px(width))
             // zeron caps its tallest picker at min(640px, 75vh).
             .max_h(px(640.0))
@@ -4315,7 +4315,7 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        popover::popover_card_flush(&theme)
+        crate::components::conversation_menu_card(&theme, true)
             .w(px(width))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -4351,7 +4351,7 @@ impl Pickers {
     }
 
     fn search_box(&self, theme: &Theme) -> AnyElement {
-        popover::search_input_frame(theme, self.search.clone().into_any_element())
+        crate::components::conversation_menu_search(theme, self.search.clone().into_any_element())
             .into_any_element()
     }
 
@@ -4493,7 +4493,7 @@ impl Pickers {
                                     };
                                     let is_switching =
                                         switching.as_deref() == Some(row.name.as_str());
-                                    popover::menu_row_nav(
+                                    crate::components::conversation_menu_row_nav(
                                         &theme,
                                         is_selected,
                                         ix == active,
@@ -4542,7 +4542,7 @@ impl Pickers {
         // git's own message, under a hairline.
         if let Some(error) = &self.switch_error {
             popover = popover.child(
-                popover::menu_section().child(
+                crate::components::conversation_menu_section(&theme).child(
                     div()
                         .px(px(Theme::SPACE_SM))
                         .py(px(4.0))
@@ -4554,7 +4554,7 @@ impl Pickers {
         }
         if total > shown {
             popover = popover.child(
-                popover::menu_section().child(
+                crate::components::conversation_menu_section(&theme).child(
                     div()
                         .px(px(Theme::SPACE_SM))
                         .py(px(4.0))
@@ -4678,7 +4678,7 @@ impl Pickers {
                     .enumerate()
                     .map(|(ix, (kind, label, icon_path))| {
                         let is_selected = current == kind;
-                        popover::menu_row_nav(
+                        crate::components::conversation_menu_row_nav(
                             &theme,
                             is_selected,
                             ix == active,
@@ -4820,7 +4820,7 @@ impl Pickers {
             .h(px(40.0))
             .px(px(popover::CARD_INSET))
             .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
+            .border_color(crate::components::conversation_menu_rule(&theme, crate::theme::hairline(0.08)))
             .flex()
             .flex_row()
             .items_center()
@@ -4832,6 +4832,7 @@ impl Pickers {
                 .w(px(32.0))
                 .h(px(32.0))
                 .rounded(px(8.0))
+                .when(true, |el| crate::components::conversation_menu_tab(el, &theme, favorites_view))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -4859,7 +4860,7 @@ impl Pickers {
                             theme.text_muted
                         }),
                 )
-                .when(favorites_view, |el| el.child(tab_indicator(theme.accent))),
+                .when(favorites_view && crate::components::conversation_menu_tab_indicator(&theme), |el| el.child(tab_indicator(theme.accent))),
         );
         for (ix, descriptor) in descriptors.iter().enumerate() {
             let harness = descriptor.id;
@@ -4874,6 +4875,7 @@ impl Pickers {
                         .w(px(32.0))
                         .h(px(32.0))
                         .rounded(px(8.0))
+                        .when(true, |el| crate::components::conversation_menu_tab(el, &theme, is_viewed))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -4895,7 +4897,7 @@ impl Pickers {
                                 theme.text_muted
                             }),
                         ))
-                        .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
+                        .when(is_viewed && crate::components::conversation_menu_tab_indicator(&theme), |el| el.child(tab_indicator(theme.accent))),
                 );
         }
 
@@ -4907,7 +4909,7 @@ impl Pickers {
             .h(px(40.0))
             .px(px(10.0))
             .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
+            .border_color(crate::components::conversation_menu_rule(&theme, crate::theme::hairline(0.08)))
             .flex()
             .flex_row()
             .items_center()
@@ -5012,7 +5014,7 @@ impl Pickers {
             .py(px(popover::CARD_INSET))
             // A whisper of wash keeps the scrolling band readable between
             // the pinned chrome above and the traits tray below.
-            .bg(crate::theme::ink(0.02))
+            .bg(crate::components::conversation_menu_band(&theme, crate::theme::ink(0.02)))
             .on_hover(cx.listener(Self::on_menu_list_hover))
             .child(match model_list {
                 Some(list) => list,
@@ -5044,7 +5046,7 @@ impl Pickers {
                 .id("model-traits-tray")
                 .flex_none()
                 .border_t_1()
-                .border_color(crate::theme::hairline(0.08))
+                .border_color(crate::components::conversation_menu_rule(&theme, crate::theme::hairline(0.08)))
                 // Long option stacks scroll inside the tray rather than
                 // growing the card past the viewport.
                 .max_h(px(236.0))
@@ -5105,6 +5107,7 @@ impl Pickers {
         let compact = self.model_rail == ModelRail::Harness;
         let mut el = div()
             .id(("model-row", ix))
+            .debug_selector(move || format!("model-row-{ix}"))
             .px(px(8.0))
             .py(px(if compact { 5.0 } else { 6.0 }))
             .rounded(px(popover::MENU_ITEM_RADIUS))
@@ -5124,6 +5127,7 @@ impl Pickers {
         } else if is_active {
             el = el.bg(crate::theme::ink(0.05));
         }
+        el = crate::components::conversation_menu_model_row(el, &theme, is_selected, is_active, compact);
         el = el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             if *hovered && this.active != ix {
                 this.active = ix;
@@ -5427,14 +5431,14 @@ impl Pickers {
             let exit_id = id.clone();
             let exit_entity = cx.entity().downgrade();
             let entity = cx.entity().downgrade();
-            let mut row = popover::menu_row(
+            let mut row = crate::components::conversation_menu_row(
                 &theme,
                 open || self.active == base_index + ix,
                 format!("model-setting-{ix}"),
             )
             .id(("model-setting", ix))
             .relative()
-            .h(px(30.0))
+            .h(px(crate::components::conversation_menu_row_height(&theme, 30.0)))
             .py(px(0.0))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.active = base_index + ix;
@@ -5529,7 +5533,7 @@ impl Pickers {
             );
             if open {
                 let entity = cx.entity().downgrade();
-                let menu = popover::popover_card(&theme)
+                let menu = crate::components::conversation_menu_card(&theme, false)
                     .w(px(232.0))
                     .relative()
                     .child(popover::menu_heading(&theme, &group.label))
@@ -5544,13 +5548,13 @@ impl Pickers {
                             .gap(px(2.0))
                             .children(group.choices.into_iter().enumerate().map(
                                 |(choice_ix, choice)| {
-                                    popover::menu_row(
+                                    crate::components::conversation_menu_row(
                                         &theme,
                                         choice_ix == self.setting_active,
                                         format!("setting-choice-{ix}-{choice_ix}"),
                                     )
                                     .id(("setting-choice", choice_ix))
-                                    .h(px(30.0))
+                                    .h(px(crate::components::conversation_menu_row_height(&theme, 30.0)))
                                     .py(px(0.0))
                                     .flex_none()
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -6940,6 +6944,50 @@ mod tests {
     }
 
     #[gpui::test]
+    fn composer_model_menu_opens_for_each_style(cx: &mut gpui::TestAppContext) {
+        use crate::ui_style::{UiStyle, UiStyleId};
+        struct MenuFixture(Entity<Pickers>);
+        impl Render for MenuFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |pickers, cx| {
+                    let content = pickers.render_harness_model_popover(cx);
+                    pickers.popover_frame_flush(320.0, content, cx)
+                })
+            }
+        }
+        for style in UiStyleId::ALL.iter().copied() {
+            cx.update(|cx| {
+                cx.set_global(Theme::dark().with_ui_style(UiStyle::resolve(style, UiStyle::MINIMAL.layout)));
+                crate::composer::init(cx, Default::default());
+            });
+            let (fixture, window) = cx.add_window_view(|window, cx| {
+                let state = cx.new(|_| AppState::new());
+                let pickers = cx.new(|cx| Pickers::new(state, cx));
+                pickers.update(cx, |pickers, cx| {
+                    pickers.config.harness = Some(HarnessId::ClaudeCode);
+                    pickers.config.model = Some("opus".into());
+                    pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+                    let mut model = bare_model("opus", "Opus");
+                    model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
+                    pickers.models.insert(HarnessId::ClaudeCode, Loadable::Ready(vec![model]));
+                    pickers.open_model_menu(window, cx);
+                });
+                MenuFixture(pickers)
+            });
+            window.run_until_parked();
+            let row = window.debug_bounds("model-row-0").expect("model row rendered");
+            if style == UiStyle::AREA.id {
+                assert_eq!(row.size.height, px(UiStyle::resolve(style, UiStyle::MINIMAL.layout).tokens.control_size));
+            }
+            fixture.update(window, |fixture, cx| {
+                fixture.0.update(cx, |pickers, cx| pickers.open_setting(ModelSetting::Reasoning, cx));
+                cx.notify();
+            });
+            window.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
     fn nested_model_settings_navigate_and_preserve_independent_choices(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -8239,7 +8287,7 @@ impl Pickers {
 }
 
 /// Catalog for the isolated native screenshot fixture; never used by the app.
-#[cfg(feature = "project-palette-fixture")]
+#[cfg(any(feature = "project-palette-fixture", feature = "snapshot"))]
 impl Pickers {
     pub(crate) fn fixture_model_catalog(&mut self, cx: &mut Context<Self>) {
         if matches!(self.models.get(&HarnessId::Codex), Some(Loadable::Ready(_))) {

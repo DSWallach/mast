@@ -519,6 +519,88 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
     }
 }
 
+/// Composer menus share a surface and row treatment without changing other popovers.
+pub fn conversation_menu_card(theme: &Theme, flush: bool) -> Div {
+    let card = if flush { crate::popover::popover_card_flush(theme) } else { crate::popover::popover_card(theme) };
+    if is_area(theme) {
+        card.bg(theme.surface).border_color(gpui::transparent_black()).shadow_sm()
+    } else if is_industrial(theme) {
+        card.bg(theme.industrial_colors().panel).border_color(theme.industrial_colors().rule).shadow(Vec::new())
+    } else { card }
+}
+
+pub fn conversation_menu_row_height(theme: &Theme, fallback: f32) -> f32 {
+    if is_area(theme) || is_industrial(theme) { theme.ui_style.tokens.control_size } else { fallback }
+}
+
+pub fn conversation_menu_row_style<T: gpui::Styled>(row: T, theme: &Theme, selected: bool, active: bool) -> T {
+    if is_area(theme) {
+        row.rounded_full().border_color(gpui::transparent_black()).shadow(Vec::new())
+            .bg(if selected || active { theme.text.opacity(0.07) } else { gpui::transparent_black() })
+            .text_color(theme.text)
+    } else if is_industrial(theme) {
+        toolbar_control(row, theme, false).bg(if selected || active { theme.industrial_colors().pressed } else { theme.industrial_colors().key })
+    } else { row }
+}
+
+pub fn conversation_menu_row(theme: &Theme, active: bool, key: impl Into<SharedString>) -> Div {
+    let key = key.into();
+    let row = menu_row(theme, active, key.clone());
+    if is_area(theme) || is_industrial(theme) {
+        let row = conversation_menu_row_style(row, theme, active, false)
+            .h(px(theme.ui_style.tokens.control_size)).py_0();
+        if is_area(theme) && !active {
+            row.bg(motion::hover_blend(&key, gpui::transparent_black(), theme.text.opacity(0.07)))
+        } else { row }
+    } else { row }
+}
+
+pub fn conversation_menu_row_nav(theme: &Theme, selected: bool, highlighted: bool, key: impl Into<SharedString>) -> Div {
+    let key = key.into();
+    let row = crate::popover::menu_row_nav(theme, selected, highlighted, key.clone());
+    if is_area(theme) || is_industrial(theme) {
+        let row = conversation_menu_row_style(row, theme, selected, highlighted)
+            .h(px(theme.ui_style.tokens.control_size)).py_0();
+        if is_area(theme) && !selected && !highlighted {
+            row.bg(motion::hover_blend(&key, gpui::transparent_black(), theme.text.opacity(0.07)))
+        } else { row }
+    } else { row }
+}
+
+pub fn conversation_menu_rule(theme: &Theme, fallback: gpui::Hsla) -> gpui::Hsla {
+    if is_area(theme) { gpui::transparent_black() } else if is_industrial(theme) { theme.industrial_colors().rule } else { fallback }
+}
+
+pub fn conversation_menu_band(theme: &Theme, fallback: gpui::Hsla) -> gpui::Hsla {
+    if is_area(theme) { gpui::transparent_black() } else { fallback }
+}
+
+pub fn conversation_menu_tab<T: gpui::Styled>(tab: T, theme: &Theme, selected: bool) -> T {
+    if is_area(theme) {
+        tab.rounded_full().bg(if selected { theme.text.opacity(0.07) } else { gpui::transparent_black() })
+    } else if is_industrial(theme) {
+        toolbar_control(tab, theme, false).bg(if selected { theme.industrial_colors().pressed } else { theme.industrial_colors().key })
+    } else { tab }
+}
+
+pub fn conversation_menu_tab_indicator(theme: &Theme) -> bool { !is_area(theme) && !is_industrial(theme) }
+
+pub fn conversation_menu_model_row<T: gpui::Styled>(row: T, theme: &Theme, selected: bool, active: bool, compact: bool) -> T {
+    if is_area(theme) || is_industrial(theme) {
+        let row = conversation_menu_row_style(row, theme, selected, active);
+        if compact { row.h(px(theme.ui_style.tokens.control_size)).py_0() } else { row.min_h(px(theme.ui_style.tokens.control_size)) }
+    } else { row }
+}
+
+pub fn conversation_menu_section(theme: &Theme) -> Div {
+    crate::popover::menu_section().border_color(conversation_menu_rule(theme, hairline(0.06)))
+}
+
+pub fn conversation_menu_search(theme: &Theme, input: AnyElement) -> Div {
+    let frame = crate::popover::search_input_frame(theme, input);
+    if is_area(theme) { frame.bg(gpui::transparent_black()).border_color(gpui::transparent_black()) } else { frame }
+}
+
 pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
     div()
         .mb(px(4.0))
@@ -1020,6 +1102,18 @@ pub fn section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_menu_geometry_matches_style_tokens() {
+        use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
+        let area = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+        let mut card = conversation_menu_card(&area, false);
+        assert_eq!(card.style().corner_radii, div().rounded(px(14.0)).style().corner_radii);
+        let mut row = conversation_menu_row(&area, false, "geometry-test");
+        assert_eq!(row.style().size.height, div().h(px(area.ui_style.tokens.control_size)).style().size.height);
+        let default = Theme::dark().with_ui_style(UiStyle::resolve(UiStyleId::Default, UiLayout::Minimal));
+        assert_eq!(conversation_menu_card(&default, false).style(), crate::popover::popover_card(&default).style());
+    }
 
     #[test]
     fn design_overrides_change_targeted_shared_surfaces_without_changing_empty_defaults() {
