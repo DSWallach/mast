@@ -106,6 +106,14 @@ pub(crate) fn horizon_primary_fill(theme: &Theme) -> gpui::Hsla {
     fill
 }
 
+pub(crate) fn horizon_primary_text(theme: &Theme, fill: gpui::Hsla) -> gpui::Hsla {
+    let preferred = theme.identity_text(fill);
+    if crate::theme::contrast_ratio(preferred, fill) >= 4.5 { return preferred; }
+    let dark = gpui::hsla(0.0, 0.0, 0.0, 1.0);
+    let light = gpui::hsla(0.0, 0.0, 1.0, 1.0);
+    if crate::theme::contrast_ratio(dark, fill) >= crate::theme::contrast_ratio(light, fill) { dark } else { light }
+}
+
 fn layout_type_adjustment(theme: &Theme) -> f32 {
     match theme.ui_style.layout {
         crate::ui_style::UiLayout::Minimal => 0.0,
@@ -707,7 +715,7 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             .bg(fill)
             .border_color(gpui::transparent_black())
             .text_color(if primary {
-                theme.identity_text(fill)
+                horizon_primary_text(theme, fill)
             } else {
                 theme.text_muted
             })
@@ -1117,7 +1125,7 @@ mod tests {
             let fill = horizon_primary_fill(&theme);
             assert!(fill.s <= 0.22);
             assert_eq!(fill.h, theme.accent.h);
-            assert!(crate::theme::contrast_ratio(theme.identity_text(fill), fill) >= 4.5);
+            assert!(crate::theme::contrast_ratio(horizon_primary_text(&theme, fill), fill) >= 4.5);
             let mut expected = div().bg(fill);
             let mut send = conversation_send_key(&theme, theme.accent, false, false);
             let mut toolbar = toolbar_control(div(), &theme, true);

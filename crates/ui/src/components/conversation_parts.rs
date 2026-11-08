@@ -1483,7 +1483,7 @@ pub fn conversation_send_key(
     let text = if theme.ui_style.design_roles.primary_colour.is_some() {
         theme.identity_text(fill)
     } else if horizon {
-        theme.identity_text(fill)
+        super::horizon_primary_text(theme, fill)
     } else if key {
         theme.on_accent
     } else {
