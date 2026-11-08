@@ -32,7 +32,7 @@ export async function streamEvents(response: ServerResponse, url: string, access
       const visible = await filter(frame.item);
       if (visible === undefined) return;
       const next = JSON.stringify(visible);
-      if (previous !== undefined && previous !== next && !closed) response.write(`event: ${event}\ndata: {}\n\n`);
+      if (previous !== undefined && (event === "transcript" || previous !== next) && !closed) response.write(`event: ${event}\ndata: {}\n\n`);
       previous = next;
     }).catch(close); });
     ws.on("error", close); ws.on("close", close);

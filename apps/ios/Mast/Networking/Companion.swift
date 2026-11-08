@@ -119,7 +119,7 @@ final class Companion: ObservableObject {
                 defer { session.invalidateAndCancel() }
                 let (bytes, response) = try await session.bytes(for: req)
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw BridgeError.response }
-                liveStatus = "Live"; delay = 1
+                liveStatus = "Live"; delay = 1; await refresh()
                 for try await line in bytes.lines {
                     if Task.isCancelled { return }
                     if line == "event: refresh" { await refresh() }
