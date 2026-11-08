@@ -4,6 +4,55 @@ use crate::theme::Theme;
 use gpui::{SharedString, div, prelude::*, px};
 use mast_proto::linear::LinearIssueSummary;
 
+pub(crate) fn search_frame(theme: &Theme) -> gpui::Div {
+    let frame = div()
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(4.0)))
+        .border_1()
+        .border_color(theme.border);
+    if super::is_horizon(theme) || super::is_industrial(theme) {
+        super::toolbar_control(frame, theme, false)
+    } else {
+        frame
+    }
+}
+
+pub(crate) fn header_icon(
+    id: &'static str,
+    icon: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let control = div()
+        .id(id)
+        .flex_none()
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .child(
+            crate::icons::icon(icon)
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+        );
+    super::toolbar_control(control, theme, false)
+}
+
+pub(crate) fn issue_row(selector: String, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap(px(6.0 * super::layout_spacing(theme)))
+        .px(px(4.0))
+        .py(px(3.0 * super::layout_spacing(theme)))
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(4.0)))
+}
+
 pub(crate) fn inbox_toolbar_button(active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let control = div()
         .id("outline-linear")

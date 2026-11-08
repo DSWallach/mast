@@ -405,15 +405,7 @@ impl ProjectIssuePicker {
         let row_selector = format!("linear-add-issues-row-{identifier}");
         let click_id = identifier.clone();
         let clickable = reveal.is_none();
-        div()
-            .id(SharedString::from(row_selector.clone()))
-            .debug_selector(move || row_selector.clone())
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(4.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
+        crate::components::linear_parts::issue_row(row_selector, theme)
             .when(clickable, |el| {
                 el.cursor_pointer()
                     .hover(|el| el.bg(theme.element_hover.opacity(0.6)))
@@ -542,12 +534,7 @@ impl Render for ProjectIssuePicker {
                     ),
             )
             .child(
-                div()
-                    .px(px(6.0))
-                    .py(px(3.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(theme.border)
+                crate::components::linear_parts::search_frame(&theme)
                     .child(self.search.clone()),
             )
             .child(list)

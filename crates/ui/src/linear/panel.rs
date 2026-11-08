@@ -1324,16 +1324,8 @@ impl LinearPanel {
             self.create_action_label(issue)
         };
         let click_focus = focus.clone();
-        div()
-            .id(SharedString::from(row_selector.clone()))
-            .debug_selector(move || row_selector.clone())
+        crate::components::linear_parts::issue_row(row_selector, theme)
             .when_some(focus, |el, focus| el.track_focus(&focus))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(4.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
             .when(focused, |el| el.bg(theme.element_hover))
             .hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             .cursor_grab()
@@ -1517,15 +1509,7 @@ impl LinearPanel {
         let template_space = self.space_id.clone();
         let linking = self.busy.contains(&format!("link-project:{id}"));
         let row_selector = format!("linear-project-row-{id}");
-        let header = div()
-            .id(SharedString::from(row_selector.clone()))
-            .debug_selector(move || row_selector.clone())
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(4.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
+        let header = crate::components::linear_parts::issue_row(row_selector, theme)
             .cursor_pointer()
             .hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(&toggle_id, cx)))
@@ -1772,42 +1756,14 @@ impl Render for LinearPanel {
             )
             .child(self.render_space_chip(&theme, cx))
             .child(
-                div()
-                    .id("linear-panel-refresh")
+                crate::components::linear_parts::header_icon("linear-panel-refresh", crate::icons::REFRESH, &theme)
                     .debug_selector(|| "linear-panel-refresh".into())
-                    .flex_none()
-                    .size(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(
-                        crate::icons::icon(crate::icons::REFRESH)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    )
                     .tooltip(|_, cx| cx.new(|_| TextTooltip("Refresh from Linear".into())).into())
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_forced(cx))),
             )
             .when(!self.embedded, |el| {
                 el.child(
-                    div()
-                        .id("linear-panel-close")
-                        .flex_none()
-                        .size(px(22.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .hover(|el| el.bg(theme.element_hover))
-                        .child(
-                            crate::icons::icon(crate::icons::CLOSE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        )
+                    crate::components::linear_parts::header_icon("linear-panel-close", crate::icons::CLOSE, &theme)
                         .hint(
                             "Hide the Linear panel",
                             HintKey::Command(crate::work_outline::WorkOutlineCommand::OpenLinear),
@@ -1815,14 +1771,9 @@ impl Render for LinearPanel {
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(LinearPanelEvent::Close))),
                 )
             });
-        let search = div()
+        let search = crate::components::linear_parts::search_frame(&theme)
             .mx(px(14.0))
             .mt(px(8.0))
-            .px(px(6.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
             .child(self.search.clone());
         let mut body = div()
             .id("linear-panel-body")
