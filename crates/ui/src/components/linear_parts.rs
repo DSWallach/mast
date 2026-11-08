@@ -4,6 +4,22 @@ use crate::theme::Theme;
 use gpui::{SharedString, div, prelude::*, px};
 use mast_proto::linear::LinearIssueSummary;
 
+pub(crate) fn settings_detail(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().secondary.unwrap_or(12.0)
+                + super::layout_type_adjustment(theme),
+        ))
+        .text_color(theme.text_muted)
+        .child(text.into())
+}
+
+pub(crate) fn settings_error(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
+    settings_detail(theme, text)
+        .debug_selector(|| "linear-settings-save-error".into())
+        .text_color(theme.danger)
+}
+
 pub(crate) fn key_input(focused: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id("linear-key-input")

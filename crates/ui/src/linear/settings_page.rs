@@ -244,10 +244,7 @@ impl Render for LinearSettingsPage {
                     )
                     .when_some(status_detail, |el, detail| {
                         el.child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(detail)),
+                            crate::components::linear_parts::settings_detail(&theme, SharedString::from(detail)),
                         )
                     }),
             )
@@ -312,11 +309,7 @@ impl Render for LinearSettingsPage {
             )
             .when_some(self.save_error.clone(), |el, error| {
                 el.child(
-                    div()
-                        .debug_selector(|| "linear-settings-save-error".into())
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .child(SharedString::from(error)),
+                    crate::components::linear_parts::settings_error(&theme, SharedString::from(error)),
                 )
             })
             .child(
