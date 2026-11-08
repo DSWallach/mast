@@ -66,6 +66,13 @@ export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = c
       return output;
     },
     transcript: page,
+    chat: async (chatId, spaceId) => {
+      if (!access || (await access.chatSpace(chatId)) !== spaceId) throw new Error("space not shared");
+      const result = await call(binary, "get_chat", {chat: chatId});
+      const project = result.project as {id?: string; name?: string} | undefined;
+      if (result.id !== chatId || project?.id !== spaceId) throw new Error("invalid chat");
+      return {id: chatId, title: result.title, status: result.status, space: project.name ?? "", spaceId, harness: result.harness ?? null, model: result.model ?? null};
+    },
     interrupt: async (chatId, spaceId) => {
       if (!access || (await access.chatSpace(chatId)) !== spaceId) throw new Error("space not shared");
       await call(binary, "interrupt_chat", { chat: chatId });

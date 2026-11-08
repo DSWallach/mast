@@ -8,7 +8,10 @@ struct ActionRequest: Identifiable, Codable {
     var createdAt: Double? = nil
     var optionChoices: [AnswerOption]? = nil
     var spaceId: String? = nil
+    var typedLinks: [RequestLink]? = nil
 }
+struct RequestLink: Codable, Identifiable { let label: String, target: RequestLinkTarget; var id: String { label + (target.id ?? target.url ?? target.path ?? target.branch ?? "") } }
+struct RequestLinkTarget: Codable { let type: String; var id: String? = nil, url: String? = nil, path: String? = nil, branch: String? = nil; var line: Int? = nil }
 struct AnswerOption: Codable, Identifiable { let id: String, label: String; var detail: String? = nil }
 struct PendingDecision: Codable {
     let key: String, outcome: String

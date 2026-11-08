@@ -1,5 +1,7 @@
+import type { ArtifactReader } from "./artifacts.js";
 import { defaultAppearance, type Appearance } from "./appearance.js";
 import { streamEvents } from "./events.js";
+import { Readable } from "node:stream";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { PairingChallenge, tokenDigest } from "./pairing.js";
 import type { ReplyCoordinator, AnswerInput } from "./reply.js";
@@ -10,6 +12,7 @@ export interface BridgeBackend {
   requests(ids: ReadonlySet<string>): Promise<unknown>;
   chats(ids: ReadonlySet<string>): Promise<unknown>;
   transcript(chatId: string, offset: number): Promise<unknown>;
+  chat?(chatId: string, spaceId: string): Promise<unknown>;
   send(chatId: string, text: string, spaceId?: string): Promise<unknown>;
   interrupt?(chatId: string, spaceId: string): Promise<unknown>;
 }
@@ -36,7 +39,7 @@ function reply(response: ServerResponse, status: number, body: unknown): void {
 /** This server exposes fixed operations only; no request can select an RPC method. */
 const denySpaces: SpaceAccess = { spaces: async () => [], chatSpace: async () => null, requestSpace: async () => null, chatAllowed: async () => false, requestAllowed: async () => false };
 const denyAudit: AuditLog = { append: async () => { throw new Error("audit unavailable"); } };
-export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, audit: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance) {
+export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, audit: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader) {
   return createServer(async (request, response) => {
     try {
       // Browsers cannot invoke the bridge from an unrelated origin.
@@ -73,6 +76,19 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
           if (path === "/requests" ? await access.requestAllowed(item.id) : await access.chatAllowed(item.id)) visible.push(item);
         }
         return reply(response, 200, { items: visible, noSpacesShared: current.size === 0 });
+      }
+      const artifact = /^\/artifacts\/([A-Za-z0-9_-]{1,128})(\/content)?$/.exec(path);
+      if (request.method === "GET" && artifact && artifacts) {
+        const row = await artifacts.find(artifact[1]);
+        if (!row) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "artifact-read", targetId: artifact[1], outcome: "denied"}); return reply(response, 403, {error: "space not shared"}); }
+        if (!artifact[2]) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "artifact-metadata", targetId: row.id, spaceId: row.spaceId, outcome: "read"}); return reply(response, 200, {id: row.id, title: row.title, kind: row.kind, spaceId: row.spaceId, revision: row.currentRevision}); }
+        let result;
+        try { result = await artifacts.content(row); }
+        catch (error) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "artifact-content", targetId: row.id, spaceId: row.spaceId, outcome: "error-or-denied"}); throw error; }
+        await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "artifact-content", targetId: row.id, spaceId: row.spaceId, outcome: "read"});
+        response.writeHead(200, {"Content-Type": "application/octet-stream", "Content-Length": result.bytes.length, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Artifact-Mime": result.mime});
+        const bytes = result.bytes;
+        Readable.from((function* () { for (let offset = 0; offset < bytes.length; offset += 65536) yield bytes.subarray(offset, offset + 65536); })()).pipe(response); return;
       }
       const requestDetail = /^\/requests\/([A-Za-z0-9_.:@-]{1,128})$/.exec(path);
       if (request.method === "GET" && requestDetail) {
@@ -117,6 +133,13 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
         try { await backend.interrupt(stop[1], spaceId); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "error-or-unknown" }); throw error; }
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "accepted" });
         return reply(response, 200, { status: "accepted" });
+      }
+      const chatDetail = /^\/chats\/([A-Za-z0-9_-]{1,128})$/.exec(path);
+      if (request.method === "GET" && chatDetail && backend.chat) {
+        const spaceId = await access.chatSpace(chatDetail[1]); if (!spaceId) return reply(response, 403, {error: "space not shared"});
+        const result = await backend.chat(chatDetail[1], spaceId);
+        if ((await access.chatSpace(chatDetail[1])) !== spaceId) return reply(response, 403, {error: "space not shared"});
+        return reply(response, 200, result);
       }
       const transcript = /^\/chats\/([A-Za-z0-9_-]{1,128})\/transcript(?:\?offset=(\d{1,7}))?$/.exec(path);
       if (request.method === "GET" && transcript) {

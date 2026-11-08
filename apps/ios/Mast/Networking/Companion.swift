@@ -57,6 +57,7 @@ enum BridgeError: LocalizedError {
         switch self { case .address: return "Use HTTPS, or HTTP on simulator loopback."; case .credential: return "Could not save the device credential."; case .response: return "Bridge request failed. Check the connection and pairing."; case .unauthorized: return "Device credential revoked. Pair again." }
     }
 }
+struct ArtifactMetadata: Decodable { let id: String, title: String, kind: String, spaceId: String; let revision: Int }
 private struct PairReply: Decodable { let token: String }
 private struct SendReply: Decodable { let delivery: String }
 private struct StopReply: Decodable { let status: String }
@@ -180,6 +181,22 @@ final class Companion: ObservableObject {
             hasLoaded = true; lastUpdated = Date()
         } catch BridgeError.unauthorized { connection = "Disconnected · pair again" }
         catch { connection = "Disconnected · showing stale data" }
+    }
+    func chatLink(_ id: String) async throws -> Chat {
+        if demo { guard let chat = chats.first(where: { $0.id == id }) else { throw BridgeError.response }; return chat }
+        let chat: Chat = try await request("/chats/\(id)")
+        guard canView(spaceId: chat.spaceId) else { throw BridgeError.response }; return chat
+    }
+    func artifact(_ id: String) async throws -> (ArtifactMetadata, Data) {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else { throw BridgeError.response }
+        if demo { return (ArtifactMetadata(id: id, title: "Sample plan", kind: "markdown", spaceId: "demo", revision: 1), Data("# Sample plan\n\nReview the **design** before proceeding.".utf8)) }
+        let metadata: ArtifactMetadata = try await request("/artifacts/\(id)")
+        guard canView(spaceId: metadata.spaceId), let token = credential.read(), let url = URL(string: "/artifacts/\(id)/content", relativeTo: try baseURL())?.absoluteURL else { throw BridgeError.response }
+        var req = URLRequest(url: url); req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); req.timeoutInterval = 20
+        let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil); defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= 4 * 1024 * 1024, canView(spaceId: metadata.spaceId) else { throw BridgeError.response }
+        return (metadata, data)
     }
     func transcript(_ chat: Chat, offset: Int = 0) async throws -> TranscriptPage {
         if demo { return TranscriptPage(messages: offset == 0 ? Demo.messages : [], olderRemaining: 0, nextOffset: Demo.messages.count) }

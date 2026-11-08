@@ -14,7 +14,7 @@ export function effectiveKind(row: { kind?: string; dedupeKey?: string; text: st
 }
 
 /** One opening frame per subscription. The caller supplies a fixture URL in tests. */
-export async function snapshot<T>(url: string, method: "WatchSpaces" | "WatchWorkOutline" | "WatchSessions" | "WatchChats" | "WatchDevices", params: object): Promise<T> {
+export async function snapshot<T>(url: string, method: "WatchSpaces" | "WatchWorkOutline" | "WatchSessions" | "WatchChats" | "WatchDevices" | "WatchArtifacts", params: object): Promise<T> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url, { maxPayload: 8 * 1024 * 1024 });
     let complete = false;
@@ -51,6 +51,7 @@ export async function readRequests(url: string, sharedIds?: ReadonlySet<string>)
       id: row.id, spaceId: space.id, space: name, kind: effectiveKind(row), text: row.text, detail: row.info ?? "", priority: row.priority ?? null, item: outline.items?.find(item => item.id === row.workItemId)?.title ?? null, createdAt: row.createdAt ?? null,
       options: (row.options ?? []).map(option => option.detail ? `${option.label}: ${option.detail}` : option.label), optionChoices: row.options ?? [],
       facts: (row.facts ?? []).map(fact => `${fact.label}: ${fact.value}`),
+      typedLinks: (row.links ?? []).filter(link => typeof link.label === "string" && ["artifact", "chat", "url", "pr", "file", "diff"].includes(String(link.target?.type))).map(link => ({label: link.label, target: link.target})),
       links: (row.links ?? []).map(link => `${link.label}: ${JSON.stringify(link.target)}`),
       origin: row.originKind === "system" ? "System" : (row.chatId ?? ""), originChatId: row.chatId ?? null,
     }));

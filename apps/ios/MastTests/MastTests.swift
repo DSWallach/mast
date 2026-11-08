@@ -40,6 +40,13 @@ final class MastTests: XCTestCase {
         model.demo = false
         return model
     }
+    func testArtifactLinkRouting() {
+        if case .artifact(let id) = companionLink(URL(string: "mast-artifact:abc123")!) { XCTAssertEqual(id, "abc123") } else { XCTFail("artifact route") }
+        if case .chat(let id) = companionLink(URL(string: "mast-chat:chat1")!) { XCTAssertEqual(id, "chat1") } else { XCTFail("chat route") }
+        if case .safari = companionLink(URL(string: "https://example.com")!) {} else { XCTFail("external route") }
+        XCTAssertNil(companionLink(URL(string: "http://example.com")!))
+        if case .mac = companionLink(URL(string: "file:///secret")!) {} else { XCTFail("file route") }
+    }
     func testPairingQRValidation() {
         let pair = parsePairingQR("mast-companion://pair?url=https%3A%2F%2Fexample.ts.net&code=one-time")
         XCTAssertEqual(pair?.url, "https://example.ts.net"); XCTAssertEqual(pair?.code, "one-time")
@@ -236,7 +243,13 @@ private struct MarkdownPreview: View {
 final class HorizonSnapshotTests: XCTestCase {
     func testRenderStyleMatrix() throws {
         let model = Companion(credential: MemoryCredential())
-        let screens: [(String, AnyView)] = [("chat", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Demo.messages))), ("inbox", AnyView(InboxScreen(model: model))), ("chats", AnyView(ChatsScreen(model: model)))]
+        let fixtureImage = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 80)).pngData { context in UIColor.systemGreen.setFill(); context.fill(CGRect(x: 0, y: 0, width: 120, height: 80)) }
+        func artifact(_ kind: String, _ data: Data) -> AnyView { AnyView(ArtifactScreen(id: "fixture", model: model, initial: (ArtifactMetadata(id: "fixture", title: "Sample artifact", kind: kind, spaceId: "demo", revision: 1), data))) }
+        let screens: [(String, AnyView)] = [
+            ("artifact-markdown", artifact("markdown", Data("# Sample plan\n\nPlease review **the design**.".utf8))),
+            ("artifact-html", artifact("htmlFragment", Data("<h1>Mockup</h1>".utf8))),
+            ("artifact-image", artifact("image", fixtureImage)),
+            ("request-markdown", AnyView(RequestDetail(request: ActionRequest(id: "r", space: "Mast", kind: "ask", text: "Review [plan](mast-artifact:fixture)", detail: "See the **design**: [open](mast-artifact:fixture)", options: [], facts: ["Status: **ready**"], links: [], origin: "Chat"), model: model))),("chat", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Demo.messages))), ("inbox", AnyView(InboxScreen(model: model))), ("chats", AnyView(ChatsScreen(model: model)))]
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/style-snapshots")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for id in MastStyleID.allCases { for scheme in [ColorScheme.light, .dark] { for (name, screen) in screens {

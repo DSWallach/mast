@@ -20,9 +20,16 @@ func parseMarkdownBlocks(_ source: String) -> [MarkdownBlock] {
     }
     if fenced { blocks.append(.code(code.joined(separator: "\n"))) }; flush(); return blocks
 }
+func linkifyBareReferences(_ text: String) -> String {
+    guard let pattern = try? NSRegularExpression(pattern: #"(?<![\w(])(?:mast-artifact:[A-Za-z0-9_-]+|mast-chat:[A-Za-z0-9_-]+|https://[^\s)<>]+)"#) else { return text }
+    let matches = pattern.matches(in: text, range: NSRange(text.startIndex..., in: text))
+    var result = text
+    for match in matches.reversed() { if let range = Range(match.range, in: result) { let link = String(result[range]); result.replaceSubrange(range, with: "[\(link)](\(link))") } }
+    return result
+}
 func markdownInline(_ text: String, linkColor: Color) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        var value = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+        var value = (try? AttributedString(markdown: linkifyBareReferences(text), options: options)) ?? AttributedString(text)
         for run in value.runs {
             if run.inlinePresentationIntent?.contains(.code) == true { value[run.range].font = .system(size: 17, design: .monospaced) }
             if run.link != nil { value[run.range].foregroundColor = linkColor; value[run.range].underlineStyle = .single }
@@ -103,13 +110,14 @@ struct SystemMessageRow: View {
     @State private var expanded = false
     @Environment(\.colorScheme) private var scheme
     var body: some View {
-        Button { expanded.toggle() } label: {
-            VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 5) {
+            Button { expanded.toggle() } label: { VStack(alignment: .leading, spacing: 5) {
                 Text(message.author == "relay" ? "FROM COORDINATOR" : (message.text.hasPrefix("Worker updates:") ? "WORKER UPDATE" : "MAST"))
                     .font(.system(size: 10, weight: .bold)).tracking(1)
-                Text(expanded ? message.text : systemMessagePreview(message.text)).font(.system(size: 13)).lineLimit(expanded ? nil : 1).multilineTextAlignment(.leading)
-            }.foregroundStyle(style.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(13).background(style.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
-        }.buttonStyle(.plain)
+                if !expanded { Text(systemMessagePreview(message.text)).font(.system(size: 13)).lineLimit(1).multilineTextAlignment(.leading) }
+            }.frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)
+            if expanded { MarkdownReply(text: message.text, linkColor: style.action(scheme)) }
+        }.foregroundStyle(style.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(13).background(style.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 struct ChatDetail: View {

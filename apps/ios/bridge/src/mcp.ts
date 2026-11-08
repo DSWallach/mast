@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-type Tool = "list_chats" | "read_chat" | "send_message" | "interrupt_chat";
+type Tool = "list_chats" | "get_chat" | "read_chat" | "send_message" | "interrupt_chat";
 
 /** A fixed set of local MCP tools, always without an agent capability token. */
 export async function callChatTool(binary: string, tool: Tool, args: Record<string, unknown>): Promise<Record<string, unknown>> {
