@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 export type AnswerInput = { outcome: string; text?: string; optionId?: string };
 export type AnswerRow = { id: string; text: string; kind: string; state: string; chatId: string; system: boolean; chatAvailable: boolean; options: { id: string; label: string }[]; resolution?: { outcome?: string; note?: string; values?: { action?: string; optionId?: string }; by?: { kind?: string } } };
-export type Intent = { key: string; input: AnswerInput; requestId: string; operationId: string; chatId: string; rowSignature: string; message: string; note: string; outcome: string; optionId?: string; phase: "prepared" | "idleDispatch" | "queueDispatch" | "sent" | "resolving" | "resolved" | "unknown" | "conflict"; resolveOnly: boolean };
+export type Intent = { inputHash?: string; key: string; input: AnswerInput; requestId: string; operationId: string; chatId: string; rowSignature: string; message: string; note: string; outcome: string; optionId?: string; phase: "prepared" | "idleDispatch" | "queueDispatch" | "sent" | "resolving" | "resolved" | "unknown" | "conflict"; resolveOnly: boolean };
 export interface IntentStore { load(requestId: string): Promise<Intent | null>; save(intent: Intent): Promise<void>; }
 export interface ReplyEngine {
   openRow(id: string): Promise<AnswerRow | null>;
@@ -52,6 +52,7 @@ export class ReplyCoordinator {
     if (running) await running.catch(() => undefined);
     const intent = await this.store.load(requestId);
     if (!intent || intent.key !== key || !["sent", "resolving", "resolved"].includes(intent.phase)) throw new Error("resolve-only retry unavailable");
+    if (intent.phase === "resolved") return intent;
     return this.answer(requestId, key, intent.input);
   }
   async answer(requestId: string, key: string, input: AnswerInput, stopAfterSend = false): Promise<Intent> {
@@ -64,7 +65,7 @@ export class ReplyCoordinator {
   }
   private async perform(requestId: string, key: string, input: AnswerInput, stopAfterSend: boolean): Promise<Intent> {
     let intent = await this.store.load(requestId);
-    if (intent && (intent.key !== key || JSON.stringify(intent.input) !== JSON.stringify(input))) throw new Error("decision conflict");
+    if (intent && (intent.key !== key || (intent.inputHash ? intent.inputHash !== createHash("sha256").update(JSON.stringify(input)).digest("hex") : JSON.stringify(intent.input) !== JSON.stringify(input)))) throw new Error("decision conflict");
     if (!intent) {
       const row = await this.engine.openRow(requestId);
       if (!row || row.state !== "open") throw new Error("request no longer open");
