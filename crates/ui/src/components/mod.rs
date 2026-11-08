@@ -41,7 +41,7 @@ pub use conversation_parts::{
     conversation_composer_expanded, conversation_composer_text_size, conversation_composer_width,
     conversation_error_chip, conversation_footer_slot, conversation_harness_tab,
     conversation_harness_tabs, conversation_input_surface, conversation_input_text_color,
-    conversation_markdown_bullet_size, conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
+    conversation_markdown_bullet_color, conversation_markdown_bullet_size, conversation_markdown_gap, conversation_markdown_text_size, conversation_message_copy_button,
     conversation_message_expander, conversation_model_label, conversation_model_picker,
     conversation_panel_radius, conversation_picker_approval, conversation_picker_footer_chip,
     conversation_picker_footer_content, conversation_picker_footer_label,
@@ -1102,6 +1102,24 @@ pub fn section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn area_list_bullets_follow_agent_reply_foreground() {
+        use crate::ui_style::{UiLayout, UiStyle, UiStyleId};
+        for appearance in [crate::theme::Appearance::Light, crate::theme::Appearance::Dark] {
+            let base = Theme::for_selection(appearance, if appearance == crate::theme::Appearance::Light { "area-light" } else { "area-dark" }, Default::default(), mast_theme::SurfacePreference::Opaque);
+            let area = base.clone().with_ui_style(UiStyle::resolve(UiStyleId::Area, UiLayout::Minimal));
+            for harness in [mast_proto::HarnessId::ClaudeCode, mast_proto::HarnessId::Codex] {
+                let identity = area.agent_identity_color(Some(harness), Some("model"));
+                let reply = agent_message_theme(&area, identity);
+                assert_eq!(conversation_markdown_bullet_color(&reply), reply.text);
+            }
+            for style in [UiStyleId::Default, UiStyleId::Industrial] {
+                let theme = base.clone().with_ui_style(UiStyle::resolve(style, UiLayout::Minimal));
+                assert_eq!(conversation_markdown_bullet_color(&theme), theme.accent);
+            }
+        }
+    }
 
     #[test]
     fn conversation_menu_geometry_matches_style_tokens() {
