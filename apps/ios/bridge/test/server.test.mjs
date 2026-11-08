@@ -12,6 +12,7 @@ test("allowlisted endpoints require a paired token and reject browser origins", 
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   try {
     const base = `http://127.0.0.1:${server.address().port}`;
+    assert.equal((await fetch(base + "/spaces", {headers: {host: "evil.example"}})).status, 403);
     assert.equal((await fetch(base + "/requests")).status, 401);
     const pair = await fetch(base + "/pair", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: "fixture-code", label: "Test device" }) });
     const { token } = await pair.json();
