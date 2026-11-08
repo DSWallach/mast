@@ -1113,11 +1113,21 @@ mod tests {
     #[test]
     fn horizon_primary_chrome_uses_a_muted_theme_colour() {
         for (appearance, id) in [(crate::theme::Appearance::Light, "mast-light"), (crate::theme::Appearance::Dark, "mast-dark"), (crate::theme::Appearance::Light, "horizon-light"), (crate::theme::Appearance::Dark, "horizon-dark")] {
-            let theme = Theme::for_selection(appearance, id, Default::default(), mast_theme::SurfacePreference::Opaque);
+            let theme = Theme::for_selection(appearance, id, Default::default(), mast_theme::SurfacePreference::Opaque).with_ui_style(crate::ui_style::UiStyle::HORIZON);
             let fill = horizon_primary_fill(&theme);
             assert!(fill.s <= 0.22);
             assert_eq!(fill.h, theme.accent.h);
             assert!(crate::theme::contrast_ratio(theme.identity_text(fill), fill) >= 4.5);
+            let mut expected = div().bg(fill);
+            let mut send = conversation_send_key(&theme, theme.accent, false, false);
+            let mut toolbar = toolbar_control(div(), &theme, true);
+            assert_eq!(send.style().background, expected.style().background);
+            assert_eq!(toolbar.style().background, expected.style().background);
+            let overrides = crate::style_overrides::Overrides::parse(r#"{"version":"mast.style-overrides/v1","styles":{"horizon":{"primaryColour":"accent"}}}"#);
+            let override_theme = theme.clone().with_ui_style(overrides.apply(theme.ui_style));
+            let mut override_send = conversation_send_key(&override_theme, override_theme.accent, false, false);
+            let mut accent = div().bg(override_theme.accent);
+            assert_eq!(override_send.style().background, accent.style().background);
         }
     }
 
@@ -1132,12 +1142,14 @@ mod tests {
                 }))
             }
         }
-        for style in crate::ui_style::UiStyleId::ALL {
-            cx.update(|cx| cx.set_global(Theme::dark().with_ui_style(crate::ui_style::UiStyle::of(*style))));
-            let (_, window) = cx.add_window_view(|_, _| Cards);
-            window.run_until_parked();
-            assert_eq!(window.debug_bounds("settings-option-selected-Selected").is_some(), *style == crate::ui_style::UiStyle::HORIZON.id);
-            assert!(window.debug_bounds("settings-option-selected-Other").is_none());
+        for (appearance, id) in [(crate::theme::Appearance::Light, "horizon-light"), (crate::theme::Appearance::Dark, "horizon-dark")] {
+            for style in crate::ui_style::UiStyleId::ALL {
+                cx.update(|cx| cx.set_global(Theme::for_selection(appearance, id, Default::default(), mast_theme::SurfacePreference::Opaque).with_ui_style(crate::ui_style::UiStyle::of(*style))));
+                let (_, window) = cx.add_window_view(|_, _| Cards);
+                window.run_until_parked();
+                assert_eq!(window.debug_bounds("settings-option-selected-Selected").is_some(), *style == crate::ui_style::UiStyle::HORIZON.id);
+                assert!(window.debug_bounds("settings-option-selected-Other").is_none());
+            }
         }
     }
 
