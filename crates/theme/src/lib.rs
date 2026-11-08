@@ -850,6 +850,8 @@ mod tests {
         let old_area = ThemeSelection { light: "area-light".into(), dark: "area-dark".into() };
         assert_eq!(registry.resolve(&old_area, Appearance::Light).id, "horizon-light");
         assert_eq!(registry.resolve(&old_area, Appearance::Dark).id, "horizon-dark");
+        assert_eq!(registry.variant("horizon-light").unwrap().name, "Horizon Light");
+        assert_eq!(registry.variant("horizon-dark").unwrap().name, "Horizon Dark");
         let errors: Vec<_> = registry
             .validate()
             .into_iter()
