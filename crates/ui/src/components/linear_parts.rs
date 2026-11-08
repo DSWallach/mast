@@ -4,6 +4,31 @@ use crate::theme::Theme;
 use gpui::{SharedString, div, prelude::*, px};
 use mast_proto::linear::LinearIssueSummary;
 
+pub(crate) fn key_input(focused: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("linear-key-input")
+        .debug_selector(|| "linear-key-input".into())
+        .key_context("LinearKeyInput")
+        .flex_1()
+        .min_w_0()
+        .h(px(28.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(6.0)))
+        .border_1()
+        .border_color(if focused { theme.accent } else { theme.border })
+        .bg(theme.surface)
+        .cursor_text()
+        .text_size(crate::typography::ui_rems(
+            theme.ui_style.type_roles().body.unwrap_or(12.5) + super::layout_type_adjustment(theme),
+        ))
+}
+
+pub(crate) fn input_cursor(theme: &Theme) -> gpui::Div {
+    div().ml(px(1.0)).w(px(1.0)).h(px(14.0)).bg(theme.accent)
+}
+
 pub(crate) fn search_frame(theme: &Theme) -> gpui::Div {
     let frame = div()
         .px(px(6.0))
