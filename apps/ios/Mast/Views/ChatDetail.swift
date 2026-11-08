@@ -168,6 +168,8 @@ struct ChatDetail: View {
                 Color.clear.frame(height: 1).id("transcript-bottom")
             }.padding(22).frame(maxWidth: .infinity, alignment: .leading) }
             .task { do { let page = try await model.transcript(chat); messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } catch { notice = "Transcript unavailable or stale." } }
+            .onAppear { model.activeChatId = chat.id }.onDisappear { if model.activeChatId == chat.id { model.activeChatId = nil } }
+            .onChange(of: model.transcriptRevision) { _, _ in Task { if let page = try? await model.transcript(chat) { messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } } }
             .onChange(of: sending) { _, _ in DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }
         }
         VStack(alignment: .leading, spacing: 8) {

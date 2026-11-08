@@ -8,6 +8,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var scheme
     var body: some View { ZStack { VStack(spacing: 0) {
         if model.connection.hasPrefix("Disconnected") { OfflineBanner(text: model.connection) }
+        if !model.demo { Text(model.liveStatus).font(.system(size: 10)).foregroundStyle(Horizon.muted(scheme)).frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 16) }
         TabView {
             NavigationStack { InboxScreen(model: model) }.tabItem { Label("Needs you", systemImage: "tray") }
             NavigationStack { ChatsScreen(model: model) }.tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
@@ -19,7 +20,7 @@ struct ContentView: View {
         .onChange(of: phase) { _, value in
             switch value { case .active: appLock.foreground(timeout: TimeInterval(lockTimeout)); case .inactive: appLock.inactive(); case .background: appLock.background(); @unknown default: appLock.inactive() }
         }.onChange(of: appLock.obscured) { _, obscured in if !obscured { Task { await model.refresh() } } }
-        .task(id: appLock.obscured) { if !appLock.obscured { while !Task.isCancelled { try? await Task.sleep(nanoseconds: 10_000_000_000); if Task.isCancelled { break }; await model.refreshSharedSpaces() } } }
+        .task(id: "\(appLock.obscured)-\(model.demo)-\(model.activeChatId ?? "")") { if !appLock.obscured { await model.watchEvents() } }
     }
 }
 struct LockScreen: View {
