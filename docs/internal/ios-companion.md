@@ -110,3 +110,5 @@ Deleting the app may leave a Keychain item on iOS. The app clears its Keychain i
 Write actions require fresh device-owner authentication and an active app immediately before sending; Quick actions skips only the dialog. A request already dispatched cannot be recalled if the app locks or the device is revoked during delivery.
 
 Tailscale HTTPS certificate issuance can publish the machine's `*.ts.net` name in certificate-transparency logs. Use a neutral machine name and accept the remaining hostname disclosure before enabling Serve.
+
+The pinned `qrcode-terminal` 0.12.0 encoder is unmaintained. It has no runtime dependencies and is used only for terminal QR output; this remains an accepted supply-chain risk until a maintained replacement is reviewed.
