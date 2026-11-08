@@ -2532,16 +2532,42 @@ impl OutlineView {
         };
         let focused = self.focus.contains_focused(window, cx);
         range
-            .map(|list_ix| match create {
-                Some((slot, depth)) if list_ix == slot => {
-                    self.render_editor_row(depth, compact, &theme, cx)
+            .map(|list_ix| {
+                let model_ix = match create {
+                    Some((slot, depth)) if list_ix == slot => {
+                        return self.render_editor_row(depth, compact, &theme, cx);
+                    }
+                    Some((slot, _)) if list_ix > slot => list_ix - 1,
+                    _ => list_ix,
+                };
+                let row = self.render_row(model_ix, compact, focused, &theme, cx);
+                if theme.ui_style.id == crate::ui_style::UiStyleId::Area {
+                    self.area_nested_row(model_ix, row, &theme)
+                } else {
+                    row
                 }
-                Some((slot, _)) if list_ix > slot => {
-                    self.render_row(list_ix - 1, compact, focused, &theme, cx)
-                }
-                _ => self.render_row(list_ix, compact, focused, &theme, cx),
             })
             .collect()
+    }
+
+    /// Paint each open ancestor's surface as consecutive row-sized segments.
+    /// This keeps the virtualized list and its scrolling behaviour intact.
+    fn area_nested_row(&self, ix: usize, row: AnyElement, theme: &Theme) -> AnyElement {
+        let Some(current) = self.model.rows.get(ix) else { return row; };
+        let depth = current.depth;
+        let previous = ix.checked_sub(1).and_then(|i| self.model.rows.get(i)).map(|r| r.depth).unwrap_or(0);
+        let next = self.model.rows.get(ix + 1).map(|r| r.depth).unwrap_or(0);
+        let backgrounds = (1..=depth).map(|level| {
+            let selector = format!("area-outline-nesting-{}-{level}", current.key);
+            div().id(selector.clone()).debug_selector(move || selector.clone())
+                .absolute().top_0().bottom_0().right_0().left(px(area_nesting_offset(level)))
+                .bg(theme.text.opacity(0.035))
+                .when(previous < level, |el| el.rounded_tl(px(12.)).rounded_tr(px(12.)))
+                .when(next < level, |el| el.rounded_bl(px(12.)).rounded_br(px(12.)))
+        });
+        div().relative().w_full().children(backgrounds)
+            .child(div().w_full().flex().pl(px(area_nesting_offset(depth))).child(row))
+            .into_any_element()
     }
 
     fn indent(depth: u16) -> f32 {
@@ -3047,7 +3073,7 @@ impl OutlineView {
         let drop_label = drop_zone.and_then(|_| self.drop_label_element(theme));
         let guides = self.guide_layer(ix, compact, theme, cx);
         let flash = self.move_flash_overlay(&key, theme);
-        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), Self::indent(row.depth), theme)
+        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), if theme.ui_style.id == crate::ui_style::UiStyleId::Area { 8.0 } else { Self::indent(row.depth) }, theme)
             .when(highlighted, |el| el.border_color(crate::components::outline_row_highlight(theme)))
             .when((selected || in_group) && focused, |el| {
                 el.bg(theme.element_active)
@@ -3059,6 +3085,7 @@ impl OutlineView {
                 el.hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             })
             .when(true, |el| crate::components::outline_row_selection(el, theme, selected))
+            .when(theme.ui_style.id == crate::ui_style::UiStyleId::Area, |el| el.max_w(px(10000.)))
             .when(dimmed, |el| el.opacity(0.6))
             .relative()
             .when(drop_zone == Some(DropZone::Into), |el| {
@@ -3181,7 +3208,7 @@ impl OutlineView {
                 }),
             )
             .children(flash)
-            .children(guides.filter(|_| crate::components::outline_row_extras(theme)))
+            .children(guides.filter(|_| theme.ui_style.id != crate::ui_style::UiStyleId::Area && crate::components::outline_row_extras(theme)))
             .child(disclosure)
             .child(body)
             .children(start_chat.filter(|_| crate::components::outline_row_extras(theme)))
@@ -3904,6 +3931,11 @@ impl Render for OutlineView {
             .child(list)
             .child(self.width_probe(cx))
     }
+}
+
+/// Horizontal step shared by nesting backgrounds and row placement.
+fn area_nesting_offset(depth: u16) -> f32 {
+    depth as f32 * 20.0
 }
 
 #[cfg(test)]
