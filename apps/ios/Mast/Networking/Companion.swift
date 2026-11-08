@@ -59,6 +59,7 @@ enum BridgeError: LocalizedError {
 }
 private struct PairReply: Decodable { let token: String }
 private struct SendReply: Decodable { let delivery: String }
+private struct StopReply: Decodable { let status: String }
 private final class NoRedirect: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
@@ -154,6 +155,10 @@ final class Companion: ObservableObject {
         let result: SendReply = try await request("/chats/\(chat.id)/messages", body: ["text": text])
         if result.delivery == "simulated" { return "Fixture only · message was not sent" }
         return result.delivery == "queued" ? "Queued" : "Accepted"
+    }
+    func stop(_ chat: Chat) async throws {
+        if demo { return }
+        let _: StopReply = try await request("/chats/\(chat.id)/stop", body: [:])
     }
     func pendingDecision(_ requestId: String) throws -> PendingDecision? { demo ? nil : try decisions.read(requestId) }
     func answer(_ requestId: String, outcome: String, text: String? = nil, optionId: String? = nil) async throws -> PendingDecision {

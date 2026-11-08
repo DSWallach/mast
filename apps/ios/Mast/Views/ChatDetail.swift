@@ -120,6 +120,7 @@ struct ChatDetail: View {
     @AppStorage("quickActions") private var quickActions = false
     @State private var confirmMessage: TranscriptMessage?
     @State private var showConfirmation = false
+    @State private var confirmStop = false
     @State private var olderRemaining = 0
     @State private var nextOffset = 0
     @Environment(\.colorScheme) private var scheme
@@ -155,6 +156,10 @@ struct ChatDetail: View {
         if !localMessages.contains(where: { $0.id == message.id }) { localMessages.append(message); text = "" }
         notice = ""; send(message)
     }
+    private func stop() {
+        guard model.canView(spaceId: chat.spaceId) else { return }
+        Task { do { try await model.stop(chat); notice = "Stop requested" } catch { notice = "Unable to stop the chat." } }
+    }
     var body: some View { Group { if !model.canView(spaceId: chat.spaceId) { Text("Space is unavailable or no longer shared.").foregroundStyle(Horizon.muted(scheme)).padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(Horizon.surface(scheme)) } else { VStack(spacing: 0) {
         ScrollViewReader { proxy in
             HorizonScroll { VStack(alignment: .leading, spacing: 20) {
@@ -168,9 +173,10 @@ struct ChatDetail: View {
         VStack(alignment: .leading, spacing: 8) {
             if !notice.isEmpty { Text(notice).font(.system(size: 12)).foregroundStyle(Horizon.muted(scheme)) }
             HStack(alignment: .bottom, spacing: 12) {
+                if (model.chats.first(where: { $0.id == chat.id })?.status ?? chat.status).lowercased().hasPrefix("working") { Button("STOP") { if requiresConfirmation(quickActions: quickActions) { confirmStop = true } else { stop() } }.font(.system(size: 11, weight: .bold)).foregroundStyle(Horizon.muted(scheme)) }
                 if snapshot { Text("Message").font(.system(size: 16)).foregroundStyle(Horizon.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading) } else { TextField("Message", text: $text, axis: .vertical).font(.system(size: 16)).lineLimit(1...5) }
                 Button("SEND") { requestSend(TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user")) }.font(.system(size: 11, weight: .bold)).tracking(1).foregroundStyle(Horizon.muted(scheme)).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding(16).background(Horizon.slate.opacity(scheme == .dark ? 0.15 : 0.12), in: RoundedRectangle(cornerRadius: 19))
         }.padding(.horizontal, 18).padding(.bottom, 12).padding(.top, 8)
-    }.background(Horizon.surface(scheme)) } }.navigationTitle(model.canView(spaceId: chat.spaceId) ? chat.title : "Chat").navigationBarTitleDisplayMode(.inline).confirmationDialog("Send this message?", isPresented: $showConfirmation, titleVisibility: .visible) { Button("Send") { if let message = confirmMessage { confirmAndSend(message) }; confirmMessage = nil }; Button("Cancel", role: .cancel) { confirmMessage = nil } } message: { if let message = confirmMessage { Text(message.text) } } }
+    }.background(Horizon.surface(scheme)) } }.navigationTitle(model.canView(spaceId: chat.spaceId) ? chat.title : "Chat").navigationBarTitleDisplayMode(.inline).confirmationDialog("Stop this chat?", isPresented: $confirmStop, titleVisibility: .visible) { Button("Stop") { stop() }; Button("Cancel", role: .cancel) {} }.confirmationDialog("Send this message?", isPresented: $showConfirmation, titleVisibility: .visible) { Button("Send") { if let message = confirmMessage { confirmAndSend(message) }; confirmMessage = nil }; Button("Cancel", role: .cancel) { confirmMessage = nil } } message: { if let message = confirmMessage { Text(message.text) } } }
 }

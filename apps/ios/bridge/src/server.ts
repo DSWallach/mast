@@ -9,6 +9,7 @@ export interface BridgeBackend {
   chats(ids: ReadonlySet<string>): Promise<unknown>;
   transcript(chatId: string, offset: number): Promise<unknown>;
   send(chatId: string, text: string, spaceId?: string): Promise<unknown>;
+  interrupt?(chatId: string, spaceId: string): Promise<unknown>;
 }
 
 export type DeviceIdentity = { id: string; label: string };
@@ -101,6 +102,16 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
         try { result = await replies.retryResolve(answer[1], key); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: "error-or-unknown" }); throw error; }
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: result.phase });
         return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
+      }
+      const stop = /^\/chats\/([A-Za-z0-9_-]{1,128})\/stop$/.exec(path);
+      if (request.method === "POST" && stop && backend.interrupt) {
+        const spaceId = await access.chatSpace(stop[1]);
+        if (!spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], outcome: "denied" }); return reply(response, 403, { error: "space not shared" }); }
+        if (request.headers["content-type"] !== "application/json" || Object.keys(await readBody(request)).length) return reply(response, 400, { error: "invalid request" });
+        await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "started" });
+        try { await backend.interrupt(stop[1], spaceId); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+        await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "accepted" });
+        return reply(response, 200, { status: "accepted" });
       }
       const transcript = /^\/chats\/([A-Za-z0-9_-]{1,128})\/transcript(?:\?offset=(\d{1,7}))?$/.exec(path);
       if (request.method === "GET" && transcript) {

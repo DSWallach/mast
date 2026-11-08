@@ -66,6 +66,11 @@ export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = c
       return output;
     },
     transcript: page,
+    interrupt: async (chatId, spaceId) => {
+      if (!access || (await access.chatSpace(chatId)) !== spaceId) throw new Error("space not shared");
+      await call(binary, "interrupt_chat", { chat: chatId });
+      return { status: "accepted" };
+    },
     send: async (chatId, text, spaceId) => {
       if (access && (!spaceId || (await access.chatSpace(chatId)) !== spaceId)) throw new Error("space not shared");
       const result = await call(binary, "send_message", { chat: chatId, text, mode: "auto", wait: false });
