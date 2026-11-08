@@ -103,6 +103,9 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let all_screens = [
         "chat",
         "overview",
+        "linear",
+        "linear-settings",
+        "team",
         "details",
         "walkthrough",
         "appearance",
@@ -301,14 +304,21 @@ fn preview_width() -> u32 {
 fn compare_minimal_preview() -> anyhow::Result<()> {
     let baseline = std::path::PathBuf::from(std::env::var("MAST_BASELINE_PREVIEW")?);
     let current = std::path::PathBuf::from(std::env::var("MAST_CURRENT_PREVIEW")?);
-    for screen in ["controls", "details"] {
+    let screens = std::env::var("MAST_PREVIEW_COMPARE_SCREENS")
+        .unwrap_or_else(|_| "controls,details".to_owned());
+    let rows: u32 = std::env::var("MAST_PREVIEW_COMPARE_ROWS")
+        .ok().map(|value| value.parse()).transpose()?.unwrap_or(1);
+    anyhow::ensure!(rows > 0, "comparison row count must be positive");
+    for screen in screens.split(',').filter(|screen| !screen.is_empty()) {
         let expected = image::open(baseline.join(format!("{screen}.png")))?.into_rgba8();
         let actual = image::open(current.join(format!("{screen}.png")))?.into_rgba8();
         anyhow::ensure!(
-            expected.dimensions() == actual.dimensions(),
+            expected.width() == actual.width() && expected.height() <= actual.height(),
             "{screen} dimensions differ"
         );
-        let (width, height) = expected.dimensions();
+        let (width, sheet_height) = expected.dimensions();
+        anyhow::ensure!(sheet_height % rows == 0, "{screen} rows do not divide the sheet");
+        let height = sheet_height / rows;
         let expected = image::imageops::crop_imm(&expected, 0, 30, width, height - 30).to_image();
         let actual = image::imageops::crop_imm(&actual, 0, 30, width, height - 30).to_image();
         let diff = image_compare::rgba_hybrid_compare(&expected, &actual)?;

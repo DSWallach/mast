@@ -2,7 +2,7 @@
 //! (`LinearSetApiKey`, which validates with Linear before storing),
 //! Disconnect (`LinearClearApiKey`), and a link to Linear's key page. The
 //! key is never displayed or logged; it is sent once and the field clears.
-use gpui::{Context, Entity, SharedString, Subscription, Window, div, prelude::*, px};
+use gpui::{Context, Entity, SharedString, Subscription, Window, div, prelude::*};
 use mast_proto::linear::{LinearConnectionStatus, LinearErrorCode, LinearKeySource};
 
 use super::client::LinearUiError;
@@ -74,6 +74,15 @@ pub(crate) struct LinearSettingsPage {
 
 impl LinearSettingsPage {
     pub(crate) fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::with_status_refresh(state, true, cx)
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn offline_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::with_status_refresh(state, false, cx)
+    }
+
+    fn with_status_refresh(state: Entity<AppState>, refresh: bool, cx: &mut Context<Self>) -> Self {
         let key_input = cx.new(|cx| MaskedKeyInput::new("Paste a Linear personal API key", cx));
         let subscriptions = vec![
             // The page reads only the connection card's view of the status.
@@ -92,7 +101,9 @@ impl LinearSettingsPage {
                 }
             }),
         ];
-        store::refresh_status(&state, false, cx);
+        if refresh {
+            store::refresh_status(&state, false, cx);
+        }
         let seen = ObserveGate::seeded(connection_view(state.read(cx).linear.status.as_ref()));
         Self {
             seen,
@@ -167,21 +178,7 @@ impl LinearSettingsPage {
         primary: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .debug_selector(move || id.into())
-            .flex_none()
-            .px(px(12.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(12.0))
-            .when(primary, |el| el.bg(theme.element_active))
-            .text_color(theme.text)
-            .hover(|el| el.bg(theme.element_hover))
-            .child(label)
+        crate::components::linear_parts::settings_button(id, label, primary, theme)
     }
 }
 
@@ -239,31 +236,7 @@ impl Render for LinearSettingsPage {
         let status_row = widgets::card_row(&theme, true)
             .child(widgets::row_tile(&theme, crate::icons::KEY_MINIMALISTIC))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(div().size(px(7.0)).rounded_full().bg(status_color))
-                            .child(
-                                widgets::row_title(&theme, status_title)
-                                    .debug_selector(|| "linear-settings-status".into()),
-                            ),
-                    )
-                    .when_some(status_detail, |el, detail| {
-                        el.child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(detail)),
-                        )
-                    }),
+                crate::components::linear_parts::settings_status(&theme, status_title, status_detail, status_color),
             )
             .child(
                 Self::button("linear-settings-recheck", "Check again", false, &theme).on_click(
@@ -297,11 +270,7 @@ impl Render for LinearSettingsPage {
                 },
             ))
             .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
+                crate::components::linear_parts::settings_key_row(&theme)
                     .child(self.key_input.clone())
                     .child(
                         Self::button("linear-settings-paste", "Paste", false, &theme).on_click(
@@ -326,36 +295,13 @@ impl Render for LinearSettingsPage {
             )
             .when_some(self.save_error.clone(), |el, error| {
                 el.child(
-                    div()
-                        .debug_selector(|| "linear-settings-save-error".into())
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .child(SharedString::from(error)),
+                    crate::components::linear_parts::settings_error(&theme, SharedString::from(error)),
                 )
             })
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child("Create one in Linear under Settings \u{2192} Security & access.")
+                crate::components::linear_parts::settings_key_help(&theme)
                     .child(
-                        div()
-                            .id("linear-settings-open-keys")
-                            .debug_selector(|| "linear-settings-open-keys".into())
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .cursor_pointer()
-                            .text_color(theme.accent)
-                            .child("Open Linear")
-                            .child(
-                                crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
-                                    .size(px(11.0))
-                                    .text_color(theme.accent),
-                            )
+                        crate::components::linear_parts::settings_key_link(&theme)
                             .on_click(|_, _, cx| cx.open_url(super::API_KEY_SETTINGS_URL)),
                     ),
             );

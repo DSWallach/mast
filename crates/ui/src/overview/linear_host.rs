@@ -27,9 +27,9 @@ use crate::work_outline::model::{OutlineRowKind, row_key};
 
 /// The narrowest the Outline/List body gets while the Linear column
 /// is inline; past that the column shrinks, then overlays.
-pub(crate) const OVERVIEW_BODY_MIN_W: f32 = 360.0;
+pub(crate) const OVERVIEW_BODY_MIN_W: f32 = crate::components::linear_parts::OVERVIEW_BODY_MIN_WIDTH;
 /// Hit target of the column's right-edge resize grabber.
-const RESIZE_HANDLE_W: f32 = 6.0;
+const RESIZE_HANDLE_W: f32 = crate::components::linear_parts::RESIZE_HANDLE_WIDTH;
 
 /// Drag marker for the column's edge grabber.
 #[derive(Clone, Copy, Debug)]
@@ -143,6 +143,22 @@ pub(crate) enum LinearSlot {
 }
 
 impl Overview {
+    #[cfg(feature = "snapshot")]
+    pub(super) fn open_snapshot_linear(&mut self, cx: &mut Context<Self>) {
+        let spaces = self.linear_spaces(cx);
+        let panel = self.ensure_linear_panel("fixture-space".into(), cx);
+        panel.update(cx, |panel, _| {
+            panel.set_data(spaces, OutlineSelection::None);
+            panel.my_issues = crate::linear::panel::Load::Ready(vec![
+                crate::linear::fixture::issue("ENG-42", "Review the workspace"),
+                crate::linear::fixture::issue("ENG-43", "Validate the release"),
+            ]);
+            panel.my_projects = crate::linear::panel::Load::Ready(vec![
+                crate::linear::fixture::project("p-launch", "Launch"),
+            ]);
+        });
+        self.linear_column.open = true;
+    }
     /// Every Space with Linear on, in Outline order, with its snapshot.
     pub(crate) fn linear_spaces(&self, cx: &gpui::App) -> Vec<LinearSpace> {
         self.outline_spaces(cx)
@@ -558,16 +574,7 @@ impl Overview {
         }
         let theme = Theme::of(cx).clone();
         Some(
-            div()
-                .id("linear-add-issues-backdrop")
-                .absolute()
-                .inset_0()
-                .flex()
-                .justify_center()
-                .items_start()
-                .pt(px(64.0))
-                .bg(theme.scrim())
-                .occlude()
+            crate::components::linear_parts::picker_backdrop(&theme)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| this.close_project_issue_picker(cx)),
@@ -775,38 +782,9 @@ impl Overview {
     /// The column's own header: "Inbox" and the close button (the toggle's
     /// hint).
     fn column_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(14.0))
-            .pt(px(8.0))
+        crate::components::linear_parts::inbox_header(theme)
             .child(
-                div()
-                    .flex_1()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_faint)
-                    .child("INBOX"),
-            )
-            .child(
-                div()
-                    .id("inbox-column-close")
-                    .debug_selector(|| "inbox-column-close".into())
-                    .flex_none()
-                    .size(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(
-                        crate::icons::icon(crate::icons::CLOSE)
-                            .size(px(11.0))
-                            .text_color(theme.text_muted),
-                    )
+                crate::components::linear_parts::inbox_close(theme)
                     .hint(
                         "Hide the Inbox column",
                         HintKey::Command(WorkOutlineCommand::OpenLinear),
@@ -876,24 +854,7 @@ impl Overview {
         }
         let active = self.column_shown();
         Some(
-            div()
-                .id("outline-linear")
-                .debug_selector(|| "outline-linear".into())
-                .px(gpui::px(8.0))
-                .py(gpui::px(3.0))
-                .rounded(gpui::px(4.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .bg(theme.element_hover.opacity(0.5))
-                .when(active, |el| {
-                    el.bg(theme.element_active).text_color(theme.text)
-                })
-                .when(!active, |el| el.text_color(theme.text_muted))
-                .hover(|el| el.text_color(theme.text))
-                .when(true, |el| {
-                    crate::components::toolbar_control(el, theme, false)
-                })
-                .child("Inbox")
+            crate::components::linear_parts::inbox_toolbar_button(active, theme)
                 .hint(
                     if active {
                         "Hide the Inbox column"

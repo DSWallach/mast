@@ -4,7 +4,7 @@
 //! `LinearSetApiKey`), and its `Debug` never prints it.
 use gpui::{
     Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, SharedString, Window, div,
-    prelude::*, px,
+    prelude::*,
 };
 
 use crate::theme::Theme;
@@ -138,23 +138,8 @@ impl Render for MaskedKeyInput {
         let theme = Theme::of(cx).clone();
         let focused = self.focus.is_focused(window);
         let empty = self.value.is_empty();
-        div()
-            .id("linear-key-input")
-            .debug_selector(|| "linear-key-input".into())
-            .key_context("LinearKeyInput")
+        crate::components::linear_parts::key_input(focused, &theme)
             .track_focus(&self.focus)
-            .flex_1()
-            .min_w_0()
-            .h(px(28.0))
-            .px(px(8.0))
-            .flex()
-            .items_center()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
-            .bg(theme.surface)
-            .cursor_text()
-            .text_size(crate::typography::ui_rems(12.5))
             .on_click(cx.listener(|this, _, window, cx| {
                 window.focus(&this.focus, cx);
             }))
@@ -170,7 +155,7 @@ impl Render for MaskedKeyInput {
                     .child(SharedString::from(self.masked()))
             })
             .when(focused, |el| {
-                el.child(div().ml(px(1.0)).w(px(1.0)).h(px(14.0)).bg(theme.accent))
+                el.child(crate::components::linear_parts::input_cursor(&theme))
             })
     }
 }

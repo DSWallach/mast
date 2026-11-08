@@ -3,7 +3,7 @@
 //! ↑/↓, ↩, Esc. A real menu: the chip never cycles.
 use std::rc::Rc;
 
-use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*};
 
 use super::LinearPanel;
 use crate::popover::choice_menu::{self, ChoiceKey, ChoiceRow};
@@ -89,19 +89,9 @@ impl LinearPanel {
             .map(|space| space.label.clone())
             .unwrap_or_default();
         let multi = self.spaces.len() > 1;
-        let chip = div()
-            .id("linear-panel-space")
-            .debug_selector(|| "linear-panel-space".into())
-            .min_w_0()
-            .truncate()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted);
+        let chip = crate::components::linear_parts::space_chip(multi, theme);
         let chip = if multi {
-            chip.px(px(4.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .hover(|el| el.text_color(theme.text).bg(theme.element_hover))
-                .child(SharedString::from(format!("{label} \u{25be}")))
+            chip.child(SharedString::from(format!("{label} \u{25be}")))
                 .tooltip(|_, cx| cx.new(|_| TextTooltip("Choose the project".into())).into())
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -131,18 +121,12 @@ impl LinearPanel {
                 pick,
                 cx,
             );
-            let card = crate::popover::popover_card(&popup)
-                .debug_selector(|| "linear-space-menu".into())
-                .w(px(220.0))
+            let card = crate::components::linear_parts::space_menu_card(&popup)
                 .on_mouse_down_out(
                     cx.listener(|this, _, window, cx| this.close_space_menu(window, cx)),
                 )
                 .child(
-                    div()
-                        .id("linear-space-menu-list")
-                        .max_h(px(280.0))
-                        .overflow_y_scroll()
-                        .child(body),
+                    crate::components::linear_parts::space_menu_list(body),
                 );
             crate::popover::anchored_menu_below(
                 "linear-space-menu",

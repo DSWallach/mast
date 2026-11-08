@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    Window, div, prelude::*,
 };
 use mast_proto::linear::{
     LINEAR_ISSUE_REFERENCE, LINEAR_PROVIDER, LinearErrorCode, LinearIssueLink, LinearIssueSummary,
@@ -76,85 +76,7 @@ pub(crate) fn create_label(destination: Option<&str>, fallback: &str) -> SharedS
     }
 }
 
-/// The issue text block every issue row shows: identifier + title, then the
-/// state dot and state · priority · assignee · project.
-pub(crate) fn issue_summary(issue: &LinearIssueSummary, theme: &Theme) -> gpui::Div {
-    let state_color = super::hex_color(&issue.state.color, theme.text_muted);
-    let mut meta = vec![issue.state.name.clone()];
-    meta.extend(super::priority_text(issue.priority, &issue.priority_label));
-    meta.extend(issue.assignee.as_ref().map(super::user_name));
-    meta.extend(issue.project.as_ref().map(|p| p.name.clone()));
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(1.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(issue.identifier.clone())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(theme.text)
-                        .child(SharedString::from(issue.title.clone())),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(theme.text_faint)
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(7.0))
-                        .rounded_full()
-                        .bg(state_color),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(meta.join(" \u{00b7} "))),
-                ),
-        )
-}
-
-/// An issue row's checkbox (`disabled`: checked and inert, e.g. an issue
-/// already added). The caller adds the click.
-pub(crate) fn issue_checkbox(
-    selector: String,
-    checked: bool,
-    disabled: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let id = selector.clone();
-    div()
-        .id(SharedString::from(id))
-        .debug_selector(move || selector.clone())
-        .flex_none()
-        .size(px(13.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(if checked { theme.accent } else { theme.border })
-        .when(checked, |el| el.bg(theme.accent))
-        .when(disabled, |el| el.opacity(0.45))
-        .when(!disabled, |el| el.cursor_pointer())
-}
+pub(crate) use crate::components::linear_parts::{issue_checkbox, issue_summary};
 
 /// One Linear-enabled Space the panel can show.
 #[derive(Debug, Clone)]
@@ -369,15 +291,7 @@ impl Focusable for LinearPanel {
 
 impl LinearPanel {
     pub(crate) fn new(state: Entity<AppState>, space_id: String, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| {
-            ComposerInput::with_context(
-                "Search issues and projects",
-                crate::composer::PALETTE_SEARCH_CONTEXT,
-                cx,
-            )
-            .with_single_line()
-            .with_text_metrics(12.0, 18.0)
-        });
+        let search = cx.new(|cx| crate::components::linear_parts::search_input("Search issues and projects", cx));
         let subscriptions = vec![cx.subscribe(&search, |_: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 cx.notify();
@@ -1088,21 +1002,7 @@ impl LinearPanel {
         label: impl Into<SharedString>,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .flex_none()
-            .max_w(px(180.0))
-            .truncate()
-            .px(px(6.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(10.5))
-            .text_color(theme.text_muted)
-            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            .child(label.into())
+        crate::components::linear_parts::small_button(id, label, theme)
     }
 
     /// A section header: click (or ↩ / Space) folds and unfolds it; with
@@ -1124,35 +1024,8 @@ impl LinearPanel {
         };
         let selector = format!("linear-section-{}", section.key());
         let click_focus = focus.clone();
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
+        crate::components::linear_parts::section_header(selector, label, open, focused, theme)
             .track_focus(&focus)
-            .mt(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .px(px(2.0))
-            .py(px(2.0))
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(11.0))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text_muted)
-            .when(focused, |el| {
-                el.bg(theme.element_hover).text_color(theme.text)
-            })
-            .hover(|el| el.text_color(theme.text))
-            .child(
-                crate::icons::icon(if open {
-                    crate::icons::ALT_ARROW_DOWN
-                } else {
-                    crate::icons::ALT_ARROW_RIGHT
-                })
-                .size(px(10.0))
-                .text_color(theme.text_muted),
-            )
-            .child(SharedString::from(label))
             .tooltip(move |_, cx| {
                 cx.new(|_| {
                     TextTooltip(if open {
@@ -1195,11 +1068,7 @@ impl LinearPanel {
     }
 
     fn quiet(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
-        div()
-            .py(px(4.0))
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.text_faint)
-            .child(text.into())
+        crate::components::linear_parts::quiet_message(theme, text, true)
     }
 
     /// The account-wide blocker (no key, rejected key, no Linear on this
@@ -1231,18 +1100,7 @@ impl LinearPanel {
                 Some("Reconnect\u{2026}"),
             )
         };
-        div()
-            .debug_selector(|| "linear-panel-blocker".into())
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .py(px(8.0))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(title)),
-            )
+        crate::components::linear_parts::blocker(theme, title)
             .when_some(button, |el, label| {
                 el.child(
                     div().child(
@@ -1264,18 +1122,7 @@ impl LinearPanel {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(error.user_text())),
-            )
+        crate::components::linear_parts::list_error(theme, error.user_text())
             .child(
                 Self::small_button(id, "Retry", theme)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_forced(cx))),
@@ -1292,22 +1139,8 @@ impl LinearPanel {
     ) -> Option<AnyElement> {
         let item_id = item_id?.to_string();
         let space_id = self.space_id.clone();
-        let selector = id.clone();
         Some(
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(3.0))
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.accent)
-                .hover(|el| el.bg(theme.element_hover))
-                .child("Linked \u{00b7} Reveal")
+            crate::components::linear_parts::linked_marker(id, theme)
                 .tooltip(|_, cx| {
                     cx.new(|_| {
                         TextTooltip(
@@ -1435,16 +1268,8 @@ impl LinearPanel {
             self.create_action_label(issue)
         };
         let click_focus = focus.clone();
-        div()
-            .id(SharedString::from(row_selector.clone()))
-            .debug_selector(move || row_selector.clone())
+        crate::components::linear_parts::issue_row(row_selector, theme)
             .when_some(focus, |el, focus| el.track_focus(&focus))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(4.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
             .when(focused, |el| el.bg(theme.element_hover))
             .hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             .cursor_grab()
@@ -1478,7 +1303,7 @@ impl LinearPanel {
                 // Mouse down on the text (not a click, so a drag still
                 // starts from the first press): focus the row; a double
                 // press creates. Buttons and the checkbox stay single-click.
-                issue_summary(issue, theme).min_w(px(90.0)).on_mouse_down(
+                issue_summary(issue, theme).on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                         if let Some(focus) = &click_focus {
@@ -1492,14 +1317,12 @@ impl LinearPanel {
             )
             .children(marker)
             .child(
-                Self::small_button(
+                crate::components::linear_parts::issue_create_action(Self::small_button(
                     SharedString::from(format!("linear-issue-create-{identifier}")),
                     create_label,
                     theme,
-                )
+                ))
                 // A long "Create under <item>" yields to the issue text.
-                .flex_shrink_1()
-                .min_w(px(44.0))
                 .debug_selector({
                     let selector = format!("linear-issue-create-{identifier}");
                     move || selector.clone()
@@ -1563,11 +1386,7 @@ impl LinearPanel {
         };
         let create_list = list.to_string();
         Some(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .py(px(4.0))
+            crate::components::linear_parts::selected_actions(theme)
                 .child(
                     Self::small_button(SharedString::from(selector.clone()), label, theme)
                         .debug_selector(move || selector.clone())
@@ -1577,10 +1396,7 @@ impl LinearPanel {
                         })),
                 )
                 .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(format!("{count} selected"))),
+                    crate::components::linear_parts::selected_count(theme, count, false),
                 )
                 .into_any_element(),
         )
@@ -1628,48 +1444,15 @@ impl LinearPanel {
         let template_space = self.space_id.clone();
         let linking = self.busy.contains(&format!("link-project:{id}"));
         let row_selector = format!("linear-project-row-{id}");
-        let header = div()
-            .id(SharedString::from(row_selector.clone()))
-            .debug_selector(move || row_selector.clone())
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(4.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
+        let header = crate::components::linear_parts::issue_row(row_selector, theme)
             .cursor_pointer()
             .hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(&toggle_id, cx)))
             .child(
-                crate::icons::icon(if open {
-                    crate::icons::ALT_ARROW_DOWN
-                } else {
-                    crate::icons::ALT_ARROW_RIGHT
-                })
-                .size(px(10.0))
-                .text_color(theme.text_muted),
+                crate::components::linear_parts::project_disclosure(theme, open),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(project.name.clone())),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(meta.join(" \u{00b7} "))),
-                    ),
+                crate::components::linear_parts::project_summary(project.name.clone(), meta.join(" \u{00b7} "), theme),
             )
             .children(marker)
             .child(
@@ -1693,7 +1476,7 @@ impl LinearPanel {
             );
         let mut column = div().flex().flex_col().child(header);
         if open {
-            let mut body = div().flex().flex_col().pl(px(14.0));
+            let mut body = crate::components::linear_parts::project_body();
             let template_button = div().flex().child(
                 Self::small_button(
                     SharedString::from(format!("linear-project-template-{id}")),
@@ -1770,47 +1553,19 @@ impl LinearPanel {
                 let parent = dest.item_id.clone();
                 let selector =
                     format!("linear-parent-{}", dest.item_id.as_deref().unwrap_or("top"));
-                div()
-                    .id(("linear-parent", ix))
-                    .debug_selector(move || selector.clone())
-                    .px(px(6.0))
-                    .py(px(3.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text)
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(SharedString::from(label))
+                crate::components::linear_parts::parent_row(ix, selector, label, theme)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.choose_parent(parent.clone(), cx)),
                     )
             });
         Some(
-            div()
-                .debug_selector(|| "linear-parent-picker".into())
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .p(px(6.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.accent.opacity(0.6))
+            crate::components::linear_parts::parent_picker(theme)
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .child(
-                            div()
-                                .flex_1()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(if count == 1 {
-                                    "Create under\u{2026}".to_string()
-                                } else {
-                                    format!("Create {count} items under\u{2026}")
-                                })),
+                            crate::components::linear_parts::parent_picker_title(count, theme),
                         )
                         .child(
                             Self::small_button("linear-parent-cancel", "Cancel", theme).on_click(
@@ -1822,13 +1577,7 @@ impl LinearPanel {
                         ),
                 )
                 .child(
-                    div()
-                        .id("linear-parent-list")
-                        .max_h(px(220.0))
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .children(rows),
+                    crate::components::linear_parts::parent_list(rows),
                 )
                 .into_any_element(),
         )
@@ -1843,18 +1592,7 @@ struct LinearDragGhost {
 impl Render for LinearDragGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        div()
-            .max_w(px(260.0))
-            .px(px(8.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text)
-            .truncate()
-            .child(self.title.clone())
+        crate::components::linear_parts::drag_ghost(self.title.clone(), theme)
     }
 }
 
@@ -1867,58 +1605,17 @@ impl Render for LinearPanel {
             .snapshot()
             .map(|snapshot| LinkedIndex::from_snapshot(snapshot))
             .unwrap_or_default();
-        let header = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(14.0))
-            .pt(px(10.0))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child("Linear"),
-            )
+        let header = crate::components::linear_parts::panel_header(&theme)
             .child(self.render_space_chip(&theme, cx))
             .child(
-                div()
-                    .id("linear-panel-refresh")
+                crate::components::linear_parts::header_icon("linear-panel-refresh", crate::icons::REFRESH, &theme)
                     .debug_selector(|| "linear-panel-refresh".into())
-                    .flex_none()
-                    .size(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .child(
-                        crate::icons::icon(crate::icons::REFRESH)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    )
                     .tooltip(|_, cx| cx.new(|_| TextTooltip("Refresh from Linear".into())).into())
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_forced(cx))),
             )
             .when(!self.embedded, |el| {
                 el.child(
-                    div()
-                        .id("linear-panel-close")
-                        .flex_none()
-                        .size(px(22.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .hover(|el| el.bg(theme.element_hover))
-                        .child(
-                            crate::icons::icon(crate::icons::CLOSE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        )
+                    crate::components::linear_parts::header_icon("linear-panel-close", crate::icons::CLOSE, &theme)
                         .hint(
                             "Hide the Linear panel",
                             HintKey::Command(crate::work_outline::WorkOutlineCommand::OpenLinear),
@@ -1926,36 +1623,12 @@ impl Render for LinearPanel {
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(LinearPanelEvent::Close))),
                 )
             });
-        let search = div()
-            .mx(px(14.0))
-            .mt(px(8.0))
-            .px(px(6.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(theme.border)
+        let search = crate::components::linear_parts::panel_search(&theme)
             .child(self.search.clone());
-        let mut body = div()
-            .id("linear-panel-body")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .px(px(14.0))
-            .py(px(8.0));
+        let mut body = crate::components::linear_parts::panel_body(&theme);
         if let Some(notice) = self.notice.clone() {
             body = body.child(
-                div()
-                    .debug_selector(|| "linear-panel-notice".into())
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(if notice.error {
-                        theme.warning
-                    } else {
-                        theme.text_muted
-                    })
-                    .child(SharedString::from(notice.text)),
+                crate::components::linear_parts::panel_notice(&theme, notice.text, notice.error),
             );
         }
         if let Some(picker) = self.render_picker(&theme, cx) {

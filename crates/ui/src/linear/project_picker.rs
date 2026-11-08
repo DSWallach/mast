@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    Window, prelude::*,
 };
 use mast_proto::linear::{LinearIssueLink, LinearIssueSummary};
 use mast_proto::{
@@ -33,9 +33,6 @@ use crate::state::AppState;
 use crate::theme::Theme;
 use crate::work_outline::actions::OperationSlot;
 use crate::work_outline::chips::TextTooltip;
-
-/// Width of the picker card.
-pub(crate) const PICKER_W: f32 = 440.0;
 
 /// Whether `id` reads as a Linear UUID (a project id) rather than a URL slug.
 fn looks_like_uuid(id: &str) -> bool {
@@ -82,15 +79,7 @@ impl ProjectIssuePicker {
         reference: WorkItemExternalReferenceView,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| {
-            ComposerInput::with_context(
-                "Search this project\u{2019}s issues",
-                crate::composer::PALETTE_SEARCH_CONTEXT,
-                cx,
-            )
-            .with_single_line()
-            .with_text_metrics(12.0, 18.0)
-        });
+        let search = cx.new(|cx| crate::components::linear_parts::search_input("Search this project\u{2019}s issues", cx));
         let subscriptions = vec![cx.subscribe(&search, |_: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 cx.notify();
@@ -405,22 +394,14 @@ impl ProjectIssuePicker {
         let row_selector = format!("linear-add-issues-row-{identifier}");
         let click_id = identifier.clone();
         let clickable = reveal.is_none();
-        div()
-            .id(SharedString::from(row_selector.clone()))
-            .debug_selector(move || row_selector.clone())
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(4.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
+        crate::components::linear_parts::issue_row(row_selector, theme)
             .when(clickable, |el| {
                 el.cursor_pointer()
                     .hover(|el| el.bg(theme.element_hover.opacity(0.6)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(&click_id, cx)))
             })
             .child(checkbox)
-            .child(issue_summary(issue, theme).min_w(px(90.0)))
+            .child(issue_summary(issue, theme))
             .children(reveal)
             .into_any_element()
     }
@@ -441,19 +422,9 @@ impl Render for ProjectIssuePicker {
             .count();
         let count = self.to_create().len();
         let item_title = self.item_title();
-        let mut list = div()
-            .id("linear-add-issues-list")
-            .max_h(px(320.0))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(px(1.0));
+        let mut list = crate::components::linear_parts::picker_list();
         let quiet = |text: String| {
-            div()
-                .py(px(6.0))
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(text))
+            crate::components::linear_parts::quiet_message(&theme, SharedString::from(text), false)
         };
         match &self.issues {
             Load::Loading => list = list.child(quiet("Loading\u{2026}".into())),
@@ -482,21 +453,8 @@ impl Render for ProjectIssuePicker {
             "One work item per checked issue, as the last children of \u{201c}{item_title}\u{201d}"
         )
         .into();
-        div()
-            .id("linear-add-issues")
-            .debug_selector(|| "linear-add-issues".into())
+        crate::components::linear_parts::picker_frame(&theme)
             .track_focus(&self.focus)
-            .occlude()
-            .w(px(PICKER_W))
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .p(px(10.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_dialog)
-            .shadow_lg()
             .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
@@ -504,37 +462,7 @@ impl Render for ProjectIssuePicker {
                 }
             }))
             .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(13.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(format!(
-                                        "Add issues from {}",
-                                        self.project_name
-                                    ))),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!(
-                                        "Open issues become work items under \u{201c}{item_title}\u{201d}"
-                                    ))),
-                            ),
-                    )
+                crate::components::linear_parts::picker_header(&theme, &self.project_name, &item_title)
                     .child(
                         LinearPanel::small_button("linear-add-issues-cancel", "Cancel", &theme)
                             .debug_selector(|| "linear-add-issues-cancel".into())
@@ -542,29 +470,17 @@ impl Render for ProjectIssuePicker {
                     ),
             )
             .child(
-                div()
-                    .px(px(6.0))
-                    .py(px(3.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(theme.border)
+                crate::components::linear_parts::search_frame(&theme)
                     .child(self.search.clone()),
             )
             .child(list)
             .when_some(self.error.clone(), |el, error| {
                 el.child(
-                    div()
-                        .debug_selector(|| "linear-add-issues-error".into())
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.warning)
-                        .child(SharedString::from(error)),
+                    crate::components::linear_parts::picker_error(&theme, error),
                 )
             })
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
+                crate::components::linear_parts::picker_actions(&theme)
                     .child(
                         LinearPanel::small_button("linear-add-issues-select-all", "Select all", &theme)
                             .debug_selector(|| "linear-add-issues-select-all".into())
@@ -581,11 +497,7 @@ impl Render for ProjectIssuePicker {
                             .on_click(cx.listener(|this, _, _, cx| this.select_all(cx))),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(format!("{count} selected"))),
+                        crate::components::linear_parts::selected_count(&theme, count, true),
                     )
                     .child(
                         LinearPanel::small_button("linear-add-issues-create", create_label, &theme)

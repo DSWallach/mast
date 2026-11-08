@@ -185,6 +185,9 @@ pub fn render(
             let view: AnyView = match screen.as_str() {
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
+                "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
+                "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
+                "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

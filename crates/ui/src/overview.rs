@@ -6949,6 +6949,17 @@ impl Overview {
         self.outline.update(cx, |outline, cx| outline.select(&row_key::item("fixture-space", "w-api"), cx));
     }
 
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn show_snapshot_linear(&mut self, cx: &mut Context<Self>) {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
+        snapshot.external_references.clear();
+        snapshot.space_settings.linear_enabled = true;
+        self.set_outline_loads([("fixture-space".into(), WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)))].into_iter().collect(), cx);
+        self.set_mode(OverviewMode::Outline, cx);
+        self.sync_outline(cx);
+        self.open_snapshot_linear(cx);
+    }
+
     /// Outline navigation bindings for fixtures that run without a Shell.
     #[doc(hidden)]
     pub fn work_outline_key_bindings() -> Vec<gpui::KeyBinding> {
