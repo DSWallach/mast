@@ -1026,7 +1026,7 @@ pub fn render_block(
                                         crate::components::conversation_markdown_bullet_size(theme),
                                     ))
                                     .rounded_full()
-                                    .bg(theme.accent),
+                                    .bg(crate::components::conversation_markdown_bullet_color(theme)),
                             )
                             .into_any_element(),
                     }
