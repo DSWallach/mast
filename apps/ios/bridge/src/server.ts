@@ -39,10 +39,14 @@ function reply(response: ServerResponse, status: number, body: unknown): void {
 /** This server exposes fixed operations only; no request can select an RPC method. */
 const denySpaces: SpaceAccess = { spaces: async () => [], chatSpace: async () => null, requestSpace: async () => null, chatAllowed: async () => false, requestAllowed: async () => false };
 const denyAudit: AuditLog = { append: async () => { throw new Error("audit unavailable"); } };
-export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, audit: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader, minuteLimit = 10) {
+export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, auditSink: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader, minuteLimit = 10, tailscaleUser?: string) {
   const writes = new Map<string, number[]>();
   return createServer(async (request, response) => {
     try {
+      const login = request.headers["tailscale-user-login"];
+      const audit: AuditLog = { append: record => auditSink.append({ ...record, ...(typeof login === "string" && login.length <= 256 ? { tailscaleLogin: login } : {}) }) };
+      if (request.headers["tailscale-funnel-request"] !== undefined) return reply(response, 403, { error: "funnel forbidden" });
+      if (tailscaleUser && (typeof login !== "string" || login !== tailscaleUser)) return reply(response, 403, { error: "identity forbidden" });
       // Browsers cannot invoke the bridge from an unrelated origin.
       if (request.headers.origin) return reply(response, 403, { error: "origin forbidden" });
       const path = request.url ?? "";
