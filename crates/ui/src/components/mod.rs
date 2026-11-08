@@ -99,6 +99,13 @@ fn is_industrial(theme: &Theme) -> bool {
     theme.ui_style.controls == crate::ui_style::ControlVariant::Key
 }
 
+/// A quiet theme-derived accent for Horizon chrome, distinct from agent identity.
+pub(crate) fn horizon_primary_fill(theme: &Theme) -> gpui::Hsla {
+    let mut fill = theme.accent;
+    fill.s = fill.s.min(0.22);
+    fill
+}
+
 fn layout_type_adjustment(theme: &Theme) -> f32 {
     match theme.ui_style.layout {
         crate::ui_style::UiLayout::Minimal => 0.0,
@@ -686,7 +693,7 @@ pub fn toolbar_control<T: gpui::Styled>(element: T, theme: &Theme, primary: bool
             .items_center()
     } else if is_horizon(theme) {
         let fill = if primary {
-            theme.accent
+            horizon_primary_fill(theme)
         } else {
             gpui::transparent_black()
         };
@@ -1102,6 +1109,37 @@ pub fn section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizon_primary_chrome_uses_a_muted_theme_colour() {
+        for (appearance, id) in [(crate::theme::Appearance::Light, "mast-light"), (crate::theme::Appearance::Dark, "mast-dark"), (crate::theme::Appearance::Light, "horizon-light"), (crate::theme::Appearance::Dark, "horizon-dark")] {
+            let theme = Theme::for_selection(appearance, id, Default::default(), mast_theme::SurfacePreference::Opaque);
+            let fill = horizon_primary_fill(&theme);
+            assert!(fill.s <= 0.22);
+            assert_eq!(fill.h, theme.accent.h);
+            assert!(crate::theme::contrast_ratio(theme.identity_text(fill), fill) >= 4.5);
+        }
+    }
+
+    #[gpui::test]
+    fn horizon_option_cards_mark_selection(cx: &mut gpui::TestAppContext) {
+        struct Cards;
+        impl gpui::Render for Cards {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                let theme = Theme::of(cx);
+                div().flex().children([("Selected", true), ("Other", false)].into_iter().map(|(label, selected)| {
+                    settings_option_card(theme, crate::icons::MONITOR, label, selected, div().size_full().into_any_element())
+                }))
+            }
+        }
+        for style in crate::ui_style::UiStyleId::ALL {
+            cx.update(|cx| cx.set_global(Theme::dark().with_ui_style(crate::ui_style::UiStyle::of(*style))));
+            let (_, window) = cx.add_window_view(|_, _| Cards);
+            window.run_until_parked();
+            assert_eq!(window.debug_bounds("settings-option-selected-Selected").is_some(), *style == crate::ui_style::UiStyle::HORIZON.id);
+            assert!(window.debug_bounds("settings-option-selected-Other").is_none());
+        }
+    }
 
     #[test]
     fn horizon_list_bullets_follow_agent_reply_foreground() {
