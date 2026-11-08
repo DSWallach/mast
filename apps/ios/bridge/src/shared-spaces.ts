@@ -6,27 +6,36 @@ import { withStateLock } from "./state-lock.js";
 
 export type Space = { id: string; name?: string; path: string };
 export function spaceName(space: Space): string { return space.name?.trim() || space.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || space.path; }
+export type Capability = "view" | "answer" | "send";
 export class SharedSpaces {
   constructor(private readonly directory: string) {}
-  private async readIds(): Promise<Set<string>> {
+  private async readIds(): Promise<Map<string, Capability>> {
     try {
       const value: unknown = JSON.parse(await readFile(join(this.directory, "shared-spaces.json"), "utf8"));
-      if (!Array.isArray(value) || !value.every(id => typeof id === "string" && id.length > 0 && id.length <= 256)) throw new Error("invalid shared spaces");
-      return new Set(value);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set(); throw error; }
+      if (!Array.isArray(value)) throw new Error("invalid shared spaces");
+      const entries = new Map<string, Capability>();
+      for (const entry of value) {
+        const id = typeof entry === "string" ? entry : entry?.id, allow = typeof entry === "string" ? "view" : entry?.allow;
+        if (typeof id !== "string" || !id.length || id.length > 256 || !["view", "answer", "send"].includes(allow) || entries.has(id)) throw new Error("invalid shared spaces");
+        entries.set(id, allow);
+      }
+      return entries;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map(); throw error; }
   }
-  async ids(): Promise<Set<string>> { return withStateLock(this.directory, "spaces", () => this.readIds()); }
-  async set(id: string, share: boolean): Promise<void> {
+  async ids(): Promise<Set<string>> { return new Set((await withStateLock(this.directory, "spaces", () => this.readIds())).keys()); }
+  async allows(id: string, level: Capability): Promise<boolean> { const entries = await withStateLock(this.directory, "spaces", () => this.readIds()); const rank = {view: 0, answer: 1, send: 2}; const allow = entries.get(id); return allow !== undefined && rank[allow] >= rank[level]; }
+  async set(id: string, share: boolean, allow: Capability = "view"): Promise<void> {
     await withStateLock(this.directory, "spaces", async () => {
-      const ids = await this.readIds(); if (share) ids.add(id); else ids.delete(id);
+      const ids = await this.readIds(); if (share) ids.set(id, allow); else ids.delete(id);
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const temporary = join(this.directory, `.spaces-${randomBytes(12).toString("hex")}`);
-      await writeFile(temporary, JSON.stringify([...ids]), { mode: 0o600, flag: "wx" });
+      await writeFile(temporary, JSON.stringify([...ids].map(([id, allow]) => ({id, allow}))), { mode: 0o600, flag: "wx" });
       await rename(temporary, join(this.directory, "shared-spaces.json"));
     });
   }
 }
 export interface SpaceAccess {
+  allows?(id: string, level: Capability): Promise<boolean>;
   spaces(): Promise<{ id: string; name: string }[]>;
   chatSpace(id: string): Promise<string | null>;
   requestSpace(id: string): Promise<string | null>;
@@ -58,6 +67,7 @@ export function engineSpaceAccess(url: string, shared: SharedSpaces): SpaceAcces
   return {
     async spaces() { return (await sharedSpaces()).map(space => ({ id: space.id, name: spaceName(space) })); },
     chatSpace, requestSpace,
+    allows: (id, level) => shared.allows(id, level),
     async chatAllowed(id) { return Boolean(await chatSpace(id)); },
     async requestAllowed(id) { return Boolean(await requestSpace(id)); },
   };

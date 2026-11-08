@@ -39,7 +39,8 @@ function reply(response: ServerResponse, status: number, body: unknown): void {
 /** This server exposes fixed operations only; no request can select an RPC method. */
 const denySpaces: SpaceAccess = { spaces: async () => [], chatSpace: async () => null, requestSpace: async () => null, chatAllowed: async () => false, requestAllowed: async () => false };
 const denyAudit: AuditLog = { append: async () => { throw new Error("audit unavailable"); } };
-export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, audit: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader) {
+export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, audit: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader, minuteLimit = 10) {
+  const writes = new Map<string, number[]>();
   return createServer(async (request, response) => {
     try {
       // Browsers cannot invoke the bridge from an unrelated origin.
@@ -59,6 +60,11 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       const match = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(authorization);
       const device = match ? await tokens.authenticate(tokenDigest(match[1])) : null;
       if (!device) return reply(response, 401, { error: "unauthorized" });
+      if (["POST", "DELETE"].includes(request.method ?? "")) {
+        const now = Date.now(), recent = (writes.get(device.id) ?? []).filter(time => now - time < 86400000);
+        if (recent.length >= 200 || recent.filter(time => now - time < 60000).length >= minuteLimit) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "write", outcome: "rate-limited"}); return reply(response, 429, {error: "rate limited"}); }
+        recent.push(now); writes.set(device.id, recent);
+      }
       const events = /^\/events(?:\?chat=([A-Za-z0-9_-]{1,128}))?$/.exec(path);
       if (request.method === "GET" && events && eventsUrl) { await streamEvents(response, eventsUrl, access, events[1], async () => !!(await tokens.authenticate(tokenDigest(match![1]))), appearance); return; }
       if (request.method === "GET" && path === "/appearance") return reply(response, 200, await appearance());
@@ -104,6 +110,7 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (request.method === "POST" && answer && replies) {
         const spaceId = await access.requestSpace(answer[1]);
         if (!spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: answer[2], targetId: answer[1], outcome: "denied" }); return reply(response, 403, { error: "space not shared", noSpacesShared: (await access.spaces()).length === 0 }); }
+        if (!access.allows || !(await access.allows(spaceId, "answer"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: answer[2], targetId: answer[1], spaceId, outcome: "denied"}); return reply(response, 403, {error: "capability denied"}); }
         if (request.headers["content-type"] !== "application/json") return reply(response, 415, { error: "json required" });
         const key = request.headers["idempotency-key"];
         if (typeof key !== "string") return reply(response, 400, { error: "idempotency key required" });
@@ -128,6 +135,7 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (request.method === "POST" && stop && backend.interrupt) {
         const spaceId = await access.chatSpace(stop[1]);
         if (!spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], outcome: "denied" }); return reply(response, 403, { error: "space not shared" }); }
+        if (!access.allows || !(await access.allows(spaceId, "send"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "denied"}); return reply(response, 403, {error: "capability denied"}); }
         if (request.headers["content-type"] !== "application/json" || Object.keys(await readBody(request)).length) return reply(response, 400, { error: "invalid request" });
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "started" });
         try { await backend.interrupt(stop[1], spaceId); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "error-or-unknown" }); throw error; }
@@ -152,6 +160,7 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (request.method === "POST" && message) {
         const spaceId = await access.chatSpace(message[1]);
         if (!spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], outcome: "denied" }); return reply(response, 403, { error: "space not shared", noSpacesShared: (await access.spaces()).length === 0 }); }
+        if (!access.allows || !(await access.allows(spaceId, "send"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "denied"}); return reply(response, 403, {error: "capability denied"}); }
         if (request.headers["content-type"] !== "application/json") return reply(response, 415, { error: "json required" });
         const body = await readBody(request);
         if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 12000) return reply(response, 400, { error: "invalid text" });

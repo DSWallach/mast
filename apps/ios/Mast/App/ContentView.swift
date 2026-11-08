@@ -11,7 +11,7 @@ struct ContentView: View {
     @State private var confirmExternal = false
     @StateObject private var model = Companion()
     @StateObject private var appLock = AppLock()
-    @AppStorage("lockTimeoutSeconds") private var lockTimeout = 60
+    @AppStorage("lockTimeoutSeconds") private var lockTimeout = 0
     @Environment(\.scenePhase) private var phase
     @Environment(\.colorScheme) private var scheme
     var body: some View { ZStack { VStack(spacing: 0) {

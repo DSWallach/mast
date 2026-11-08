@@ -7,7 +7,7 @@ struct ConnectScreen: View {
     @ObservedObject var model: Companion
     @Environment(\.colorScheme) private var scheme
     @Environment(\.snapshotRendering) private var snapshot
-    @AppStorage("lockTimeoutSeconds") private var lockTimeout = 60
+    @AppStorage("lockTimeoutSeconds") private var lockTimeout = 0
     @AppStorage("quickActions") private var quickActions = false
     @AppStorage("mastStyleChoice") private var styleChoice = "match"
     @AppStorage("mastAppearanceChoice") private var appearanceChoice = "system"
@@ -30,7 +30,7 @@ struct ConnectScreen: View {
         else { Toggle("Demo mode", isOn: $model.demo).tint(style.muted(scheme)).onChange(of: model.demo) { _, demo in if !demo { model.hasLoaded = false; model.requests = []; model.chats = [] }; Task { await model.refresh() } }.font(.system(size: 14)); Toggle("Show worker chats", isOn: $model.showWorkers).tint(style.muted(scheme)).font(.system(size: 14)) }
         if snapshot { HStack { Text("Reply & resolve"); Spacer(); Text(model.replyEnabled ? "On" : "Off").foregroundStyle(style.muted(scheme)) }.font(.system(size: 14)) } else { Toggle("Reply & resolve", isOn: $model.replyEnabled).tint(style.muted(scheme)).font(.system(size: 14)) }
         if !model.demo { VStack(alignment: .leading, spacing: 12) { Text("SHARED SPACES").font(.system(size: 10, weight: .bold)).tracking(1.3).foregroundStyle(style.muted(scheme)); if model.sharedSpaces.isEmpty { Text("No Spaces shared — run `spaces share` on your Mac").font(.system(size: 13)) }; ForEach(model.sharedSpaces) { space in Toggle(space.name, isOn: Binding(get: { !model.hiddenSpaceIds.contains(space.id) }, set: { enabled in if enabled { model.hiddenSpaceIds.remove(space.id) } else { model.hiddenSpaceIds.insert(space.id) } })).tint(style.muted(scheme)).font(.system(size: 14)) } } }
-        if snapshot { HStack { Text("Quick actions"); Spacer(); Text(quickActions ? "On" : "Off").foregroundStyle(style.muted(scheme)) }.font(.system(size: 14)); HStack { Text("Lock after"); Spacer(); Text("1 minute").foregroundStyle(style.muted(scheme)) }.font(.system(size: 14)) }
+        if snapshot { HStack { Text("Quick actions"); Spacer(); Text(quickActions ? "On" : "Off").foregroundStyle(style.muted(scheme)) }.font(.system(size: 14)); HStack { Text("Lock after"); Spacer(); Text(lockTimeout == 0 ? "Immediately" : "\(lockTimeout / 60) minutes").foregroundStyle(style.muted(scheme)) }.font(.system(size: 14)) }
         else { Toggle("Quick actions", isOn: $quickActions).tint(style.muted(scheme)).font(.system(size: 14)); Picker("Lock after", selection: $lockTimeout) { Text("Immediately").tag(0); Text("1 minute").tag(60); Text("5 minutes").tag(300); Text("15 minutes").tag(900) }.font(.system(size: 14)) }
     }.font(style.ui(14)).foregroundStyle(style.ink(scheme)).padding(.horizontal, 22).padding(.top, 24) }.background(style.surface(scheme)).toolbar(.hidden, for: .navigationBar).confirmationDialog("Disconnect before changing the bridge?", isPresented: $confirmChange) { Button("Disconnect and continue", role: .destructive) { model.forget(); if scanAfterChange { scanning = true } }; Button("Cancel", role: .cancel) {} } message: { Text("The saved device token will be cleared.") }.sheet(isPresented: $scanning) { QRScanner { value in scanning = false; if let pair = parsePairingQR(value) { model.address = pair.url; model.pairingCode = pair.code; scanError = "" } else { scanError = "Invalid pairing code." } } } }
 }

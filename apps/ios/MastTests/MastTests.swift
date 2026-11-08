@@ -12,6 +12,8 @@ private final class MemoryDecisionStore: DecisionStore {
     func read(_ requestId: String) throws -> PendingDecision? { values[requestId] }
     func save(_ requestId: String, decision: PendingDecision) throws { values[requestId] = decision }
 }
+private struct RefusingAuthenticator: DeviceAuthenticator { func authenticate(completion: @escaping (AuthenticationResult) -> Void) { completion(.failure) } }
+private struct ImmediateAuthenticator: DeviceAuthenticator { func authenticate(completion: @escaping (AuthenticationResult) -> Void) { completion(.success) } }
 private final class MockAuthenticator: DeviceAuthenticator {
     var completion: ((AuthenticationResult) -> Void)?
     func authenticate(completion: @escaping (AuthenticationResult) -> Void) { self.completion = completion }
@@ -36,7 +38,7 @@ final class MastTests: XCTestCase {
     private func model(_ credential: MemoryCredential) -> Companion {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, configuration: configuration)
+        let model = Companion(credential: credential, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true })
         model.demo = false
         return model
     }
@@ -71,6 +73,17 @@ final class MastTests: XCTestCase {
         """.utf8))
         XCTAssertEqual(request.options, ["Yes"])
         XCTAssertEqual(request.origin, "Chat")
+    }
+    func testWriteRequiresFreshAuthentication() async throws {
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
+        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAuthenticator: RefusingAuthenticator(), actionAllowed: { true }); model.demo = false
+        var sent = false; StubProtocol.reply = { _ in sent = true; return (200, "{}") }
+        let chat = Chat(id: "c", title: "Chat", space: "S", status: "working")
+        do { _ = try await model.send(chat, text: "hello"); XCTFail("expected authentication failure") } catch {}
+        do { try await model.stop(chat); XCTFail("expected authentication failure") } catch {}
+        do { _ = try await model.answer("r", outcome: "answered", text: "yes"); XCTFail("expected authentication failure") } catch {}
+        XCTAssertFalse(sent)
     }
     func testCredentialIsNeverSentToAnotherOrigin() async throws {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "https://good.ts.net", token: "secret"))
@@ -165,7 +178,7 @@ final class MastTests: XCTestCase {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false
         var key: String?
         StubProtocol.reply = { request in
             key = request.value(forHTTPHeaderField: "Idempotency-Key")
@@ -187,7 +200,7 @@ final class MastTests: XCTestCase {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration); model.demo = false
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false
         var bodies: [[String: String]] = []
         StubProtocol.reply = { request in
             let data: Data

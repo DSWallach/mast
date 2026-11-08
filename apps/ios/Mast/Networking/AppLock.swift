@@ -8,7 +8,7 @@ enum AuthenticationResult: Equatable { case success, failure, noPasscode }
 protocol DeviceAuthenticator { func authenticate(completion: @escaping (AuthenticationResult) -> Void) }
 struct LocalDeviceAuthenticator: DeviceAuthenticator {
     func authenticate(completion: @escaping (AuthenticationResult) -> Void) {
-        let context = LAContext(); var error: NSError?
+        let context = LAContext(); context.touchIDAuthenticationAllowableReuseDuration = 0; var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { completion(error?.code == LAError.passcodeNotSet.rawValue ? .noPasscode : .failure); return }
         context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock Mast") { success, _ in DispatchQueue.main.async { completion(success ? .success : .failure) } }
     }

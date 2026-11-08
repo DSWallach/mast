@@ -70,7 +70,9 @@ final class Companion: ObservableObject {
     private let credential: any CredentialStore
     private let decisions: any DecisionStore
     private let configuration: URLSessionConfiguration
-    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral) { self.credential = credential; self.decisions = decisions; self.configuration = configuration; if let stored = credential.read() { address = stored.origin; isPaired = true } }
+    private let actionAuthenticator: any DeviceAuthenticator
+    private let actionAllowed: @MainActor () -> Bool
+    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAuthenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), actionAllowed: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) { self.actionAllowed = actionAllowed; self.actionAuthenticator = actionAuthenticator; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if let stored = credential.read() { address = stored.origin; isPaired = true } }
     @Published var demo = true
     @Published private(set) var isPaired = false
     @Published var address = "http://127.0.0.1:27655"
@@ -217,14 +219,20 @@ final class Companion: ObservableObject {
         if demo { return TranscriptPage(messages: offset == 0 ? Demo.messages : [], olderRemaining: 0, nextOffset: Demo.messages.count) }
         return try await request("/chats/\(chat.id)/transcript?offset=\(offset)")
     }
+    private func authenticateWrite() async throws {
+        let result = await withCheckedContinuation { continuation in actionAuthenticator.authenticate { continuation.resume(returning: $0) } }
+        guard result == .success, actionAllowed() else { throw BridgeError.credential }
+    }
     func send(_ chat: Chat, text: String) async throws -> String {
         if demo { return "Demo only · message was not sent" }
+        try await authenticateWrite()
         let result: SendReply = try await request("/chats/\(chat.id)/messages", body: ["text": text])
         if result.delivery == "simulated" { return "Fixture only · message was not sent" }
         return result.delivery == "queued" ? "Queued" : "Accepted"
     }
     func stop(_ chat: Chat) async throws {
         if demo { return }
+        try await authenticateWrite()
         let _: StopReply = try await request("/chats/\(chat.id)/stop", body: [:])
     }
     func pendingDecision(_ requestId: String) throws -> PendingDecision? { demo ? nil : try decisions.read(requestId) }
@@ -233,6 +241,7 @@ final class Companion: ObservableObject {
         var decision = existing ?? PendingDecision(key: UUID().uuidString, outcome: outcome, text: text, optionId: optionId)
         guard decision.outcome == outcome && decision.text == text && decision.optionId == optionId else { throw BridgeError.response }
         if demo { guard existing == nil else { throw BridgeError.response }; decision.phase = "resolved"; return decision }
+        try await authenticateWrite()
         try decisions.save(requestId, decision: decision)
         var body = ["outcome": decision.outcome]
         if let text = decision.text { body["text"] = text }; if let optionId = decision.optionId { body["optionId"] = optionId }

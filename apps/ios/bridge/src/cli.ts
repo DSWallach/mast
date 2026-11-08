@@ -10,7 +10,7 @@ import { engineBackend } from "./backend.js";
 import { ReplyCoordinator } from "./reply.js";
 import { FileIntentStore } from "./reply-store.js";
 import { ipcReplyEngine } from "./reply-ipc.js";
-import { SharedSpaces, engineSpaceAccess, spaceName, type Space } from "./shared-spaces.js";
+import { SharedSpaces, engineSpaceAccess, spaceName, type Space, type Capability } from "./shared-spaces.js";
 import { FileAuditLog } from "./audit.js";
 import { snapshot } from "./outline.js";
 
@@ -22,12 +22,14 @@ if (command === "spaces") {
   const spaces = await snapshot<Space[]>(url, "WatchSpaces", {}), ids = await shared.ids();
   if (!Array.isArray(spaces)) throw new Error("invalid spaces");
   const action = process.argv[3], selector = process.argv[4];
-  if (!action) for (const space of spaces) console.log(`${ids.has(space.id) ? "shared" : "not shared"}\t${space.id}\t${spaceName(space)}\t${space.path}`);
+  const allow = process.argv[5] === "--allow" ? process.argv[6] : "view";
+  if (!["view", "answer", "send"].includes(allow) || (process.argv[5] && process.argv[5] !== "--allow") || (process.argv[5] && !process.argv[6]) || process.argv[7]) throw new Error("invalid capability");
+  if (!action) for (const space of spaces) { const capability = !ids.has(space.id) ? "not shared" : await shared.allows(space.id, "send") ? "shared:send" : await shared.allows(space.id, "answer") ? "shared:answer" : "shared:view"; console.log(`${capability}\t${space.id}\t${spaceName(space)}\t${space.path}`); }
   else if ((action === "share" || action === "unshare") && selector) {
     const matches = spaces.filter(space => space.id === selector || spaceName(space) === selector);
     if (matches.length !== 1) throw new Error("space not found or ambiguous");
     await audit.append({ timestamp: new Date().toISOString(), deviceId: "mac", action: `spaces-${action}`, spaceId: matches[0].id, outcome: "started" });
-    await shared.set(matches[0].id, action === "share");
+    await shared.set(matches[0].id, action === "share", allow as Capability);
     await audit.append({ timestamp: new Date().toISOString(), deviceId: "mac", action: `spaces-${action}`, spaceId: matches[0].id, outcome: "completed" });
     console.log(`${spaceName(matches[0])}: ${action === "share" ? "shared" : "not shared"}`);
   } else throw new Error("Usage: spaces [share|unshare <id|name>]");
