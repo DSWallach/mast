@@ -3,23 +3,63 @@ import { readRequests } from "./outline.js";
 import type { BridgeBackend } from "./server.js";
 
 type ChatTool = typeof callChatTool;
+type Message = { id: string; role: string; text: string };
+export function messageAuthor(message: Message): "user" | "agent" | "system" | "relay" {
+  const text = message.text.trimStart();
+  if (/^\[Message from Mast chat\b/i.test(text)) return "relay";
+  if (/^(\[Mast system message\b|Worker updates:|\[?auto[- ]continue\b)/i.test(text)) return "system";
+  if (/^Re:\s*["“]/i.test(text)) return "system";
+  return message.role.toLowerCase() === "user" ? "user" : message.role.toLowerCase() === "assistant" ? "agent" : "system";
+}
 
 /** Only projected companion fields leave the bridge. */
-export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = callChatTool): BridgeBackend {
+export function engineBackend(binary: string, ipcUrl: string, call: ChatTool = callChatTool, requests: typeof readRequests = readRequests): BridgeBackend {
+  const cache = new Map<string, { revision: string; spoke: boolean }>();
+  async function page(chatId: string, offset: number) {
+    const result = await call(binary, "read_chat", { chat: chatId, limit: 40, offset, include_tools: false, include_reasoning: false });
+    if (!Array.isArray(result.messages) || typeof result.olderRemaining !== "number" || typeof result.total !== "number") throw new Error("invalid transcript");
+    const messages = result.messages.filter((message: Message) => typeof message.text === "string" && message.text.length > 0)
+      .map((message: Message) => ({ id: message.id, role: message.role, text: message.text, author: messageAuthor(message) }));
+    return { messages, olderRemaining: result.olderRemaining, nextOffset: result.total - result.olderRemaining };
+  }
+  async function spoke(chat: { id: string; lastMessageAt?: string | null }): Promise<boolean> {
+    const revision = chat.lastMessageAt ?? "";
+    const prior = cache.get(chat.id);
+    if (revision && prior && prior.revision === revision) return prior.spoke;
+    let offset = 0;
+    let found = false;
+    for (;;) {
+      const result = await page(chat.id, offset);
+      if (result.messages.some((message: { author: string }) => message.author === "user")) { found = true; break; }
+      if (result.olderRemaining <= 0) break;
+      if (result.nextOffset <= offset) throw new Error("transcript pagination did not advance");
+      offset = result.nextOffset;
+    }
+    if (cache.size >= 500) cache.delete(cache.keys().next().value!);
+    if (revision) cache.set(chat.id, { revision, spoke: found });
+    return found;
+  }
   return {
-    requests: () => readRequests(ipcUrl),
+    requests: () => requests(ipcUrl),
     chats: async () => {
-      const result = await call(binary, "list_chats", { limit: 500 });
+      const [result, openRequests] = await Promise.all([call(binary, "list_chats", { limit: 500 }), requests(ipcUrl)]);
       if (!Array.isArray(result.chats)) throw new Error("invalid chats");
-      return result.chats.filter(chat => typeof chat.status === "string" && (chat.status.startsWith("working") || chat.status === "awaitingInput")).map(chat => ({
-        id: chat.id, title: chat.title, space: chat.project?.name ?? "", status: chat.status,
+      const chats = result.chats;
+      const requestChats = new Set(openRequests.map((row: any) => row.originChatId).filter(Boolean));
+      const output = new Array(chats.length);
+      let index = 0;
+      await Promise.all(Array.from({ length: Math.min(4, chats.length) }, async () => {
+        while (index < chats.length) {
+          const current = index++; const chat = chats[current];
+          const hasRequest = requestChats.has(chat.id);
+          const isWorker = Boolean(chat.parentChatId);
+          const hasUserMessage = isWorker || hasRequest ? false : await spoke(chat);
+          output[current] = { id: chat.id, title: chat.title, space: chat.project?.name ?? "", status: chat.status, harness: chat.harness ?? null, model: chat.model ?? null, lastMessageAt: chat.lastMessageAt ?? null, isWorker, hasUserMessage, hasOpenRequest: hasRequest };
+        }
       }));
+      return output;
     },
-    transcript: async chatId => {
-      const result = await call(binary, "read_chat", { chat: chatId, limit: 40, include_tools: false, include_reasoning: false });
-      if (!Array.isArray(result.messages)) throw new Error("invalid transcript");
-      return result.messages.filter(message => typeof message.text === "string" && message.text.length > 0).map(message => ({ id: message.id, role: message.role, text: message.text }));
-    },
+    transcript: page,
     send: async (chatId, text) => {
       const result = await call(binary, "send_message", { chat: chatId, text, mode: "auto", wait: false });
       const sent = result.sent as { delivery?: string } | undefined;

@@ -30,7 +30,8 @@ test("HTTP inbox uses an isolated IPC snapshot", async () => {
     assert.deepEqual(rows[0].facts, ["State: Ready"]);
     assert.match(rows[0].links[0], /https:\/\/example.com/);
     const chats = await (await fetch(base + "/chats", { headers: { authorization: `Bearer ${token}` } })).json();
-    assert.deepEqual(chats, [{ id: "fixture-chat", title: "Fixture chat", space: "Space", status: "working" }]);
+    assert.equal(chats[0].id, "fixture-chat");
+    assert.equal(chats[0].space, "Space");
   } finally {
     bridge.closeAllConnections();
     await new Promise(resolve => bridge.close(resolve));

@@ -88,4 +88,51 @@ final class MastTests: XCTestCase {
         XCTAssertNil(credential.read())
         XCTAssertTrue(model.connection.contains("pair again"))
     }
+    func testTranscriptPagesAndChatVisibility() async throws {
+        let credential = MemoryCredential(); try credential.save("token")
+        let model = model(credential)
+        StubProtocol.reply = { request in
+            XCTAssertEqual(request.url?.query, "offset=40")
+            return (200, "{\"messages\":[{\"id\":\"m\",\"role\":\"user\",\"text\":\"Worker updates: done\",\"author\":\"system\"}],\"olderRemaining\":0,\"nextOffset\":41}")
+        }
+        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working")
+        let page = try await model.transcript(chat, offset: 40)
+        XCTAssertEqual(page.messages.first?.author, "system")
+        XCTAssertEqual(page.nextOffset, 41)
+        XCTAssertFalse(Chat(id: "w", title: "Worker", space: "", status: "idle", isWorker: true).visible(showWorkers: false))
+        XCTAssertTrue(Chat(id: "w", title: "Worker", space: "", status: "idle", isWorker: true).visible(showWorkers: true))
+        XCTAssertFalse(Chat(id: "n", title: "No user", space: "", status: "idle", hasUserMessage: false).visible(showWorkers: true))
+        XCTAssertTrue(Chat(id: "r", title: "Request", space: "", status: "idle", isWorker: true, hasOpenRequest: true).visible(showWorkers: false))
+    }
+}
+
+import SwiftUI
+
+@MainActor
+final class HorizonSnapshotTests: XCTestCase {
+    func testRenderScreens() throws {
+        let model = Companion(credential: MemoryCredential())
+        let offline = Companion(credential: MemoryCredential())
+        offline.connection = "Disconnected · showing stale data"
+        let longMessages = (1...40).map { TranscriptMessage(id: "long-\($0)", role: "assistant", text: "Message \($0): The latest update is ready for review.", author: "agent") }
+        let screens: [(String, AnyView)] = [
+            ("inbox", AnyView(InboxScreen(model: model))),
+            ("request-detail", AnyView(RequestDetail(request: Demo.requests[0]))),
+            ("chats", AnyView(ChatsScreen(model: model))),
+            ("chat-detail", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Demo.messages))),
+            ("long-chat-bottom", AnyView(ChatDetail(chat: Demo.chats[0], model: model, initialMessages: Array(longMessages.suffix(3))))),
+            ("connect", AnyView(ConnectScreen(model: model))),
+            ("offline", AnyView(VStack(spacing: 0) { OfflineBanner(text: offline.connection); InboxScreen(model: offline) }))
+        ]
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/snapshots")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for scheme in [ColorScheme.light, .dark] {
+            for (name, screen) in screens {
+                let renderer = ImageRenderer(content: screen.environment(\.colorScheme, scheme).environment(\.snapshotRendering, true).frame(width: 393, height: 852))
+                renderer.scale = 1
+                let png = try XCTUnwrap(try XCTUnwrap(renderer.uiImage).pngData())
+                try png.write(to: directory.appendingPathComponent("\(name)-\(scheme == .dark ? "dark" : "light").png"))
+            }
+        }
+    }
 }

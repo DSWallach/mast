@@ -16,7 +16,7 @@ if (command === "revoke") {
   const fixture: BridgeBackend = {
     requests: async () => [{ id: "fixture-request", space: "Mast", kind: "review", text: "Review the companion layout", detail: "Fixture request", options: [], facts: [], links: [], origin: "Fixture chat" }],
     chats: async () => [{ id: "fixture-chat", title: "Fixture chat", space: "Mast", status: "working" }],
-    transcript: async () => [{ id: "fixture-message", role: "assistant", text: "Fixture transcript" }],
+    transcript: async () => ({ messages: [{ id: "fixture-message", role: "assistant", author: "agent", text: "Fixture transcript" }], olderRemaining: 0, nextOffset: 1 }),
     send: async () => ({ delivery: "simulated" }),
   };
   const backend = command === "fixture" ? fixture : engineBackend("/Applications/Mast.app/Contents/MacOS/mast", "ws://127.0.0.1:27654");

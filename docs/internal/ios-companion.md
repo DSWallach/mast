@@ -38,3 +38,13 @@ Bridge credentials live in `~/Library/Application Support/MastCompanionBridge/`,
 - The CLI strips inherited Mast agent tokens and IPC port overrides before starting the unscoped MCP process. The app permits HTTPS or loopback HTTP, refuses redirects, and keeps its token in device-only Keychain storage.
 
 The review and fixture tests do not establish live IPC compatibility or replace real-device security testing.
+
+## Horizon design pass
+
+The iOS 17.5 iPhone 15 Pro Max simulator (`E50FC8FD-69AB-4633-B2C5-49A34B1B6299`) ran six passing unit tests, including ImageRenderer fixture output, with:
+
+```sh
+xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'platform=iOS Simulator,id=E50FC8FD-69AB-4633-B2C5-49A34B1B6299' -derivedDataPath /tmp/mast-ios-design-derived CODE_SIGNING_ALLOWED=NO test -quiet
+```
+
+The bridge suite has 10 passing tests, including message author classification, transcript paging and participation caching. Headless light/dark PNGs are generated in `apps/ios/build/snapshots/` and ignored by git. ImageRenderer does not render UIKit-backed scroll containers, navigation or input controls in isolation, so snapshots render the same content without those containers and use static representations for inputs. The long-chat image renders a tail fixture; it does not verify interactive scrolling. QA should check opening at the most recent message, Load earlier, scrolling after a send, collapsed system/relay rows, and the Show worker chats toggle. The bridge must be restarted after pulling this branch to serve the updated transcript and visibility contract.

@@ -4,7 +4,7 @@ import { PairingChallenge, tokenDigest } from "./pairing.js";
 export interface BridgeBackend {
   requests(): Promise<unknown>;
   chats(): Promise<unknown>;
-  transcript(chatId: string): Promise<unknown>;
+  transcript(chatId: string, offset: number): Promise<unknown>;
   send(chatId: string, text: string): Promise<unknown>;
 }
 
@@ -49,8 +49,8 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (!match || !(await tokens.contains(tokenDigest(match[1])))) return reply(response, 401, { error: "unauthorized" });
       if (request.method === "GET" && path === "/requests") return reply(response, 200, await backend.requests());
       if (request.method === "GET" && path === "/chats") return reply(response, 200, await backend.chats());
-      const transcript = /^\/chats\/([A-Za-z0-9_-]{1,128})\/transcript$/.exec(path);
-      if (request.method === "GET" && transcript) return reply(response, 200, await backend.transcript(transcript[1]));
+      const transcript = /^\/chats\/([A-Za-z0-9_-]{1,128})\/transcript(?:\?offset=(\d{1,7}))?$/.exec(path);
+      if (request.method === "GET" && transcript) return reply(response, 200, await backend.transcript(transcript[1], Number(transcript[2] ?? 0)));
       const message = /^\/chats\/([A-Za-z0-9_-]{1,128})\/messages$/.exec(path);
       if (request.method === "POST" && message) {
         if (request.headers["content-type"] !== "application/json") return reply(response, 415, { error: "json required" });
