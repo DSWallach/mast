@@ -39,7 +39,7 @@ struct OfflineScreen: View {
         Text("Mac is offline").font(.system(size: 24, weight: .semibold)).foregroundStyle(style.ink(scheme))
         if let date = model.lastUpdated { Text("Last updated \(date.formatted(.relative(presentation: .named)))").font(.system(size: 14)).foregroundStyle(style.muted(scheme)) }
         else { Text("Connect to your Mac and try again.").font(.system(size: 14)).foregroundStyle(style.muted(scheme)) }
-        Button("Retry") { Task { await model.refresh() } }.font(.system(size: 14, weight: .semibold)).foregroundStyle(style.muted(scheme)).padding(.horizontal, 18).padding(.vertical, 10).background(style.slate.opacity(0.15), in: Capsule())
+        Button { Task { await model.refresh() } } label: { Text("Retry").font(.system(size: 14, weight: .semibold)).foregroundStyle(style.muted(scheme)).padding(.horizontal, 18).frame(minHeight: 44).background(style.slate.opacity(0.15), in: Capsule()).contentShape(Rectangle()) }.buttonStyle(MastTapTargetStyle())
     }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 30) }
 }
 
@@ -54,6 +54,13 @@ struct RequestLinkView: View {
         case "url", "pr": target.url ?? ""
         default: "mast-open-on-mac:"
         }
-        Button(link.label) { if let url = URL(string: destination) { openURL(url) } }.buttonStyle(.plain).underline()
+        Button(link.label) { if let url = URL(string: destination) { openURL(url) } }.buttonStyle(MastTapTargetStyle()).underline()
+    }
+}
+
+/// Keeps the visual label inside the tappable 44-point minimum target.
+struct MastTapTargetStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()).opacity(configuration.isPressed ? 0.7 : 1)
     }
 }

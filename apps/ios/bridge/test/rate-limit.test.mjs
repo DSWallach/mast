@@ -5,6 +5,6 @@ test('write rate limit is per device and audited', async () => {
  await new Promise(r=>bridge.listen(0,'127.0.0.1',r)); const base=`http://127.0.0.1:${bridge.address().port}`;
  try { const pair=await fetch(base+'/pair',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:'fixture',label:'test'})}), {token}=await pair.json(), headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
  for(let i=0;i<10;i++) assert.equal((await fetch(base+'/chats/a/messages',{method:'POST',headers,body:'{"text":"x"}'})).status,200);
- assert.equal((await fetch(base+'/chats/a/messages',{method:'POST',headers,body:'{"text":"x"}'})).status,429); assert.ok(records.some(e=>e.outcome==='rate-limited'));
+ const denied=await fetch(base+'/chats/a/messages',{method:'POST',headers,body:'{"text":"x"}'}); assert.equal(denied.status,429); const body=await denied.json(); assert.ok(body.retryAfter>0); assert.equal(Number(denied.headers.get('retry-after')),body.retryAfter); assert.ok(records.some(e=>e.outcome==='rate-limited'));
  } finally {bridge.closeAllConnections();await new Promise(r=>bridge.close(r));}
 });

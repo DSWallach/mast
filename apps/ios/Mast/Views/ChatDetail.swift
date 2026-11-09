@@ -69,7 +69,7 @@ struct TranscriptContent: View {
         } else if message.author == "system" || message.author == "relay" {
             SystemMessageRow(message: message)
         } else if message.author == "user" || (message.author == nil && (message.role.lowercased() == "user" || message.role.lowercased() == "you")) {
-            HStack { Spacer(minLength: 45); VStack(alignment: .trailing, spacing: 5) { Text(message.text).font(.system(size: 16)).padding(.horizontal, 17).padding(.vertical, 13).background(style.slate.opacity(scheme == .dark ? 0.18 : 0.14), in: RoundedRectangle(cornerRadius: 19)); if let state = sendStates[message.id] { if state == "Delivery unknown · Retry" { Button(state) { retry(message) }.font(.system(size: 11)).foregroundStyle(style.muted(scheme)) } else { Text(state).font(.system(size: 11)).foregroundStyle(style.muted(scheme)) } } } }
+            HStack { Spacer(minLength: 45); VStack(alignment: .trailing, spacing: 5) { Text(message.text).font(.system(size: 16)).padding(.horizontal, 17).padding(.vertical, 13).background(style.slate.opacity(scheme == .dark ? 0.18 : 0.14), in: RoundedRectangle(cornerRadius: 19)); if let state = sendStates[message.id] { if state.hasSuffix(" · Retry") { Button(state) { retry(message) }.font(.system(size: 11)).foregroundStyle(style.muted(scheme)) } else { Text(state).font(.system(size: 11)).foregroundStyle(style.muted(scheme)) } } } }
         } else {
             VStack(alignment: .leading, spacing: 9) { Text((chat.model ?? "ASSISTANT").uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.2); MarkdownReply(text: message.text, linkColor: style.replyColor(chat, scheme)) }.foregroundStyle(style.replyColor(chat, scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(style.id == .industrial ? 12 : 0).overlay { if style.id == .industrial { Rectangle().stroke(style.rule(scheme), lineWidth: 1) } }
         }
@@ -88,7 +88,7 @@ struct ToolActivityRow: View {
                 Label(commands ? "Ran \(tools.count) \(tools.count == 1 ? "command" : "commands")" : "Used \(tools.count) \(tools.count == 1 ? "tool" : "tools")", systemImage: expanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .medium))
                 if expanded { ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in Text(tool).font(.system(size: 12, design: .monospaced)).textSelection(.enabled) } }
             }.foregroundStyle(style.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(13).background(style.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
-        }.buttonStyle(.plain)
+        }.buttonStyle(MastTapTargetStyle())
     }
 }
 func systemMessagePreview(_ text: String) -> String {
@@ -115,9 +115,9 @@ struct SystemMessageRow: View {
                 Text(message.author == "relay" ? "FROM COORDINATOR" : (message.text.hasPrefix("Worker updates:") ? "WORKER UPDATE" : "MAST"))
                     .font(.system(size: 10, weight: .bold)).tracking(1)
                 if !expanded { Text(systemMessagePreview(message.text)).font(.system(size: 13)).lineLimit(1).multilineTextAlignment(.leading) }
-            }.frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)
-            if expanded { MarkdownReply(text: message.text, linkColor: style.action(scheme)) }
-        }.foregroundStyle(style.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(13).background(style.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(13).background(style.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14)).contentShape(Rectangle()) }.buttonStyle(MastTapTargetStyle())
+            if expanded { MarkdownReply(text: message.text, linkColor: style.action(scheme)).padding(13).background(style.slate.opacity(0.09), in: RoundedRectangle(cornerRadius: 14)) }
+        }.foregroundStyle(style.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 struct ChatDetail: View {
@@ -127,6 +127,9 @@ struct ChatDetail: View {
     @State private var text = ""
     @State private var notice = ""
     @State private var messages: [TranscriptMessage]
+    @State private var hasTranscript: Bool
+    @State private var transcriptFailed = false
+    @State private var refreshingTranscript = false
     @State private var sending = false
     @State private var localMessages: [TranscriptMessage] = []
     @State private var sendStates: [String: String] = [:]
@@ -139,7 +142,28 @@ struct ChatDetail: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.snapshotRendering) private var snapshot
     init(chat: Chat, model: Companion, initialMessages: [TranscriptMessage] = []) {
-        self.chat = chat; self.model = model; _messages = State(initialValue: initialMessages)
+        self.chat = chat; self.model = model; _messages = State(initialValue: initialMessages); _hasTranscript = State(initialValue: !initialMessages.isEmpty)
+    }
+    private func refreshTranscript() async {
+        refreshingTranscript = true; defer { refreshingTranscript = false }
+        if !hasTranscript, let cached = model.cachedTranscript(chat) {
+            messages = cached.messages; olderRemaining = cached.olderRemaining; nextOffset = cached.nextOffset; hasTranscript = true
+        }
+        do {
+            let page = try await model.transcript(chat)
+            guard model.canView(spaceId: chat.spaceId) else { return }
+            let latestIDs = Set(page.messages.map(\.id))
+            let earlier = nextOffset > page.nextOffset ? messages.filter { !latestIDs.contains($0.id) } : []
+            messages = earlier + page.messages
+            if earlier.isEmpty { olderRemaining = page.olderRemaining; nextOffset = page.nextOffset }
+            else { nextOffset = max(nextOffset, page.nextOffset) }
+            model.cacheTranscript(chat, page: TranscriptPage(messages: messages, olderRemaining: olderRemaining, nextOffset: nextOffset))
+            hasTranscript = true; transcriptFailed = false
+        } catch {
+            guard !hasTranscript else { notice = "Transcript may be stale."; return }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if !Task.isCancelled && !hasTranscript { transcriptFailed = true }
+        }
     }
     private func send(_ message: TranscriptMessage) {
         sending = true; sendStates[message.id] = "Sending"
@@ -155,8 +179,12 @@ struct ChatDetail: View {
                     messages = refreshed; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset
                 }
             } catch {
-                sendStates[message.id] = "Delivery unknown · Retry"
-                notice = "Check the chat before retrying; the message may have arrived."
+                switch error as? BridgeError {
+                case .deliveryUnknown: sendStates[message.id] = "Delivery unknown · Retry"; notice = "Check the chat before retrying; the message may have arrived."
+                case .notSent: sendStates[message.id] = "Not sent · Retry"; notice = "Not sent. Check the connection."
+                case .rateLimited(let seconds): sendStates[message.id] = "Slow down · Retry"; notice = "Slow down. Try again in \(seconds) seconds."
+                default: sendStates[message.id] = error.localizedDescription; notice = error.localizedDescription
+                }
             }
             sending = false
         }
@@ -171,23 +199,30 @@ struct ChatDetail: View {
     }
     private func stop() {
         guard model.canView(spaceId: chat.spaceId) else { return }
-        Task { do { try await model.stop(chat); notice = "Stop requested" } catch { notice = "Unable to stop the chat." } }
+        Task { do { try await model.stop(chat); notice = "Stop requested" } catch { notice = error.localizedDescription } }
     }
     var body: some View { Group { if !model.canView(spaceId: chat.spaceId) { Text("Space is unavailable or no longer shared.").foregroundStyle(style.muted(scheme)).padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(style.surface(scheme)) } else { VStack(spacing: 0) {
         ScrollViewReader { proxy in
             HorizonScroll { VStack(alignment: .leading, spacing: 20) {
-                if olderRemaining > 0 { Button("Load earlier") { Task { let first = messages.first?.id; do { let page = try await model.transcript(chat, offset: nextOffset); messages = page.messages + messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; if let first { proxy.scrollTo(first, anchor: .top) } } catch { notice = "Earlier messages unavailable." } } }.font(.system(size: 13)).foregroundStyle(style.muted(scheme)) }
-                TranscriptContent(messages: messages + localMessages, chat: chat, sendStates: sendStates, retry: requestSend)
+                if olderRemaining > 0 { Button("Load earlier") { Task { let first = messages.first?.id; do { let page = try await model.transcript(chat, offset: nextOffset); messages = page.messages + messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; model.cacheTranscript(chat, page: TranscriptPage(messages: messages, olderRemaining: olderRemaining, nextOffset: nextOffset)); if let first { proxy.scrollTo(first, anchor: .top) } } catch { notice = "Earlier messages unavailable." } } }.font(.system(size: 13)).foregroundStyle(style.muted(scheme)) }
+                if !hasTranscript && !transcriptFailed { LoadingPlaceholder() }
+                else if transcriptFailed && !hasTranscript { VStack(alignment: .leading, spacing: 12) { Text("Transcript unavailable"); Button("Retry") { Task { transcriptFailed = false; await refreshTranscript() } } }.foregroundStyle(style.muted(scheme)) }
+                else { TranscriptContent(messages: messages + localMessages, chat: chat, sendStates: sendStates, retry: requestSend).transition(.opacity) }
                 Color.clear.frame(height: 1).id("transcript-bottom")
             }.padding(22).frame(maxWidth: .infinity, alignment: .leading) }
-            .task { do { let page = try await model.transcript(chat); messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } catch { notice = "Transcript unavailable or stale." } }
+            .overlay(alignment: .topTrailing) { if refreshingTranscript && hasTranscript { Text("Updating…").font(.system(size: 11)).foregroundStyle(style.muted(scheme)).padding(8) } }
+            .refreshable { await refreshTranscript() }
+            .animation(.easeInOut(duration: 0.2), value: hasTranscript)
+            .task { let firstOpen = !hasTranscript; let hadCache = model.cachedTranscript(chat) != nil; if let cached = model.cachedTranscript(chat), firstOpen { messages = cached.messages; olderRemaining = cached.olderRemaining; nextOffset = cached.nextOffset; hasTranscript = true }; if firstOpen { DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }; await refreshTranscript(); if firstOpen && !hadCache { DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } }
             .onAppear { model.activeChatId = chat.id }.onDisappear { if model.activeChatId == chat.id { model.activeChatId = nil } }
-            .onChange(of: model.transcriptRevision) { _, _ in Task { if let page = try? await model.transcript(chat) { messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } } }
+            .onChange(of: model.transcriptRevision) { _, _ in Task { await refreshTranscript() } }
             .onChange(of: sending) { _, _ in DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }
         }
         VStack(alignment: .leading, spacing: 8) {
             if !notice.isEmpty { Text(notice).font(.system(size: 12)).foregroundStyle(style.muted(scheme)) }
-            VStack(alignment: .leading, spacing: 0) {
+            if !model.canPerform(spaceId: chat.spaceId, level: "send") {
+                Text("Sending is off for this Space — allow it on your Mac with `spaces share \"\(chat.space)\" --allow send`").font(.system(size: 13)).foregroundStyle(style.muted(scheme)).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 12)
+            } else { VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     Image(systemName: style.providerSymbol(chat)).font(.system(size: 16)).foregroundStyle(.white).padding(8).background(Color(red: 24/255, green: 48/255, blue: 40/255), in: RoundedRectangle(cornerRadius: 8))
                     if snapshot { Text("Do anything…").frame(maxWidth: .infinity, alignment: .leading) } else { TextField("Do anything…", text: $text, axis: .vertical).lineLimit(3...6) }
@@ -198,9 +233,9 @@ struct ChatDetail: View {
                     Label(chat.model ?? "Assistant", systemImage: style.providerSymbol(chat)).lineLimit(1).padding(.horizontal, 9).padding(.vertical, 7).background(style.slate.opacity(0.13), in: Capsule())
                     Text("Ask").opacity(0.6)
                     if (model.chats.first(where: { $0.id == chat.id })?.status ?? chat.status).lowercased().hasPrefix("working") { Button("STOP") { if requiresConfirmation(quickActions: quickActions) { confirmStop = true } else { stop() } } }
-                    Button("SEND") { requestSend(TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user")) }.disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).foregroundStyle(style.surface(scheme)).padding(.horizontal, 14).padding(.vertical, 8).background(style.action(scheme), in: RoundedRectangle(cornerRadius: style.chipRadius))
+                    Button { requestSend(TranscriptMessage(id: UUID().uuidString, role: "user", text: text, author: "user")) } label: { Text("SEND").foregroundStyle(style.surface(scheme)).padding(.horizontal, 14).frame(minWidth: 44, minHeight: 44).background(style.action(scheme), in: RoundedRectangle(cornerRadius: style.chipRadius)).contentShape(Rectangle()) }.disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }.font(style.semibold(10)).foregroundStyle(style.muted(scheme)).padding(.top, 8)
-            }
+            } }
         }.padding(.horizontal, 18).padding(.bottom, 12).padding(.top, 8)
     }.background(style.surface(scheme)) } }.navigationTitle(model.canView(spaceId: chat.spaceId) ? chat.title : "Chat").navigationBarTitleDisplayMode(.inline).confirmationDialog("Stop this chat?", isPresented: $confirmStop, titleVisibility: .visible) { Button("Stop") { stop() }; Button("Cancel", role: .cancel) {} }.confirmationDialog("Send this message?", isPresented: $showConfirmation, titleVisibility: .visible) { Button("Send") { if let message = confirmMessage { confirmAndSend(message) }; confirmMessage = nil }; Button("Cancel", role: .cancel) { confirmMessage = nil } } message: { if let message = confirmMessage { Text(message.text) } } }
 }

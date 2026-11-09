@@ -1,3 +1,4 @@
+import { DispatchDenied } from "./authorization.js";
 import { createHash, randomUUID } from "node:crypto";
 
 export type AnswerInput = { outcome: string; text?: string; optionId?: string };
@@ -81,10 +82,10 @@ export class ReplyCoordinator {
       else { intent.phase = await this.engine.isBusy(intent.chatId) ? "queueDispatch" : "idleDispatch"; await this.store.save(intent); }
     }
     if (intent.phase === "idleDispatch") {
-      try { await guard(); await this.engine.sendIdle(intent, guard); } catch { throw new Error("idle delivery unconfirmed; retry same operation"); }
+      try { await guard(); await this.engine.sendIdle(intent, guard); } catch (error) { if (error instanceof DispatchDenied) throw error; throw new Error("idle delivery unconfirmed; retry same operation"); }
       intent.phase = "sent"; await this.store.save(intent);
     } else if (intent.phase === "queueDispatch") {
-      try { await guard(); await this.engine.sendQueued(intent, guard); } catch { intent.phase = "unknown"; await this.store.save(intent); return intent; }
+      try { await guard(); await this.engine.sendQueued(intent, guard); } catch (error) { if (error instanceof DispatchDenied) { intent.phase = "prepared"; await this.store.save(intent); throw error; } intent.phase = "unknown"; await this.store.save(intent); return intent; }
       intent.phase = "sent"; await this.store.save(intent);
     }
     if (intent.phase === "sent" && stopAfterSend) return intent;

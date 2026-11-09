@@ -18,3 +18,12 @@ test("expired and exhausted challenges fail closed", () => {
   for (let i = 0; i < 5; i++) assert.equal(challenge.exchange("wrong", 1), null);
   assert.equal(challenge.exchange("secret", 1), null);
 });
+
+test("pairing failure reasons distinguish wrong, exhausted, expired and used", () => {
+  const challenge = new PairingChallenge("secret", 0);
+  for (let i = 0; i < 5; i++) assert.deepEqual(challenge.exchangeResult("wrong", 1), {reason:"wrong-code"});
+  assert.deepEqual(challenge.exchangeResult("secret", 1), {reason:"attempts-exhausted"});
+  assert.deepEqual(new PairingChallenge("secret", 0).exchangeResult("secret", 300000), {reason:"expired"});
+  const used = new PairingChallenge("secret", 0); assert.ok(used.exchangeResult("secret", 1).token);
+  assert.deepEqual(used.exchangeResult("secret", 2), {reason:"used"});
+});

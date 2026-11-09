@@ -63,7 +63,7 @@ export function ipcReplyEngine(url: string, access?: SpaceAccess): ReplyEngine {
       if (guard) await guard();
       const params = { chatId: intent.chatId, prompt: { text: intent.message, attachments: [] }, operationId: intent.operationId };
       let reply = await unary(url, "ContinueChatForWorkItem", params);
-      for (let i = 0; i < 6 && reply.state === "queued"; i++) { await new Promise(resolve => setTimeout(resolve, 500)); if (guard) await guard(); reply = await unary(url, "ContinueChatForWorkItem", params); }
+      for (let i = 0; i < 6 && reply.state === "queued"; i++) { await new Promise(resolve => setTimeout(resolve, 500)); if (guard) { try { await guard(); } catch { throw new Error("delivery unconfirmed after dispatch"); } } reply = await unary(url, "ContinueChatForWorkItem", params); }
       if (!reply || reply.state === "rejected" || !["queued", "started"].includes(reply.state)) throw new Error("reply not accepted");
     },
     async sendQueued(intent, guard) {

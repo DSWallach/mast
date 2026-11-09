@@ -1,3 +1,4 @@
+import { DispatchDenied } from "./authorization.js";
 import type { ArtifactReader } from "./artifacts.js";
 import { defaultAppearance, type Appearance } from "./appearance.js";
 import { streamEvents } from "./events.js";
@@ -39,7 +40,7 @@ function reply(response: ServerResponse, status: number, body: unknown): void {
 /** This server exposes fixed operations only; no request can select an RPC method. */
 const denySpaces: SpaceAccess = { spaces: async () => [], chatSpace: async () => null, requestSpace: async () => null, chatAllowed: async () => false, requestAllowed: async () => false };
 const denyAudit: AuditLog = { append: async () => { throw new Error("audit unavailable"); } };
-export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, auditSink: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader, minuteLimit = 10, tailscaleUser?: string, publicHost?: string, pairingEnabled = true) {
+export function createBridge(backend: BridgeBackend, tokens: TokenStore, challenge: PairingChallenge, replies?: ReplyCoordinator, access: SpaceAccess = denySpaces, auditSink: AuditLog = denyAudit, eventsUrl?: string, appearance: () => Promise<Appearance> = async () => defaultAppearance, artifacts?: ArtifactReader, minuteLimit = 10, tailscaleUser?: string, publicHost?: string, pairingEnabled = true, pairLog: (reason: string) => void = reason => console.log(`Pairing failed: ${reason}`)) {
   let pairDenials = 0;
   const flushPairDenials = () => {
     const count = pairDenials; pairDenials = 0;
@@ -50,22 +51,26 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
   const streamCounts = new Map<string, number>(); let totalStreams = 0;
   const server = createServer(async (request, response) => {
     try {
+      const isPair = request.method === "POST" && request.url === "/pair";
+      const pairFailure = (reason: string) => { if (isPair) pairLog(reason); };
       const host = request.headers.host?.toLowerCase(), port = request.socket.localPort;
-      if (!host || ![`127.0.0.1:${port}`, `localhost:${port}`, ...(publicHost ? [publicHost.toLowerCase()] : [])].includes(host)) return reply(response, 403, { error: "host forbidden" });
+      if (!host || ![`127.0.0.1:${port}`, `localhost:${port}`, ...(publicHost ? [publicHost.toLowerCase()] : [])].includes(host)) { pairFailure("host-forbidden"); return reply(response, 403, { error: "host forbidden" }); }
       const login = request.headers["tailscale-user-login"];
       const audit: AuditLog = { append: record => auditSink.append({ ...record, ...(typeof login === "string" && login.length <= 256 ? { tailscaleLogin: login } : {}) }) };
-      if (request.headers["tailscale-funnel-request"] !== undefined) return reply(response, 403, { error: "funnel forbidden" });
-      if (tailscaleUser && (typeof login !== "string" || login !== tailscaleUser)) return reply(response, 403, { error: "identity forbidden" });
+      if (request.headers["tailscale-funnel-request"] !== undefined) { pairFailure("funnel-forbidden"); return reply(response, 403, { error: "funnel forbidden" }); }
+      if (tailscaleUser && (typeof login !== "string" || login !== tailscaleUser)) { pairFailure("identity-forbidden"); return reply(response, 403, { error: "identity forbidden" }); }
       // Browsers cannot invoke the bridge from an unrelated origin.
-      if (request.headers.origin) return reply(response, 403, { error: "origin forbidden" });
+      if (request.headers.origin) { pairFailure("origin-forbidden"); return reply(response, 403, { error: "origin forbidden" }); }
       const path = request.url ?? "";
       if (request.method === "POST" && path === "/pair") {
-        if (!pairingEnabled) return reply(response, 403, {error: "pairing closed"});
-        if (request.headers["content-type"] !== "application/json") return reply(response, 415, { error: "json required" });
-        const body = await readBody(request);
-        if (typeof body.label !== "string" || !body.label.trim() || body.label.trim().length > 80 || /[\x00-\x1f\x7f]/.test(body.label)) return reply(response, 400, { error: "device label required" });
-        const token = challenge.exchange(typeof body.code === "string" ? body.code : "", Date.now());
-        if (!token) { pairDenials++; return reply(response, 401, { error: "pairing failed" }); }
+        if (!pairingEnabled) { pairFailure("pairing-closed"); return reply(response, 403, {error: "pairing closed"}); }
+        if (request.headers["content-type"] !== "application/json") { pairFailure("json-required"); return reply(response, 415, { error: "json required" }); }
+        let body: Record<string, unknown>;
+        try { body = await readBody(request); } catch { pairFailure("invalid-body"); return reply(response, 400, {error: "invalid pairing request"}); }
+        if (typeof body.label !== "string" || !body.label.trim() || body.label.trim().length > 80 || /[\x00-\x1f\x7f]/.test(body.label)) { pairFailure("invalid-label"); return reply(response, 400, { error: "device label required" }); }
+        const result = challenge.exchangeResult(typeof body.code === "string" ? body.code : "", Date.now());
+        if ("reason" in result) { pairDenials++; pairFailure(result.reason); return reply(response, 401, { error: "pairing failed", reason: result.reason }); }
+        const token = result.token;
         const device = await tokens.add(tokenDigest(token), body.label.trim());
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "pair", outcome: "paired" });
         return reply(response, 200, { token });
@@ -76,11 +81,17 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (!device) return reply(response, 401, { error: "unauthorized" });
       const fresh = (spaceId: string, capability: "answer" | "send", target: () => Promise<string | null>) => async () => {
         const current = await tokens.authenticate(tokenDigest(match![1]));
-        if (!current || current.id !== device.id || !access.allows || !(await access.allows(spaceId, capability)) || (await target()) !== spaceId) throw new Error("authorization changed");
+        if (!current || current.id !== device.id) throw new DispatchDenied(401);
+        if (!access.allows || !(await access.allows(spaceId, capability))) throw new DispatchDenied(403, capability);
+        if ((await target()) !== spaceId) throw new DispatchDenied(403);
       };
       if (["POST", "DELETE"].includes(request.method ?? "")) {
         const now = Date.now(), recent = (writes.get(device.id) ?? []).filter(time => now - time < 86400000);
-        if (recent.length >= 200 || recent.filter(time => now - time < 60000).length >= minuteLimit) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "write", outcome: "rate-limited"}); return reply(response, 429, {error: "rate limited"}); }
+        if (recent.length >= 200 || recent.filter(time => now - time < 60000).length >= minuteLimit) {
+          const minute = recent.filter(time => now - time < 60000), waitMinute = minute.length >= minuteLimit ? minute[minute.length - minuteLimit] + 60000 - now : 0, waitDay = recent.length >= 200 ? recent[recent.length - 200] + 86400000 - now : 0;
+          const retryAfter = Math.max(1, Math.ceil(Math.max(waitMinute, waitDay) / 1000)); response.setHeader("Retry-After", String(retryAfter));
+          await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "write", outcome: "rate-limited"}); return reply(response, 429, {error: "rate limited", retryAfter});
+        }
         recent.push(now); writes.set(device.id, recent);
       }
       if (request.method === "DELETE" && path === "/devices/self" && tokens.revoke) {
@@ -139,7 +150,7 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (request.method === "POST" && answer && replies) {
         const spaceId = await access.requestSpace(answer[1]);
         if (!spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: answer[2], targetId: answer[1], outcome: "denied" }); return reply(response, 403, { error: "space not shared", noSpacesShared: (await access.spaces()).length === 0 }); }
-        if (!access.allows || !(await access.allows(spaceId, "answer"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: answer[2], targetId: answer[1], spaceId, outcome: "denied"}); return reply(response, 403, {error: "capability denied"}); }
+        if (!access.allows || !(await access.allows(spaceId, "answer"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: answer[2], targetId: answer[1], spaceId, outcome: "capability-denied"}); return reply(response, 403, {error: "capability", need: "answer"}); }
         if (request.headers["content-type"] !== "application/json") return reply(response, 415, { error: "json required" });
         const key = request.headers["idempotency-key"];
         if (typeof key !== "string") return reply(response, 400, { error: "idempotency key required" });
@@ -149,14 +160,14 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
           const input: AnswerInput = { outcome: body.outcome, ...(body.text === undefined ? {} : { text: body.text as string }), ...(body.optionId === undefined ? {} : { optionId: body.optionId as string }) };
           await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: "started" });
           let result;
-          try { await fresh(spaceId, "answer", () => access.requestSpace(answer[1]))(); result = await replies.answer(answer[1], key, input, true, fresh(spaceId, "answer", () => access.requestSpace(answer[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+          try { await fresh(spaceId, "answer", () => access.requestSpace(answer[1]))(); result = await replies.answer(answer[1], key, input, true, fresh(spaceId, "answer", () => access.requestSpace(answer[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: error instanceof DispatchDenied && error.need ? "capability-denied" : "error-or-unknown" }); throw error; }
           await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "answer", targetId: answer[1], spaceId, outcome: result.phase });
           return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
         }
         if (Object.keys(body).length) return reply(response, 400, { error: "invalid retry" });
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: "started" });
         let result;
-        try { await fresh(spaceId, "answer", () => access.requestSpace(answer[1]))(); result = await replies.retryResolve(answer[1], key, fresh(spaceId, "answer", () => access.requestSpace(answer[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+        try { await fresh(spaceId, "answer", () => access.requestSpace(answer[1]))(); result = await replies.retryResolve(answer[1], key, fresh(spaceId, "answer", () => access.requestSpace(answer[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: error instanceof DispatchDenied && error.need ? "capability-denied" : "error-or-unknown" }); throw error; }
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "resolve", targetId: answer[1], spaceId, outcome: result.phase });
         return reply(response, 200, { state: result.phase, resolveOnly: result.resolveOnly });
       }
@@ -164,10 +175,10 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (request.method === "POST" && stop && backend.interrupt) {
         const spaceId = await access.chatSpace(stop[1]);
         if (!spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], outcome: "denied" }); return reply(response, 403, { error: "space not shared" }); }
-        if (!access.allows || !(await access.allows(spaceId, "send"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "denied"}); return reply(response, 403, {error: "capability denied"}); }
+        if (!access.allows || !(await access.allows(spaceId, "send"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "capability-denied"}); return reply(response, 403, {error: "capability", need: "send"}); }
         if (request.headers["content-type"] !== "application/json" || Object.keys(await readBody(request)).length) return reply(response, 400, { error: "invalid request" });
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "started" });
-        try { await fresh(spaceId, "send", () => access.chatSpace(stop[1]))(); await backend.interrupt(stop[1], spaceId, fresh(spaceId, "send", () => access.chatSpace(stop[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+        try { await fresh(spaceId, "send", () => access.chatSpace(stop[1]))(); await backend.interrupt(stop[1], spaceId, fresh(spaceId, "send", () => access.chatSpace(stop[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: error instanceof DispatchDenied && error.need ? "capability-denied" : "error-or-unknown" }); throw error; }
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "stop", targetId: stop[1], spaceId, outcome: "accepted" });
         return reply(response, 200, { status: "accepted" });
       }
@@ -189,20 +200,22 @@ export function createBridge(backend: BridgeBackend, tokens: TokenStore, challen
       if (request.method === "POST" && message) {
         const spaceId = await access.chatSpace(message[1]);
         if (!spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], outcome: "denied" }); return reply(response, 403, { error: "space not shared", noSpacesShared: (await access.spaces()).length === 0 }); }
-        if (!access.allows || !(await access.allows(spaceId, "send"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "denied"}); return reply(response, 403, {error: "capability denied"}); }
+        if (!access.allows || !(await access.allows(spaceId, "send"))) { await audit.append({timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "capability-denied"}); return reply(response, 403, {error: "capability", need: "send"}); }
         if (request.headers["content-type"] !== "application/json") return reply(response, 415, { error: "json required" });
         const body = await readBody(request);
         if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 12000) return reply(response, 400, { error: "invalid text" });
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "started" });
         if ((await access.chatSpace(message[1])) !== spaceId) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "denied" }); return reply(response, 403, { error: "space not shared" }); }
         let result;
-        try { await fresh(spaceId, "send", () => access.chatSpace(message[1]))(); result = await backend.send(message[1], body.text, spaceId, fresh(spaceId, "send", () => access.chatSpace(message[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: "error-or-unknown" }); throw error; }
+        try { await fresh(spaceId, "send", () => access.chatSpace(message[1]))(); result = await backend.send(message[1], body.text, spaceId, fresh(spaceId, "send", () => access.chatSpace(message[1]))); } catch (error) { await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: error instanceof DispatchDenied && error.need ? "capability-denied" : "error-or-unknown" }); throw error; }
         const delivery = (result && typeof result === "object" && "delivery" in result && (result.delivery === "queued" || result.delivery === "accepted")) ? result.delivery : "completed";
         await audit.append({ timestamp: new Date().toISOString(), deviceId: device.id, action: "send", targetId: message[1], spaceId, outcome: delivery });
         return reply(response, 200, result);
       }
       return reply(response, 404, { error: "not found" });
-    } catch {
+    } catch (error) {
+      if (error instanceof DispatchDenied) return reply(response, error.status, error.need ? { error: "capability", need: error.need } : { error: error.status === 401 ? "unauthorized" : "space not shared" });
+      if (request.method === "POST" && request.url === "/pair") pairLog("internal-error");
       // Never log request contents, credentials, or upstream errors.
       return reply(response, 503, { error: "bridge operation failed" });
     }
