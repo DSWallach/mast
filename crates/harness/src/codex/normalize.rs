@@ -138,6 +138,42 @@ pub(crate) fn turn_error_message(params: &Value) -> Option<String> {
         })
 }
 
+/// Normalize only errors that identify the Codex login as the problem.
+pub(crate) fn authentication_error_message(message: String) -> String {
+    let lower = message.to_ascii_lowercase();
+    // Preserve non-401 HTTP failures even if their detail mentions auth.
+    let other_status = lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|word| {
+        word.len() == 3 && word.parse::<u16>().is_ok_and(|code| (400..600).contains(&code) && code != 401)
+    });
+    let status_401 = ["http 401", "status 401", "status code 401", "status code: 401"]
+        .iter()
+        .any(|phrase| lower.match_indices(phrase).any(|(start, _)| {
+            lower.as_bytes().get(start + phrase.len()).is_none_or(|byte| !byte.is_ascii_digit())
+        }));
+    if !other_status && (status_401 || [
+        "401 unauthorized",
+        "not logged in",
+        "not signed in",
+        "not authenticated",
+        "authentication required",
+        "authentication is required",
+        "requires authentication",
+        "authentication failed",
+        "authentication_failed",
+        "auth required",
+        "login required",
+        "login is required",
+        "sign in required",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase)))
+    {
+        "Authentication failed — sign in to Codex again.".into()
+    } else {
+        message
+    }
+}
+
 /// `thread/tokenUsage/updated` → a [`AgentEvent::Usage`] snapshot of the LAST
 /// turn's tokens (held by the session loop, emitted before `Done`).
 pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {

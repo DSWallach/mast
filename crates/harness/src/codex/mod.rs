@@ -943,7 +943,18 @@ fn rotate(id: &mut String) -> (String, String) {
     (prev, id.clone())
 }
 
-async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEvent) -> bool {
+fn normalize_authentication_event(ev: &mut AgentEvent) {
+    match ev {
+        AgentEvent::Error { message } | AgentEvent::Done { error: Some(message), .. } => {
+            *message = normalize::authentication_error_message(std::mem::take(message));
+        }
+        AgentEvent::Subagent { event, .. } => normalize_authentication_event(event),
+        _ => {}
+    }
+}
+
+async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, mut ev: AgentEvent) -> bool {
+    normalize_authentication_event(&mut ev);
     tx.send(Ok(ev)).await.is_ok()
 }
 
@@ -1157,7 +1168,7 @@ async fn run_session(session: Session) {
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
-                        error: Some(e.to_string()),
+                        error: Some(normalize::authentication_error_message(e.to_string())),
                         session_id: None,
                     }))
                     .await;
@@ -1239,7 +1250,7 @@ async fn run_session(session: Session) {
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
-                    error: Some(e.to_string()),
+                    error: Some(normalize::authentication_error_message(e.to_string())),
                     session_id: Some(thread_id.clone()),
                 }))
                 .await;

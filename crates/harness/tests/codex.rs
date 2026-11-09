@@ -92,7 +92,6 @@ async fn run_to_end(
 }
 
 #[tokio::test]
-#[ignore = "first-run bug: Codex authentication failures are not normalized or actionable"]
 async fn signed_out_cli_emits_actionable_authentication_error() {
     const ISOLATED: &str = "MAST_TEST_SIGNED_OUT_CODEX_ISOLATED";
     if std::env::var_os(ISOLATED).is_none() {
@@ -101,7 +100,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
             .tempdir_in("/private/tmp")
             .unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "--ignored", "signed_out_cli_emits_actionable_authentication_error"])
+            .args(["--exact", "signed_out_cli_emits_actionable_authentication_error"])
             .env(ISOLATED, "1")
             .env("HOME", profile.path())
             .env("MAST_DATA_DIR", profile.path().join("data"))
@@ -113,19 +112,21 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
         return;
     }
-    let (controls, _steer, _token) = controls("Yes");
-    let events = run_to_end(&harness(), request("scenario:signed-out"), controls).await;
-    assert!(events.iter().any(|event| {
-        let message = match event {
-            AgentEvent::Error { message } => Some(message.as_str()),
-            AgentEvent::Done { error: Some(message), .. } => Some(message.as_str()),
-            _ => None,
-        };
-        message.is_some_and(|message| {
-            let message = message.to_lowercase();
-            message.contains("codex") && message.contains("sign in")
-        })
-    }), "events: {events:?}");
+    for scenario in ["signed-out", "signed-out-login", "signed-out-required", "signed-out-notification", "signed-out-start"] {
+        let (controls, _steer, _token) = controls("Yes");
+        let events = run_to_end(&harness(), request(&format!("scenario:{scenario}")), controls).await;
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::Error { message } | AgentEvent::Done { error: Some(message), .. }
+                if message == "Authentication failed — sign in to Codex again."
+        )), "{scenario}: {events:?}");
+    }
+    for (scenario, expected) in [("forbidden", "403 Forbidden: authentication required for this model"), ("server-failure", "500 Internal Server Error")] {
+        let (controls, _steer, _token) = controls("Yes");
+        let events = run_to_end(&harness(), request(&format!("scenario:{scenario}")), controls).await;
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::Done { error: Some(message), .. } if message == expected
+        )), "{scenario}: {events:?}");
+    }
 }
 
 #[tokio::test]

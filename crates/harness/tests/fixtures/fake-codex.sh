@@ -75,6 +75,26 @@ tid=$(rid "$turnline")
 
 case "$turnline" in
 
+*scenario:signed-out-login*)
+  fail_turn "$tid" "Not logged in"
+  ;;
+*scenario:signed-out-required*)
+  fail_turn "$tid" "Authentication required"
+  ;;
+*scenario:signed-out-notification*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"error","params":{"error":{"message":"Not logged in"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:signed-out-start*)
+  emit "{\"id\":$tid,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
+  ;;
+*scenario:forbidden*)
+  fail_turn "$tid" "403 Forbidden: authentication required for this model"
+  ;;
+*scenario:server-failure*)
+  fail_turn "$tid" "500 Internal Server Error"
+  ;;
 *scenario:signed-out*)
   fail_turn "$tid" "401 Unauthorized"
   ;;
