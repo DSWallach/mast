@@ -63,11 +63,20 @@ scripts/run-macos-dev.sh
 
 It builds a debug binary and opens `Mast Dev.app` with its own data folder (`~/.mast-dev`, or an existing `~/.zeron-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
 
-## Getting Mast to a coworker
+## Updating
 
-On a trusted Mac, run `scripts/package-macos.sh` as described above. The DMG targets the build Mac’s architecture; transfer it to a compatible Mac and drag Mast into Applications. The default package is ad-hoc signed. On first launch, right-click Mast and choose **Open**. If macOS still blocks a trusted copy, remove its quarantine attribute with `xattr -dr com.apple.quarantine /Applications/Mast.app`, then open it. Notarised builds are not yet available.
+Pull and rebuild, then package again and replace the app:
 
-New installs store data in `~/.mast`. To update, build and transfer a new DMG, quit Mast, and replace the app in Applications; the data folder stays in place. Validate the hand-off on the recipient Mac.
+```bash
+git pull
+scripts/package-macos.sh
+```
+
+Quit Mast, copy the new `target/package/Mast.app` over the one in `/Applications`, and open it. Your data stays in `~/.mast`.
+
+### Sharing a build instead
+
+If someone can't build from source, run `scripts/package-macos.sh` on your Mac and send them the DMG. It only runs on Macs with the same architecture as yours (Apple silicon or Intel). The app is ad-hoc signed, so on first launch they right-click Mast and choose **Open**. If macOS still blocks it, run `xattr -dr com.apple.quarantine /Applications/Mast.app`. Notarised builds are not available yet.
 
 ## First run
 
