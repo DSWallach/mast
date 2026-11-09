@@ -2831,6 +2831,19 @@ impl DocHost {
             .map(|(id, _)| id)
     }
 
+    /// Queue a command with a stable client-supplied identity, so a lost
+    /// acknowledgement can be retried without dispatching the command twice.
+    pub fn queue_command_with_transfers_and_id(
+        &self, chat_id: &str, command_id: &str, payload: SessionCommandPayload,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
+        if command_id.is_empty() || command_id.len() > 64 {
+            return Err(EngineError::Other("invalid command id".into()));
+        }
+        self.queue_command_inner(chat_id, command_id.to_owned(), payload, transfers)
+            .map(|(id, _)| id)
+    }
+
     /// [`Self::queue_command`] with a caller-derived command id (the Work
     /// Outline launch workflow derives it from its `operationId`).
     /// Idempotent by id: when an entry with `command_id` already exists the
@@ -3061,6 +3074,24 @@ impl DocHost {
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
         self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true, None)
+    }
+
+    /// Preserve a submitting client's identity across a lost acknowledgement.
+    pub async fn queue_message_with_id(
+        &self, chat_id: &str, id: &str, text: &str, attachments: Vec<String>,
+        hold_for_turn_end: bool,
+    ) -> Result<String, EngineError> {
+        if id.is_empty() || id.len() > 64 {
+            return Err(EngineError::Other("invalid message id".into()));
+        }
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        if handle.doc.read_queue()?.iter().any(|item| item.id == id)
+            || handle.doc.read_entries()?.iter().any(|entry| entry.id == id)
+        {
+            return Ok(id.to_owned());
+        }
+        self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true, Some(id))
     }
 
     /// Queue an orchestrator wake message. It is not a user message: it never
@@ -5785,6 +5816,22 @@ impl DocHost {
         }
         self.dispatch_unchecked(sessions, chat_id, harness, request, message_id)
             .await
+    }
+
+    pub(crate) async fn dispatch_retry_with_source_context(
+        &self, sessions: &SessionsEngine, chat_id: &str, harness: HarnessId,
+        mut request: mast_proto::RunRequest, message_id: String, error_entry_id: String,
+    ) -> Result<String, EngineError> {
+        if let Some(validated) = self.validate_bound_dispatch(chat_id).await? {
+            pin_bound_request(chat_id, &validated, &mut request)?;
+        }
+        if let Some(workspace) = self.workspace()
+            && let Some(context) = self.capture_source_context(&request.cwd).await
+            && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+        }
+        sessions.dispatch_retry(chat_id, harness, request, message_id, error_entry_id).await
     }
 
     /// [`Self::dispatch_with_source_context`] for a request whose execution

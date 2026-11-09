@@ -180,6 +180,7 @@ struct Inner {
     last_requests: Mutex<HashMap<String, RunRequest>>,
     /// Error entries already claimed by a retry, including dispatches in flight.
     retry_claims: Mutex<std::collections::HashSet<(String, String)>>,
+    dispatch_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Harness-native session ids per chat (resume continuity across turns) —
     /// the live-process cache over the durable copy on the workspace chat row
     /// (zeron kept the same pair on `chats.harness_session_id`). An empty
@@ -312,6 +313,7 @@ impl SessionsEngine {
                 friction_approvals: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 retry_claims: Mutex::new(std::collections::HashSet::new()),
+                dispatch_locks: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 managed_accounts: OnceLock::new(),
@@ -845,7 +847,15 @@ impl SessionsEngine {
         message_id: Option<String>,
         startup_retry: bool,
     ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
-        Box::pin(self.dispatch_inner(chat_id, harness_id, request, message_id, startup_retry))
+        Box::pin(self.dispatch_inner(chat_id, harness_id, request, message_id, startup_retry, None, false))
+    }
+
+    pub(crate) async fn dispatch_retry(&self, chat_id: &str, harness_id: HarnessId, request: RunRequest, message_id: String, error_entry_id: String) -> Result<String, EngineError> {
+        self.dispatch_inner(chat_id, harness_id, request, Some(message_id), false, Some(error_entry_id), false).await
+    }
+
+    fn dispatch_fresh_retry<'a>(&'a self, chat_id: &'a str, harness_id: HarnessId, request: RunRequest, message_id: String) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
+        Box::pin(self.dispatch_inner(chat_id, harness_id, request, Some(message_id), true, None, true))
     }
 
     async fn dispatch_inner(
@@ -855,7 +865,27 @@ impl SessionsEngine {
         mut request: RunRequest,
         mut message_id: Option<String>,
         startup_retry: bool,
+        retry_error: Option<String>,
+        force_fresh: bool,
     ) -> Result<String, EngineError> {
+        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        let _dispatch_guard = dispatch_lock.lock().await;
+        let user_retry = retry_error.is_some();
+        if let Some(error_id) = retry_error {
+            let entries = self.doc_handle(chat_id)?.doc().read_entries()?;
+            let latest_user = entries.iter().rposition(|entry| entry.role == MessageRole::User);
+            let latest_error = latest_user.and_then(|ix| entries[ix + 1..].iter().rev().find(|entry|
+                entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))));
+            let still_errored = matches!(self.inner.journal.last_event(chat_id).ok().flatten(),
+                Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. })));
+            if self.has_live_run(chat_id) || !still_errored
+                || latest_user.is_none_or(|ix| Some(&entries[ix].id) != message_id.as_ref())
+                || latest_error.is_none_or(|entry| entry.id != error_id)
+            {
+                return Err(EngineError::Other("The failed turn is no longer available to retry".into()));
+            }
+        }
         // Project-less chats store the portable marker `~` (the creating
         // device cannot name a host-local path). Never expand that marker to
         // the person's real HOME: agent startup and broad file tools would
@@ -896,13 +926,17 @@ impl SessionsEngine {
                     )
                 })
         });
-        let instruction_plan = self.plan_instructions(
+        let mut instruction_plan = self.plan_instructions(
             chat_id,
             harness_id,
             &request,
             message_id.as_deref(),
             context_reset_confirmed,
         )?;
+        if force_fresh && let Some(plan) = instruction_plan.as_mut() {
+            plan.resume = None;
+            plan.transition = InstructionTransition::Fresh;
+        }
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -993,7 +1027,10 @@ impl SessionsEngine {
         // A plain Turn's resume decision fails BEFORE the user message is
         // written (a bound Chat's `resumeRootMismatch` must leave nothing to
         // retry or duplicate).
-        let plain_resume = if instruction_plan.is_none() && request.resume.is_none() {
+        let plain_resume = if force_fresh {
+            request.resume = None;
+            Some(None)
+        } else if instruction_plan.is_none() && request.resume.is_none() {
             Some(self.inner.checked_resume_for(chat_id, &request.cwd)?)
         } else {
             None
@@ -1132,6 +1169,7 @@ impl SessionsEngine {
                 user_message_id: user_id,
                 resume_injected,
                 startup_retry,
+                user_retry,
             },
             agent_tools,
         ));
@@ -1414,6 +1452,28 @@ impl SessionsEngine {
         Ok(recovered)
     }
 
+    fn revival_request(&self, host: &DocHost, chat_id: &str, prompt: &str) -> Option<RunRequest> {
+        let mut request = self.last_request(chat_id).filter(|request| request.prompt == prompt)
+            .or_else(|| host.request_from_chat_row(chat_id, prompt))
+            .or_else(|| {
+                let (_, cwd) = self.inner.journal_harness_session(chat_id)?;
+                Some(RunRequest {
+                    prompt: String::new(), harness: None, model: None, reasoning: None,
+                    model_options: Default::default(), cwd,
+                    sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
+                    attachments: Vec::new(), resume: None, worktree: None, instructions: None,
+                })
+            })?;
+        request.prompt = prompt.to_owned();
+        request.resume = None;
+        request.worktree = None;
+        if request.attachments.is_empty() {
+            request.attachments = retry_prompt_attachments(prompt);
+        }
+        host.apply_chat_approval(chat_id, &mut request);
+        Some(request)
+    }
+
     /// Re-dispatch `prompt_text` (the chat's last user message, under its own
     /// id so the transcript never shows a duplicate) on the remembered harness
     /// session. Shared by boot auto-resume and the user's one-click Resume.
@@ -1423,36 +1483,10 @@ impl SessionsEngine {
             let Some(host) = sessions.inner.doc_host() else {
                 return;
             };
-            let request = sessions
-                .last_request(&chat_id)
-                .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
-                // Last resort: the journal's own cwd (zeron's draft config)
-                // — a crash can predate the debounced workspace-row write.
-                .or_else(|| {
-                    let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
-                    Some(RunRequest {
-                        prompt: String::new(),
-                        harness: None,
-                        model: None,
-                        reasoning: None,
-                        model_options: Default::default(),
-                        cwd,
-                        sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
-                        auto_approve: false,
-                        attachments: Vec::new(),
-                        resume: None,
-                        worktree: None,
-                        instructions: None,
-                    })
-                });
-            let Some(mut request) = request else {
+            let Some(request) = sessions.revival_request(&host, &chat_id, &prompt_text) else {
                 tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
                 return;
             };
-            request.prompt = prompt_text;
-            request.resume = None; // dispatch re-injects the remembered session
-            request.attachments = Vec::new();
-            host.apply_chat_approval(&chat_id, &mut request);
             let harness_id = host.harness_for_request(&chat_id, &request);
             match host
                 .dispatch_with_source_context(
@@ -1531,8 +1565,9 @@ impl SessionsEngine {
         let Some(user_index) = entries.iter().rposition(|entry| entry.role == MessageRole::User) else {
             return Ok(false);
         };
-        if !entries[user_index + 1..].iter().any(|entry| entry.id == error_entry_id
-            && entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))) {
+        if entries[user_index + 1..].iter().rev().find(|entry|
+            entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. })))
+            .is_none_or(|entry| entry.id != error_entry_id) {
             return Ok(false);
         }
         let user = &entries[user_index];
@@ -1541,17 +1576,9 @@ impl SessionsEngine {
             _ => None,
         }) else { return Ok(false); };
         let Some(host) = self.inner.doc_host() else { return Ok(false); };
-        let Some(mut request) = self.last_request(chat_id).filter(|request| request.prompt == prompt)
-            .or_else(|| host.request_from_chat_row(chat_id, &prompt)) else { return Ok(false); };
-        request.prompt = prompt.clone();
-        request.resume = None;
-        request.worktree = None;
-        if request.attachments.is_empty() {
-            request.attachments = retry_prompt_attachments(&prompt);
-        }
-        host.apply_chat_approval(chat_id, &mut request);
+        let Some(request) = self.revival_request(&host, chat_id, &prompt) else { return Ok(false); };
         let harness = host.harness_for_request(chat_id, &request);
-        host.dispatch_with_source_context(self, chat_id, harness, request, Some(user.id.clone())).await?;
+        host.dispatch_retry_with_source_context(self, chat_id, harness, request, user.id.clone(), error_entry_id.to_owned()).await?;
         Ok(true)
     }
 
@@ -2640,6 +2667,13 @@ struct RunResumeState {
     user_message_id: String,
     resume_injected: bool,
     startup_retry: bool,
+    user_retry: bool,
+}
+
+fn session_resume_rejected(message: &str) -> bool {
+    let message = message.to_lowercase();
+    ["no conversation found", "session not found", "session does not exist", "invalid session id", "thread not found"]
+        .iter().any(|marker| message.contains(marker))
 }
 
 fn cursor_unstarted_history(
@@ -2762,6 +2796,26 @@ async fn drive_run(
         Ok(stream) => stream,
         Err(err) => {
             let message = err.to_string();
+            if resume_state.user_retry && resume_state.resume_injected
+                && session_resume_rejected(&message)
+                && let Some(retry) = retry_request.take()
+            {
+                inner.remove_run(&chat_id, &run_id);
+                let engine = SessionsEngine { inner: inner.clone() };
+                let chat = chat_id.clone();
+                let message_id = resume_state.user_message_id.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = engine.dispatch_fresh_retry(&chat, harness_id, retry, message_id).await {
+                        tracing::error!(chat = %chat, error = %err, "fresh retry dispatch failed");
+                        engine.inner.set_status(&chat, SessionStatus::Errored, false);
+                    }
+                });
+                return;
+            }
+            let error = MessagePart::Error { id: new_id(), message: message.clone() };
+            if let Err(error) = finish_segment(&doc, None, &new_id(), &device_id, now_ms(), &[error], MessageStatus::Complete) {
+                tracing::warn!(chat = %chat_id, %error, "could not persist harness startup error");
+            }
             inner.publish(
                 &chat_id,
                 &AgentEvent::Error {
@@ -3464,6 +3518,33 @@ async fn drive_run(
             }
         }
 
+        // A provider's explicit missing-session error is different from a
+        // process crash: retry fresh only when the saved session is known bad
+        // and no response or tool activity has begun.
+        let rejected_resume = match &event {
+            AgentEvent::Done { status: DoneStatus::Errored, error, .. } => error.as_deref()
+                .is_some_and(session_resume_rejected)
+                || folded.iter().any(|part| matches!(part, MessagePart::Error { message, .. } if session_resume_rejected(message))),
+            _ => false,
+        };
+        if resume_state.user_retry && resume_state.resume_injected && !saw_session_started
+            && !interrupted && rejected_resume
+            && folded.iter().all(|part| matches!(part, MessagePart::Error { .. }))
+            && let Some(retry) = retry_request.take()
+        {
+            inner.remove_run(&chat_id, &run_id);
+            let engine = SessionsEngine { inner: inner.clone() };
+            let chat = chat_id.clone();
+            let message_id = resume_state.user_message_id.clone();
+            tokio::spawn(async move {
+                if let Err(err) = engine.dispatch_fresh_retry(&chat, harness_id, retry, message_id).await {
+                    tracing::error!(chat = %chat, error = %err, "fresh retry dispatch failed");
+                    engine.inner.set_status(&chat, SessionStatus::Errored, false);
+                }
+            });
+            return;
+        }
+
         // Startup-crash retry: a run that dies before ever starting (errored
         // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
         // failed to come up — not that the injected resume id was bad. Since
@@ -3818,6 +3899,12 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_recovers_attachment_paths_from_transcript_prompt() {
+        assert_eq!(retry_prompt_attachments("hello\n\nAttached images (local files — open them to view):\n- /tmp/one.png\n- /tmp/two.png"), ["/tmp/one.png", "/tmp/two.png"]);
+        assert!(retry_prompt_attachments("hello").is_empty());
+    }
 
     /// The backwards search agrees with the forward fold it replaced, over a
     /// deterministic spread of session-event sequences (ids missing, cwds

@@ -64,6 +64,33 @@ struct RecordingHarness {
     fail_starts: Arc<Mutex<u32>>,
 }
 
+struct ResumeRejectingHarness { requests: RequestLog }
+
+#[async_trait]
+impl Harness for ResumeRejectingHarness {
+    fn id(&self) -> HarnessId { HarnessId::Mock }
+    fn display_name(&self) -> &str { "Resume rejection" }
+    fn supports_steering(&self) -> bool { false }
+    fn steering_mode(&self) -> SteeringMode { SteeringMode::TurnBoundary }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] { &[] }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> { Ok(vec![]) }
+    async fn run(&self, request: RunRequest, _: RunControls) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let call = { let mut requests = self.requests.lock().unwrap(); requests.push(request.clone()); requests.len() };
+        let mut events = Vec::new();
+        if call != 3 {
+            events.push(Ok(AgentEvent::SessionStarted { harness: HarnessId::Mock, model: "mock".into(), tools: vec![], cwd: request.cwd, session_id: "saved-session".into(), assistant_message_id: format!("assistant-{call}") }));
+        }
+        if call == 1 || call == 4 {
+            events.push(Ok(AgentEvent::TextDelta { text: "done".into() }));
+            events.push(Ok(AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("saved-session".into()) }));
+        } else {
+            let message = if call == 3 { "No conversation found with session ID" } else { "service overloaded" };
+            events.push(Ok(AgentEvent::Done { status: DoneStatus::Errored, result: None, error: Some(message.into()), session_id: None }));
+        }
+        Ok(futures::stream::iter(events).boxed())
+    }
+}
+
 /// Keeps one turn active until engine shutdown cancels it, then emits the
 /// same terminal interrupted event a graceful application quit produces.
 struct RestartInterruptedHarness;
@@ -304,6 +331,80 @@ async fn retry_errored_turn_resends_once_with_attachments() {
     assert_eq!(log[1].prompt, prompt);
     assert_eq!(log[1].attachments, ["/tmp/picture.png"]);
     drop(log);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn retry_errored_turn_refuses_live_run() {
+    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RestartInterruptedHarness));
+    let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    pre_title(&core);
+    queue_run(&core, "running", "/tmp", "running-user");
+    wait_for(|| core.sessions.has_live_run(CHAT), "live run").await;
+    assert!(!core.sessions.retry_errored_turn(CHAT, "old-error").await.unwrap());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn retry_falls_back_to_fresh_when_saved_session_is_rejected() {
+    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(ResumeRejectingHarness { requests: requests.clone() }));
+    let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    pre_title(&core);
+    queue_run(&core, "first", "/tmp", "first-user");
+    wait_for(|| complete_assistant_count(&core) == 1 && !core.sessions.has_live_run(CHAT), "first turn").await;
+    queue_run(&core, "retry this", "/tmp", "second-user");
+    wait_for(|| !core.sessions.has_live_run(CHAT) && entries_now(&core).iter().any(|entry|
+        entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))), "failed turn").await;
+    let error_id = entries_now(&core).iter().rev().find(|entry|
+        entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))).unwrap().id.clone();
+    assert!(core.sessions.retry_errored_turn(CHAT, &error_id).await.unwrap());
+    wait_for(|| requests.lock().unwrap().len() >= 4, "fresh retry").await;
+    let log = requests.lock().unwrap();
+    assert_eq!(log[2].resume.as_deref(), Some("saved-session"));
+    assert_eq!(log[3].resume, None);
+    assert_eq!(log[3].prompt, "retry this");
+    drop(log);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_command_identity_dispatches_only_once() {
+    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble(&tmp.path().join("data"), RecordingHarness {
+        requests: requests.clone(), session_id: "command-session".into(), fail_starts: Default::default(),
+    });
+    pre_title(&core);
+    let command = SessionCommandPayload::Run {
+        request: run_request("one send", "/tmp"), message_id: "message-id".into(),
+    };
+    for _ in 0..2 {
+        core.doc_host.queue_command_with_transfers_and_id(CHAT, "command-id", command.clone(), Vec::new()).unwrap();
+    }
+    wait_for(|| complete_assistant_count(&core) == 1, "command completion").await;
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_queue_identity_adds_one_message() {
+    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RestartInterruptedHarness));
+    let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    pre_title(&core);
+    queue_run(&core, "running", "/tmp", "running-user");
+    wait_for(|| core.sessions.has_live_run(CHAT), "live run").await;
+    for _ in 0..2 {
+        core.doc_host.queue_message_with_id(CHAT, "queued-id", "queued once", Vec::new(), true).await.unwrap();
+    }
+    let queue = core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap();
+    assert_eq!(queue.iter().filter(|item| item.id == "queued-id").count(), 1);
     core.shutdown().await;
 }
 

@@ -138,6 +138,8 @@ async fn update_harness_enabled(
 struct QueueCommandParams {
     chat_id: String,
     command: SessionCommandPayload,
+    #[serde(default)]
+    command_id: Option<String>,
     /// Queued attachments (bytes already committed locally as `pending://`
     /// refs) the engine delivers to a remote host AFTER the command is
     /// durably queued — never as a gate in front of it.
@@ -304,6 +306,8 @@ fn shared_closeout_error(shared: &[crate::chat_workspace_plan::CloseoutChatRefer
 struct QueueMessageParams {
     chat_id: String,
     text: String,
+    #[serde(default)]
+    message_id: Option<String>,
     #[serde(default)]
     attachments: Vec<String>,
     /// Keep this row visible during the current turn even when the harness
@@ -2631,9 +2635,10 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
-                let command_id = self
-                    .doc_host
-                    .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
+                let command_id = match p.command_id {
+                    Some(id) => self.doc_host.queue_command_with_transfers_and_id(&p.chat_id, &id, p.command, p.transfers),
+                    None => self.doc_host.queue_command_with_transfers(&p.chat_id, p.command, p.transfers),
+                }
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
@@ -2824,14 +2829,10 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
-                let id = self
-                    .doc_host
-                    .queue_message_with_behavior(
-                        &p.chat_id,
-                        &p.text,
-                        p.attachments,
-                        p.hold_for_turn_end,
-                    )
+                let id = match p.message_id {
+                    Some(id) => self.doc_host.queue_message_with_id(&p.chat_id, &id, &p.text, p.attachments, p.hold_for_turn_end).await,
+                    None => self.doc_host.queue_message_with_behavior(&p.chat_id, &p.text, p.attachments, p.hold_for_turn_end),
+                }
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
