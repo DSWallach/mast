@@ -92,6 +92,13 @@ struct ChatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RetryErroredTurnParams {
+    chat_id: String,
+    error_entry_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
@@ -2131,6 +2138,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_MODELS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
+            | methods::RETRY_ERRORED_TURN
             | methods::TAKE_PROJECT_ACTION_SETUP
             | methods::WATCH_DOC_MESSAGES
             // The queue lives on the chat doc, and only its host may send from
@@ -2736,6 +2744,12 @@ impl RpcService for EngineRpc {
                 let p: ChatParams = parse_params(params)?;
                 let resumed = self.sessions.resume_interrupted(&p.chat_id);
                 RpcReply::value(&serde_json::json!({ "resumed": resumed }))
+            }
+            methods::RETRY_ERRORED_TURN => {
+                let p: RetryErroredTurnParams = parse_params(params)?;
+                let retried = self.sessions.retry_errored_turn(&p.chat_id, &p.error_entry_id)
+                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "retried": retried }))
             }
             methods::RETRY_DELIVERY => {
                 let p: ChatParams = parse_params(params)?;

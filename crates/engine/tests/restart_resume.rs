@@ -278,6 +278,35 @@ fn pre_title(core: &EngineCore) {
         .expect("rename chat");
 }
 
+#[tokio::test]
+async fn retry_errored_turn_resends_once_with_attachments() {
+    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let failures = Arc::new(Mutex::new(1));
+    let core = assemble(&tmp.path().join("data"), RecordingHarness {
+        requests: requests.clone(), session_id: "retry-session".into(), fail_starts: failures,
+    });
+    pre_title(&core);
+    let prompt = "inspect\n\nAttached images (local files — open them to view):\n- /tmp/picture.png";
+    let mut request = run_request(prompt, "/tmp");
+    request.attachments = vec!["/tmp/picture.png".into()];
+    core.doc_host.queue_command(CHAT, SessionCommandPayload::Run {
+        request, message_id: "retry-user".into(),
+    }).unwrap();
+    wait_for(|| !core.sessions.has_live_run(CHAT) && entries_now(&core).iter().any(|entry|
+        entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))), "errored turn").await;
+    let error_id = entries_now(&core).iter().find(|entry|
+        entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))).unwrap().id.clone();
+    assert!(core.sessions.retry_errored_turn(CHAT, &error_id).await.unwrap());
+    assert!(!core.sessions.retry_errored_turn(CHAT, &error_id).await.unwrap());
+    wait_for(|| requests.lock().unwrap().len() == 2, "retry dispatch").await;
+    let log = requests.lock().unwrap();
+    assert_eq!(log[1].prompt, prompt);
+    assert_eq!(log[1].attachments, ["/tmp/picture.png"]);
+    drop(log);
+    core.shutdown().await;
+}
+
 /// One full turn in a fresh engine over `dir`, then graceful shutdown — the
 /// "before restart" phase shared by the tests below.
 async fn run_one_turn_and_shutdown(dir: &std::path::Path, requests: &RequestLog, session: &str) {

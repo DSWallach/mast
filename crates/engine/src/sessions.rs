@@ -178,6 +178,8 @@ struct Inner {
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
+    /// Error entries already claimed by a retry, including dispatches in flight.
+    retry_claims: Mutex<std::collections::HashSet<(String, String)>>,
     /// Harness-native session ids per chat (resume continuity across turns) —
     /// the live-process cache over the durable copy on the workspace chat row
     /// (zeron kept the same pair on `chats.harness_session_id`). An empty
@@ -227,6 +229,15 @@ pub type AssistantTextListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Recover the durable attachment references embedded in a user prompt.
+fn retry_prompt_attachments(prompt: &str) -> Vec<String> {
+    const HEADER: &str = "\n\nAttached images (local files — open them to view):\n";
+    let Some((_, trailer)) = prompt.rsplit_once(HEADER) else { return Vec::new(); };
+    trailer.lines().map(|line| line.strip_prefix("- "))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default().into_iter().map(str::to_owned).collect()
 }
 
 #[derive(Clone)]
@@ -300,6 +311,7 @@ impl SessionsEngine {
                 auto_capture_friction: AtomicBool::new(true),
                 friction_approvals: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
+                retry_claims: Mutex::new(std::collections::HashSet::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 managed_accounts: OnceLock::new(),
@@ -1486,6 +1498,61 @@ impl SessionsEngine {
     /// Forget a ledger entry without acting on it.
     pub fn dismiss_interrupted(&self, chat_id: &str) {
         self.inner.journal.clear_interrupted(chat_id);
+    }
+
+    /// Retry a particular error entry once. The entry id makes a delayed second
+    /// click harmless even if the first retry has already finished.
+    pub async fn retry_errored_turn(&self, chat_id: &str, error_entry_id: &str) -> Result<bool, EngineError> {
+        let claim = (chat_id.to_owned(), error_entry_id.to_owned());
+        {
+            let mut claims = lock(&self.inner.retry_claims);
+            if claims.contains(&claim) || self.has_live_run(chat_id) {
+                return Ok(false);
+            }
+            claims.insert(claim.clone());
+        }
+        let result = self.retry_errored_turn_inner(chat_id, error_entry_id).await;
+        if !matches!(result, Ok(true)) {
+            lock(&self.inner.retry_claims).remove(&claim);
+        }
+        result
+    }
+
+    async fn retry_errored_turn_inner(&self, chat_id: &str, error_entry_id: &str) -> Result<bool, EngineError> {
+        if self.has_live_run(chat_id) {
+            return Ok(false);
+        }
+        let Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. })) =
+            self.inner.journal.last_event(chat_id).ok().flatten() else {
+                return Ok(false);
+            };
+        let handle = self.doc_handle(chat_id)?;
+        let entries = handle.doc().read_entries()?;
+        let Some(user_index) = entries.iter().rposition(|entry| entry.role == MessageRole::User) else {
+            return Ok(false);
+        };
+        if !entries[user_index + 1..].iter().any(|entry| entry.id == error_entry_id
+            && entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))) {
+            return Ok(false);
+        }
+        let user = &entries[user_index];
+        let Some(prompt) = user.parts.iter().find_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        }) else { return Ok(false); };
+        let Some(host) = self.inner.doc_host() else { return Ok(false); };
+        let Some(mut request) = self.last_request(chat_id).filter(|request| request.prompt == prompt)
+            .or_else(|| host.request_from_chat_row(chat_id, &prompt)) else { return Ok(false); };
+        request.prompt = prompt.clone();
+        request.resume = None;
+        request.worktree = None;
+        if request.attachments.is_empty() {
+            request.attachments = retry_prompt_attachments(&prompt);
+        }
+        host.apply_chat_approval(chat_id, &mut request);
+        let harness = host.harness_for_request(chat_id, &request);
+        host.dispatch_with_source_context(self, chat_id, harness, request, Some(user.id.clone())).await?;
+        Ok(true)
     }
 
     /// One-click Resume / Resend for an interrupted turn: clear the entry and
