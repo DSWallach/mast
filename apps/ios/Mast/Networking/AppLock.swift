@@ -4,13 +4,25 @@ import Combine
 
 func requiresConfirmation(quickActions: Bool) -> Bool { !quickActions }
 
-enum AuthenticationResult: Equatable { case success, failure, noPasscode }
+enum AuthenticationResult: Equatable { case success, cancelled, failure, unavailable, noPasscode }
 protocol DeviceAuthenticator { func authenticate(completion: @escaping (AuthenticationResult) -> Void) }
 struct LocalDeviceAuthenticator: DeviceAuthenticator {
     func authenticate(completion: @escaping (AuthenticationResult) -> Void) {
         let context = LAContext(); context.touchIDAuthenticationAllowableReuseDuration = 0; var error: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { completion(error?.code == LAError.passcodeNotSet.rawValue ? .noPasscode : .failure); return }
-        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock Mast") { success, _ in DispatchQueue.main.async { completion(success ? .success : .failure) } }
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { completion(error?.code == LAError.passcodeNotSet.rawValue ? .noPasscode : .unavailable); return }
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock Mast") { success, error in
+            let result: AuthenticationResult
+            if success { result = .success }
+            else if let error = error as? LAError {
+                switch error.code {
+                case .userCancel, .systemCancel, .appCancel: result = .cancelled
+                case .passcodeNotSet: result = .noPasscode
+                case .biometryNotAvailable, .biometryNotEnrolled, .notInteractive: result = .unavailable
+                default: result = .failure
+                }
+            } else { result = .failure }
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 }
 @MainActor
@@ -24,6 +36,8 @@ final class AppLock: ObservableObject {
     private var backgroundedAt: Date?
     private var active = false
     private var generation = 0
+    var authorizationGeneration: Int { generation }
+    var allowsWrite: Bool { active && !locked }
     init(authenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), now: @escaping () -> Date = Date.init) { self.authenticator = authenticator; self.now = now }
     func inactive() { obscured = true }
     func background() { active = false; generation += 1; authenticating = false; obscured = true; backgroundedAt = now() }

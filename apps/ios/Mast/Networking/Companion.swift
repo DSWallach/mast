@@ -58,11 +58,15 @@ func clearKeychainOnFirstLaunch(defaults: UserDefaults, credential: any Credenti
     credential.clear(); clearDecisions(); defaults.set(true, forKey: "companionFirstLaunchComplete")
 }
 enum BridgeError: LocalizedError {
-    case address, credential, response, unauthorized, capability, notSent, deliveryUnknown, rateLimited(Int), pairing(String)
+    case address, credential, response, unauthorized, capability, notSent, deliveryUnknown, rateLimited(Int), pairing(String), authenticationCancelled, authenticationFailed, authenticationUnavailable, passcodeRequired
     var errorDescription: String? {
         switch self {
         case .address: return "Check the bridge URL. Use HTTPS, or HTTP on simulator loopback."
-        case .credential: return "Authentication or device credential unavailable."
+        case .credential: return "Device credential unavailable. Pair again."
+        case .authenticationCancelled: return "Cancelled"
+        case .authenticationFailed: return "Face ID failed. Try again or use your passcode."
+        case .authenticationUnavailable: return "Device authentication is unavailable. Try again."
+        case .passcodeRequired: return "Set a device passcode to authorize this action."
         case .response: return "Bridge request failed."
         case .unauthorized: return "Device credential revoked. Pair again."
         case .capability: return "Not allowed for this Space."
@@ -137,7 +141,9 @@ final class Companion: ObservableObject {
     private let configuration: URLSessionConfiguration
     private let actionAuthenticator: any DeviceAuthenticator
     private let actionAllowed: @MainActor () -> Bool
-    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAuthenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), actionAllowed: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) { self.actionAllowed = actionAllowed; self.actionAuthenticator = actionAuthenticator; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if credential is Credential { clearKeychainOnFirstLaunch(defaults: .standard, credential: credential, clearDecisions: KeychainDecisionStore.clearAll) }; if let stored = credential.read() { address = stored.origin; isPaired = true } }
+    private let actionGeneration: @MainActor () -> Int
+    private let actionActive: @MainActor () -> Bool
+    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAuthenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), actionAllowed: @escaping @MainActor () -> Bool = { false }, actionGeneration: @escaping @MainActor () -> Int = { 0 }, actionActive: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) { self.actionAllowed = actionAllowed; self.actionGeneration = actionGeneration; self.actionActive = actionActive; self.actionAuthenticator = actionAuthenticator; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if credential is Credential { clearKeychainOnFirstLaunch(defaults: .standard, credential: credential, clearDecisions: KeychainDecisionStore.clearAll) }; if let stored = credential.read() { address = stored.origin; isPaired = true } }
     @Published var demo = true {
         didSet { if oldValue != demo { clearCachedContent() } }
     }
@@ -349,8 +355,23 @@ final class Companion: ObservableObject {
         return page
     }
     private func authenticateWrite() async throws {
+        guard actionAllowed() else { throw BridgeError.authenticationCancelled }
+        let generation = actionGeneration()
         let result = await withCheckedContinuation { continuation in actionAuthenticator.authenticate { continuation.resume(returning: $0) } }
-        guard result == .success, actionAllowed() else { throw BridgeError.credential }
+        switch result {
+        case .cancelled: throw BridgeError.authenticationCancelled
+        case .failure: throw BridgeError.authenticationFailed
+        case .unavailable: throw BridgeError.authenticationUnavailable
+        case .noPasscode: throw BridgeError.passcodeRequired
+        case .success: break
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while !actionActive() {
+            guard actionAllowed(), actionGeneration() == generation, !Task.isCancelled else { throw BridgeError.authenticationCancelled }
+            guard Date() < deadline else { throw BridgeError.authenticationUnavailable }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard actionAllowed(), actionGeneration() == generation, !Task.isCancelled else { throw BridgeError.authenticationCancelled }
     }
     func send(_ chat: Chat, text: String) async throws -> String {
         if demo { return "Demo only · message was not sent" }

@@ -180,6 +180,7 @@ struct ChatDetail: View {
                 }
             } catch {
                 switch error as? BridgeError {
+                case .authenticationCancelled: localMessages.removeAll { $0.id == message.id }; sendStates.removeValue(forKey: message.id); if text.isEmpty { text = message.text }; notice = "Cancelled"
                 case .deliveryUnknown: sendStates[message.id] = "Delivery unknown · Retry"; notice = "Check the chat before retrying; the message may have arrived."
                 case .notSent: sendStates[message.id] = "Not sent · Retry"; notice = "Not sent. Check the connection."
                 case .rateLimited(let seconds): sendStates[message.id] = "Slow down · Retry"; notice = "Slow down. Try again in \(seconds) seconds."
