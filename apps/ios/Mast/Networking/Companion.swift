@@ -139,11 +139,10 @@ final class Companion: ObservableObject {
     private let credential: any CredentialStore
     private let decisions: any DecisionStore
     private let configuration: URLSessionConfiguration
-    private let actionAuthenticator: any DeviceAuthenticator
     private let actionAllowed: @MainActor () -> Bool
     private let actionGeneration: @MainActor () -> Int
     private let actionActive: @MainActor () -> Bool
-    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAuthenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), actionAllowed: @escaping @MainActor () -> Bool = { false }, actionGeneration: @escaping @MainActor () -> Int = { 0 }, actionActive: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) { self.actionAllowed = actionAllowed; self.actionGeneration = actionGeneration; self.actionActive = actionActive; self.actionAuthenticator = actionAuthenticator; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if credential is Credential { clearKeychainOnFirstLaunch(defaults: .standard, credential: credential, clearDecisions: KeychainDecisionStore.clearAll) }; if let stored = credential.read() { address = stored.origin; isPaired = true } }
+    init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAllowed: @escaping @MainActor () -> Bool = { false }, actionGeneration: @escaping @MainActor () -> Int = { 0 }, actionActive: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState != .background }) { self.actionAllowed = actionAllowed; self.actionGeneration = actionGeneration; self.actionActive = actionActive; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if credential is Credential { clearKeychainOnFirstLaunch(defaults: .standard, credential: credential, clearDecisions: KeychainDecisionStore.clearAll) }; if let stored = credential.read() { address = stored.origin; isPaired = true } }
     @Published var demo = true {
         didSet { if oldValue != demo { clearCachedContent() } }
     }
@@ -270,7 +269,7 @@ final class Companion: ObservableObject {
         if let port = url.port, !((c.scheme == "https" && port == 443) || (c.scheme == "http" && port == 80)) { c.port = port }
         return c.string ?? ""
     }
-    private func request<T: Decodable>(_ path: String, body: [String: String]? = nil, authenticated: Bool = true, idempotencyKey: String? = nil) async throws -> T {
+    private func request<T: Decodable>(_ path: String, body: [String: String]? = nil, authenticated: Bool = true, idempotencyKey: String? = nil, authorizationGeneration: Int? = nil) async throws -> T {
         let base = try baseURL()
         guard let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw BridgeError.address }
         var request = URLRequest(url: url); request.timeoutInterval = 20
@@ -280,6 +279,7 @@ final class Companion: ObservableObject {
         let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         let data: Data; let response: URLResponse
+        if let authorizationGeneration { try validateWrite(generation: authorizationGeneration) }
         do { (data, response) = try await session.data(for: request) }
         catch let error as URLError {
             if !authenticated { throw BridgeError.pairing(pairingNetworkMessage(error)) }
@@ -354,38 +354,27 @@ final class Companion: ObservableObject {
         if offset == 0, canView(spaceId: chat.spaceId) { cacheTranscript(chat, page: page) }
         return page
     }
-    private func authenticateWrite() async throws {
-        guard actionAllowed() else { throw BridgeError.authenticationCancelled }
+    private func validateWrite(generation: Int) throws {
+        guard actionAllowed(), actionActive(), actionGeneration() == generation, !Task.isCancelled else { throw BridgeError.authenticationCancelled }
+    }
+    private func authorizeWrite() throws -> Int {
         let generation = actionGeneration()
-        let result = await withCheckedContinuation { continuation in actionAuthenticator.authenticate { continuation.resume(returning: $0) } }
-        switch result {
-        case .cancelled: throw BridgeError.authenticationCancelled
-        case .failure: throw BridgeError.authenticationFailed
-        case .unavailable: throw BridgeError.authenticationUnavailable
-        case .noPasscode: throw BridgeError.passcodeRequired
-        case .success: break
-        }
-        let deadline = Date().addingTimeInterval(2)
-        while !actionActive() {
-            guard actionAllowed(), actionGeneration() == generation, !Task.isCancelled else { throw BridgeError.authenticationCancelled }
-            guard Date() < deadline else { throw BridgeError.authenticationUnavailable }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        guard actionAllowed(), actionGeneration() == generation, !Task.isCancelled else { throw BridgeError.authenticationCancelled }
+        try validateWrite(generation: generation)
+        return generation
     }
     func send(_ chat: Chat, text: String) async throws -> String {
         if demo { return "Demo only · message was not sent" }
         guard canPerform(spaceId: chat.spaceId, level: "send") else { throw BridgeError.capability }
-        try await authenticateWrite()
-        let result: SendReply = try await request("/chats/\(chat.id)/messages", body: ["text": text])
+        let generation = try authorizeWrite()
+        let result: SendReply = try await request("/chats/\(chat.id)/messages", body: ["text": text], authorizationGeneration: generation)
         if result.delivery == "simulated" { return "Fixture only · message was not sent" }
         return result.delivery == "queued" ? "Queued" : "Accepted"
     }
     func stop(_ chat: Chat) async throws {
         if demo { return }
         guard canPerform(spaceId: chat.spaceId, level: "send") else { throw BridgeError.capability }
-        try await authenticateWrite()
-        let _: StopReply = try await request("/chats/\(chat.id)/stop", body: [:])
+        let generation = try authorizeWrite()
+        let _: StopReply = try await request("/chats/\(chat.id)/stop", body: [:], authorizationGeneration: generation)
     }
     func pendingDecision(_ requestId: String) throws -> PendingDecision? { demo ? nil : try decisions.read(requestId) }
     func answer(_ requestId: String, outcome: String, text: String? = nil, optionId: String? = nil) async throws -> PendingDecision {
@@ -394,12 +383,12 @@ final class Companion: ObservableObject {
         guard decision.outcome == outcome && decision.text == text && decision.optionId == optionId else { throw BridgeError.response }
         if demo { guard existing == nil else { throw BridgeError.response }; decision.phase = "resolved"; return decision }
         guard canPerform(spaceId: requests.first(where: { $0.id == requestId })?.spaceId, level: "answer") else { throw BridgeError.capability }
-        try await authenticateWrite()
+        let generation = try authorizeWrite()
         try decisions.save(requestId, decision: decision)
         var body = ["outcome": decision.outcome]
         if let text = decision.text { body["text"] = text }; if let optionId = decision.optionId { body["optionId"] = optionId }
         let resolveOnly = decision.phase == "sent" || decision.phase == "resolving"
-        let result: AnswerResult = try await request("/requests/\(requestId)/\(resolveOnly ? "resolve" : "answer")", body: resolveOnly ? [:] : body, idempotencyKey: decision.key)
+        let result: AnswerResult = try await request("/requests/\(requestId)/\(resolveOnly ? "resolve" : "answer")", body: resolveOnly ? [:] : body, idempotencyKey: decision.key, authorizationGeneration: generation)
         decision.phase = result.state; decision.resolveOnly = result.resolveOnly; try decisions.save(requestId, decision: decision)
         return decision
     }

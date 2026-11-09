@@ -37,7 +37,8 @@ final class AppLock: ObservableObject {
     private var active = false
     private var generation = 0
     var authorizationGeneration: Int { generation }
-    var allowsWrite: Bool { active && !locked }
+    private var authenticated = false
+    var allowsWrite: Bool { active && !locked && authenticated }
     init(authenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), now: @escaping () -> Date = Date.init) { self.authenticator = authenticator; self.now = now }
     func inactive() { obscured = true }
     func background() { active = false; generation += 1; authenticating = false; obscured = true; backgroundedAt = now() }
@@ -54,9 +55,9 @@ final class AppLock: ObservableObject {
             Task { @MainActor in
                 guard let self, self.generation == attempt, self.active else { return }
                 self.authenticating = false; self.noPasscode = result == .noPasscode
-                self.locked = result != .success; self.obscured = result != .success
+                self.authenticated = result == .success; self.locked = result != .success; self.obscured = result != .success
             }
         }
     }
-    func continueWithoutPasscode() { guard active && noPasscode && !authenticating else { return }; locked = false; obscured = false; noPasscode = false }
+    func continueWithoutPasscode() { guard active && noPasscode && !authenticating else { return }; authenticated = false; locked = false; obscured = false; noPasscode = false }
 }

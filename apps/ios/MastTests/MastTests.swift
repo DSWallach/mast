@@ -38,7 +38,7 @@ final class MastTests: XCTestCase {
     private func model(_ credential: MemoryCredential) -> Companion {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }, actionActive: { true })
+        let model = Companion(credential: credential, configuration: configuration, actionAllowed: { true }, actionActive: { true })
         model.demo = false
         return model
     }
@@ -76,7 +76,7 @@ final class MastTests: XCTestCase {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
         let auth = MockAuthenticator()
-        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAuthenticator: auth, actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
+        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
         model.sharedSpaces = [SharedSpace(id: "s", name: "Space", allow: "view")]
         let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working", spaceId: "s")
         do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Not allowed")) }
@@ -152,49 +152,32 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(request.options, ["Yes"])
         XCTAssertEqual(request.origin, "Chat")
     }
-    func testWriteWaitsForActiveAfterAuthenticationAndRejectsBackground() async throws {
+    func testWritesRequireAuthenticatedUnlockAndRejectBackground() async throws {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let lock = AppLock(authenticator: ImmediateAuthenticator()); lock.foreground(timeout: 60); await Task.yield()
+        let authenticator = MockAuthenticator(), lock = AppLock(authenticator: authenticator)
+        var prompts = 0, requests = 0
+        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAllowed: { lock.allowsWrite }, actionGeneration: { lock.authorizationGeneration }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
+        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working", spaceId: "s")
+        StubProtocol.reply = { request in requests += 1; return request.url!.path.hasSuffix("stop") ? (200, "{}") : (200, "{\"delivery\":\"accepted\"}") }
+        do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch {}
+        lock.foreground(timeout: 60); prompts += 1; authenticator.completion?(.noPasscode); await Task.yield(); lock.continueWithoutPasscode()
+        XCTAssertFalse(lock.allowsWrite)
+        do { try await model.stop(chat); XCTFail() } catch {}
+        lock.background(); lock.foreground(timeout: 0); prompts += 1; authenticator.completion?(.success); await Task.yield()
         XCTAssertTrue(lock.allowsWrite)
-        let authenticator = MockAuthenticator(); var active = false; var sent = 0
-        let model = Companion(credential: credential, configuration: configuration, actionAuthenticator: authenticator, actionAllowed: { lock.allowsWrite }, actionGeneration: { lock.authorizationGeneration }, actionActive: { active }); model.demo = false; enableWrites(model)
-        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working", spaceId: "s")
-        StubProtocol.reply = { _ in sent += 1; return (200, "{\"delivery\":\"accepted\"}") }
-        lock.inactive()
-        let send = Task { try await model.send(chat, text: "hello") }
-        await Task.yield(); authenticator.completion?(.success)
-        try await Task.sleep(nanoseconds: 100_000_000); XCTAssertEqual(sent, 0)
-        active = true; lock.foreground(timeout: 60)
-        let result = try await send.value; XCTAssertEqual(result, "Accepted"); XCTAssertEqual(sent, 1)
-        active = false; lock.inactive(); authenticator.completion = nil
-        let stopped = Task { try await model.stop(chat) }
-        await Task.yield(); authenticator.completion?(.success)
-        lock.background(); lock.foreground(timeout: 60); active = true
-        do { try await stopped.value; XCTFail("background must cancel") } catch { XCTAssertEqual(error.localizedDescription, "Cancelled") }
-        XCTAssertEqual(sent, 1)
+        _ = try await model.send(chat, text: "hello"); XCTAssertEqual(requests, 1); XCTAssertEqual(prompts, 2)
+        lock.background()
+        do { _ = try await model.answer("r", outcome: "answered", text: "yes"); XCTFail() } catch {}
+        XCTAssertEqual(requests, 1)
     }
-    func testAuthenticationFailuresHaveDistinctMessages() async throws {
+    func testWriteCancelledWhenGenerationChangesBeforeDispatch() async throws {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let authenticator = MockAuthenticator()
-        let model = Companion(credential: credential, configuration: configuration, actionAuthenticator: authenticator, actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
-        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working", spaceId: "s")
-        for (result, expected) in [(AuthenticationResult.cancelled, "Cancelled"), (.failure, "Face ID failed"), (.unavailable, "unavailable"), (.noPasscode, "passcode")] {
-            authenticator.completion = nil
-            let task = Task { try await model.send(chat, text: "hello") }; await Task.yield(); authenticator.completion?(result)
-            do { _ = try await task.value; XCTFail("authentication must fail") } catch { XCTAssertTrue(error.localizedDescription.contains(expected), error.localizedDescription) }
-        }
-    }
-    func testWriteRequiresFreshAuthentication() async throws {
-        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
-        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAuthenticator: RefusingAuthenticator(), actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
-        var sent = false; StubProtocol.reply = { _ in sent = true; return (200, "{}") }
-        let chat = Chat(id: "c", title: "Chat", space: "S", status: "working", spaceId: "s")
-        do { _ = try await model.send(chat, text: "hello"); XCTFail("expected authentication failure") } catch {}
-        do { try await model.stop(chat); XCTFail("expected authentication failure") } catch {}
-        do { _ = try await model.answer("r", outcome: "answered", text: "yes"); XCTFail("expected authentication failure") } catch {}
+        var checks = 0, sent = false
+        let model = Companion(credential: credential, configuration: configuration, actionAllowed: { true }, actionGeneration: { checks += 1; return checks < 3 ? 0 : 1 }, actionActive: { true }); model.demo = false; enableWrites(model)
+        StubProtocol.reply = { _ in sent = true; return (200, "{}") }
+        do { _ = try await model.send(Chat(id: "c", title: "Chat", space: "Space", status: "idle", spaceId: "s"), text: "hello"); XCTFail() } catch { XCTAssertEqual(error.localizedDescription, "Cancelled") }
         XCTAssertFalse(sent)
     }
     func testFirstLaunchClearsSurvivingKeychainOnlyOnce() throws {
@@ -311,7 +294,7 @@ final class MastTests: XCTestCase {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
         var key: String?
         StubProtocol.reply = { request in
             key = request.value(forHTTPHeaderField: "Idempotency-Key")
@@ -333,7 +316,7 @@ final class MastTests: XCTestCase {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["ask", "choose", "approve", "decline"])
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAllowed: { true }, actionActive: { true }); model.demo = false; enableWrites(model, requestIDs: ["ask", "choose", "approve", "decline"])
         var bodies: [[String: String]] = []
         StubProtocol.reply = { request in
             let data: Data
