@@ -1,5 +1,7 @@
 # zeron — Architecture
 
+> This describes the original Zeron-era design and is partly out of date for Mast.
+
 A ground-up native rewrite of [zeron](../zeron) — a multi-device controller for coding agents
 (Claude Code / Codex) — in Rust, with a gpui UI. Fresh app; no backwards compatibility required.
 

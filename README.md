@@ -123,8 +123,8 @@ Reference:
 
 ## Credits
 
-Mast began as a fork of [Zeron](https://github.com/zeronsh/zeron), created by Wing and contributors. Zeron provided the engine, Loro-based sync and documents, agent adapters, and chat UI. Mast builds on that foundation with the Work Outline, Overview, Required Actions, PR review, Linear integration, Horizon styles, and a newer iOS companion. Zeron already included an iOS app.
+Mast began as a fork of [Zeron](https://github.com/zeronsh/zeron), created by Wing and contributors. Zeron provided the engine, Loro-based sync and documents, agent adapters, and chat UI. Mast builds on that foundation with the Work Outline, Overview, Needs you, PR review, Linear integration, Horizon styles, and a new iOS companion (replacing Zeron's iOS app).
 
-[Mentics/tod](https://github.com/mentics/tod) inspired parts of the outline keyboard navigation and Linear integration. Those ideas were reimplemented; no Tod code was copied.
+[Tod](https://github.com/mentics/tod) inspired parts of the outline keyboard navigation and Linear integration. Those ideas were reimplemented; no Tod code was copied.
 
-Zeron is MIT licensed, copyright 2026 Wing. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Zeron is MIT licensed, copyright 2026 Wing. Mast is also licensed under the [MIT License](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
