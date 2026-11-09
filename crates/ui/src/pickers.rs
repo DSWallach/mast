@@ -4779,6 +4779,8 @@ impl Pickers {
         // enabled) and there's no committed chat harness to force-include —
         // guidance instead of an empty tab row.
         if descriptors.is_empty() {
+            let title = "No agents available";
+            let guidance = "Enable an installed agent in Settings → Agents, or install an agent CLI.";
             return div()
                 .p(px(16.0))
                 .flex()
@@ -4792,19 +4794,18 @@ impl Pickers {
                 )
                 .child(
                     div()
+                        .when(cfg!(test), |el| el.debug_selector(move || title.into()))
                         .text_size(crate::typography::ui_rems(13.0))
                         .text_color(theme.text)
-                        .child(SharedString::from("No agents available")),
+                        .child(SharedString::from(title)),
                 )
                 .child(
                     div()
+                        .when(cfg!(test), |el| el.debug_selector(move || guidance.into()))
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .text_center()
-                        .child(SharedString::from(
-                            "Enable an installed agent in Settings → Agents, \
-                             or install an agent CLI.",
-                        )),
+                        .child(SharedString::from(guidance)),
                 )
                 .into_any_element();
         }
@@ -6296,6 +6297,51 @@ mod tests {
                 .child(div().track_focus(&self.neutral))
                 .child(self.pickers.clone())
         }
+    }
+
+    #[gpui::test]
+    fn fresh_catalog_without_agents_shows_install_guidance(cx: &mut gpui::TestAppContext) {
+        if !crate::first_run_test::isolated("pickers::tests::fresh_catalog_without_agents_shows_install_guidance") { return; }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (pickers, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut pickers = Pickers::new(state, cx);
+            pickers.defaults = ComposerDefaults::default();
+            let mut claude = descriptor(HarnessId::ClaudeCode, "Claude Code");
+            let mut codex = descriptor(HarnessId::Codex, "Codex");
+            claude.installed = false;
+            codex.installed = false;
+            pickers.harnesses = Loadable::Ready(vec![claude, codex]);
+            pickers
+        });
+        pickers.update(vcx, |pickers, cx| {
+            assert!(pickers.no_agents_available());
+            assert_eq!(pickers.effective_harness(cx), None);
+        });
+        vcx.update(|window, cx| pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx)));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        for selector in ["No agents available", "Enable an installed agent in Settings → Agents, or install an agent CLI."] {
+            assert!(vcx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+    }
+
+    #[gpui::test]
+    fn fresh_catalog_with_only_codex_selects_codex(cx: &mut gpui::TestAppContext) {
+        if !crate::first_run_test::isolated("pickers::tests::fresh_catalog_with_only_codex_selects_codex") { return; }
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            let pickers = cx.new(|cx| Pickers::new(state, cx));
+            pickers.update(cx, |pickers, cx| {
+                pickers.defaults = ComposerDefaults::default();
+                let mut claude = descriptor(HarnessId::ClaudeCode, "Claude Code");
+                claude.installed = false;
+                pickers.harnesses = Loadable::Ready(vec![claude, descriptor(HarnessId::Codex, "Codex")]);
+                assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Codex));
+                assert_eq!(pickers.resolved(cx).chat_config().unwrap().harness, HarnessId::Codex);
+            });
+        });
     }
 
     /// The approval chip reads the chat's persisted `autoApprove`, the

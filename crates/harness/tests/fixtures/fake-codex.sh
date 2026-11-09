@@ -75,6 +75,10 @@ tid=$(rid "$turnline")
 
 case "$turnline" in
 
+*scenario:signed-out*)
+  fail_turn "$tid" "401 Unauthorized"
+  ;;
+
 *scenario:image-*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"image-1","type":"imageGeneration","status":"in_progress","result":""}}}'

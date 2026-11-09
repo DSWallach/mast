@@ -35,6 +35,8 @@ pub mod components;
 pub mod stories;
 #[cfg(test)]
 mod component_lint;
+#[cfg(test)]
+mod first_run_test;
 mod composer_dock;
 mod context_usage;
 mod diff_targets;

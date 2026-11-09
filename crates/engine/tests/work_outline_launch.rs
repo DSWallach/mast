@@ -44,7 +44,7 @@ const SPACE: &str = "space-1";
 // ---------------------------------------------------------------------------
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = mast_harness::git_command()
         .args([
             "-c",
             "user.name=Zeron Test",
@@ -200,6 +200,95 @@ async fn missing_agent_is_rejected_before_creating_a_chat() {
     let error = launch(&rig, &request).await.unwrap_err();
     assert_eq!(error.message, "agent not installed: codex");
     assert!(rig.core.workspace.chat(&derive_id("missing-agent", roles::CHAT)).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn signed_out_claude_launch_reaches_transcript() {
+    const ISOLATED: &str = "MAST_TEST_FIRST_RUN_CLAUDE_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "signed_out_claude_launch_reaches_transcript"])
+            .env(ISOLATED, "1")
+            .env("HOME", profile.path())
+            .env("MAST_DATA_DIR", profile.path().join("data"))
+            .env("CLAUDE_CONFIG_DIR", profile.path().join("claude"))
+            .env("CODEX_HOME", profile.path().join("codex"))
+            .env("TMPDIR", "/private/tmp")
+            .env("MAST_NO_LOGIN_SHELL", "1")
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+
+    let tmp = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let repo = root.join("repo");
+    init_repo(&repo, "README");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("device-id"), DEVICE).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/tests/fixtures/fake-claude.sh");
+    let harness = mast_harness::ClaudeHarness::new().with_executable(fixture).with_account_home(root.join("claude"));
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(harness));
+    let core = EngineCore::assemble(&data, Arc::new(harnesses), HarnessId::ClaudeCode, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace", "spaceId":SPACE, "deviceId":DEVICE, "path":repo})).await.unwrap();
+    client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem", "spaceId":SPACE, "title":"First launch", "operationId":"first-item"})).await.unwrap();
+    let request = CreateChatForWorkItemParams {
+        work_item_id: derive_id("first-item", roles::ITEM),
+        initial_prompt: WorkItemPrompt { text: "scenario:signed-out".into(), attachments: Vec::new() },
+        config: Some(mast_proto::ChatConfig { harness: HarnessId::ClaudeCode, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
+        execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None,
+    };
+    let reply: CreateChatForWorkItemReply = serde_json::from_value(client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap()).unwrap();
+    wait_for(|| core.doc_host.open(&reply.chat_id).ok().and_then(|handle| handle.doc().read_entries().ok()).is_some_and(|entries| entries.iter().any(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Error { message, .. } if message == "Authentication failed — sign in to Claude again.")))), "Claude authentication error in transcript").await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn codex_only_launch_spawns_selected_executable() {
+    const ISOLATED: &str = "MAST_TEST_FIRST_RUN_CODEX_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "codex_only_launch_spawns_selected_executable"])
+            .env(ISOLATED, "1")
+            .env("HOME", profile.path())
+            .env("MAST_DATA_DIR", profile.path().join("data"))
+            .env("CLAUDE_CONFIG_DIR", profile.path().join("claude"))
+            .env("CODEX_HOME", profile.path().join("codex"))
+            .env("TMPDIR", "/private/tmp")
+            .env("MAST_NO_LOGIN_SHELL", "1")
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let tmp = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let repo = root.join("repo");
+    init_repo(&repo, "README");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("device-id"), DEVICE).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/tests/fixtures/fake-codex.sh");
+    let harness = mast_harness::CodexHarness::new().with_executable(fixture).with_account_home(root.join("codex"));
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(harness));
+    let core = EngineCore::assemble(&data, Arc::new(harnesses), HarnessId::Codex, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace", "spaceId":SPACE, "deviceId":DEVICE, "path":repo})).await.unwrap();
+    client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem", "spaceId":SPACE, "title":"First launch", "operationId":"first-item"})).await.unwrap();
+    let request = CreateChatForWorkItemParams {
+        work_item_id: derive_id("first-item", roles::ITEM),
+        initial_prompt: WorkItemPrompt { text: "scenario:publication".into(), attachments: Vec::new() },
+        config: Some(mast_proto::ChatConfig { harness: HarnessId::Codex, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
+        execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None,
+    };
+    let reply: CreateChatForWorkItemReply = serde_json::from_value(client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap()).unwrap();
+    wait_for(|| core.doc_host.open(&reply.chat_id).ok().and_then(|handle| handle.doc().read_entries().ok()).is_some_and(|entries| entries.iter().any(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("Publication turn completed"))))), "fake Codex response in transcript").await;
+    core.shutdown().await;
 }
 
 async fn continue_chat(rig: &Rig, chat: &str, op: &str, prompt: &str) -> Result<Value, String> {
