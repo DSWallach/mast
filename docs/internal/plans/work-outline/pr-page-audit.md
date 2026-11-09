@@ -1,6 +1,6 @@
 # Zeron PR page and chat-PR linking audit
 
-Repo: `/Users/mikey/Projects/agent-mode-tools/zeron`. All paths are relative to it unless absolute.
+Repo: `<home>/Projects/agent-mode-tools/zeron`. All paths are relative to it unless absolute.
 Registry evidence comes from a `.backup` copy at `/tmp/zeron-audit.db`. The snapshot was saved 2026-10-23 14:55 UTC.
 
 ## 0. Orientation
@@ -203,7 +203,7 @@ Chat title generation (`crates/engine/src/titles.rs:173-210`) only **reads** `ch
 
 ## C. Root causes of misses
 
-Test case: chat `cb4e21587cb30673589bb3f52acd9d22` ("Begin workspace environment initialization"). The chat is assigned to work item `71e462b0…` (ENG-3012), has `branch: main` and `cwd: /Users/mikey/Projects/cofactr/workspace` (the superproject root), and `chatDiffTargets` bound manually to `/Users/mikey/Projects/cofactr/workspace/flagship`. The flagship checkout is currently on `michael/eng-3012-kit-line-estimate-calculation` (the head branch of #6488). Nothing in the linking code reads that diff target.
+Test case: chat `cb4e21587cb30673589bb3f52acd9d22` ("Begin workspace environment initialization"). The chat is assigned to work item `71e462b0…` (ENG-3012), has `branch: main` and `cwd: <home>/Projects/cofactr/workspace` (the superproject root), and `chatDiffTargets` bound manually to `<home>/Projects/cofactr/workspace/flagship`. The flagship checkout is currently on `michael/eng-3012-kit-line-estimate-calculation` (the head branch of #6488). Nothing in the linking code reads that diff target.
 
 ### Facts from the registry for this chat
 

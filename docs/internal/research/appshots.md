@@ -1,7 +1,7 @@
 # Appshots for Zeron
 
 > Historical design notes. The implemented behavior and current validation are
-> documented in [Appshots](../../appshots.md); proposals below may be superseded.
+> documented in [Appshots](../appshots.md); proposals below may be superseded.
 
 Status: implemented on the exploration branch; native validation ongoing
 
