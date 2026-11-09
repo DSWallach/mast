@@ -92,6 +92,13 @@ struct ChatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RetryErroredTurnParams {
+    chat_id: String,
+    error_entry_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
@@ -131,6 +138,8 @@ async fn update_harness_enabled(
 struct QueueCommandParams {
     chat_id: String,
     command: SessionCommandPayload,
+    #[serde(default)]
+    command_id: Option<String>,
     /// Queued attachments (bytes already committed locally as `pending://`
     /// refs) the engine delivers to a remote host AFTER the command is
     /// durably queued — never as a gate in front of it.
@@ -297,6 +306,8 @@ fn shared_closeout_error(shared: &[crate::chat_workspace_plan::CloseoutChatRefer
 struct QueueMessageParams {
     chat_id: String,
     text: String,
+    #[serde(default)]
+    message_id: Option<String>,
     #[serde(default)]
     attachments: Vec<String>,
     /// Keep this row visible during the current turn even when the harness
@@ -2131,6 +2142,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_MODELS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
+            | methods::RETRY_ERRORED_TURN
             | methods::TAKE_PROJECT_ACTION_SETUP
             | methods::WATCH_DOC_MESSAGES
             // The queue lives on the chat doc, and only its host may send from
@@ -2623,9 +2635,10 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
-                let command_id = self
-                    .doc_host
-                    .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
+                let command_id = match p.command_id {
+                    Some(id) => self.doc_host.queue_command_with_transfers_and_id(&p.chat_id, &id, p.command, p.transfers),
+                    None => self.doc_host.queue_command_with_transfers(&p.chat_id, p.command, p.transfers),
+                }
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
@@ -2737,6 +2750,12 @@ impl RpcService for EngineRpc {
                 let resumed = self.sessions.resume_interrupted(&p.chat_id);
                 RpcReply::value(&serde_json::json!({ "resumed": resumed }))
             }
+            methods::RETRY_ERRORED_TURN => {
+                let p: RetryErroredTurnParams = parse_params(params)?;
+                let retried = self.sessions.retry_errored_turn(&p.chat_id, &p.error_entry_id)
+                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "retried": retried }))
+            }
             methods::RETRY_DELIVERY => {
                 let p: ChatParams = parse_params(params)?;
                 self.doc_host
@@ -2810,14 +2829,10 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
-                let id = self
-                    .doc_host
-                    .queue_message_with_behavior(
-                        &p.chat_id,
-                        &p.text,
-                        p.attachments,
-                        p.hold_for_turn_end,
-                    )
+                let id = match p.message_id {
+                    Some(id) => self.doc_host.queue_message_with_id(&p.chat_id, &id, &p.text, p.attachments, p.hold_for_turn_end).await,
+                    None => self.doc_host.queue_message_with_behavior(&p.chat_id, &p.text, p.attachments, p.hold_for_turn_end),
+                }
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }

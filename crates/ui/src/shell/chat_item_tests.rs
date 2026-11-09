@@ -1582,6 +1582,24 @@ fn record_engine(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> (Sent, t
     (requests, runtime)
 }
 
+#[gpui::test]
+fn transcript_retry_dispatches_the_error_identity(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    let (mut sent, _runtime) = record_engine(&shell, vcx);
+    shell.update(vcx, |shell, cx| {
+        let transcript = shell.transcript.clone();
+        shell.on_transcript_event(transcript, &crate::transcript::TranscriptEvent::RetryErroredTurn {
+            chat_id: CHAT_API.into(), error_entry_id: "failure-entry".into(),
+        }, cx);
+    });
+    vcx.run_until_parked();
+    let calls: Vec<serde_json::Value> = std::iter::from_fn(|| sent.try_recv().ok())
+        .map(|line| serde_json::from_str(&line).unwrap()).collect();
+    assert!(calls.iter().any(|call| call["method"] == mast_rpc::methods::RETRY_ERRORED_TURN
+        && call["params"]["chatId"] == CHAT_API
+        && call["params"]["errorEntryId"] == "failure-entry"));
+}
+
 /// The `setChatArchived` requests sent so far (other traffic is skipped).
 fn archive_requests(sent: &mut Sent) -> Vec<serde_json::Value> {
     let mut out = Vec::new();

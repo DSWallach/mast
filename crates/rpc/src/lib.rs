@@ -71,6 +71,7 @@ pub mod methods {
     /// One-click Resume/Resend: re-dispatch the last user message on the saved
     /// harness session. Params `{chatId}`; replies `{resumed}`. IPC-only.
     pub const RESUME_INTERRUPTED_RUN: &str = "ResumeInterruptedRun";
+    pub const RETRY_ERRORED_TURN: &str = "RetryErroredTurn";
     /// Grant a chat admin for its Space, with an expiry. Params
     /// `GrantAdminParams`; replies the `AdminGrant`. IPC-only, user action:
     /// no agent tool reaches it.
