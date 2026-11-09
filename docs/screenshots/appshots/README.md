@@ -6,4 +6,4 @@ Desktop coverage includes light/dark, narrow layouts, composer and transcript ca
 
 These are presentation fixtures, not proof of live application capture, permission dialogs, portal interaction or physical remote-device delivery. The desktop fixture emitted nonfatal resize and local IPC probe warnings while exporting all frames.
 
-Reproduce desktop frames with the `appshots-fixture` example and supplied neutral PNG inputs. Reproduce phone frames with `AppshotUITests` using the `-demo -appshots` dataset. See `docs/appshots.md` for the implementation and validation limits.
+Reproduce desktop frames with the `appshots-fixture` example and supplied neutral PNG inputs. Reproduce phone frames with `AppshotUITests` using the `-demo -appshots` dataset. See `docs/internal/appshots.md` for the implementation and validation limits.

@@ -10,14 +10,14 @@ Long web links are shortened with an ellipsis according to the actual available 
 
 Only explicit HTTP(S) web addresses without embedded credentials, control characters, whitespace, backslashes, or malformed percent escapes can navigate. Rejected links never fall through to the OS opener. Workspace/file links keep their file-opening behavior. Markdown file previews also open web links in a new Browser tab belonging to the file's conversation, with the same explicit external/copy actions. File previews retain their local-file, anchor, and mail-link handling; their labels are not visually truncated.
 
-macOS uses its integrated WebKit browser. Linux uses WebKitGTK and requires the [Linux browser runtime packages](reference/linux-browser.md). If that runtime is unavailable, the Browser tab displays an error; its external-browser button and the link's external action remain explicit alternatives. Platforms without an integrated implementation use the system browser for valid web links.
+macOS uses its integrated WebKit browser. Linux uses WebKitGTK and requires the [Linux browser runtime packages](../reference/linux-browser.md). If that runtime is unavailable, the Browser tab displays an error; its external-browser button and the link's external action remain explicit alternatives. Platforms without an integrated implementation use the system browser for valid web links.
 
 ## Reproducible validation
 
 The fixture uses synthetic chat data, temporary app storage, and a local HTTP server. Its Markdown corpus includes short and long URLs, misleading labels, rejected destinations, Unicode, and tables:
 
-- [Fixture Markdown](../crates/ui/examples/browser-fixture/transcript-links.md)
-- [Native scenario](../crates/ui/examples/browser-fixture/transcript_links.rs)
+- [Fixture Markdown](../../crates/ui/examples/browser-fixture/transcript-links.md)
+- [Native scenario](../../crates/ui/examples/browser-fixture/transcript_links.rs)
 
 ```sh
 cargo test -p mast-ui

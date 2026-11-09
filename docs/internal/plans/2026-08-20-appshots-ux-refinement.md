@@ -1,7 +1,7 @@
 # Appshots UX refinement implementation plan
 
 > Historical design notes. The implemented behavior and current validation are
-> documented in [Appshots](../../appshots.md); proposals below may be superseded.
+> documented in [Appshots](../appshots.md); proposals below may be superseded.
 
 1. Extend `crates/ui/src/appshots.rs` and `appshots/macos.rs` with optional
    application-icon presentation data and separate Screen Recording and
