@@ -114,6 +114,22 @@ private struct StopReply: Decodable { let status: String }
 private final class NoRedirect: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
+enum LoadState: Equatable { case idle, loading, loaded, empty, stale, offline }
+
+struct LoadStateMachine {
+    private(set) var state: LoadState = .idle
+    private(set) var hasContent = false
+    private var failureAt: Date?
+    mutating func begin() { failureAt = nil; if !hasContent { state = .loading } else if state != .stale && state != .empty { state = .loaded } }
+    mutating func succeed(empty: Bool) { failureAt = nil; hasContent = true; state = empty ? .empty : .loaded }
+    mutating func fail(at time: Date) { failureAt = time }
+    mutating func advance(to time: Date) {
+        guard let failureAt, time.timeIntervalSince(failureAt) >= 3 else { return }
+        state = hasContent ? .stale : .offline
+    }
+    mutating func reset() { self = LoadStateMachine() }
+}
+
 @MainActor
 final class Companion: ObservableObject {
     private let credential: any CredentialStore
@@ -122,7 +138,9 @@ final class Companion: ObservableObject {
     private let actionAuthenticator: any DeviceAuthenticator
     private let actionAllowed: @MainActor () -> Bool
     init(credential: any CredentialStore = Credential(), decisions: any DecisionStore = KeychainDecisionStore(), configuration: URLSessionConfiguration = .ephemeral, actionAuthenticator: any DeviceAuthenticator = LocalDeviceAuthenticator(), actionAllowed: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) { self.actionAllowed = actionAllowed; self.actionAuthenticator = actionAuthenticator; self.credential = credential; self.decisions = decisions; self.configuration = configuration; if credential is Credential { clearKeychainOnFirstLaunch(defaults: .standard, credential: credential, clearDecisions: KeychainDecisionStore.clearAll) }; if let stored = credential.read() { address = stored.origin; isPaired = true } }
-    @Published var demo = true
+    @Published var demo = true {
+        didSet { if oldValue != demo { clearCachedContent() } }
+    }
     @Published private(set) var isPaired = false
     @Published var address = "http://127.0.0.1:27655"
     @Published var requests = Demo.requests
@@ -141,7 +159,38 @@ final class Companion: ObservableObject {
     @Published var macAppearance = MacAppearance(style: "default", layout: "minimal", lightTheme: "mast-light", darkTheme: "mast-dark")
     @Published var activeChatId: String?
     @Published var transcriptRevision = 0
-    @Published var liveStatus = "Stale"
+    @Published var liveStatus = ""
+    @Published var loadState: LoadState = .idle
+    private var loadMachine = LoadStateMachine()
+    private var failureTask: Task<Void, Never>?
+    private var streamFailureTask: Task<Void, Never>?
+    private var refreshGeneration = 0
+    private var transcriptCache: [String: TranscriptPage] = [:]
+    private var transcriptSpaces: [String: String] = [:]
+    func cachedTranscript(_ chat: Chat) -> TranscriptPage? { transcriptCache[chat.id] }
+    func cacheTranscript(_ chat: Chat, page: TranscriptPage) { transcriptCache[chat.id] = page; transcriptSpaces[chat.id] = chat.spaceId }
+    private func clearCachedContent() {
+        refreshGeneration += 1; failureTask?.cancel(); streamFailureTask?.cancel()
+        transcriptCache.removeAll(); transcriptSpaces.removeAll(); requests = []; chats = []; sharedSpaces = []; noSpacesShared = false
+        loadMachine.reset(); loadState = .idle; hasLoaded = false; isLoading = false; liveStatus = ""
+    }
+    private func reportLoadFailure() {
+        loadMachine.fail(at: Date()); failureTask?.cancel()
+        failureTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.loadMachine.advance(to: Date()); self.loadState = self.loadMachine.state
+            self.connection = self.isPaired ? "Disconnected · showing stale data" : "Disconnected · pair again"
+        }
+    }
+    private func reportStreamFailure() {
+        guard streamFailureTask == nil else { return }
+        streamFailureTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.liveStatus = "Stale · reconnecting"
+        }
+    }
     @Published var sharedSpaces: [SharedSpace] = []
     @Published var noSpacesShared = false
     @Published var hiddenSpaceIds = Set(UserDefaults.standard.stringArray(forKey: "hiddenSharedSpaces") ?? []) {
@@ -157,7 +206,7 @@ final class Companion: ObservableObject {
     }
     func canView(spaceId: String?) -> Bool {
         if demo { return true }
-        guard !connection.hasPrefix("Disconnected"), let spaceId else { return false }
+        guard let spaceId else { return false }
         return !hiddenSpaceIds.contains(spaceId) && sharedSpaces.contains(where: { $0.id == spaceId })
     }
     func refreshAppearance() async { if !demo, let appearance: MacAppearance = try? await request("/appearance") { macAppearance = appearance } }
@@ -167,8 +216,8 @@ final class Companion: ObservableObject {
             let latest: SharedSpaceList = try await request("/spaces")
             let changed = Set(latest.spaces.map { "\($0.id):\($0.allow ?? "view")" }) != Set(sharedSpaces.map { "\($0.id):\($0.allow ?? "view")" })
             sharedSpaces = latest.spaces; noSpacesShared = latest.noSpacesShared
-            if changed || connection.hasPrefix("Disconnected") { requests = []; chats = []; await refresh() }
-        } catch { connection = "Disconnected · showing stale data" }
+            if changed || connection.hasPrefix("Disconnected") { await refresh() }
+        } catch { reportLoadFailure() }
     }
     func watchEvents() async {
         guard !demo else { liveStatus = "Demo"; return }
@@ -183,7 +232,7 @@ final class Companion: ObservableObject {
                 defer { session.invalidateAndCancel() }
                 let (bytes, response) = try await session.bytes(for: req)
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw BridgeError.response }
-                liveStatus = "Live"; delay = 1; await refresh(); await refreshAppearance()
+                streamFailureTask?.cancel(); streamFailureTask = nil; liveStatus = "Live"; delay = 1; await refresh(); await refreshAppearance()
                 for try await line in bytes.lines {
                     if Task.isCancelled { return }
                     if line == "event: appearance" { await refreshAppearance() }
@@ -192,8 +241,8 @@ final class Companion: ObservableObject {
                 }
                 throw BridgeError.response
             } catch {
-                if Task.isCancelled { return }
-                liveStatus = "Stale · reconnecting"; await refresh()
+                if Task.isCancelled { streamFailureTask?.cancel(); streamFailureTask = nil; return }
+                reportStreamFailure(); await refresh()
                 try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
                 delay = min(delay * 2, 30)
             }
@@ -233,7 +282,7 @@ final class Companion: ObservableObject {
         }
         guard let http = response as? HTTPURLResponse else { throw body == nil ? BridgeError.response : BridgeError.deliveryUnknown }
         if !authenticated && path == "/pair" && !(200..<300).contains(http.statusCode) { throw BridgeError.pairing(pairingHTTPMessage(status: http.statusCode, data: data)) }
-        if http.statusCode == 401 { credential.clear(); isPaired = false; connection = "Disconnected · pair again"; throw BridgeError.unauthorized }
+        if http.statusCode == 401 { credential.clear(); isPaired = false; clearCachedContent(); loadState = .offline; connection = "Disconnected · pair again"; throw BridgeError.unauthorized }
         if http.statusCode == 403, (try? JSONDecoder().decode(BridgeFailure.self, from: data).error) == "capability" { throw BridgeError.capability }
         if http.statusCode == 429 { let info = try? JSONDecoder().decode(BridgeFailure.self, from: data); throw BridgeError.rateLimited(max(1, info?.retryAfter ?? Int(http.value(forHTTPHeaderField: "Retry-After") ?? "") ?? 60)) }
         guard (200..<300).contains(http.statusCode) else { throw body != nil && http.statusCode >= 500 ? BridgeError.deliveryUnknown : BridgeError.notSent }
@@ -249,25 +298,32 @@ final class Companion: ObservableObject {
             let rawLabel = String(String.UnicodeScalarView(UIDevice.current.name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(40))).trimmingCharacters(in: .whitespacesAndNewlines)
             let reply: PairReply = try await request("/pair", body: ["code": pairingCode.trimmingCharacters(in: .whitespacesAndNewlines), "label": rawLabel.isEmpty ? "iPhone" : rawLabel], authenticated: false)
             guard canonicalOrigin(try baseURL()) == origin else { throw BridgeError.address }
-            try credential.save(BoundCredential(origin: origin, token: reply.token)); isPaired = true; pairingCode = ""; demo = false; hasLoaded = false; requests = []; chats = []; await refresh()
+            try credential.save(BoundCredential(origin: origin, token: reply.token)); clearCachedContent(); isPaired = true; pairingCode = ""; demo = false; hasLoaded = false; requests = []; chats = []; await refresh()
         } catch { pairingError = error.localizedDescription; connection = "Disconnected" }
     }
     func refresh() async {
-        if demo { requests = Demo.requests; chats = Demo.chats; sharedSpaces = []; noSpacesShared = false; connection = "Demo mode"; hasLoaded = true; return }
-        isLoading = true
-        defer { isLoading = false }
+        if demo { requests = Demo.requests; chats = Demo.chats; sharedSpaces = []; noSpacesShared = false; connection = "Demo mode"; hasLoaded = true; loadState = .loaded; return }
+        refreshGeneration += 1; let generation = refreshGeneration
+        failureTask?.cancel(); loadMachine.begin(); loadState = loadMachine.state; isLoading = true
         do {
             async let newSpaces: SharedSpaceList = request("/spaces")
             async let newRequests: SpaceItems<ActionRequest> = request("/requests")
             async let newChats: SpaceItems<Chat> = request("/chats")
             let (spaces, requestsReply, chatsReply) = try await (newSpaces, newRequests, newChats)
+            guard generation == refreshGeneration, !demo else { return }
             sharedSpaces = spaces.spaces; noSpacesShared = spaces.noSpacesShared || requestsReply.noSpacesShared || chatsReply.noSpacesShared
+            let allowed = Set(spaces.spaces.map(\.id))
+            transcriptCache = transcriptCache.filter { transcriptSpaces[$0.key].map(allowed.contains) ?? false }
+            transcriptSpaces = transcriptSpaces.filter { allowed.contains($0.value) }
             requests = noSpacesShared ? [] : requestsReply.items; chats = noSpacesShared ? [] : chatsReply.items
-            connection = "Connected · updated now"
+            connection = "Connected · updated now"; hasLoaded = true; lastUpdated = Date(); isLoading = false
+            loadMachine.succeed(empty: requests.isEmpty && chats.isEmpty); loadState = loadMachine.state
+            if activeChatId != nil { transcriptRevision += 1 }
             await refreshAppearance()
-            hasLoaded = true; lastUpdated = Date()
-        } catch BridgeError.unauthorized { connection = "Disconnected · pair again" }
-        catch { connection = "Disconnected · showing stale data" }
+        } catch {
+            guard generation == refreshGeneration, !demo else { return }
+            isLoading = false; reportLoadFailure()
+        }
     }
     func chatLink(_ id: String) async throws -> Chat {
         if demo { guard let chat = chats.first(where: { $0.id == id }) else { throw BridgeError.response }; return chat }
@@ -288,7 +344,9 @@ final class Companion: ObservableObject {
     }
     func transcript(_ chat: Chat, offset: Int = 0) async throws -> TranscriptPage {
         if demo { return TranscriptPage(messages: offset == 0 ? Demo.messages : [], olderRemaining: 0, nextOffset: Demo.messages.count) }
-        return try await request("/chats/\(chat.id)/transcript?offset=\(offset)")
+        let page: TranscriptPage = try await request("/chats/\(chat.id)/transcript?offset=\(offset)")
+        if offset == 0, canView(spaceId: chat.spaceId) { cacheTranscript(chat, page: page) }
+        return page
     }
     private func authenticateWrite() async throws {
         let result = await withCheckedContinuation { continuation in actionAuthenticator.authenticate { continuation.resume(returning: $0) } }
@@ -333,6 +391,6 @@ final class Companion: ObservableObject {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 401 else { throw BridgeError.response }
         forget()
     }
-    func forget() { credential.clear(); isPaired = false; demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
+    func forget() { credential.clear(); isPaired = false; clearCachedContent(); demo = true; requests = Demo.requests; chats = Demo.chats; connection = "Demo mode" }
 }
 

@@ -103,6 +103,16 @@ final class MastTests: XCTestCase {
         do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Pair again")) }
         XCTAssertNil(credential.read())
     }
+    func testLoadStateUsesFailureGraceAndRetainsContent() {
+        var state = LoadStateMachine(); var now = Date(timeIntervalSince1970: 100)
+        XCTAssertEqual(state.state, .idle); state.begin(); XCTAssertEqual(state.state, .loading)
+        now.addTimeInterval(10); state.advance(to: now); XCTAssertEqual(state.state, .loading)
+        state.fail(at: now); now.addTimeInterval(2); state.advance(to: now); XCTAssertEqual(state.state, .loading)
+        state.succeed(empty: false); now.addTimeInterval(5); state.advance(to: now); XCTAssertEqual(state.state, .loaded)
+        state.begin(); state.fail(at: now); now.addTimeInterval(3); state.advance(to: now); XCTAssertEqual(state.state, .stale)
+        state.begin(); XCTAssertEqual(state.state, .stale); state.succeed(empty: true); XCTAssertEqual(state.state, .empty)
+        state.reset(); state.begin(); state.fail(at: now); now.addTimeInterval(3); state.advance(to: now); XCTAssertEqual(state.state, .offline)
+    }
     func testArtifactKindsAndNavigationAreRestricted() {
         for kind in ["htmlPage", "htmlFragment", "html-page", "html-fragment"] { XCTAssertEqual(artifactDisplayKind(kind), "html") }
         XCTAssertEqual(artifactDisplayKind("image"), "image"); XCTAssertEqual(artifactDisplayKind("mermaid"), "other")
@@ -185,7 +195,8 @@ final class MastTests: XCTestCase {
         StubProtocol.reply = { _ in throw URLError(.notConnectedToInternet) }
         await model.refresh()
         XCTAssertEqual(model.requests.first?.text, "Review")
-        XCTAssertTrue(model.connection.contains("stale"))
+        XCTAssertEqual(model.loadState, .loaded)
+        model.hiddenSpaceIds.removeAll(); XCTAssertEqual(model.visibleRequests.count, 1)
     }
     func testPairAndSendAcceptedAndError() async throws {
         let credential = MemoryCredential(); let model = model(credential)
@@ -232,6 +243,19 @@ final class MastTests: XCTestCase {
         XCTAssertTrue(Chat(id: "w", title: "Worker", space: "", status: "idle", isWorker: true).visible(showWorkers: true))
         XCTAssertFalse(Chat(id: "n", title: "No user", space: "", status: "idle", hasUserMessage: false).visible(showWorkers: true))
         XCTAssertTrue(Chat(id: "r", title: "Request", space: "", status: "idle", isWorker: true, hasOpenRequest: true).visible(showWorkers: false))
+    }
+    func testTranscriptCacheIsClearedOnRevocationAndUnshare() async throws {
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
+        let model = model(credential); enableWrites(model)
+        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "idle", spaceId: "s")
+        let page = TranscriptPage(messages: [TranscriptMessage(id: "m", role: "user", text: "hello")], olderRemaining: 0, nextOffset: 1)
+        model.cacheTranscript(chat, page: page); XCTAssertEqual(model.cachedTranscript(chat)?.messages.first?.text, "hello")
+        StubProtocol.reply = { request in
+            if request.url?.path == "/spaces" { return (200, "{\"spaces\":[],\"noSpacesShared\":true}") }
+            return (200, "{\"items\":[],\"noSpacesShared\":true}")
+        }
+        await model.refresh(); XCTAssertNil(model.cachedTranscript(chat))
+        model.cacheTranscript(chat, page: page); model.forget(); XCTAssertNil(model.cachedTranscript(chat))
     }
     func testSystemMessagePreviewRemovesOnlyHeaders() {
         XCTAssertEqual(systemMessagePreview("[Message from Mast chat Coordinator (abc123)]\nPlease review"), "Please review")
@@ -357,12 +381,17 @@ final class HorizonSnapshotTests: XCTestCase {
     func testRenderScreens() throws {
         let model = Companion(credential: MemoryCredential())
         let offline = Companion(credential: MemoryCredential())
-        offline.demo = false; offline.connection = "Disconnected · showing stale data"
+        offline.demo = false; offline.connection = "Disconnected · showing stale data"; offline.loadState = .offline
+        let loading = Companion(credential: MemoryCredential()); loading.demo = false; loading.sharedSpaces = [SharedSpace(id: "s", name: "Space", allow: "send")]
+        let loadingChat = Chat(id: "loading", title: "Chat", space: "Space", status: "working", spaceId: "s")
         let empty = Companion(credential: MemoryCredential()); empty.requests = []
         let iconPath = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Mast/Assets.xcassets/AppIcon.appiconset/AppIcon.png")
         let icon = try XCTUnwrap(UIImage(contentsOfFile: iconPath.path))
         let longMessages = (1...40).map { TranscriptMessage(id: "long-\($0)", role: "assistant", text: "Message \($0): The latest update is ready for review.", author: "agent") }
         let screens: [(String, AnyView)] = [
+            ("loading-inbox", AnyView(InboxScreen(model: loading))),
+            ("loading-chats", AnyView(ChatsScreen(model: loading))),
+            ("loading-chat-detail", AnyView(ChatDetail(chat: loadingChat, model: loading))),
             ("inbox", AnyView(InboxScreen(model: model))),
             ("request-detail", AnyView(RequestDetail(request: Demo.requests[0], model: model))),
             ("answer-ask", AnyView(RequestDetail(request: ActionRequest(id: "ask", space: "Mast", kind: "ask", text: "What should we do?", detail: "A decision is needed.", options: [], facts: [], links: [], origin: "Chat"), model: model))),

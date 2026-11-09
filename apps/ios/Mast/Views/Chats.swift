@@ -7,9 +7,9 @@ struct ChatsScreen: View {
     @Environment(\.snapshotRendering) private var snapshot
     private func group(_ chat: Chat) -> String { let status = chat.status.lowercased(); return status.hasPrefix("working") ? "Running" : (status.contains("awaiting") || status.contains("waiting") ? "Waiting" : "Idle") }
     var body: some View { HorizonScroll { VStack(alignment: .leading, spacing: 25) {
-        HorizonHeader(title: "Chats")
-        if !model.demo && model.isLoading && !model.hasLoaded { LoadingPlaceholder() }
-        else if !model.demo && model.connection.hasPrefix("Disconnected") { OfflineScreen(model: model) }
+        HorizonHeader(title: "Chats").overlay(alignment: .topTrailing) { if model.isLoading && model.hasLoaded { Text("Updating…").font(.system(size: 11)).foregroundStyle(style.muted(scheme)) } }
+        if !model.demo && (model.loadState == .idle || model.loadState == .loading) { LoadingPlaceholder() }
+        else if !model.demo && model.loadState == .offline { OfflineScreen(model: model) }
         else if model.noSpacesShared { Text("No Spaces shared — run `spaces share` on your Mac").foregroundStyle(style.muted(scheme)) }
         else { if !model.visibleChats.contains(where: { $0.visible(showWorkers: model.showWorkers) && group($0) == "Running" }) { Text("No running chats").font(.system(size: 14)).foregroundStyle(style.muted(scheme)) }
         ForEach(["Running", "Waiting", "Idle"], id: \.self) { section in
@@ -19,7 +19,7 @@ struct ChatsScreen: View {
                 ForEach(chats) { chat in if snapshot { ChatRow(chat: chat) } else { NavigationLink { ChatDetail(chat: chat, model: model) } label: { ChatRow(chat: chat) }.buttonStyle(MastTapTargetStyle()) } }
             } }
         } }
-    }.padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 30) }.refreshable { await model.refresh() }.background(style.surface(scheme)).toolbar(.hidden, for: .navigationBar) }
+    }.padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 30) }.refreshable { await model.refresh() }.animation(.easeInOut(duration: 0.2), value: model.loadState).background(style.surface(scheme)).toolbar(.hidden, for: .navigationBar) }
 }
 struct ChatRow: View {
     @Environment(\.mastStyle) private var style

@@ -127,6 +127,9 @@ struct ChatDetail: View {
     @State private var text = ""
     @State private var notice = ""
     @State private var messages: [TranscriptMessage]
+    @State private var hasTranscript: Bool
+    @State private var transcriptFailed = false
+    @State private var refreshingTranscript = false
     @State private var sending = false
     @State private var localMessages: [TranscriptMessage] = []
     @State private var sendStates: [String: String] = [:]
@@ -139,7 +142,28 @@ struct ChatDetail: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.snapshotRendering) private var snapshot
     init(chat: Chat, model: Companion, initialMessages: [TranscriptMessage] = []) {
-        self.chat = chat; self.model = model; _messages = State(initialValue: initialMessages)
+        self.chat = chat; self.model = model; _messages = State(initialValue: initialMessages); _hasTranscript = State(initialValue: !initialMessages.isEmpty)
+    }
+    private func refreshTranscript() async {
+        refreshingTranscript = true; defer { refreshingTranscript = false }
+        if !hasTranscript, let cached = model.cachedTranscript(chat) {
+            messages = cached.messages; olderRemaining = cached.olderRemaining; nextOffset = cached.nextOffset; hasTranscript = true
+        }
+        do {
+            let page = try await model.transcript(chat)
+            guard model.canView(spaceId: chat.spaceId) else { return }
+            let latestIDs = Set(page.messages.map(\.id))
+            let earlier = nextOffset > page.nextOffset ? messages.filter { !latestIDs.contains($0.id) } : []
+            messages = earlier + page.messages
+            if earlier.isEmpty { olderRemaining = page.olderRemaining; nextOffset = page.nextOffset }
+            else { nextOffset = max(nextOffset, page.nextOffset) }
+            model.cacheTranscript(chat, page: TranscriptPage(messages: messages, olderRemaining: olderRemaining, nextOffset: nextOffset))
+            hasTranscript = true; transcriptFailed = false
+        } catch {
+            guard !hasTranscript else { notice = "Transcript may be stale."; return }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if !Task.isCancelled && !hasTranscript { transcriptFailed = true }
+        }
     }
     private func send(_ message: TranscriptMessage) {
         sending = true; sendStates[message.id] = "Sending"
@@ -180,13 +204,18 @@ struct ChatDetail: View {
     var body: some View { Group { if !model.canView(spaceId: chat.spaceId) { Text("Space is unavailable or no longer shared.").foregroundStyle(style.muted(scheme)).padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(style.surface(scheme)) } else { VStack(spacing: 0) {
         ScrollViewReader { proxy in
             HorizonScroll { VStack(alignment: .leading, spacing: 20) {
-                if olderRemaining > 0 { Button("Load earlier") { Task { let first = messages.first?.id; do { let page = try await model.transcript(chat, offset: nextOffset); messages = page.messages + messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; if let first { proxy.scrollTo(first, anchor: .top) } } catch { notice = "Earlier messages unavailable." } } }.font(.system(size: 13)).foregroundStyle(style.muted(scheme)) }
-                TranscriptContent(messages: messages + localMessages, chat: chat, sendStates: sendStates, retry: requestSend)
+                if olderRemaining > 0 { Button("Load earlier") { Task { let first = messages.first?.id; do { let page = try await model.transcript(chat, offset: nextOffset); messages = page.messages + messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; model.cacheTranscript(chat, page: TranscriptPage(messages: messages, olderRemaining: olderRemaining, nextOffset: nextOffset)); if let first { proxy.scrollTo(first, anchor: .top) } } catch { notice = "Earlier messages unavailable." } } }.font(.system(size: 13)).foregroundStyle(style.muted(scheme)) }
+                if !hasTranscript && !transcriptFailed { LoadingPlaceholder() }
+                else if transcriptFailed && !hasTranscript { VStack(alignment: .leading, spacing: 12) { Text("Transcript unavailable"); Button("Retry") { Task { transcriptFailed = false; await refreshTranscript() } } }.foregroundStyle(style.muted(scheme)) }
+                else { TranscriptContent(messages: messages + localMessages, chat: chat, sendStates: sendStates, retry: requestSend).transition(.opacity) }
                 Color.clear.frame(height: 1).id("transcript-bottom")
             }.padding(22).frame(maxWidth: .infinity, alignment: .leading) }
-            .task { do { let page = try await model.transcript(chat); messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } catch { notice = "Transcript unavailable or stale." } }
+            .overlay(alignment: .topTrailing) { if refreshingTranscript && hasTranscript { Text("Updating…").font(.system(size: 11)).foregroundStyle(style.muted(scheme)).padding(8) } }
+            .refreshable { await refreshTranscript() }
+            .animation(.easeInOut(duration: 0.2), value: hasTranscript)
+            .task { let firstOpen = !hasTranscript; let hadCache = model.cachedTranscript(chat) != nil; if let cached = model.cachedTranscript(chat), firstOpen { messages = cached.messages; olderRemaining = cached.olderRemaining; nextOffset = cached.nextOffset; hasTranscript = true }; if firstOpen { DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }; await refreshTranscript(); if firstOpen && !hadCache { DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } }
             .onAppear { model.activeChatId = chat.id }.onDisappear { if model.activeChatId == chat.id { model.activeChatId = nil } }
-            .onChange(of: model.transcriptRevision) { _, _ in Task { if let page = try? await model.transcript(chat) { messages = page.messages; olderRemaining = page.olderRemaining; nextOffset = page.nextOffset; DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } } } }
+            .onChange(of: model.transcriptRevision) { _, _ in Task { await refreshTranscript() } }
             .onChange(of: sending) { _, _ in DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }
         }
         VStack(alignment: .leading, spacing: 8) {

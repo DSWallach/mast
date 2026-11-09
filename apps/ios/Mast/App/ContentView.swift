@@ -15,8 +15,8 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.colorScheme) private var scheme
     var body: some View { ZStack { VStack(spacing: 0) {
-        if model.connection.hasPrefix("Disconnected") { OfflineBanner(text: model.connection) }
-        if !model.demo { Text(model.liveStatus).font(.system(size: 10)).foregroundStyle(style.muted(effectiveScheme)).frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 16) }
+        if model.loadState == .offline || model.loadState == .stale { OfflineBanner(text: model.connection).transition(.opacity) }
+        if !model.demo && !model.liveStatus.isEmpty { Text(model.liveStatus).font(.system(size: 10)).foregroundStyle(style.muted(effectiveScheme)).frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 16) }
         TabView {
             NavigationStack { InboxScreen(model: model) }.tabItem { Label("Needs you", systemImage: "tray") }
             NavigationStack { ChatsScreen(model: model) }.tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
