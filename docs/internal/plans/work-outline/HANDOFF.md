@@ -1016,6 +1016,45 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-08 20:00; coordinator dd899921 handing off)
+
+- **Installed Mast: release 70** (93c138ba). No Mast-side workers are running. The Horizon worker (8ac73b69) waits for
+  Mikey's next batch; its queue so far is just the Horizon Inbox panel divider line.
+- **iOS companion on Mikey's real iPhone 13 mini** (UDID 00008110-000651D21ABB801E, now trusted, so the MDM allowed
+  the dev cert). Integration has 881e60cc; branch `ios-companion` is in worktree `.worktrees/zeron/ios-companion`.
+  Worker: Terra chat 3c892a57, item 14c99c51.
+  - **In progress:** fixing a send bug. `authenticateWrite()` (Companion.swift ~351) checks
+    `applicationState == .active` immediately after Face ID, but the app is `.inactive` while the auth sheet
+    dismisses, so every send/stop/answer fails with "Authentication or device credential unavailable".
+  - When it's pushed: merge `origin/ios-companion` (check the diff stays inside `apps/ios/` + the doc), then reinstall
+    on the phone yourself:
+    `xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'id=00008110-000651D21ABB801E'
+    -derivedDataPath /tmp/mast-ios-device -allowProvisioningUpdates DEVELOPMENT_TEAM=9PD43XAATA
+    CODE_SIGN_STYLE=Automatic PRODUCT_BUNDLE_IDENTIFIER=computer.mikey.mast.companion.dev build`, then
+    `xcrun devicectl device install app --device 00008110-000651D21ABB801E
+    /tmp/mast-ios-device/Build/Products/Debug-iphoneos/Mast.app`. Free team: the build expires after 7 days.
+  - **Bridge** (Node **22**: `export PATH="$HOME/.nvm/versions/node/v22.17.0/bin:$PATH"`, in
+    `apps/ios/bridge`). Mikey runs `node dist/cli.js start --tailscale-user michael@aintwet.nyc --url
+    https://macbook-pro.tail09fdaf.ts.net` in his terminal; add `--pair` only to pair. After bridge changes, run
+    `npm run build` and ask him to restart it. Sharing persists: agent-mode-tools is `shared:send`. Don't re-run
+    `spaces share … --allow answer`. Paired devices: phone d7ae9871, simulator f55fed2a. CLI: `spaces`, `devices`,
+    `revoke <id>`, `audit N`.
+  - Tailscale: Mac 100.115.7.28 and phone 100.67.238.10 on tailnet tail09fdaf (michael@aintwet.nyc). Serve is
+    tailnet-only, Funnel off, HTTPS certs on.
+  - **Security:** the Opus review (mast-artifact:cab6f4c5) found 0 Critical, 1 High, 5 Medium, 13 Low; all fixed and
+    merged (0f615ea2). DevOps brief: mast-artifact:0ce919c7. Its "fixes planned" wording is now out of date: update it
+    to "fixed" before Mikey sends it. DevOps hasn't been asked or answered yet; the Slack draft is in chat dd899921.
+  - **Done this session:** artifact viewer, three styles + Match Mac, live updates, Stop, QR pairing, loading states,
+    44 pt tap targets, capability-aware controls and errors.
+  - **Open items:** photo attachments (9719a85d, needs a Rust attach path); desktop Settings → Phone page
+    (Rust + release); auto-start the bridge; the xcodebuild approval rule (e866c323) awaits Mikey.
+- **Waiting on Mikey:**
+  - personal-workspace `chore/agent-setup-revamp` (204f55c6): merge, and the Space vs AGENTS.md line question
+  - coworker readiness (2fda739e)
+  - active-checkout design (a53732a1); "Phone QA test (choose)" (4acead10) can be closed
+  - iOS QA requests: refinement 3 (52cb2b03), artifacts (6966a1cc), security fixes (663aa009), spaces+lock (b36e5074).
+    He has used most of these live, so resolve them as each is confirmed.
+
 ## In flight (snapshot 2026-11-08 17:30; coordinator dd899921)
 
 - **iOS companion merged on integration** (a1ac86d6; `apps/ios` + `docs/internal/ios-companion.md` only, no Rust).
