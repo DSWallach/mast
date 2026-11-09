@@ -4404,6 +4404,18 @@ impl ComposerSlice {
     }
 }
 
+#[derive(Clone)]
+struct FailedSend {
+    key: String,
+    text: String,
+    message_id: String,
+    queued: bool,
+    attachment_ids: Vec<String>,
+    appshot_ids: Vec<String>,
+    skills: Vec<String>,
+    comments: Vec<crate::comments::ReviewComment>,
+}
+
 pub struct Composer {
     sign_in_check: Option<(Option<String>, mast_proto::HarnessId, Option<String>, Instant, bool)>,
     pub(crate) state: Entity<AppState>,
@@ -4471,6 +4483,8 @@ pub struct Composer {
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
     failure_key: Option<String>,
+    failed_send: Option<FailedSend>,
+    retry_send_id: Option<String>,
     /// Work Outline instruction refusals (context reset confirmation).
     instruction_reset: instruction_reset::InstructionResetState,
     wizard: Option<Wizard>,
@@ -4772,6 +4786,8 @@ impl Composer {
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             failure_key: None,
+            failed_send: None,
+            retry_send_id: None,
             instruction_reset: Default::default(),
             action_task: None,
             advance_task: None,
@@ -6714,9 +6730,19 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+        if self.sending { return; }
+        let message_id = self.retry_send_id.take().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let failed_send = FailedSend {
+            key: self.current_key.clone(), text: text.clone(), message_id: message_id.clone(), queued: queue,
+            attachment_ids: self.staged().iter().map(|item| item.id.clone()).collect(),
+            appshot_ids: self.staged_appshots().iter().map(|item| item.id.clone()).collect(),
+            skills: self.staged_skills().to_vec(), comments: self.staged_comments(cx),
+        };
+        self.failed_send = None;
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None; // global — meaningful on every chat
+            self.failed_send = Some(failed_send);
             cx.notify();
             return;
         };
@@ -6829,7 +6855,6 @@ impl Composer {
         let text = with_skill_preamble(&staged_skills, &text);
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
-        let message_id = uuid::Uuid::new_v4().to_string();
         self.instruction_reset.remember_send(&message_id, &typed);
         let created_at = chrono::Utc::now().timestamp_millis();
         // Existing busy chats always queue; compatibility was checked before
@@ -7020,6 +7045,7 @@ impl Composer {
         let err_chat_id = chat_id.clone();
         let err_message_id = message_id.clone();
         self.send_task = Some(cx.spawn(async move |this, cx| {
+            let mut dispatch_attempted = false;
             let result: Result<Option<String>, String> = async {
                 // Attachments stage FIRST — before the chat row or anything
                 // else exists. Staging is chat-independent (keyed by
@@ -7364,6 +7390,7 @@ impl Composer {
                     };
                     let params = serde_json::json!({
                         "chatId": chat_id,
+                        "messageId": message_id,
                         "text": queue_text,
                         "attachments": attachment_paths,
                         "holdForTurnEnd": true,
@@ -7408,12 +7435,13 @@ impl Composer {
                 };
                 let command = serde_json::to_value(&command)
                     .map_err(|e| format!("Send failed: {e}"))?;
-                let mut params = serde_json::json!({ "chatId": chat_id, "command": command });
+                let mut params = serde_json::json!({ "chatId": chat_id, "command": command, "commandId": message_id });
                 if !transfers.is_empty() {
                     params["transfers"] = serde_json::Value::Array(transfers);
                 }
                 // Deadline-bounded: QueueCommand is a local write (in-process
                 // or IPC), but a deferred engine handle can park forever.
+                dispatch_attempted = true;
                 let queued = attachments::call_with_timeout(
                     &engine,
                     cx.background_executor(),
@@ -7500,7 +7528,7 @@ impl Composer {
                 Ok(None)
             }
             .await;
-            if result.is_err() && is_new {
+            if result.is_err() && is_new && !dispatch_attempted {
                 // A failed new-chat send must not strand a just-minted empty
                 // chat in the sidebar (v0.2.12 "empty transcript" report).
                 // Staging now runs before CreateChat, so usually nothing was
@@ -7533,17 +7561,20 @@ impl Composer {
                     // chat restores to the CANVAS (key "") and navigates back
                     // there — the minted chat is gone (deleted above), so
                     // nothing may restore under its key.
-                    let restore_key = if is_new {
+                    let restore_key = if is_new && !dispatch_attempted {
                         String::new()
                     } else {
                         err_chat_id.clone()
                     };
                     composer.failure = Some(message.into());
                     composer.failure_key = Some(restore_key.clone());
+                    let mut failed_send = failed_send;
+                    failed_send.key = restore_key.clone();
+                    composer.failed_send = Some(failed_send);
                     composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
                         s.end_pending_send(&err_chat_id, &err_message_id);
-                        if is_new && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
+                        if is_new && !dispatch_attempted && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
                             // Back to the canvas; the navigation draft-swap
                             // loads the restored draft below.
                             s.select_chat(None, cx);
@@ -8203,6 +8234,19 @@ impl Render for Composer {
                 .as_ref()
                 .is_none_or(|key| *key == self.current_key)
         });
+        let retry = self.failed_send.clone().filter(|failed| {
+            let allowed = failure.as_ref().is_some_and(|message| {
+                let lower = message.to_lowercase();
+                !mast_harness::is_authentication_failure(message)
+                    && !["capability", "policy", "unsupported", "not supported", "refused", "permission denied"].iter().any(|word| lower.contains(word))
+            });
+            allowed && !self.sending && failed.key == self.current_key
+                && self.input.read(cx).text().trim() == failed.text
+                && self.staged().iter().map(|item| &item.id).eq(failed.attachment_ids.iter())
+                && self.staged_appshots().iter().map(|item| &item.id).eq(failed.appshot_ids.iter())
+                && self.staged_skills() == failed.skills
+                && self.staged_comments(cx) == failed.comments
+        });
         // Composer honesty: when the target's delivery path is degraded, say
         // UP FRONT that a send will queue (a durable local write delivered on
         // reconnect) instead of letting the button imply instant delivery.
@@ -8287,6 +8331,15 @@ impl Render for Composer {
                         ),
                 )
             })
+            .when_some(retry, |el, failed| el.child(
+                div().id("composer-retry").debug_selector(|| "composer-retry".into())
+                    .cursor_pointer().text_color(theme.accent).child("Retry")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.sending { return; }
+                        this.retry_send_id = Some(failed.message_id.clone());
+                        this.send(failed.text.clone(), failed.queued, cx);
+                    }))
+            ))
             .children(context_reset)
             .when_some(queue_notice, |el, (notice, offline)| {
                 // Not a warning box (v0.2.12 feedback: the amber Notice read
@@ -9283,6 +9336,11 @@ mod tests {
             // With no engine attached, reaching the normal send error proves
             // Enter dispatched instead of silently stopping at the UI gate.
             assert_eq!(composer.failure.as_deref(), Some("Engine not connected"));
+            let failed = composer.failed_send.clone().expect("send can be retried");
+            assert_eq!(failed.text, "Hello without a project");
+            composer.retry_send_id = Some(failed.message_id.clone());
+            composer.send(failed.text, failed.queued, cx);
+            assert_eq!(composer.failed_send.as_ref().unwrap().message_id, failed.message_id);
             composer.queue_edit_finishing = true;
             assert!(
                 composer.send_blocked(cx),

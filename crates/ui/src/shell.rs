@@ -3893,6 +3893,22 @@ impl Shell {
         match event {
             TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::SignInAgain(chat_id) => self.sign_in_for_chat(chat_id.clone(), cx),
+            TranscriptEvent::RetryErroredTurn { chat_id, error_entry_id } => {
+                let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
+                let device = self.state.read(cx).chats.iter().find(|chat| chat.id == *chat_id).map(|chat| chat.device_id.clone());
+                let chat_id = chat_id.clone();
+                let error_entry_id = error_entry_id.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = engine.client().call(mast_rpc::methods::RETRY_ERRORED_TURN,
+                        serde_json::json!({ "chatId": chat_id, "errorEntryId": error_entry_id, "targetDeviceId": device })).await;
+                    if let Err(error) = result {
+                        this.update(cx, |shell, cx| {
+                            shell.set_sidebar_error(format!("Retry failed: {error}"));
+                            cx.notify();
+                        }).ok();
+                    }
+                }).detach();
+            }
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,

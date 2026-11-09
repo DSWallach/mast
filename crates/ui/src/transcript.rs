@@ -3278,6 +3278,7 @@ impl Render for BlobFetchErrorTooltip {
 pub enum TranscriptEvent {
     OpenChat(String),
     SignInAgain(String),
+    RetryErroredTurn { chat_id: String, error_entry_id: String },
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -3291,6 +3292,12 @@ pub enum TranscriptEvent {
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
+
+fn retryable_error_message(message: &str) -> bool {
+    let message = message.to_lowercase();
+    !["capability", "policy", "not supported", "unsupported", "refused", "permission denied"]
+        .iter().any(|marker| message.contains(marker))
+}
 
 impl Transcript {
     #[cfg(feature = "snapshot")]
@@ -6505,12 +6512,19 @@ impl Transcript {
             }
             RowKind::ErrorChip { message } => {
                 let chat = self.chat_id.clone().filter(|_| self.doc_override.is_none());
-                let action = chat.filter(|chat_id| {
+                let action = chat.clone().filter(|chat_id| {
                     mast_harness::is_authentication_failure(message)
                         && self.state.read(cx).chats.iter().find(|chat| chat.id == *chat_id)
                             .and_then(|chat| chat.config.as_ref())
                             .is_some_and(|config| crate::managed_accounts::supports_accounts(config.harness))
                 });
+                let retry = chat.filter(|chat_id| {
+                    !mast_harness::is_authentication_failure(message)
+                        && retryable_error_message(message)
+                        && !self.rows[ix + 1..].iter().any(|row| matches!(row.kind, RowKind::User { .. } | RowKind::ErrorChip { .. }))
+                        && self.state.read(cx).sessions.iter().any(|session| session.chat_id == *chat_id && session.status == mast_proto::SessionStatus::Errored)
+                });
+                let error_entry_id = row.entry_id.to_string();
                 div().child(crate::components::conversation_error_chip(&theme, message.clone()))
                     .when_some(action, |el, chat_id| el.child(
                         div().id(SharedString::from(format!("{}-sign-in-again", row.id)))
@@ -6518,6 +6532,12 @@ impl Transcript {
                             .cursor_pointer().text_color(theme.accent)
                             .child("Sign in again…")
                             .on_click(cx.listener(move |_, _, _, cx| cx.emit(TranscriptEvent::SignInAgain(chat_id.clone()))))
+                    )).when_some(retry, |el, chat_id| el.child(
+                        div().id(SharedString::from(format!("{}-retry", row.id)))
+                            .debug_selector({ let selector = format!("{}-retry", row.id); move || selector.clone() })
+                            .cursor_pointer().text_color(theme.accent)
+                            .child("Retry")
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(TranscriptEvent::RetryErroredTurn { chat_id: chat_id.clone(), error_entry_id: error_entry_id.clone() })))
                     )).into_any_element()
             },
         };
@@ -13064,6 +13084,68 @@ mod tests {
             vcx.simulate_click(action, gpui::Modifiers::default());
             assert_eq!(selected.borrow().as_deref(), Some(chat_id));
         }
+    }
+
+    #[gpui::test]
+    fn retry_action_is_limited_to_latest_errored_turn(cx: &mut gpui::TestAppContext) {
+        if !crate::first_run_test::isolated("transcript::tests::retry_action_is_limited_to_latest_errored_turn") { return; }
+        let dir = tempfile::Builder::new().prefix("mast-retry-").tempdir_in("/private/tmp").unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.sessions.push(serde_json::from_value(serde_json::json!({
+                "chatId": "chat", "deviceId": "device", "status": "errored",
+                "updatedAt": chrono::Utc::now()
+            })).unwrap());
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let selected = Rc::new(std::cell::RefCell::new(None));
+        let captured = selected.clone();
+        let _subscription = cx.update(|cx| cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+            if let TranscriptEvent::RetryErroredTurn { chat_id, error_entry_id } = event {
+                *captured.borrow_mut() = Some((chat_id.clone(), error_entry_id.clone()));
+            }
+        }));
+        let mut entry = assistant("failure", MessageStatus::Complete, vec![]);
+        entry.parts = vec![MessagePart::Error { id: "error".into(), message: "API overloaded".into() }];
+        transcript.update(cx, |this, _| {
+            this.rows = rows_for_entry(&entry, false, &mut parse);
+            this.chat_id = Some("chat".into());
+            this.content_width = 600.0;
+        });
+        struct RetryFixture(Entity<Transcript>);
+        impl Render for RetryFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |this, cx| this.render_row(0, window, cx))
+            }
+        }
+        let (fixture, vcx) = cx.add_window_view(|_, _| RetryFixture(transcript.clone()));
+        vcx.run_until_parked();
+        let action = vcx.debug_bounds("failure#error-retry").expect("retry action").center();
+        vcx.simulate_click(action, gpui::Modifiers::default());
+        assert_eq!(*selected.borrow(), Some(("chat".into(), "failure".into())));
+        for message in ["Authentication failed — sign in again", "Capability unsupported", "Policy refusal"] {
+            entry.parts = vec![MessagePart::Error { id: "error".into(), message: message.into() }];
+            transcript.update(vcx, |this, _| this.rows = rows_for_entry(&entry, false, &mut parse));
+            fixture.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            assert!(vcx.debug_bounds("failure#error-retry").is_none(), "{message}");
+        }
+        entry.parts = vec![MessagePart::Error { id: "error".into(), message: "API overloaded".into() }];
+        let mut later = assistant("later", MessageStatus::Complete, vec![]);
+        later.role = MessageRole::User;
+        later.parts = vec![text_part("text", "another turn")];
+        transcript.update(vcx, |this, _| {
+            this.rows = rows_for_entry(&entry, false, &mut parse);
+            this.rows.extend(rows_for_entry(&later, false, &mut parse));
+        });
+        fixture.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("failure#error-retry").is_none());
     }
 
     #[test]
