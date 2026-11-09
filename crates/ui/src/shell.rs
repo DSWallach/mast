@@ -9744,6 +9744,8 @@ impl Shell {
         } else if !has_spaces && !no_project {
             // Onboarding (first boot / after the destructive wipe): no folders
             // to work in yet — one clear affordance.
+            let title = "Add a Space to get started";
+            let description = "A Space is a folder on one of your devices.";
             let _ = faint;
             div()
                 .size_full()
@@ -9764,24 +9766,27 @@ impl Shell {
                         )
                         .child(
                             div()
+                                .when(cfg!(test), |el| el.debug_selector(move || title.into()))
                                 .mt(px(24.0))
                                 .text_size(crate::typography::ui_rems(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from("Add a Space to get started")),
+                                .child(SharedString::from(title)),
                         )
                         .child(
                             div()
+                                .when(cfg!(test), |el| el.debug_selector(move || description.into()))
                                 .mt(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(SharedString::from(
-                                    "A Space is a folder on one of your devices.",
+                                    description,
                                 )),
                         )
                         .child(
                             popover::btn_primary(&theme_owned, "Add a Space")
                                 .id("onboarding-add-space")
+                                .when(cfg!(test), |el| el.debug_selector(|| "onboarding-add-space".into()))
                                 .mt(px(20.0))
                                 .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
                         ),

@@ -1839,6 +1839,31 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear());
     }
 
+    #[gpui::test]
+    fn fresh_profile_shows_space_onboarding(cx: &mut gpui::TestAppContext) {
+        if !crate::first_run_test::isolated("shell::start_chat_ui::tests::fresh_profile_shows_space_onboarding") { return; }
+        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let settings = crate::settings::UiSettings::load_for_startup(dir.path());
+        assert!(!settings.compact_single_chat);
+        assert_eq!(settings.team_tab_visibility, crate::settings::TeamTabVisibility::Auto);
+        assert_eq!(settings.admin_grant_duration, crate::admin::DurationChoice::FourHours);
+        assert!(!settings.sound_enabled && !settings.sound_completion_enabled && !settings.sound_input_enabled && !settings.sound_attention_enabled);
+        assert!(settings.notifications_enabled && settings.notifications_background_only);
+        assert!(!settings.live_app_icon && !settings.show_menu_bar_item);
+        cx.update(|cx| crate::settings::init(settings, dir.path(), cx));
+        let (shell, cx) = test_shell(cx, dir.path());
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            let state = shell.state.read(cx);
+            assert!(state.spaces.is_empty());
+            assert!(state.selected_space.is_none());
+            assert!(state.selected_chat.is_none());
+        });
+        for selector in ["Add a Space to get started", "A Space is a folder on one of your devices.", "onboarding-add-space"] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+    }
+
     fn calls_to(calls: &Calls, method: &str) -> Vec<serde_json::Value> {
         calls
             .lock()

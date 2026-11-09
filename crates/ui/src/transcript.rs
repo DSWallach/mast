@@ -13008,7 +13008,8 @@ mod tests {
 
     #[gpui::test]
     fn authentication_notice_offers_sign_in_for_managed_and_default_chats(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
+        if !crate::first_run_test::isolated("transcript::tests::authentication_notice_offers_sign_in_for_managed_and_default_chats") { return; }
+        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
@@ -13016,13 +13017,13 @@ mod tests {
         });
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
-            for chat_id in ["managed", "default"] {
+            for (chat_id, harness) in [("managed", mast_proto::HarnessId::ClaudeCode), ("default", mast_proto::HarnessId::ClaudeCode), ("codex", mast_proto::HarnessId::Codex)] {
                 let mut chat: mast_proto::Chat = serde_json::from_value(serde_json::json!({
                     "id": chat_id, "deviceId": "device", "archived": false,
                     "createdAt": chrono::Utc::now(), "spaceId": "space"
                 })).unwrap();
                 chat.config = Some(mast_proto::ChatConfig {
-                    harness: mast_proto::HarnessId::ClaudeCode, model: None, reasoning: None,
+                    harness, model: None, reasoning: None,
                     model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
                     auto_approve: false,
                 });
@@ -13049,8 +13050,14 @@ mod tests {
             }
         }
         let (fixture, vcx) = cx.add_window_view(|_, _| RowFixture(transcript.clone()));
-        for chat_id in ["managed", "default"] {
-            transcript.update(vcx, |this, _| this.chat_id = Some(chat_id.into()));
+        for chat_id in ["managed", "default", "codex"] {
+            transcript.update(vcx, |this, _| {
+                this.chat_id = Some(chat_id.into());
+                if chat_id == "codex" {
+                    entry.parts = vec![MessagePart::Error { id: "error".into(), message: "Authentication failed — sign in to Codex again.".into() }];
+                    this.rows = rows_for_entry(&entry, false, &mut parse);
+                }
+            });
             fixture.update(vcx, |_, cx| cx.notify());
             vcx.run_until_parked();
             let action = vcx.debug_bounds("failure#error-sign-in-again").expect("sign-in action").center();

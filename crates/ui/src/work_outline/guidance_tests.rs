@@ -17,7 +17,8 @@ fn first_use_shown(vcx: &mut gpui::VisualTestContext) -> bool {
 
 #[gpui::test]
 fn first_use_line_shows_only_without_work_items_and_creates_one(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
+    if !crate::first_run_test::isolated("overview::logic_tests::guidance_tests::first_use_line_shows_only_without_work_items_and_creates_one") { return; }
+    let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
     let (overview, calls, vcx) = instruction_overview(cx, dir.path(), empty_snapshot(), reply_ok);
     let outline = overview.read_with(vcx, |o, _| o.outline.clone());
     draw(vcx);
