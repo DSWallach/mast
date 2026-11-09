@@ -121,8 +121,10 @@ Reference:
 - [docs/mcp.md](docs/mcp.md): the MCP server that serves the agent tools.
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the engine and UI fit together.
 
-## Credits and licence
+## Credits
 
-Mast started as a fork of [zeronsh/zeron](https://github.com/zeronsh/zeron) (MIT). It was briefly called Creel, and it no longer tracks upstream. Third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Mast began as a fork of [Zeron](https://github.com/zeronsh/zeron), created by Wing and contributors. Zeron provided the engine, Loro-based sync and documents, agent adapters, and chat UI. Mast builds on that foundation with the Work Outline, Overview, Required Actions, PR review, Linear integration, Horizon styles, and a newer iOS companion. Zeron already included an iOS app.
 
-Licensed under the [MIT License](LICENSE).
+[Mentics/tod](https://github.com/mentics/tod) inspired parts of the outline keyboard navigation and Linear integration. Those ideas were reimplemented; no Tod code was copied.
+
+Zeron is MIT licensed, copyright 2026 Wing. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
