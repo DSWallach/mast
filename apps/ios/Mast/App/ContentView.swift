@@ -9,8 +9,13 @@ struct ContentView: View {
     @State private var link: CompanionLink?
     @State private var pendingExternal: URL?
     @State private var confirmExternal = false
-    @StateObject private var model = Companion()
-    @StateObject private var appLock = AppLock()
+    @StateObject private var model: Companion
+    @StateObject private var appLock: AppLock
+    init() {
+        let lock = AppLock()
+        _appLock = StateObject(wrappedValue: lock)
+        _model = StateObject(wrappedValue: Companion(actionAllowed: { [weak lock] in lock?.allowsWrite == true }, actionGeneration: { [weak lock] in lock?.authorizationGeneration ?? -1 }))
+    }
     @AppStorage("lockTimeoutSeconds") private var lockTimeout = 0
     @Environment(\.scenePhase) private var phase
     @Environment(\.colorScheme) private var scheme
