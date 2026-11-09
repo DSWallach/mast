@@ -1,6 +1,6 @@
 # pr-dash: port-ready spec for the two PR tabs
 
-Source of truth: `/Users/mikey/Projects/cofactr/workspace/scripts/shell/bin/pr-dash` (Python 3; logic and the embedded HTML/JS template are both in this one file). Line refs below are to that file ("L123") unless a path is given. Skill doc: `.claude/skills/pr-dash/SKILL.md`. `tools/github-overlay/src/dash/{dashboard.js,frame.js,*.html}` are only a Chrome native-messaging relay (op `page`/`prs`/`ticket`); they contain NO PR logic. The extension starts `pr-dash --native-host` with no other flags (`tools/github-overlay/native/install.sh:70`), so extension defaults == CLI defaults.
+Source of truth: `<home>/Projects/cofactr/workspace/scripts/shell/bin/pr-dash` (Python 3; logic and the embedded HTML/JS template are both in this one file). Line refs below are to that file ("L123") unless a path is given. Skill doc: `.claude/skills/pr-dash/SKILL.md`. `tools/github-overlay/src/dash/{dashboard.js,frame.js,*.html}` are only a Chrome native-messaging relay (op `page`/`prs`/`ticket`); they contain NO PR logic. The extension starts `pr-dash --native-host` with no other flags (`tools/github-overlay/native/install.sh:70`), so extension defaults == CLI defaults.
 
 I ran `pr-dash --json --no-cache --fast` (and `--incoming`) read-only to confirm bucket output shape. It matches the rules below. (`--fast` skips only the mergeable retry.)
 
@@ -126,7 +126,7 @@ For each entry with `ts > last_mine_at`, login non-empty, not a bot: `addressed_
 `unanswered_comments = len(list)` (count of entries, not distinct people); `unanswered_comment_from = sorted(set(list))`. Note `my_last_comment_at = last_mine_at`.
 
 ### 3.6 Diff (L894-933, L950-1100, SKILL.md "Diff counting")
-Per file `classify_path(path)` on lowercased path: first of test, gen (gen patterns + lockfile patterns), docs match wins, else code. Patterns live in `/Users/mikey/Projects/cofactr/workspace/.claude/skills/pr-risk/scripts/diff_kinds.json` (copy them verbatim; regexes with search semantics):
+Per file `classify_path(path)` on lowercased path: first of test, gen (gen patterns + lockfile patterns), docs match wins, else code. Patterns live in `<home>/Projects/cofactr/workspace/.claude/skills/pr-risk/scripts/diff_kinds.json` (copy them verbatim; regexes with search semantics):
 - test: `(^|/)tests?/`, `(^|/)__tests__/`, `(^|/)test_[^/]+\.py$`, `(^|/)tests?\.py$`, `(^|/)conftest\.py$`, `\.(test|spec)\.[jt]sx?$`, `(^|/)(e2e|cypress|playwright)/`, `(^|/)factories?\.py$`, `(^|/)(test)?fixtures?/`, `(^|/)test(setup|utils?|helpers?|harness|support|fixtures?)[a-z0-9]*\.[jt]sx?$`, `(^|/)setuptests?\.[jt]sx?$`, `(^|/)(vitest|jest|playwright|cypress|karma)[.-][^/]*$`, `(^|/)(pytest\.ini|tox\.ini)$`
 - gen: `(^|/)migrations/`, `(^|/)versions/[0-9a-f]{8,}_`, `(^|/)__snapshots__/`, `\.snap$`, `\.generated\.[^/]+$`, `(^|/)generated/`, `(^|/)\.(basedpyright|quality)/baseline\.json$`, `\.(svg|png|jpe?g|gif|ico|woff2?|ttf|pdf)$`, plus lockfile `(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|cargo\.lock|pipfile\.lock)$`
 - docs: `\.(md|mdx|rst|txt|adoc)$`, `(^|/)docs?/`, `(^|/)\.claude/`

@@ -155,7 +155,7 @@ crates/engine/src/registry.rs:6://! this device's composer offers, persisted in 
 crates/engine/src/registry.rs:197:    pub fn load_prefs(&self, data_dir: &Path) {
 crates/engine/src/registry.rs:198:        let path = data_dir.join("harness-prefs.json");
 crates/engine/src/change_requests.rs:545:        let home = crate::repos::home_dir();
-crates/engine/src/subagent_scan.rs:404:            "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/29fd48ab-0258-4406-b725-26265045e05f.jsonl",
+crates/engine/src/subagent_scan.rs:404:            "<home>/.claude/projects/-Users-mikey-Projects-agent-mode-tools/29fd48ab-0258-4406-b725-26265045e05f.jsonl",
 crates/engine/src/managed_accounts.rs:4://! (`<data>/managed-accounts/<harness>/<id>/`, never under `~/.claude`). Chats
 crates/engine/src/managed_accounts.rs:5://! pinned to the account run their CLI with `CLAUDE_CONFIG_DIR` / `CODEX_HOME`
 crates/engine/src/managed_accounts.rs:11://! `~/.claude` / `~/.codex`, untouched, exactly as before this module existed.
@@ -248,7 +248,7 @@ crates/ui/src/pickers.rs:1040:        if let Some(dir) = self.data_dir.as_deref(
 crates/ui/src/pickers.rs:3074:        if let Some(dir) = &self.data_dir
 crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:10://! `subagent_scan_real_smoke.rs` — depends on a real `~/.claude/projects`
 crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:22:#[ignore = "depends on real ~/.claude/projects data on this machine"]
-crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27:        "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/8de11ea8-2a2a-42a2-9784-81b4142b404d.jsonl",
+crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27:        "<home>/.claude/projects/-Users-mikey-Projects-agent-mode-tools/8de11ea8-2a2a-42a2-9784-81b4142b404d.jsonl",
 crates/proto/src/agent.rs:38:    /// `~/.claude/settings.json`). `None` for harnesses without a built-in
 crates/engine/tests/local_import.rs:20:async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
 crates/engine/tests/local_import.rs:21:    let local = assemble(EngineProfile::local(data_dir).expect("local profile"));
@@ -351,9 +351,9 @@ crates/engine/tests/external_import_bulk_session_canvas.rs:82:    let data_dir =
 crates/engine/tests/external_import_bulk_session_canvas.rs:84:        data_dir.path(),
 crates/ui/src/perf/overview_bench.rs:132:        state.data_dir = Some(dir.path().to_path_buf());
 crates/engine/tests/external_import_real_smoke.rs:48:#[ignore = "depends on a real ~/.claude/projects transcript on this machine"]
-crates/engine/tests/external_import_real_smoke.rs:52:            "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/572aa472-53ef-435f-8596-190f70bbf034.jsonl",
+crates/engine/tests/external_import_real_smoke.rs:52:            "<home>/.claude/projects/-Users-mikey-Projects-agent-mode-tools/572aa472-53ef-435f-8596-190f70bbf034.jsonl",
 crates/engine/tests/external_import_real_smoke.rs:61:#[ignore = "depends on a real ~/.claude/projects transcript on this machine"]
-crates/engine/tests/external_import_real_smoke.rs:65:            "/Users/mikey/.claude/projects/-Users-mikey-Projects-cofactr-workspace/258f3c46-1d77-46e8-b4bc-170ecd3dd0bc.jsonl",
+crates/engine/tests/external_import_real_smoke.rs:65:            "<home>/.claude/projects/-Users-mikey-Projects-cofactr-workspace/258f3c46-1d77-46e8-b4bc-170ecd3dd0bc.jsonl",
 crates/engine/tests/external_import_title_repair.rs:86:    let data_dir = tempfile::tempdir().expect("data dir");
 crates/engine/tests/external_import_title_repair.rs:88:        data_dir.path(),
 crates/engine/tests/external_import_title_repair.rs:341:// process-global `$HOME` env var and this file already has one such test
@@ -692,7 +692,7 @@ crates/harness/src/claude/mod.rs:261:                "claude (searched PATH, the
 crates/harness/src/claude/mod.rs:303:        // Mast's default so `~/.claude/settings.json` cannot pick it silently.
 crates/harness/src/claude/mod.rs:391:    /// from the directory it's spawned in (`<cwd>/.claude` alongside the
 crates/harness/src/claude/mod.rs:392:    /// global `~/.claude`), so this must run in that chat's cwd rather than
-crates/engine/tests/subagent_scan_real_smoke.rs:8:        "/Users/mikey/.claude/projects/-Users-mikey-Projects-cofactr-workspace/13371e6c-e8b4-4c61-a772-da80b5909352.jsonl",
+crates/engine/tests/subagent_scan_real_smoke.rs:8:        "<home>/.claude/projects/-Users-mikey-Projects-cofactr-workspace/13371e6c-e8b4-4c61-a772-da80b5909352.jsonl",
 crates/ui/src/shell/instructions_ui.rs:1397:        let data_dir = dir.to_path_buf();
 crates/ui/src/shell/instructions_ui.rs:1408:                    data_dir: data_dir.clone(),
 crates/ui/src/work_outline/space_roots.rs:91:    pub(super) fn load_space_prefs(&mut self, data_dir: &std::path::Path) {
@@ -797,8 +797,8 @@ crates/engine/src/instance_lock.rs:65:                             stop it or us
 crates/engine/src/instance_lock.rs:170:         stop it or use a different data dir (MAST_DATA_DIR)",
 crates/engine/src/instance_lock.rs:226:        let Some(dir) = mast_proto::env::var_os("MAST_INSTANCE_LOCK_TEST_DIR") else {
 crates/engine/src/instance_lock.rs:252:            .env("MAST_INSTANCE_LOCK_TEST_DIR", dir.path())
-crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:25:    let real_cwd = "/Users/mikey/Projects/agent-mode-tools";
-crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27:        "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/8de11ea8-2a2a-42a2-9784-81b4142b404d.jsonl",
+crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:25:    let real_cwd = "<home>/Projects/agent-mode-tools";
+crates/engine/tests/subagent_scan_harness_session_real_smoke.rs:27:        "<home>/.claude/projects/-Users-mikey-Projects-agent-mode-tools/8de11ea8-2a2a-42a2-9784-81b4142b404d.jsonl",
 crates/engine/tests/external_import_bulk_session_canvas.rs:48:    let previous_home = std::env::var_os("HOME");
 crates/engine/tests/external_import_bulk_session_canvas.rs:50:        std::env::set_var("HOME", fake_home.path());
 crates/engine/tests/external_import_bulk_session_canvas.rs:162:            Some(value) => std::env::set_var("HOME", value),
@@ -812,8 +812,8 @@ crates/proto/src/env.rs:5://! Callers pass the new name (`MAST_DATA_DIR`). The n
 crates/proto/src/env.rs:70:            legacy_name("MAST_DATA_DIR").as_deref(),
 crates/proto/src/env.rs:71:            Some("ZERON_DATA_DIR")
 crates/proto/src/env.rs:73:        assert_eq!(legacy_name("HOME"), None);
-crates/engine/tests/external_import_real_smoke.rs:52:            "/Users/mikey/.claude/projects/-Users-mikey-Projects-agent-mode-tools/572aa472-53ef-435f-8596-190f70bbf034.jsonl",
-crates/engine/tests/external_import_real_smoke.rs:65:            "/Users/mikey/.claude/projects/-Users-mikey-Projects-cofactr-workspace/258f3c46-1d77-46e8-b4bc-170ecd3dd0bc.jsonl",
+crates/engine/tests/external_import_real_smoke.rs:52:            "<home>/.claude/projects/-Users-mikey-Projects-agent-mode-tools/572aa472-53ef-435f-8596-190f70bbf034.jsonl",
+crates/engine/tests/external_import_real_smoke.rs:65:            "<home>/.claude/projects/-Users-mikey-Projects-cofactr-workspace/258f3c46-1d77-46e8-b4bc-170ecd3dd0bc.jsonl",
 crates/engine/tests/external_import_title_repair_no_transcript.rs:22:    let previous_home = std::env::var_os("HOME");
 crates/engine/tests/external_import_title_repair_no_transcript.rs:25:        std::env::set_var("HOME", fake_home.path());
 crates/engine/tests/external_import_title_repair_no_transcript.rs:87:            Some(value) => std::env::set_var("HOME", value),
@@ -854,7 +854,7 @@ crates/harness/examples/cursor_stability_probe.rs:531:        assert!(mast_proto
 crates/harness/examples/cursor_stability_probe.rs:535:            mast_proto::env::var_os("MAST_CURSOR_STATE_DIR").is_some(),
 crates/harness/examples/cursor_stability_probe.rs:536:            "set an isolated MAST_CURSOR_STATE_DIR"
 crates/engine/tests/work_outline_launch.rs:1346:    let home = std::env::var("HOME").expect("HOME is set");
-crates/engine/tests/subagent_scan_real_smoke.rs:8:        "/Users/mikey/.claude/projects/-Users-mikey-Projects-cofactr-workspace/13371e6c-e8b4-4c61-a772-da80b5909352.jsonl",
+crates/engine/tests/subagent_scan_real_smoke.rs:8:        "<home>/.claude/projects/-Users-mikey-Projects-cofactr-workspace/13371e6c-e8b4-4c61-a772-da80b5909352.jsonl",
 crates/engine/tests/pr_ticket_cache_login_shell.rs:91:        std::env::set_var("HOME", dir.path());
 crates/harness/src/executable.rs:292:    env("HOME")
 crates/harness/src/executable.rs:296:                .then(|| env("USERPROFILE").filter(|value| !value.is_empty()))

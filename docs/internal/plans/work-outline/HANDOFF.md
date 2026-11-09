@@ -4,7 +4,7 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Where things are
 
-- **Repository:** `/Users/mikey/Projects/agent-mode-tools/zeron`, on GitHub as `Pluto8195/mast`
+- **Repository:** `<home>/Projects/agent-mode-tools/zeron`, on GitHub as `Pluto8195/mast`
   (renamed from the `Pluto8195/zeron` fork on 2026-10-25, then `creel` → `mast` on 2026-10-26; old
   URLs redirect). `zeronsh/zeron`
   stays as the `upstream` remote, but we no longer open PRs there. The folder and submodule path
@@ -1033,7 +1033,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
   the share line, and was reset to `send`. Paired phone: **da178287**. Stale phone pairings d7ae9871 and 47615a59
   can be revoked; Mikey hasn't answered yet.
 - **Security docs updated (revision 2 of each):**
-  - DevOps brief mast-artifact:0ce919c7: current state, Face ID on unlock as a trade-off, ACL open. It says the
+  - Security brief mast-artifact:0ce919c7: current state, Face ID on unlock as a trade-off, ACL open. It says the
     app already runs on the managed phone; Mikey should OK that wording before sending.
   - Review mast-artifact:cab6f4c5: status and commit for each finding.
 
@@ -1043,11 +1043,13 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 - **Waiting on Mikey:** personal-workspace revamp (204f55c6), coworker readiness (2fda739e), iOS research review
   (99cf645c), and whether to revoke the stale pairings.
 
+Real values: agent-mode-tools docs/private/ios-device.md.
+
 ## In flight (snapshot 2026-11-08 20:00; coordinator dd899921 handing off)
 
 - **Installed Mast: release 70** (93c138ba). No Mast-side workers are running. The Horizon worker (8ac73b69) waits for
   Mikey's next batch; its queue so far is just the Horizon Inbox panel divider line.
-- **iOS companion on Mikey's real iPhone 13 mini** (UDID 00008110-000651D21ABB801E, now trusted, so the MDM allowed
+- **iOS companion on Mikey's real iPhone 13 mini** (UDID <iphone-udid>, now trusted, so the work phone's MDM allowed
   the dev cert). Integration has 881e60cc; branch `ios-companion` is in worktree `.worktrees/zeron/ios-companion`.
   Worker: Terra chat 3c892a57, item 14c99c51.
   - **In progress:** fixing a send bug. `authenticateWrite()` (Companion.swift ~351) checks
@@ -1055,22 +1057,22 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
     dismisses, so every send/stop/answer fails with "Authentication or device credential unavailable".
   - When it's pushed: merge `origin/ios-companion` (check the diff stays inside `apps/ios/` + the doc), then reinstall
     on the phone yourself:
-    `xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'id=00008110-000651D21ABB801E'
-    -derivedDataPath /tmp/mast-ios-device -allowProvisioningUpdates DEVELOPMENT_TEAM=9PD43XAATA
+    `xcodebuild -project apps/ios/Mast.xcodeproj -scheme Mast -destination 'id=<iphone-udid>'
+    -derivedDataPath /tmp/mast-ios-device -allowProvisioningUpdates DEVELOPMENT_TEAM=<team-id>
     CODE_SIGN_STYLE=Automatic PRODUCT_BUNDLE_IDENTIFIER=computer.mikey.mast.companion.dev build`, then
-    `xcrun devicectl device install app --device 00008110-000651D21ABB801E
+    `xcrun devicectl device install app --device <iphone-udid>
     /tmp/mast-ios-device/Build/Products/Debug-iphoneos/Mast.app`. Free team: the build expires after 7 days.
   - **Bridge** (Node **22**: `export PATH="$HOME/.nvm/versions/node/v22.17.0/bin:$PATH"`, in
-    `apps/ios/bridge`). Mikey runs `node dist/cli.js start --tailscale-user michael@aintwet.nyc --url
-    https://macbook-pro.tail09fdaf.ts.net` in his terminal; add `--pair` only to pair. After bridge changes, run
+    `apps/ios/bridge`). Mikey runs `node dist/cli.js start --tailscale-user <tailscale-login> --url
+    https://<tailnet-host>` in his terminal; add `--pair` only to pair. After bridge changes, run
     `npm run build` and ask him to restart it. Sharing persists: agent-mode-tools is `shared:send`. Don't re-run
     `spaces share … --allow answer`. Paired devices: phone d7ae9871, simulator f55fed2a. CLI: `spaces`, `devices`,
     `revoke <id>`, `audit N`.
-  - Tailscale: Mac 100.115.7.28 and phone 100.67.238.10 on tailnet tail09fdaf (michael@aintwet.nyc). Serve is
+  - Tailscale: Mac <tailscale-ip> and phone <tailscale-ip> on tailnet <tailnet-host> (<tailscale-login>). Serve is
     tailnet-only, Funnel off, HTTPS certs on.
   - **Security:** the Opus review (mast-artifact:cab6f4c5) found 0 Critical, 1 High, 5 Medium, 13 Low; all fixed and
-    merged (0f615ea2). DevOps brief: mast-artifact:0ce919c7. Its "fixes planned" wording is now out of date: update it
-    to "fixed" before Mikey sends it. DevOps hasn't been asked or answered yet; the Slack draft is in chat dd899921.
+    merged (0f615ea2). Security brief: mast-artifact:0ce919c7. Its "fixes planned" wording is now out of date: update it
+    to "fixed" before Mikey sends it. The review is pending.
   - **Done this session:** artifact viewer, three styles + Match Mac, live updates, Stop, QR pairing, loading states,
     44 pt tap targets, capability-aware controls and errors.
   - **Open items:** photo attachments (9719a85d, needs a Rust attach path); desktop Settings → Phone page
@@ -1096,10 +1098,10 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
   - Default/Industrial/Horizon styles with Match Mac (read-only `GET /appearance`), fonts EB Garamond + Geist (OFL)
 
   Mikey QAs in the Simulator (iPhone 15 Pro; workers test on the Pro Max E50FC8FD). Tailscale is set up on the Mac
-  (tailnet tail09fdaf, `tailscale serve --bg http://127.0.0.1:27655` is tailnet-only, Funnel off). His work iPhone
-  13 mini (MDM via Rippling) **blocks dev-signed apps**, so phone use waits on DevOps. The signed build (Personal
-  Team 9PD43XAATA, bundle `computer.mikey.mast.companion.dev`) is installed there via devicectl but can't open.
-  Open items: security pass before DevOps (84df7cc6), photo attachments design (9719a85d; needs a Rust attach
+  (tailnet <tailnet-host> `tailscale serve --bg http://127.0.0.1:27655` is tailnet-only, Funnel off). His work iPhone
+  13 mini (the work phone's MDM) **blocks dev-signed apps**, so phone use awaits approval. The signed build (Personal
+  Team <team-id>, bundle `computer.mikey.mast.companion.dev`) is installed there via devicectl but can't open.
+  Open items: security pass before review (84df7cc6), photo attachments design (9719a85d; needs a Rust attach
   path), desktop Settings → Phone page (not started; Rust + release). Proposed approval rule for iOS xcodebuild
   (e866c323) awaits Mikey.
 
@@ -1514,7 +1516,7 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
 
 ## How we work
 
-- **Worktrees:** `/Users/mikey/Projects/agent-mode-tools/.worktrees/zeron/<branch>`, branched from
+- **Worktrees:** `<home>/Projects/agent-mode-tools/.worktrees/zeron/<branch>`, branched from
   the integration head. Seed the build cache with
   `cp -c -R target/debug/{deps,build,.fingerprint}` (APFS clones), add a `.workspace-root` file.
   Merge with `--no-ff` into `work-outline-implementation`. **Delete each worktree's `target/` after

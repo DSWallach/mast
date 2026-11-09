@@ -1,7 +1,7 @@
 # M0 audit: idempotent multi-step operations and the command plane
 
 Branch audited: `work-outline-implementation` (read-only). Spec: `docs/plans/work-outline-implementation-specification.md` (Persistence and convergence, last bullet at :92; Service operations :516-554; Materialization :510-514; acceptance 10, 16, 19 at :603, :609, :612).
-All paths below are relative to `/Users/mikey/Projects/agent-mode-tools/zeron`.
+All paths below are relative to `<home>/Projects/agent-mode-tools/zeron`.
 
 ## 0. Headline findings
 

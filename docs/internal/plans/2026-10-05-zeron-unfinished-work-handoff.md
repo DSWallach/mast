@@ -4,7 +4,7 @@ Status: the original repository/transcript implementation is committed on the fo
 
 Prepared: 2026-10-05. Updated: 2026-10-08.
 
-Repository: `/Users/mikey/Projects/agent-mode-tools/zeron`
+Repository: `<home>/Projects/agent-mode-tools/zeron`
 
 Branch and source baseline:
 
