@@ -7,7 +7,9 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 - **Repository:** `<home>/Projects/agent-mode-tools/zeron`, on GitHub as `Pluto8195/mast`
   (renamed from the `Pluto8195/zeron` fork on 2026-10-25, then `creel` → `mast` on 2026-10-26; old
   URLs redirect). `zeronsh/zeron`
-  stays as the `upstream` remote, but we no longer open PRs there. The folder and submodule path
+  stays as the `upstream` remote, but we no longer open PRs there. On 2026-11-09 the repo left GitHub's fork
+  network: it's standalone and **public**, and it can now be made private. Porting from upstream works by fetching
+  the `upstream` remote; triage is parked (item 07486a45). The folder and submodule path
   are still `zeron/`, and so are all code identifiers.
 - **Integration branch:** `work-outline-implementation`, branched from `main` at `3801cb5b`. It is
   the GitHub default branch. `main` is upstream's code at the fork point. **Never commit to
@@ -1551,6 +1553,14 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
 - No real Linear/GitHub API calls in tests. Nothing is ever written to Linear.
 - Never commit or push to `main`.
 - Registry operation ids must be ≤ 64 characters; hash long keys with `derive_id`.
+- **The Mast repo is public.** Never write these into it (docs, commits, fixtures):
+  - device IDs (UDIDs), team IDs, account logins or emails
+  - Tailscale names or IPs
+  - home paths: use `<home>`
+  - employer, MDM or DevOps specifics
+
+  Put real values in the private parent repo's `docs/private/` (e.g. `docs/private/ios-device.md`) and point to
+  them. Run `gitleaks git --redact --log-opts=--remotes=origin` before a release push if in doubt.
 
 ## Diagnostics
 

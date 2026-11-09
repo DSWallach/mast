@@ -1674,7 +1674,7 @@ async fn image_generation_fake_lifecycle_reaches_done_without_inline_payload() {
 }
 
 /// Opt-in provider smoke; the engine integration test verifies the subsequent
-/// import lands under profile uploads. See docs/generated-images-validation.md.
+/// import lands under profile uploads. See docs/internal/generated-images-validation.md.
 #[tokio::test]
 #[ignore = "consumes image quota; requires real Codex auth and image generation access"]
 async fn real_image_generation_smoke() {
