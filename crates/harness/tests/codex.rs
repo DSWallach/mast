@@ -92,6 +92,43 @@ async fn run_to_end(
 }
 
 #[tokio::test]
+#[ignore = "first-run bug: Codex authentication failures are not normalized or actionable"]
+async fn signed_out_cli_emits_actionable_authentication_error() {
+    const ISOLATED: &str = "MAST_TEST_SIGNED_OUT_CODEX_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let profile = tempfile::Builder::new()
+            .prefix("mast-first-run-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--ignored", "signed_out_cli_emits_actionable_authentication_error"])
+            .env(ISOLATED, "1")
+            .env("HOME", profile.path())
+            .env("MAST_DATA_DIR", profile.path().join("data"))
+            .env("CLAUDE_CONFIG_DIR", profile.path().join("claude"))
+            .env("CODEX_HOME", profile.path().join("codex"))
+            .env("TMPDIR", "/private/tmp")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:signed-out"), controls).await;
+    assert!(events.iter().any(|event| {
+        let message = match event {
+            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Done { error: Some(message), .. } => Some(message.as_str()),
+            _ => None,
+        };
+        message.is_some_and(|message| {
+            let message = message.to_lowercase();
+            message.contains("codex") && message.contains("sign in")
+        })
+    }), "events: {events:?}");
+}
+
+#[tokio::test]
 async fn reasoning_preserves_summary_parts_and_item_boundaries_per_thread() {
     let (controls, _steer, _token) = controls("Yes");
     let events = run_to_end(&harness(), request("scenario:reasoning"), controls).await;
