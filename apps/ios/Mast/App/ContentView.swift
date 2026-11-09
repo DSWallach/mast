@@ -35,7 +35,7 @@ struct ContentView: View {
     .environment(\.openURL, OpenURLAction { url in
         guard let destination = companionLink(url) else { return .discarded }
         if case .safari(let external) = destination { pendingExternal = external; confirmExternal = true } else { link = destination }; return .handled
-    }).environment(\.mastStyle, style).preferredColorScheme(chosenScheme).onAppear { if phase == .active { appLock.foreground(timeout: TimeInterval(lockTimeout)) } }
+    }).environment(\.mastStyle, style).buttonStyle(MastTapTargetStyle()).preferredColorScheme(chosenScheme).onAppear { if phase == .active { appLock.foreground(timeout: TimeInterval(lockTimeout)) } }
         .onChange(of: phase) { _, value in
             switch value { case .active: appLock.foreground(timeout: TimeInterval(lockTimeout)); case .inactive: appLock.inactive(); case .background: appLock.background(); @unknown default: appLock.inactive() }
         }.onChange(of: appLock.obscured) { _, obscured in if !obscured { Task { await model.refresh() } } else { link = nil; pendingExternal = nil; confirmExternal = false } }
@@ -104,7 +104,7 @@ struct ArtifactScreen: View {
             } else { Text("Space is unavailable or no longer shared.") }
         } else if error.isEmpty { ProgressView() } else { Text(error) }
     }.frame(maxWidth: .infinity, maxHeight: .infinity).background(style.surface(scheme)) }
-    var body: some View { Group { if snapshot { artifactBody } else { NavigationStack { artifactBody.navigationTitle(metadata?.title ?? "Artifact").toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }; ToolbarItem(placement: .primaryAction) { if metadata != nil { ShareLink(item: "mast-artifact:\(id)") } } }.task { if metadata == nil { do { (metadata, data) = try await model.artifact(id) } catch { self.error = "Artifact unavailable." } } } } } } }
+    var body: some View { Group { if snapshot { artifactBody } else { NavigationStack { artifactBody.navigationTitle(metadata?.title ?? "Artifact").toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }; ToolbarItem(placement: .primaryAction) { if metadata != nil { ShareLink(item: "mast-artifact:\(id)") { Image(systemName: "square.and.arrow.up").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) }.accessibilityLabel("Share artifact link") } } }.task { if metadata == nil { do { (metadata, data) = try await model.artifact(id) } catch { self.error = "Artifact unavailable." } } } } } } }
 }
 func artifactDisplayKind(_ kind: String) -> String {
     switch kind.lowercased() { case "htmlpage", "htmlfragment", "html-page", "html-fragment": "html"; case "markdown": "markdown"; case "image": "image"; default: "other" }

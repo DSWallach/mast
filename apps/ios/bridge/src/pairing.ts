@@ -14,12 +14,17 @@ export class PairingChallenge {
     this.expiresAt = now + lifetimeMilliseconds;
   }
 
-  exchange(code: string, now: number): string | null {
-    if (this.consumed || now >= this.expiresAt || this.attempts >= 5) return null;
+  exchangeResult(code: string, now: number): { token: string } | { reason: "used" | "expired" | "attempts-exhausted" | "wrong-code" } {
+    if (this.consumed) return { reason: "used" };
+    if (now >= this.expiresAt) return { reason: "expired" };
+    if (this.attempts >= 5) return { reason: "attempts-exhausted" };
     this.attempts += 1;
-    if (!timingSafeEqual(this.codeDigest, digest(code))) return null;
+    if (!timingSafeEqual(this.codeDigest, digest(code))) return { reason: "wrong-code" };
     this.consumed = true;
-    return randomBytes(32).toString("base64url");
+    return { token: randomBytes(32).toString("base64url") };
+  }
+  exchange(code: string, now: number): string | null {
+    const result = this.exchangeResult(code, now); return "token" in result ? result.token : null;
   }
 }
 

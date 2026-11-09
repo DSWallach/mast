@@ -1,3 +1,4 @@
+import { DispatchDenied } from "../dist/authorization.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ReplyCoordinator, decisionMessage, deriveId } from "../dist/reply.js";
@@ -62,4 +63,11 @@ test('revocation guard prevents dispatch after preparation', async () => {
  const f=fixtures(); let checks=0; const guard=async()=>{checks++;throw Error('revoked')};
  await assert.rejects(()=>new ReplyCoordinator(f.store,f.engine).answer('request',key,{outcome:'answered',text:'yes'},false,guard));
  assert.equal(checks,1); assert.deepEqual(f.calls,[]);
+});
+
+test("capability revoked before queued dispatch stays definitely unsent and can be retried", async () => {
+ const f=fixtures({busy:true}), coordinator=new ReplyCoordinator(f.store,f.engine), input={outcome:"answered",text:"yes"};
+ await assert.rejects(()=>coordinator.answer("request",key,input,false,async()=>{throw new DispatchDenied(403,"answer")}), DispatchDenied);
+ assert.deepEqual(f.calls,[]); assert.equal((await f.store.load("request")).phase,"prepared");
+ assert.equal((await coordinator.answer("request",key,input)).phase,"resolved"); assert.equal(f.calls.filter(call=>call[0]==="queue").length,1);
 });

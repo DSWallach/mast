@@ -16,7 +16,7 @@ struct ChatsScreen: View {
             let chats = model.visibleChats.filter { chat in group(chat) == section && chat.visible(showWorkers: model.showWorkers) }
             if !chats.isEmpty { VStack(alignment: .leading, spacing: 12) {
                 Text(section.uppercased()).font(.system(size: 10, weight: .bold)).tracking(1.3).foregroundStyle(style.muted(scheme))
-                ForEach(chats) { chat in if snapshot { ChatRow(chat: chat) } else { NavigationLink { ChatDetail(chat: chat, model: model) } label: { ChatRow(chat: chat) }.buttonStyle(.plain) } }
+                ForEach(chats) { chat in if snapshot { ChatRow(chat: chat) } else { NavigationLink { ChatDetail(chat: chat, model: model) } label: { ChatRow(chat: chat) }.buttonStyle(MastTapTargetStyle()) } }
             } }
         } }
     }.padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 30) }.refreshable { await model.refresh() }.background(style.surface(scheme)).toolbar(.hidden, for: .navigationBar) }
@@ -30,6 +30,6 @@ struct ChatRow: View {
         VStack(alignment: .leading, spacing: 6) { Text(chat.title).font(style.semibold(15)).foregroundStyle(style.ink(scheme)); Text([chat.model, statusLabel].compactMap { $0 }.joined(separator: "  ·  ")).font(style.ui(12)).foregroundStyle(style.muted(scheme)) }
         Spacer(minLength: 4)
         TimelineView(.periodic(from: .now, by: 60)) { _ in Text(style.relativeISO(chat.lastMessageAt)) }.font(.system(size: 12)).foregroundStyle(style.muted(scheme))
-    }.frame(minHeight: style.rowHeight).padding(.vertical, 4).contentShape(Rectangle()) }
+    }.frame(minHeight: 44).contentShape(Rectangle()) }
     private var statusLabel: String { let status = chat.status.lowercased(); return status.contains("stale") ? "Offline" : (status.hasPrefix("working") ? "Running" : (status.contains("awaiting") || status.contains("waiting") ? "Waiting" : (status == "idle" ? "Idle" : chat.status))) }
 }

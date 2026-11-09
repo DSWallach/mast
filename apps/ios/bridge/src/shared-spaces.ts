@@ -27,6 +27,7 @@ export class SharedSpaces {
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.cachedKey = ""; this.cached.clear(); return new Map(); } throw error; }
   }
   async ids(): Promise<Set<string>> { return new Set((await this.readIds()).keys()); }
+  async level(id: string): Promise<Capability | undefined> { return (await this.readIds()).get(id); }
   async allows(id: string, level: Capability): Promise<boolean> { const entries = await this.readIds(); const rank = {view: 0, answer: 1, send: 2}; const allow = entries.get(id); return allow !== undefined && rank[allow] >= rank[level]; }
   async set(id: string, share: boolean, allow: Capability = "view"): Promise<void> {
     await withStateLock(this.directory, "spaces", async () => {
@@ -41,7 +42,7 @@ export class SharedSpaces {
 export interface SpaceAccess {
   allows?(id: string, level: Capability): Promise<boolean>;
   chatSpaces?(): Promise<Map<string, string>>;
-  spaces(): Promise<{ id: string; name: string }[]>;
+  spaces(): Promise<{ id: string; name: string; allow?: Capability }[]>;
   chatSpace(id: string): Promise<string | null>;
   requestSpace(id: string): Promise<string | null>;
   chatAllowed(id: string): Promise<boolean>;
@@ -70,7 +71,7 @@ export function engineSpaceAccess(url: string, shared: SharedSpaces): SpaceAcces
       return null;
   }
   return {
-    async spaces() { return (await sharedSpaces()).map(space => ({ id: space.id, name: spaceName(space) })); },
+    async spaces() { const spaces = await sharedSpaces(); const result = await Promise.all(spaces.map(async space => { const allow = await shared.level(space.id); return allow ? { id: space.id, name: spaceName(space), allow } : null; })); return result.filter((space): space is {id: string; name: string; allow: Capability} => space !== null); },
     chatSpace, requestSpace,
     async chatSpaces() {
       const ids = await shared.ids(), chats = await snapshot<{id: string; spaceId?: string; archived?: boolean}[]>(url, "WatchChats", {});

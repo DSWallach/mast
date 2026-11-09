@@ -42,6 +42,67 @@ final class MastTests: XCTestCase {
         model.demo = false
         return model
     }
+    private func enableWrites(_ model: Companion, requestIDs: [String] = []) {
+        model.sharedSpaces = [SharedSpace(id: "s", name: "Space", allow: "send")]; model.noSpacesShared = false; model.connection = "Connected"
+        model.requests = requestIDs.map { ActionRequest(id: $0, space: "Space", kind: "ask", text: "Question", detail: "", options: [], facts: [], links: [], origin: "Chat", spaceId: "s") }
+    }
+    func testPairingErrorsAndDeliveryClassification() {
+        let reasons = ["wrong-code", "expired", "used", "attempts-exhausted"]
+        for reason in reasons {
+            let data = Data("{\"reason\":\"\(reason)\"}".utf8)
+            XCTAssertFalse(pairingHTTPMessage(status: 401, data: data).isEmpty)
+        }
+        for error in ["identity forbidden", "host forbidden", "funnel forbidden", "pairing closed"] {
+            let data = Data("{\"error\":\"\(error)\"}".utf8)
+            XCTAssertFalse(pairingHTTPMessage(status: 403, data: data).isEmpty)
+        }
+        XCTAssertTrue(pairingHTTPMessage(status: 400, data: Data("{\"error\":\"device label required\"}".utf8)).contains("device label required"))
+        XCTAssertTrue(pairingNetworkMessage(URLError(.serverCertificateUntrusted)).contains("TLS"))
+        XCTAssertTrue(pairingNetworkMessage(URLError(.notConnectedToInternet)).contains("Network"))
+        XCTAssertTrue(classifyWriteNetworkError(URLError(.cannotConnectToHost)).localizedDescription.contains("Not sent"))
+        XCTAssertTrue(classifyWriteNetworkError(URLError(.timedOut)).localizedDescription.contains("Delivery unknown"))
+    }
+    func testPairingCannotRunTwiceAndShowsErrors() async throws {
+        let credential = MemoryCredential(); let model = model(credential); model.pairingCode = "code"
+        let lock = NSLock(); var attempts = 0
+        StubProtocol.reply = { _ in lock.lock(); attempts += 1; lock.unlock(); Thread.sleep(forTimeInterval: 0.15); return (401, "{\"reason\":\"expired\"}") }
+        async let first: Void = model.pair()
+        async let second: Void = model.pair()
+        _ = await (first, second)
+        XCTAssertEqual(attempts, 1); XCTAssertFalse(model.pairingInProgress)
+        XCTAssertTrue(model.pairingError?.contains("expired") == true)
+    }
+    func testCapabilitiesBlockWritesBeforeAuthentication() async throws {
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
+        let auth = MockAuthenticator()
+        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAuthenticator: auth, actionAllowed: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
+        model.sharedSpaces = [SharedSpace(id: "s", name: "Space", allow: "view")]
+        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working", spaceId: "s")
+        do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Not allowed")) }
+        do { try await model.stop(chat); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Not allowed")) }
+        do { _ = try await model.answer("r", outcome: "answered", text: "yes"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Not allowed")) }
+        XCTAssertNil(auth.completion)
+        model.sharedSpaces = [SharedSpace(id: "s", name: "Space", allow: "answer")]
+        XCTAssertTrue(model.canPerform(spaceId: "s", level: "answer")); XCTAssertFalse(model.canPerform(spaceId: "s", level: "send"))
+        XCTAssertFalse(model.canPerform(spaceId: "missing", level: "answer"))
+    }
+    func testWriteErrorsAreReportedPrecisely() async throws {
+        let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
+        let model = model(credential); enableWrites(model)
+        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working", spaceId: "s")
+        for (status, body, expected) in [(403, "{\"error\":\"capability\",\"need\":\"send\"}", "Not allowed"), (429, "{\"retryAfter\":12}", "12 seconds"), (503, "{}", "Delivery unknown")] {
+            StubProtocol.reply = { _ in (status, body) }
+            do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains(expected), error.localizedDescription) }
+        }
+        StubProtocol.reply = { _ in throw URLError(.notConnectedToInternet) }
+        do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Not sent")) }
+        StubProtocol.reply = { _ in throw URLError(.timedOut) }
+        do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Delivery unknown")) }
+        StubProtocol.reply = { _ in (401, "{}") }
+        do { _ = try await model.send(chat, text: "hello"); XCTFail() } catch { XCTAssertTrue(error.localizedDescription.contains("Pair again")) }
+        XCTAssertNil(credential.read())
+    }
     func testArtifactKindsAndNavigationAreRestricted() {
         for kind in ["htmlPage", "htmlFragment", "html-page", "html-fragment"] { XCTAssertEqual(artifactDisplayKind(kind), "html") }
         XCTAssertEqual(artifactDisplayKind("image"), "image"); XCTAssertEqual(artifactDisplayKind("mermaid"), "other")
@@ -84,9 +145,9 @@ final class MastTests: XCTestCase {
     func testWriteRequiresFreshAuthentication() async throws {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAuthenticator: RefusingAuthenticator(), actionAllowed: { true }); model.demo = false
+        let model = Companion(credential: credential, decisions: MemoryDecisionStore(), configuration: configuration, actionAuthenticator: RefusingAuthenticator(), actionAllowed: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
         var sent = false; StubProtocol.reply = { _ in sent = true; return (200, "{}") }
-        let chat = Chat(id: "c", title: "Chat", space: "S", status: "working")
+        let chat = Chat(id: "c", title: "Chat", space: "S", status: "working", spaceId: "s")
         do { _ = try await model.send(chat, text: "hello"); XCTFail("expected authentication failure") } catch {}
         do { try await model.stop(chat); XCTFail("expected authentication failure") } catch {}
         do { _ = try await model.answer("r", outcome: "answered", text: "yes"); XCTFail("expected authentication failure") } catch {}
@@ -140,7 +201,8 @@ final class MastTests: XCTestCase {
         XCTAssertEqual(credential.read()?.token, "device")
         XCTAssertTrue(model.noSpacesShared)
         XCTAssertTrue(model.visibleRequests.isEmpty)
-        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working")
+        enableWrites(model)
+        let chat = Chat(id: "c", title: "Chat", space: "Space", status: "working", spaceId: "s")
         let sent = try await model.send(chat, text: "hello")
         XCTAssertEqual(sent, "Accepted")
         StubProtocol.reply = { _ in (503, "{}") }
@@ -191,7 +253,7 @@ final class MastTests: XCTestCase {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false; enableWrites(model, requestIDs: ["r"])
         var key: String?
         StubProtocol.reply = { request in
             key = request.value(forHTTPHeaderField: "Idempotency-Key")
@@ -213,7 +275,7 @@ final class MastTests: XCTestCase {
         let credential = MemoryCredential(); try credential.save(BoundCredential(origin: "http://127.0.0.1:27655", token: "token"))
         let store = MemoryDecisionStore()
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [StubProtocol.self]
-        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false
+        let model = Companion(credential: credential, decisions: store, configuration: configuration, actionAuthenticator: ImmediateAuthenticator(), actionAllowed: { true }); model.demo = false; enableWrites(model, requestIDs: ["ask", "choose", "approve", "decline"])
         var bodies: [[String: String]] = []
         StubProtocol.reply = { request in
             let data: Data

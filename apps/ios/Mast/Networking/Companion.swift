@@ -58,10 +58,54 @@ func clearKeychainOnFirstLaunch(defaults: UserDefaults, credential: any Credenti
     credential.clear(); clearDecisions(); defaults.set(true, forKey: "companionFirstLaunchComplete")
 }
 enum BridgeError: LocalizedError {
-    case address, credential, response, unauthorized
+    case address, credential, response, unauthorized, capability, notSent, deliveryUnknown, rateLimited(Int), pairing(String)
     var errorDescription: String? {
-        switch self { case .address: return "Use HTTPS, or HTTP on simulator loopback."; case .credential: return "Could not save the device credential."; case .response: return "Bridge request failed. Check the connection and pairing."; case .unauthorized: return "Device credential revoked. Pair again." }
+        switch self {
+        case .address: return "Check the bridge URL. Use HTTPS, or HTTP on simulator loopback."
+        case .credential: return "Authentication or device credential unavailable."
+        case .response: return "Bridge request failed."
+        case .unauthorized: return "Device credential revoked. Pair again."
+        case .capability: return "Not allowed for this Space."
+        case .notSent: return "Not sent. Check the connection."
+        case .deliveryUnknown: return "Delivery unknown. Check the chat before retrying."
+        case .rateLimited(let seconds): return "Slow down. Try again in \(seconds) seconds."
+        case .pairing(let message): return message
+        }
     }
+}
+private struct BridgeFailure: Decodable { var error: String?; var reason: String?; var retryAfter: Int? }
+func pairingHTTPMessage(status: Int, data: Data) -> String {
+    let failure = try? JSONDecoder().decode(BridgeFailure.self, from: data)
+    if status == 401 {
+        switch failure?.reason {
+        case "wrong-code": return "Wrong pairing code. Check the code and try again."
+        case "expired": return "Pairing code expired. Restart the bridge with --pair for a new code."
+        case "used": return "This pairing code has already been used. Start a new pairing window."
+        case "attempts-exhausted": return "Too many attempts. Start a new pairing window."
+        default: return "Wrong or expired pairing code, or the code was already used. Start a new pairing window."
+        }
+    }
+    if status == 403 {
+        switch failure?.error { case "host forbidden": return "Bridge Host is not allowed. Check the bridge --url option."
+        case "funnel forbidden": return "Funnel access is refused. Use the approved Tailscale Serve path."
+        case "pairing closed": return "Pairing is closed. Restart the bridge with --pair."
+        case "origin forbidden": return "Bridge rejected the request origin."
+        default: return "Tailscale identity did not match. Check the bridge --tailscale-user setting." }
+    }
+    if status == 400, let error = failure?.error {
+        let safe = String(String.UnicodeScalarView(error.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(200)))
+        return safe.isEmpty ? "The bridge rejected the pairing request." : "Bridge rejected pairing: \(safe)"
+    }
+    if status == 415 { return "The bridge rejected the pairing request format." }
+    return "Bridge pairing failed (HTTP \(status)). Check the Mac bridge."
+}
+func pairingNetworkMessage(_ error: URLError) -> String {
+    switch error.code { case .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .secureConnectionFailed: return "TLS connection failed. Check the HTTPS certificate and Tailscale connection."
+    default: return "Network connection failed. Check that the Mac bridge and Tailscale are reachable." }
+}
+func classifyWriteNetworkError(_ error: URLError) -> BridgeError {
+    switch error.code { case .notConnectedToInternet, .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid: return .notSent
+    default: return .deliveryUnknown }
 }
 struct ArtifactMetadata: Decodable { let id: String, title: String, kind: String, spaceId: String; let revision: Int }
 private struct PairReply: Decodable { let token: String }
@@ -85,6 +129,8 @@ final class Companion: ObservableObject {
     @Published var chats = Demo.chats
     @Published var connection = "Demo mode"
     @Published var pairingCode = ""
+    @Published private(set) var pairingInProgress = false
+    @Published var pairingError: String?
     @Published var showWorkers = false
     @Published var replyEnabled = UserDefaults.standard.object(forKey: "replyAndResolveEnabled") as? Bool ?? true {
         didSet { UserDefaults.standard.set(replyEnabled, forKey: "replyAndResolveEnabled") }
@@ -103,6 +149,12 @@ final class Companion: ObservableObject {
     }
     var visibleRequests: [ActionRequest] { requests.filter { canView(spaceId: $0.spaceId) } }
     var visibleChats: [Chat] { chats.filter { canView(spaceId: $0.spaceId) } }
+    func canPerform(spaceId: String?, level: String) -> Bool {
+        if demo { return true }
+        guard canView(spaceId: spaceId), let space = sharedSpaces.first(where: { $0.id == spaceId }) else { return false }
+        let ranks = ["view": 0, "answer": 1, "send": 2]
+        return (ranks[space.allow ?? "view"] ?? 0) >= (ranks[level] ?? Int.max)
+    }
     func canView(spaceId: String?) -> Bool {
         if demo { return true }
         guard !connection.hasPrefix("Disconnected"), let spaceId else { return false }
@@ -113,7 +165,7 @@ final class Companion: ObservableObject {
         if demo { return }
         do {
             let latest: SharedSpaceList = try await request("/spaces")
-            let changed = Set(latest.spaces.map(\.id)) != Set(sharedSpaces.map(\.id))
+            let changed = Set(latest.spaces.map { "\($0.id):\($0.allow ?? "view")" }) != Set(sharedSpaces.map { "\($0.id):\($0.allow ?? "view")" })
             sharedSpaces = latest.spaces; noSpacesShared = latest.noSpacesShared
             if changed || connection.hasPrefix("Disconnected") { requests = []; chats = []; await refresh() }
         } catch { connection = "Disconnected · showing stale data" }
@@ -172,19 +224,33 @@ final class Companion: ObservableObject {
         if authenticated { guard let token = try token(for: base) else { throw BridgeError.credential }; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw BridgeError.response }
+        let data: Data; let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch let error as URLError {
+            if !authenticated { throw BridgeError.pairing(pairingNetworkMessage(error)) }
+            if body != nil { throw classifyWriteNetworkError(error) }
+            throw error
+        }
+        guard let http = response as? HTTPURLResponse else { throw body == nil ? BridgeError.response : BridgeError.deliveryUnknown }
+        if !authenticated && path == "/pair" && !(200..<300).contains(http.statusCode) { throw BridgeError.pairing(pairingHTTPMessage(status: http.statusCode, data: data)) }
         if http.statusCode == 401 { credential.clear(); isPaired = false; connection = "Disconnected · pair again"; throw BridgeError.unauthorized }
-        guard (200..<300).contains(http.statusCode) else { throw BridgeError.response }
-        return try JSONDecoder().decode(T.self, from: data)
+        if http.statusCode == 403, (try? JSONDecoder().decode(BridgeFailure.self, from: data).error) == "capability" { throw BridgeError.capability }
+        if http.statusCode == 429 { let info = try? JSONDecoder().decode(BridgeFailure.self, from: data); throw BridgeError.rateLimited(max(1, info?.retryAfter ?? Int(http.value(forHTTPHeaderField: "Retry-After") ?? "") ?? 60)) }
+        guard (200..<300).contains(http.statusCode) else { throw body != nil && http.statusCode >= 500 ? BridgeError.deliveryUnknown : BridgeError.notSent }
+        do { return try JSONDecoder().decode(T.self, from: data) }
+        catch { if !authenticated { throw BridgeError.pairing("The bridge sent an invalid pairing response.") }; throw body == nil ? BridgeError.response : BridgeError.deliveryUnknown }
     }
     func pair() async {
+        guard !pairingInProgress else { return }
+        pairingInProgress = true; pairingError = nil
+        defer { pairingInProgress = false }
         do {
             let origin = canonicalOrigin(try baseURL())
-            let reply: PairReply = try await request("/pair", body: ["code": pairingCode, "label": UIDevice.current.name], authenticated: false)
+            let rawLabel = String(String.UnicodeScalarView(UIDevice.current.name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(40))).trimmingCharacters(in: .whitespacesAndNewlines)
+            let reply: PairReply = try await request("/pair", body: ["code": pairingCode.trimmingCharacters(in: .whitespacesAndNewlines), "label": rawLabel.isEmpty ? "iPhone" : rawLabel], authenticated: false)
             guard canonicalOrigin(try baseURL()) == origin else { throw BridgeError.address }
             try credential.save(BoundCredential(origin: origin, token: reply.token)); isPaired = true; pairingCode = ""; demo = false; hasLoaded = false; requests = []; chats = []; await refresh()
-        } catch { connection = "Disconnected · \(error.localizedDescription)" }
+        } catch { pairingError = error.localizedDescription; connection = "Disconnected" }
     }
     func refresh() async {
         if demo { requests = Demo.requests; chats = Demo.chats; sharedSpaces = []; noSpacesShared = false; connection = "Demo mode"; hasLoaded = true; return }
@@ -230,6 +296,7 @@ final class Companion: ObservableObject {
     }
     func send(_ chat: Chat, text: String) async throws -> String {
         if demo { return "Demo only · message was not sent" }
+        guard canPerform(spaceId: chat.spaceId, level: "send") else { throw BridgeError.capability }
         try await authenticateWrite()
         let result: SendReply = try await request("/chats/\(chat.id)/messages", body: ["text": text])
         if result.delivery == "simulated" { return "Fixture only · message was not sent" }
@@ -237,6 +304,7 @@ final class Companion: ObservableObject {
     }
     func stop(_ chat: Chat) async throws {
         if demo { return }
+        guard canPerform(spaceId: chat.spaceId, level: "send") else { throw BridgeError.capability }
         try await authenticateWrite()
         let _: StopReply = try await request("/chats/\(chat.id)/stop", body: [:])
     }
@@ -246,6 +314,7 @@ final class Companion: ObservableObject {
         var decision = existing ?? PendingDecision(key: UUID().uuidString, outcome: outcome, text: text, optionId: optionId)
         guard decision.outcome == outcome && decision.text == text && decision.optionId == optionId else { throw BridgeError.response }
         if demo { guard existing == nil else { throw BridgeError.response }; decision.phase = "resolved"; return decision }
+        guard canPerform(spaceId: requests.first(where: { $0.id == requestId })?.spaceId, level: "answer") else { throw BridgeError.capability }
         try await authenticateWrite()
         try decisions.save(requestId, decision: decision)
         var body = ["outcome": decision.outcome]

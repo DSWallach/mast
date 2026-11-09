@@ -41,3 +41,15 @@ test('pair denials are aggregated rather than individually audited', async () =>
  for(let i=0;i<2;i++)assert.equal((await fetch(base+'/pair',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:'bad',label:'device'})})).status,401);
  assert.equal(records.length,0);server.closeAllConnections();await new Promise(r=>server.close(r));assert.equal(records.length,1);assert.equal(records[0].outcome,'count:2');
 });
+
+test("pair failures log only static reasons, never credentials or labels", async () => {
+ const logs=[], server=createBridge({},fakeTokens(),new PairingChallenge("secret-code",Date.now()),undefined,fixtureAccess,fixtureAudit,undefined,undefined,undefined,10,undefined,undefined,true,reason=>logs.push(reason));
+ await new Promise(r=>server.listen(0,"127.0.0.1",r));
+ try { const base=`http://127.0.0.1:${server.address().port}/pair`;
+   let result=await fetch(base,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:"wrong-secret",label:"private-label"})}); assert.equal(result.status,401); assert.equal((await result.json()).reason,"wrong-code");
+   result=await fetch(base,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:"secret-code",label:""})}); assert.equal(result.status,400);
+   result=await fetch(base,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:"secret-code",label:"private-label"})}); assert.equal(result.status,200);
+   result=await fetch(base,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:"secret-code",label:"private-label"})}); assert.equal((await result.json()).reason,"used");
+   assert.deepEqual(logs,["wrong-code","invalid-label","used"]);
+ } finally {server.closeAllConnections();await new Promise(r=>server.close(r));}
+});

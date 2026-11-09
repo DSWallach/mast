@@ -13,7 +13,7 @@ struct InboxScreen: View {
             else if !model.demo && model.connection.hasPrefix("Disconnected") { OfflineScreen(model: model) }
             else if model.noSpacesShared { Text("No Spaces shared — run `spaces share` on your Mac").foregroundStyle(style.muted(scheme)).padding(.top, 20) }
             else { ForEach(model.visibleRequests.sorted { ($0.priority == "blocking" ? 0 : 1) < ($1.priority == "blocking" ? 0 : 1) }) { request in
-                if snapshot { RequestCard(request: request) } else { NavigationLink { RequestDetail(request: request, model: model) } label: { RequestCard(request: request) }.buttonStyle(.plain) }
+                if snapshot { RequestCard(request: request) } else { NavigationLink { RequestDetail(request: request, model: model) } label: { RequestCard(request: request) }.buttonStyle(MastTapTargetStyle()) }
             }
             if model.visibleRequests.isEmpty { Text("Nothing needs you").foregroundStyle(style.muted(scheme)).padding(.top, 20) } }
         }.padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 30) }.refreshable { await model.refresh() }.background(style.surface(scheme)).toolbar(.hidden, for: .navigationBar)

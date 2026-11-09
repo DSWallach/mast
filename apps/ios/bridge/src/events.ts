@@ -6,6 +6,7 @@ import type { SpaceAccess } from "./shared-spaces.js";
 export async function streamEvents(response: ServerResponse, url: string, access: SpaceAccess, chatId?: string, authorized: () => Promise<boolean> = async () => true, appearance: () => Promise<unknown> = async () => null, onClose: () => void = () => {}): Promise<void> {
   const spaces = await access.spaces();
   const ids = new Set(spaces.map(space => space.id));
+  const levels = new Map(spaces.map(space => [space.id, space.allow ?? "view"]));
   if (chatId && !(await access.chatAllowed(chatId))) { response.writeHead(403); response.end(); onClose(); return; }
   response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "Connection": "keep-alive", "X-Accel-Buffering": "no" });
   response.write(": connected\n\n");
@@ -18,7 +19,7 @@ export async function streamEvents(response: ServerResponse, url: string, access
   const heartbeat = setInterval(() => { void (async () => {
     if (!(await authorized())) return close();
     const current = await access.spaces();
-    if (current.length !== ids.size || current.some(space => !ids.has(space.id)) || (chatId && !(await access.chatAllowed(chatId)))) return close();
+    if (current.length !== ids.size || current.some(space => !ids.has(space.id) || levels.get(space.id) !== (space.allow ?? "view")) || (chatId && !(await access.chatAllowed(chatId)))) return close();
     const nextAppearance = JSON.stringify(await appearance());
     if (nextAppearance !== appearanceValue) { appearanceValue = nextAppearance; response.write("event: appearance\ndata: {}\n\n"); }
     response.write(": heartbeat\n\n");
