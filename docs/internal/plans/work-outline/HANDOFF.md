@@ -1016,6 +1016,33 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-08 21:15; coordinator 844aab58 handing off)
+
+- **Installed Mast: still release 70.** No Mast-side workers are running. The Horizon worker (8ac73b69) waits for Mikey's
+  next batch.
+- **iOS companion works end to end on Mikey's iPhone 13 mini.** Send, read and answer are confirmed live; Stop is not
+  yet tested (the button only shows while the viewed chat is working). Merged tonight, so integration is at c5589eae:
+  - 7874665e: writes wait for `.active` after Face ID
+  - c5589eae: **Face ID only on unlock** (launch and return from background), no longer per action. Mikey asked for
+    this; writes need an app unlocked by real device auth, and the no-passcode bypass is read-only.
+
+  Both are reinstalled on the phone. The worker (Terra chat 3c892a57) is idle with no open requests, and all four
+  iOS QA requests are resolved.
+- **Bridge:** Mikey runs it from `.worktrees/zeron/ios-companion/apps/ios/bridge`. The main checkout has no `dist/`;
+  use the worktree for CLI commands. agent-mode-tools was found at `shared:answer`, probably because Mikey pasted
+  the share line, and was reset to `send`. Paired phone: **da178287**. Stale phone pairings d7ae9871 and 47615a59
+  can be revoked; Mikey hasn't answered yet.
+- **Security docs updated (revision 2 of each):**
+  - DevOps brief mast-artifact:0ce919c7: current state, Face ID on unlock as a trade-off, ACL open. It says the
+    app already runs on the managed phone; Mikey should OK that wording before sending.
+  - Review mast-artifact:cab6f4c5: status and commit for each finding.
+
+  Sources are in `/private/tmp/mast-ios-security/`, with the previous versions kept beside them.
+- **Next options (unchosen):** desktop Settings → Phone page (Rust + release); auto-start the bridge; photo
+  attachments (9719a85d).
+- **Waiting on Mikey:** personal-workspace revamp (204f55c6), coworker readiness (2fda739e), iOS research review
+  (99cf645c), and whether to revoke the stale pairings.
+
 ## In flight (snapshot 2026-11-08 20:00; coordinator dd899921 handing off)
 
 - **Installed Mast: release 70** (93c138ba). No Mast-side workers are running. The Horizon worker (8ac73b69) waits for
