@@ -1017,8 +1017,12 @@ async fn models_discovers_visible_catalog_with_pagination() {
     assert_eq!(tier.choices.len(), 2, "priority and fast dedupe");
 
     // A failed probe stays useful and includes the new model in the fallback.
+    let failure_executable = ["/usr/bin/false", "/bin/false"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .expect("system false executable");
     let fallback = CodexHarness::new()
-        .with_executable("/bin/false")
+        .with_executable(failure_executable)
         .models()
         .await
         .expect("fallback models");
