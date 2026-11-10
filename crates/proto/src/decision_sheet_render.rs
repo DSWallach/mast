@@ -61,8 +61,14 @@ pub fn render(sheet: &DecisionSheet) -> String {
     out.push_str("<div class=\"mk-legend\"><span><b class=\"mk-yes\">+</b> new</span><span><b>~</b> changed</span><span><b class=\"mk-no\">−</b> removed / rejected</span><span><span class=\"mk-chip mk-decided\">✓</span> decided</span><span><span class=\"mk-chip mk-open\">?</span> open</span></div>");
     if !sheet.flows.is_empty() {
         section(&mut out, "Flows · what each action touches");
+        out.push_str("<div class=\"mk-legend\"><span class=\"mk-step mk-ui\">UI</span><span class=\"mk-step mk-api\">API</span><span class=\"mk-step mk-db\">DB write</span><span class=\"mk-step mk-event\">event</span><span class=\"mk-step mk-effect\">side effect</span><span class=\"mk-step mk-none\">does not happen</span></div>");
         for f in &sheet.flows {
-            write!(out, "<div class=\"mk-flow\"><div class=\"mk-card-header\">{} {}</div><div class=\"mk-lane\">", esc(&f.title), status(&f.status)).unwrap();
+            let lane = if f.steps.len() >= 4 {
+                "mk-lane mk-lane-dense"
+            } else {
+                "mk-lane"
+            };
+            write!(out, "<div class=\"mk-flow\"><div class=\"mk-card-header\">{} {}</div><div class=\"{}\">", esc(&f.title), status(&f.status), lane).unwrap();
             for (i, s) in f.steps.iter().enumerate() {
                 if i > 0 {
                     out.push_str("<div class=\"mk-arrow\">→</div>");
@@ -76,9 +82,9 @@ pub fn render(sheet: &DecisionSheet) -> String {
         section(&mut out, "Data model");
         out.push_str("<div class=\"mk-grid\">");
         for m in &sheet.models {
-            write!(out,"<div class=\"mk-card\"><div class=\"mk-card-header\">{} {}</div><table class=\"mk-table\"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th>constraint</th><th></th></tr>",esc(&m.name),status(&m.status)).unwrap();
+            write!(out,"<div class=\"mk-card\"><div class=\"mk-card-header\">{} {}</div><table class=\"mk-table\"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class=\"mk-notes\">constraint</th><th></th></tr>",esc(&m.name),status(&m.status)).unwrap();
             for f in &m.fields {
-                write!(out,"<tr><td class=\"mk-marker {}\">{}</td><td class=\"mk-mono\">{}</td><td class=\"mk-mono\">{}</td><td>{}{}</td><td>{}</td><td>{}</td></tr>",marker(&f.marker),esc(&f.marker),esc(&f.name),esc(&f.field_type),if f.null { "nullable" } else { "required" }, f.default.as_ref().map(|x| format!(" / {}",esc(x))).unwrap_or_default(),f.constraint.as_deref().map(esc).unwrap_or_else(|| "—".into()),status(&f.status)).unwrap();
+                write!(out,"<tr><td class=\"mk-marker {}\">{}</td><td class=\"mk-mono\">{}</td><td class=\"mk-mono\">{}</td><td>{}{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>",marker(&f.marker),esc(&f.marker),esc(&f.name),esc(&f.field_type),if f.null { "nullable" } else { "required" }, f.default.as_ref().map(|x| format!(" / {}",esc(x))).unwrap_or_default(),f.constraint.as_deref().map(esc).unwrap_or_else(|| "—".into()),status(&f.status)).unwrap();
             }
             out.push_str("</table></div>");
         }
@@ -147,20 +153,30 @@ pub fn render(sheet: &DecisionSheet) -> String {
     }
     if !sheet.permissions.is_empty() {
         section(&mut out, "Permissions");
-        out.push_str("<div class=\"mk-card\"><table class=\"mk-table\"><tr><th>subject</th><th>access</th><th></th></tr>");
+        let columns: std::collections::BTreeSet<&str> = sheet
+            .permissions
+            .iter()
+            .flat_map(|p| p.access.keys().map(String::as_str))
+            .collect();
+        out.push_str("<div class=\"mk-card\"><table class=\"mk-table\"><tr><th>subject</th>");
+        for column in &columns {
+            write!(out, "<th>{}</th>", esc(column)).unwrap();
+        }
+        out.push_str("<th></th></tr>");
         for p in &sheet.permissions {
-            write!(
-                out,
-                "<tr><td class=\"mk-mono\">{}</td><td>{}</td><td>{}</td></tr>",
-                esc(&p.subject),
-                p.access
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", esc(k), esc(v)))
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-                status(&p.status)
-            )
-            .unwrap();
+            write!(out, "<tr><td class=\"mk-mono\">{}</td>", esc(&p.subject)).unwrap();
+            for column in &columns {
+                write!(
+                    out,
+                    "<td>{}</td>",
+                    p.access
+                        .get(*column)
+                        .map(|s| esc(s))
+                        .unwrap_or_else(|| "—".into())
+                )
+                .unwrap();
+            }
+            write!(out, "<td>{}</td></tr>", status(&p.status)).unwrap();
         }
         out.push_str("</table></div>");
     }
@@ -168,7 +184,13 @@ pub fn render(sheet: &DecisionSheet) -> String {
         section(&mut out, "UI states");
         out.push_str("<div class=\"mk-screenshots\">");
         for s in &sheet.ui_states {
-            out.push_str("<div class=\"mk-screenshot\"><div class=\"mk-screenshot-placeholder\">screenshot</div>");
+            out.push_str("<div class=\"mk-screenshot\"><div class=\"mk-screenshot-placeholder\">");
+            if let Some(image) = &s.image {
+                write!(out, "<a href=\"{}\">Open screenshot</a>", esc(image)).unwrap();
+            } else {
+                out.push_str("screenshot");
+            }
+            out.push_str("</div>");
             write!(
                 out,
                 "<div class=\"mk-caption\">{} {}</div></div>",
@@ -201,12 +223,25 @@ pub fn render(sheet: &DecisionSheet) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn image_references_are_safe_links() {
+        let source = r#"{"kind":"decision-sheet","title":"T","ui_states":[{"id":"screen","label":"Screen","image":"mast-artifact:abc","status":{"state":"open","date":null}}]}"#;
+        let sheet = DecisionSheet::parse(source).unwrap();
+        assert!(render(&sheet).contains("href=\"mast-artifact:abc\""));
+        assert!(
+            DecisionSheet::parse(&source.replace("mast-artifact:abc", "javascript:alert(1)"))
+                .is_err()
+        );
+    }
+    #[test]
     fn sample_render_and_counts() {
         let sheet = DecisionSheet::parse(include_str!(
             "../../../docs/artifact-kit/decision-sheet-example.json"
         ))
         .unwrap();
         let html = render(&sheet);
+        if let Ok(path) = std::env::var("MAST_DECISION_SHEET_RENDER_PATH") {
+            std::fs::write(path, &html).unwrap();
+        }
         assert_eq!(
             html,
             include_str!("../tests/snapshots/decision-sheet.fragment.html")
@@ -226,8 +261,5 @@ mod tests {
             assert!(html.contains(title), "{title}");
         }
         assert!(!html.contains("style=\""));
-        if let Ok(path) = std::env::var("MAST_DECISION_SHEET_RENDER_PATH") {
-            std::fs::write(path, html).unwrap();
-        }
     }
 }

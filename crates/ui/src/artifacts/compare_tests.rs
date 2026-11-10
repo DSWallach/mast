@@ -75,6 +75,14 @@ impl ArtifactRenderer for Rc<PngRenderer> {
 fn fixture_text(kind: ArtifactKind, revision: u32) -> (String, ArtifactContentEncoding) {
     let utf8 = ArtifactContentEncoding::Utf8;
     match (kind, revision) {
+        (ArtifactKind::DecisionSheet, 1) => (
+            r#"{"kind":"decision-sheet","title":"old"}"#.to_owned(),
+            utf8,
+        ),
+        (ArtifactKind::DecisionSheet, _) => (
+            r#"{"kind":"decision-sheet","title":"CHANGED"}"#.to_owned(),
+            utf8,
+        ),
         (ArtifactKind::Image, _) => (PNG_1X1.to_owned(), ArtifactContentEncoding::Base64),
         (ArtifactKind::Mermaid, 1) => ("graph TD; A-->B".to_owned(), utf8),
         (ArtifactKind::Mermaid, _) => ("graph TD; A-->B; B-->CHANGED".to_owned(), utf8),
@@ -137,6 +145,7 @@ fn mode(tab: &Entity<ArtifactTab>, vcx: &mut VisualTestContext) -> CompareMode {
 fn compare_picks_the_mode_and_flavor_per_kind(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     let cases = [
+        (ArtifactKind::DecisionSheet, Flavor::Visual),
         (ArtifactKind::HtmlFragment, Flavor::Visual),
         (ArtifactKind::HtmlPage, Flavor::Visual),
         (ArtifactKind::Mermaid, Flavor::Visual),
@@ -295,6 +304,23 @@ fn compare_with_picker_offers_the_previous_revision(cx: &mut TestAppContext) {
     vcx.simulate_click(previous.center(), gpui::Modifiers::default());
     settle(vcx);
     assert_eq!(revision_pair(&tab, vcx), (1, 2));
+}
+
+#[gpui::test]
+fn decision_sheet_comparison_renders_both_revisions(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let kind = ArtifactKind::DecisionSheet;
+    let (tab, _, _, renderer, vcx) = open(cx, kind, by_revision(kind));
+    tab.update_in(vcx, |tab, window, cx| tab.compare_previous(window, cx));
+    settle(vcx);
+    let docs = renderer.documents.borrow();
+    assert_eq!(docs.len(), 2);
+    assert!(docs[0].0.contains("old"));
+    assert!(docs[1].0.contains("CHANGED"));
+    assert!(
+        docs.iter()
+            .all(|(document, _)| document.contains("mk-sheet"))
+    );
 }
 
 #[gpui::test]

@@ -210,6 +210,14 @@ impl DecisionSheet {
         }
         for s in &sheet.ui_states {
             row(&mut ids, &s.id, &s.status)?;
+            if s.image.as_ref().is_some_and(|image| {
+                !image.starts_with("mast-artifact:") && !image.starts_with("zeron-artifact:")
+            }) {
+                return Err(format!(
+                    "image for {:?} must be an artifact reference",
+                    s.id
+                ));
+            }
         }
         for s in &sheet.out_of_scope {
             row(&mut ids, &s.id, &s.status)?;

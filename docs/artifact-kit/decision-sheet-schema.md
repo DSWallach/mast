@@ -18,7 +18,7 @@ calendar date (`YYYY-MM-DD`). Keep IDs when republishing; do not reuse an ID for
   `access` (subject-to-access string map).
 - Flows have `title` and `steps` (`kind`, `label`, `params`); kinds are `ui`, `api`, `db`, `event`,
   `effect`, and `none`.
-- UI states have `label` and `image` (artifact reference or null); out-of-scope rows have `label`.
+- UI states have `label` and `image` (a `mast-artifact:` reference or null); references render as links to the screenshot; out-of-scope rows have `label`.
 
 Field markers are `+`, `~`, `−`, or empty; endpoint markers are `+`, `−`, or empty. Nullable
 `default`, `constraint`, and `image` are strings or null.
