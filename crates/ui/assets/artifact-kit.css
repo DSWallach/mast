@@ -5,7 +5,7 @@
 .mk-sheet h1 { font-size: 20px; margin: 0 0 4px; }
 .mk-section { color: var(--mk-sage); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin: 24px 0 8px; }
 .mk-muted { color: var(--muted-foreground); }
-.mk-mono { font-family: var(--font-mono); }
+.mk-mono { font-family: var(--font-mono); overflow-wrap: normal; word-break: normal; }
 .mk-id { word-break: normal; overflow-wrap: break-word; }
 .mk-chips, .mk-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
 .mk-legend { gap: 14px; color: var(--muted-foreground); font-size: 12px; }
@@ -35,7 +35,7 @@
 .mk-diff .mk-context::before { content: '  '; white-space: pre; }
 .mk-flow { margin: 0 0 12px; }
 .mk-lane { display: flex; align-items: stretch; gap: 5px; min-width: 0; }
-.mk-step { flex: 0 1 auto; min-width: min-content; max-width: 18em; padding: 6px; border-left: 3px solid var(--mk-sage); word-break: normal; }
+.mk-step { flex: 0 1 auto; min-width: min-content; max-width: 18em; padding: 6px; border-left: 3px solid var(--mk-sage); word-break: normal; overflow-wrap: normal; }
 .mk-step strong { display: block; font-size: 11px; }
 .mk-step.mk-ui { border-color: var(--mk-blue); }
 .mk-step.mk-api { border-color: var(--foreground); }
@@ -53,9 +53,14 @@
 .mk-fan { display: flex; flex: 0 1 auto; min-width: min-content; flex-direction: column; gap: 6px; }
 .mk-step-kind { font-size: 11px; font-weight: 700; }
 @container (max-width: 900px) {
+  .mk-lane-dense { flex-direction: column; }
+  .mk-lane-dense .mk-step, .mk-lane-dense .mk-fan { min-width: 0; max-width: none; }
+  .mk-lane-dense .mk-arrow { transform: rotate(90deg); }
+}
+@container (max-width: 700px) {
   .mk-lane { flex-direction: column; }
   .mk-lane .mk-step, .mk-lane .mk-fan { min-width: 0; max-width: none; }
   .mk-arrow { transform: rotate(90deg); }
 }
-@container (max-width: 800px) { .mk-grid { grid-template-columns: minmax(0, 1fr); } }
+@container (max-width: 700px) { .mk-grid { grid-template-columns: minmax(0, 1fr); } }
 .mk-caption { padding: 6px 8px; }
