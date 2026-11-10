@@ -10,10 +10,10 @@ use std::{cell::Cell, rc::Rc};
 
 type Counter = (&'static str, Rc<Cell<u64>>);
 
-/// Run with `--ignored --nocapture` to measure a settled closed disclosure.
+/// Set `MAST_BENCH_OPEN=1` to measure the open list; otherwise measure the closed disclosure.
 #[gpui::test]
 #[ignore]
-fn sidebar_closed_section_frame_cost(cx: &mut TestAppContext) {
+fn sidebar_frame_cost(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -27,7 +27,7 @@ fn sidebar_closed_section_frame_cost(cx: &mut TestAppContext) {
     let state = cx.new(|_| AppState::new());
     state.update(cx, |state, _| {
         state.chats = (0..400).map(chat_row).collect();
-        state.sessions = (0..5).map(|index| mast_proto::Session {
+        state.sessions = (395..400).map(|index| mast_proto::Session {
             last_completed_turn: None,
             awaiting_input: None,
             last_turn_tool_failures: None,
@@ -49,7 +49,7 @@ fn sidebar_closed_section_frame_cost(cx: &mut TestAppContext) {
         shell.active_chat = "c0".into();
         shell.debug_gate = Some(GatePhase::Ready);
         shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-        shell.sessions_open = false;
+        shell.sessions_open = std::env::var_os("MAST_BENCH_OPEN").is_some();
         shell
     });
     vcx.update(|window, cx| window.draw(cx).clear());
@@ -60,7 +60,7 @@ fn sidebar_closed_section_frame_cost(cx: &mut TestAppContext) {
             window.draw(cx).clear();
         });
     }
-    eprintln!("BENCH closed sidebar: 400 chats, 5 working, 10 frames: {:?}", start.elapsed());
+    eprintln!("BENCH sidebar (open={}): 400 chats, 5 working, 10 frames: {:?}", std::env::var_os("MAST_BENCH_OPEN").is_some(), start.elapsed());
 }
 
 fn watch<T: 'static>(cx: &mut TestAppContext, name: &'static str, entity: &Entity<T>) -> Counter {
