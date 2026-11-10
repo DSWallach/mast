@@ -36,6 +36,8 @@ pub struct Model {
     pub id: String,
     pub name: String,
     pub status: Status,
+    pub recommendation: Option<String>,
+    pub question: Option<String>,
     pub fields: Vec<Field>,
 }
 #[derive(Debug, Deserialize)]
@@ -49,7 +51,7 @@ pub struct Field {
     pub null: bool,
     pub default: Option<String>,
     pub constraint: Option<String>,
-    pub status: Status,
+    pub status: Option<Status>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +63,8 @@ pub struct Endpoint {
     #[serde(default)]
     pub callers: Vec<Caller>,
     pub status: Status,
+    pub recommendation: Option<String>,
+    pub question: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,7 +72,7 @@ pub struct DiffLine {
     pub id: String,
     pub marker: String,
     pub text: String,
-    pub status: Status,
+    pub status: Option<Status>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,7 +80,7 @@ pub struct Caller {
     pub id: String,
     pub name: String,
     pub effect: String,
-    pub status: Status,
+    pub status: Option<Status>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +98,8 @@ pub struct RuleRow {
     pub action: Option<String>,
     pub cells: Vec<String>,
     pub status: Status,
+    pub recommendation: Option<String>,
+    pub question: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +109,8 @@ pub struct Validation {
     pub enforced: Vec<String>,
     pub result: String,
     pub status: Status,
+    pub recommendation: Option<String>,
+    pub question: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,6 +119,8 @@ pub struct Permission {
     pub subject: String,
     pub access: BTreeMap<String, String>,
     pub status: Status,
+    pub recommendation: Option<String>,
+    pub question: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +129,8 @@ pub struct Flow {
     pub title: String,
     pub steps: Vec<Step>,
     pub status: Status,
+    pub recommendation: Option<String>,
+    pub question: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,7 +141,7 @@ pub struct Step {
     pub params: Vec<String>,
     #[serde(default)]
     pub parallel: Vec<ParallelStep>,
-    pub status: Status,
+    pub status: Option<Status>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,7 +150,7 @@ pub struct ParallelStep {
     pub kind: String,
     pub label: String,
     pub params: Vec<String>,
-    pub status: Status,
+    pub status: Option<Status>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +159,8 @@ pub struct UiState {
     pub label: String,
     pub image: Option<String>,
     pub status: Status,
+    pub recommendation: Option<String>,
+    pub question: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,7 +200,7 @@ impl DecisionSheet {
         for m in &sheet.models {
             row(&mut ids, &m.id, &m.status)?;
             for f in &m.fields {
-                row(&mut ids, &f.id, &f.status)?;
+                row(&mut ids, &f.id, f.status.as_ref().unwrap_or(&m.status))?;
                 if !["+", "~", "−", ""].contains(&f.marker.as_str()) {
                     return Err(format!("invalid marker for {:?}", f.id));
                 }
@@ -195,10 +209,10 @@ impl DecisionSheet {
         for e in &sheet.endpoints {
             row(&mut ids, &e.id, &e.status)?;
             for c in &e.callers {
-                row(&mut ids, &c.id, &c.status)?;
+                row(&mut ids, &c.id, c.status.as_ref().unwrap_or(&e.status))?;
             }
             for l in e.request.iter().chain(&e.response) {
-                row(&mut ids, &l.id, &l.status)?;
+                row(&mut ids, &l.id, l.status.as_ref().unwrap_or(&e.status))?;
                 if !["+", "−", ""].contains(&l.marker.as_str()) {
                     return Err(format!("invalid marker for {:?}", l.id));
                 }
@@ -228,9 +242,13 @@ impl DecisionSheet {
         for f in &sheet.flows {
             row(&mut ids, &f.id, &f.status)?;
             for s in &f.steps {
-                row(&mut ids, &s.id, &s.status)?;
+                row(&mut ids, &s.id, s.status.as_ref().unwrap_or(&f.status))?;
                 for p in &s.parallel {
-                    row(&mut ids, &p.id, &p.status)?;
+                    row(
+                        &mut ids,
+                        &p.id,
+                        p.status.as_ref().or(s.status.as_ref()).unwrap_or(&f.status),
+                    )?;
                     if !["ui", "api", "db", "event", "effect", "none"].contains(&p.kind.as_str()) {
                         return Err(format!("invalid flow kind for {:?}", p.id));
                     }
@@ -261,6 +279,13 @@ impl DecisionSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn children_can_inherit_parent_status() {
+        let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"flow","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[{"id":"step","kind":"ui","label":"Open","params":[]}]}]}"#;
+        let sheet = DecisionSheet::parse(source).unwrap();
+        assert!(sheet.flows[0].steps[0].status.is_none());
+        assert_eq!(sheet.flows[0].recommendation.as_deref(), Some("Proceed"));
+    }
     #[test]
     fn rejects_unknown_keys_and_invalid_rows() {
         assert!(
