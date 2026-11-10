@@ -28,6 +28,25 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 71: perf, Retry, Codex sign-in** (2026-11-10, 289bb5688):
+  - Perf:
+    - Loro 1.13 → 1.17: an upstream snapshot-growth fix (streaming test 1.13 GB → 2.8 MB; legacy 1.13.7 fixtures load).
+    - diff-sync ignores checkout read events, which stops a git feedback loop.
+    - The orchestrator-wake timer skips outline materialization when nothing is due.
+    - PR watches use a known repo root.
+    - Sidebar skips layout for off-screen/closed rows, and the heartbeat no longer redraws the sidebar (400 chats:
+      10 frames 330 → 129 ms; previews byte-identical).
+  - Retry on the latest errored turn and failed composer sends.
+  - A signed-out Codex shows "Authentication failed — sign in to Codex again."
+  - "Charting"/"Masting" working words; first-run regression tests; README Updating section.
+  - Tests: nextest 2502/2503; UI 2608/0. The one failure is `mast-preview::leak
+    remote_preview_churn_does_not_accumulate_tasks_or_memory`, which hangs even at 3 iterations. Its crate and deps
+    are unchanged since release 70, so it's likely ICE over the Tailscale utun interfaces; quarantine it if it
+    recurs.
+  - Pre-release backups: `~/zeron-dev-app-backups/pre-release-71-2026-11-10/` (docs.sqlite3 read-only copy,
+    mast-release-70).
+  - Baseline before restart: 4.4 GB RSS fresh, 5.4–6.4 GB after 2 days, UI thread 94% busy. Profiles are in
+    `~/zeron-dev-app-backups/perf/`. Follow-ups: item 2694931e.
 - **Release 70: Horizon polish + Linear/team migration** (2026-11-08): Horizon SEND is muted on any theme; Horizon
   selected Appearance cards are marked; Linear and team screens are on shared components (all planned screen
   migrations done).
@@ -1017,6 +1036,26 @@ Coordinator tips:
   text, `read_chat` the `originChatId`.
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
+
+## In flight (snapshot 2026-11-10 13:00; coordinator 844aab58)
+
+- **Installed: release 71.** Mikey needs to restart Mast. No workers are running; the Horizon worker 8ac73b69 is
+  idle.
+- **Coworker hand-off:** ready on the code side. Coworkers build from source off the public, standalone repo; there's
+  no DMG and no workflow pack. Waiting on Mikey to pick the first coworker for a clean-Mac run. The iOS companion
+  stays undocumented in the README until DevOps approves it.
+- **Process redesign (from the Kit Scheduler session a2e6b013, Cofactr Space):**
+  - Diagnosis: three gates per ticket in `implement-ticket`, about 70 repeated "Waiting on you" lists, decisions
+    buried in a plan that reached rev 44, and UI seen only at local QA.
+  - Proposed: one gate per ticket (workers push and open draft PRs; Mikey reviews and merges), a quiet orchestrator,
+    a **decision sheet** (contracts and constraints plus flows, mast-artifact:1af1d319), and a saved local-test
+    recipe.
+  - Mikey wants an **artifact component library**. Recommended: A, a built-in CSS kit injected by the fragment
+    host, then B, data-driven kinds like `decision-sheet` JSON → kit HTML. Not C, native gpui. Awaiting his go.
+  - Skill edits (`~/.claude/skills/project-planner`, `implement-ticket`) need his OK.
+- **Parked today:** upstream Zeron port triage (07486a45), chat fork/rollback (729bb9ad, design mast-artifact:7b47bc3d).
+- **Repo:** detached from the fork network; public; credits and cleanup merged. Personal values live in parent
+  `docs/private/`.
 
 ## In flight (snapshot 2026-11-08 21:15; coordinator 844aab58 handing off)
 
