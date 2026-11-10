@@ -28,6 +28,18 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 73: PR reviews never move the main checkout** (2026-11-10, 3de8e23a5):
+  - `choose_location` no longer runs `gh pr checkout` in a clean canonical checkout. It reuses an existing
+    checkout of the branch, or creates `<root>/<repo>-pr-<n>`.
+  - Review chats still start at the Space root, so workspace skills resolve. The prompts confine work to the
+    checkout and forbid branch switches elsewhere. The diff binding uses the checkout.
+  - Tests: nextest 1296/1296, UI 2608/0. Backup: `~/zeron-dev-app-backups/mast-release-72`.
+  - Skills, outside the repo, now single copies in `~/.agents/skills`, symlinked into `~/.claude` and `~/.codex`:
+    - new `review-pr`: a safe review checkout, then the repo's `code-review`
+    - global `code-review`: routes named PRs to `review-pr`
+    - `~/.codex/skills/implement-ticket` synced with `~/.claude` (still two copies)
+  - The Cofactr Space-root lines (review-pr + quiet orchestrator) await Mikey's paste. Admin grants only reach
+    the chat's own Space.
 - **Release 72: open-file limit, log fixes, artifact kit** (2026-11-10, a9fb7d41b):
   - The app raises its own RLIMIT_NOFILE (256 → min(hard, 8192)) at launch and logs it. Native watchers share a
     budget, with repair polling as the fallback.
@@ -1053,7 +1065,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-10 13:00; coordinator 844aab58)
 
-- **Installed: release 72** (restart needed). Coworker testing handed off by Mikey 2026-11-10. No workers are running; the Horizon worker 8ac73b69 is
+- **Installed: release 73** (restart needed). Coworker testing handed off by Mikey 2026-11-10. No workers are running; the Horizon worker 8ac73b69 is
   idle.
 - **Coworker hand-off:** ready on the code side. Coworkers build from source off the public, standalone repo; there's
   no DMG and no workflow pack. Waiting on Mikey to pick the first coworker for a clean-Mac run. The iOS companion
