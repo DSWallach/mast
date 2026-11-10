@@ -48,6 +48,46 @@ pub fn system_clock() -> Clock {
     Arc::new(|| chrono::Utc::now().timestamp_millis())
 }
 
+fn materialize_due_outline<T>(
+    space_id: &str,
+    inputs: &mast_doc::WorkOutlineInputs,
+    now: i64,
+    materialize: impl FnOnce() -> T,
+) -> Option<T> {
+    let due = inputs.items.iter().any(|row| {
+        row.fields.get("spaceId").and_then(|v| v.as_str()) == Some(space_id)
+            && row.fields.get("waitingUntil").and_then(|v| v.as_i64()).is_some_and(|until| until <= now)
+            && row.fields.get("archivedAt").and_then(|v| v.as_i64()).is_none()
+            && row.fields.get("status").and_then(|v| v.as_str()) != Some("completed")
+    });
+    due.then(materialize)
+}
+
+#[cfg(test)]
+mod waiting_outline_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn no_due_items_skip_materialization() {
+        let mut inputs = mast_doc::WorkOutlineInputs::default();
+        let mut row: mast_doc::RegistryRow = serde_json::from_value(serde_json::json!({
+            "kind": "workItems", "id": "item", "fields": {
+                "spaceId": "space", "waitingUntil": 101
+            }
+        })).unwrap();
+        inputs.items.push(row.clone());
+        let calls = Cell::new(0);
+        let materialize = || { calls.set(calls.get() + 1); };
+        assert_eq!(materialize_due_outline("space", &inputs, 100, materialize), None);
+        assert_eq!(calls.get(), 0);
+        row.fields.insert("waitingUntil".into(), serde_json::json!(100));
+        inputs.items[0] = row;
+        assert_eq!(materialize_due_outline("space", &inputs, 100, materialize), Some(()));
+        assert_eq!(calls.get(), 1);
+    }
+}
+
 // The original file was a flat map of chat ids to settings. Preserve it on
 // read; missing autoContinue fields inherit the global default.
 fn read_settings(bytes: &[u8]) -> (bool, HashMap<String, WakeSettings>) {
@@ -785,7 +825,10 @@ impl OrchestratorWakes {
         let actor = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: device_id.to_owned(), chat_id: None, message_id: None };
         for space in workspace.read_spaces().unwrap_or_default() {
             if space.device_id != device_id { continue; }
-            let snapshot = mast_doc::materialize_work_outline(&space.id, &workspace.work_outline_inputs(&space.id));
+            let inputs = workspace.work_outline_inputs(&space.id);
+            let Some(snapshot) = materialize_due_outline(&space.id, &inputs, self.now(), || {
+                mast_doc::materialize_work_outline(&space.id, &inputs)
+            }) else { continue; };
             if !snapshot.available { continue; }
             for item in snapshot.items.iter().filter(|item| item.archived_at.is_none() && item.status != mast_proto::WorkItemStatus::Completed) {
                 let Some(until) = item.waiting_until.filter(|until| *until <= self.now()) else { continue; };

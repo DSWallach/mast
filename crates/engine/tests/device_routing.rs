@@ -516,6 +516,43 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkout_change_request_accepts_local_chat_source_root() {
+    let dirs = tempfile::tempdir().unwrap();
+    let checkout = dirs.path().join("checkout");
+    init_git_repo(&checkout);
+    let app = checkout.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let root = std::fs::canonicalize(&checkout).unwrap();
+    let mut core = assemble(&dirs.path().join("b"), "device-b");
+    core.change_requests = CheckoutChangeRequests::new(
+        core.repos.clone(), "device-b", change_request_lookup(&checkout),
+    );
+    core.workspace
+        .create_chat("source-root-chat", None, Some("device-b"), None, Some(app.to_string_lossy().into_owned()))
+        .unwrap();
+    core.workspace
+        .set_chat_source_context("source-root-chat", &mast_proto::ConversationSourceContext {
+            checkout_id: "checkout".into(),
+            repo_root: root.to_string_lossy().into_owned(),
+            cwd: app.to_string_lossy().into_owned(),
+            branch: "feature/status".into(),
+            head_sha: None,
+            observed_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let mut watch = client
+        .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, serde_json::json!({ "cwd": root }))
+        .await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), watch.recv()).await.unwrap().unwrap();
+    std::fs::rename(&checkout, dirs.path().join("moved-checkout")).unwrap();
+    assert!(client
+        .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, serde_json::json!({ "cwd": root }))
+        .await.is_err());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() {
     let (relay_url, _relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().expect("tempdir");

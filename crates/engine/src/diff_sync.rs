@@ -1123,7 +1123,7 @@ fn build_watchers(
         let tx = kick_tx.clone();
         let watcher =
             notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
-                if event.is_ok() {
+                if event.as_ref().is_ok_and(is_checkout_change) {
                     let _ = tx.send(());
                 }
             });
@@ -1141,6 +1141,31 @@ fn build_watchers(
         }
     }
     watchers
+}
+
+/// Reads cannot change a diff, and Git's own reads must not trigger another scan.
+fn is_checkout_change(event: &notify::Event) -> bool {
+    !matches!(event.kind, notify::EventKind::Access(_))
+}
+
+#[cfg(test)]
+mod checkout_change_tests {
+    use super::is_checkout_change;
+    use notify::event::{AccessKind, AccessMode, DataChange, EventKind, ModifyKind};
+
+    #[test]
+    fn reads_do_not_trigger_scans_but_writes_do() {
+        for kind in [
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        ] {
+            assert!(!is_checkout_change(&notify::Event::new(kind)));
+        }
+        for kind in [EventKind::Modify(ModifyKind::Data(DataChange::Any)), EventKind::Any] {
+            assert!(is_checkout_change(&notify::Event::new(kind)));
+        }
+    }
 }
 
 /// Per-checkout task: trailing-debounce fs kicks, then compute + publish. Runs
