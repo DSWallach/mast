@@ -62,10 +62,14 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &AppearanceDark, cx| appearance::set_mode(AppearanceMode::Dark, cx));
 }
 
-fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
-    if let Some(window) = cx.active_window() {
-        window.update(cx, |_, window, _| f(window)).ok();
-    }
+fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
+    cx.defer(move |cx| {
+        if let Some(window) = cx.active_window()
+            && let Err(error) = window.update(cx, |_, window, _| f(window))
+        {
+            tracing::warn!(%error, "could not apply window menu action");
+        }
+    });
 }
 
 /// All app-owned quit paths must flush file buffers before GPUI destroys windows.

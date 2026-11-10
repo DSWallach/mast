@@ -136,7 +136,60 @@ static BUILD_MARKER: &str = concat!(
     "\0"
 );
 
+#[cfg(unix)]
+fn raise_file_limit() -> std::io::Result<(libc::rlim_t, libc::rlim_t)> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut limit = unsafe { limit.assume_init() };
+    let before = limit.rlim_cur;
+    limit.rlim_cur = file_limit_target(before, limit.rlim_max);
+    if limit.rlim_cur != before && unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((before, limit.rlim_cur))
+}
+
+#[cfg(unix)]
+fn file_limit_target(soft: libc::rlim_t, hard: libc::rlim_t) -> libc::rlim_t {
+    soft.max(hard.min(8192))
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn raises_process_file_limit() {
+    const CHILD: &str = "MAST_TEST_FILE_LIMIT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) }, 0);
+        let mut limit = unsafe { limit.assume_init() };
+        limit.rlim_cur = limit.rlim_max.min(64);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let (before, after) = raise_file_limit().unwrap();
+        assert_eq!(before, limit.rlim_cur);
+        assert_eq!(after, file_limit_target(before, limit.rlim_max));
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "raises_process_file_limit", "--nocapture"])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn file_limit_target_respects_hard_limit_and_never_lowers_soft_limit() {
+    assert_eq!(file_limit_target(256, 1024), 1024);
+    assert_eq!(file_limit_target(256, 16384), 8192);
+    assert_eq!(file_limit_target(12000, 16384), 12000);
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let file_limit = raise_file_limit();
     mast_ui::build_watch::set_running_build(env!("MAST_BUILD_SHA"), env!("MAST_BUILD_GIT_DIR"));
     #[cfg(windows)]
     attach_parent_console();
@@ -209,6 +262,14 @@ fn main() -> anyhow::Result<()> {
                     .init(),
                 None => registry.init(),
             }
+        }
+    }
+
+    #[cfg(unix)]
+    if long_running {
+        match file_limit {
+            Ok((before, after)) => tracing::info!(before, after, "open-file limit"),
+            Err(error) => tracing::warn!(%error, "could not raise open-file limit"),
         }
     }
 
