@@ -1556,6 +1556,7 @@ impl Tools {
                 harness_session_id: None,
                 harness_session_cwd: None,
                 actual_model: None,
+                scheduled_task: None,
                 parent_chat_id: parent_chat_id.clone(),
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
