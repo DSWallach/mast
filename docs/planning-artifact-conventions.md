@@ -23,7 +23,7 @@ Everything the user should see is published; Mast never discovers artifacts by s
   artifact_publish {
     path:          "<file you wrote>",
     title:         "Receiving flow — plan",
-    kind?:         "markdown" | "html-fragment" | "html-page" | "mermaid" | "image" | "options",
+    kind?:         "markdown" | "html-fragment" | "html-page" | "mermaid" | "image" | "options" | "decision-sheet",
     role?:         "plan" | "diagram" | "state-machine" | "comparison" | "doc",
     note:          "<one line: what changed in this revision>",
     pinAsPlan?:    true,
@@ -46,6 +46,8 @@ Everything the user should see is published; Mast never discovers artifacts by s
   `[title](mast-artifact:<path you wrote>)`; Mast registers it on first sight.
 - **Existing files** (`work/`, `.local/`, earlier artifacts): publish them the same way; the first
   publish imports them as revision 1.
+
+For a data-driven decision sheet, write JSON following [the schema](artifact-kit/decision-sheet-schema.md) and publish it with `kind: "decision-sheet"`. Keep row IDs stable across revisions. Mast validates the JSON and renders the sheet using the artifact kit.
 
 ## 2. HTML
 

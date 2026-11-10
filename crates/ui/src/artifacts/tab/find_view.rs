@@ -186,7 +186,9 @@ impl ArtifactTab {
         }
         match self.presenter() {
             Presenter::Markdown => Some(Surface::Markdown),
-            Presenter::Web(WebKind::Fragment | WebKind::Page) if self.web_scriptable() => {
+            Presenter::Web(WebKind::Fragment | WebKind::DecisionSheet | WebKind::Page)
+                if self.web_scriptable() =>
+            {
                 Some(Surface::Web)
             }
             _ => None,
@@ -459,7 +461,7 @@ impl ArtifactTab {
         self.nav.web_count = None;
         self.nav.html_headings = match &self.body {
             Some(ArtifactBody::Web {
-                kind: WebKind::Fragment | WebKind::Page,
+                kind: WebKind::Fragment | WebKind::DecisionSheet | WebKind::Page,
                 source,
             }) => outline::html_headings(source),
             _ => Vec::new(),
@@ -848,8 +850,12 @@ impl ArtifactTab {
                 .border_r_1()
                 .border_color(theme.border)
                 .child(
-                    crate::components::browser_parts::artifact_index_toggle(icons::LIST, 12.0, theme)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_index(cx))),
+                    crate::components::browser_parts::artifact_index_toggle(
+                        icons::LIST,
+                        12.0,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_index(cx))),
                 )
                 .into_any_element();
         }
@@ -862,10 +868,13 @@ impl ArtifactTab {
             crate::components::browser_parts::artifact_index_row(
                 gpui::SharedString::from(selector),
                 8.0 + 10.0 * f32::from(section.level.saturating_sub(base)),
-                is_active, rail_focused, section.level == base, theme,
+                is_active,
+                rail_focused,
+                section.level == base,
+                theme,
             )
-                .child(gpui::SharedString::from(section.title.clone()))
-                .on_click(cx.listener(move |this, _, _, cx| this.goto_section(ix, cx)))
+            .child(gpui::SharedString::from(section.title.clone()))
+            .on_click(cx.listener(move |this, _, _, cx| this.goto_section(ix, cx)))
         });
         div()
             .id("artifact-index")
@@ -917,8 +926,12 @@ impl ArtifactTab {
                     .text_color(theme.text_faint)
                     .child("Sections")
                     .child(
-                        crate::components::browser_parts::artifact_index_toggle(icons::ALT_ARROW_LEFT, 11.0, theme)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_index(cx))),
+                        crate::components::browser_parts::artifact_index_toggle(
+                            icons::ALT_ARROW_LEFT,
+                            11.0,
+                            theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_index(cx))),
                     ),
             )
             .child(
