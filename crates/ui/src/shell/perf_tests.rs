@@ -44,10 +44,17 @@ fn working_heartbeat_notifies_transcript_without_notifying_sidebar(cx: &mut Test
     cx.run_until_parked();
     assert_eq!(totals(&counters), vec![("shell", 0), ("sidebar", 0), ("transcript", 1)]);
     shell.update(cx, |shell, cx| {
-        shell.refresh_heartbeat(now + chrono::TimeDelta::seconds(46), false, cx)
+        shell.running.open = true;
+        shell.refresh_heartbeat(now, false, cx);
     });
     cx.run_until_parked();
     assert_eq!(totals(&counters), vec![("shell", 1), ("sidebar", 1), ("transcript", 2)]);
+    shell.update(cx, |shell, cx| {
+        shell.running.open = false;
+        shell.refresh_heartbeat(now + chrono::TimeDelta::seconds(46), false, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(totals(&counters), vec![("shell", 2), ("sidebar", 2), ("transcript", 3)]);
 }
 
 /// Set `MAST_BENCH_OPEN=1` to measure the open list; otherwise measure the closed disclosure.

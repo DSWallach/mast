@@ -2390,7 +2390,7 @@ impl Shell {
         // Time alone can expire a session or a pending-send overlay. The
         // fingerprint catches those transitions, while relative sidebar times
         // and the connection retry countdown keep their existing cadence.
-        if state_changed || minute_changed || degraded {
+        if state_changed || minute_changed || degraded || (live && self.running.open) {
             cx.notify();
         }
     }
