@@ -226,3 +226,24 @@ text and goes *outdated* once that text is gone. Call `artifact_get_plan` to rea
 `comments` (each has its anchor and quoted text), address them in the next revision, and pass their
 ids as `addressedComments` (for example `["C-1", "C-3"]`) to `artifact_publish`; they are then
 marked resolved.
+
+## Artifact component kit
+
+Use kit classes; no inline colours. The fragment host supplies the stylesheet in light and dark themes, including compare panes. Wrap content in `mk-sheet`. See `docs/artifact-kit/gallery.fragment.html` for all variants and `decision-sheet-example.fragment.html` for a complete sheet.
+
+```html
+<h2 class="mk-section">Models</h2>
+<div class="mk-chips"><span class="mk-chip mk-added">+ added</span></div>
+<span class="mk-status mk-decided">✓ decided</span>
+<div class="mk-legend"><span><b class="mk-marker mk-changed">~</b> changed</span></div>
+<div class="mk-card"><div class="mk-card-header">Model</div>Content</div>
+<table class="mk-table"><tr><th>Field</th></tr><tr><td><span class="mk-marker mk-added">+</span> name</td></tr></table>
+<div class="mk-diff"><div class="mk-added">added</div><div class="mk-removed">removed</div><div class="mk-context">context</div></div>
+<table class="mk-table"><tr><td class="mk-yes">✓</td><td class="mk-no">—</td><td class="mk-question">?</td></tr></table>
+<div class="mk-grid"><div class="mk-card">Grid item</div></div>
+<div class="mk-lane"><div class="mk-step mk-ui"><strong>UI</strong>Save</div><span class="mk-arrow">→</span><div class="mk-step mk-api">POST</div></div>
+<figure class="mk-screenshot"><div class="mk-screenshot-placeholder">Screenshot</div><figcaption>State</figcaption></figure>
+<div class="mk-callout">Warning</div>
+```
+
+Chip variants: `mk-added`, `mk-changed`, `mk-removed`, `mk-open`, `mk-decided`, `mk-neutral`; use the same variants on `mk-status`. Flow step kinds: `mk-ui`, `mk-api`, `mk-db`, `mk-event`, `mk-effect`, `mk-none` (dashed). Use `mk-flow` around a lane, `mk-fan` for parallel steps, `mk-screenshots` for tiles, and `mk-mono` for identifiers. Tables use `mk-table` for schemas, matrices, validation and permissions.

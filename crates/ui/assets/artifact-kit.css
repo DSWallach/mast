@@ -48,3 +48,6 @@
 .mk-screenshot-placeholder { min-height: 86px; display: grid; place-items: center; background: var(--muted); color: var(--muted-foreground); }
 .mk-screenshot figcaption { padding: 6px 8px; }
 .mk-callout { padding: 10px 12px; border-left: 3px solid var(--mk-blue); background: var(--muted); }
+.mk-fan { display: flex; flex: 1 1 0; min-width: 0; flex-direction: column; gap: 6px; }
+.mk-step-kind { font-size: 11px; font-weight: 700; }
+.mk-caption { padding: 6px 8px; }
