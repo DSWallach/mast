@@ -1166,13 +1166,31 @@ mod pinned_session_tests {
                 shell
             }))
         });
-        let _ = host;
         cx.run_until_parked();
         assert!(cx.debug_bounds("chat-pinned").is_some(), "rows render");
         assert!(cx.debug_bounds("chat-plain").is_some());
         assert!(cx.debug_bounds("chat-account-pinned").is_some());
         assert!(cx.debug_bounds("chat-account-plain").is_none());
         assert!(cx.debug_bounds("chat-account-unpinned").is_none());
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        shell.update(cx, |shell, cx| {
+            shell.sessions_open = false;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("chat-pinned").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.sessions_open = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("chat-pinned").is_some());
     }
 
     fn exercise_session_section_drops(
@@ -4518,6 +4536,40 @@ impl Shell {
         let mut moving_row = None;
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
+            // A closed disclosure still needs row heights for its next opening
+            // animation, but its clipped children need no controls or text layout.
+            // Keep the children while a transition or drag is in progress.
+            let closed_motion_key = if pinned_group && !self.pinned_open {
+                Some("pinned".to_owned())
+            } else if let Some((key, _)) = &group {
+                if let Some(id) = key.strip_prefix("section:") {
+                    custom_sections.iter().find(|section| section.id == id)
+                        .filter(|section| section.collapsed)
+                        .map(|_| format!("custom:{id}"))
+                } else {
+                    let organization = match self.settings.sidebar_organization {
+                        SidebarOrganization::ByDevice => "device",
+                        SidebarOrganization::ByProject => "project",
+                        SidebarOrganization::InOneList => "list",
+                    };
+                    let collapse_key = format!("{organization}:{key}");
+                    self.sidebar_collapsed_groups.contains(&collapse_key)
+                        .then(|| format!("group:{collapse_key}"))
+                }
+            } else if !pinned_group
+                && self.settings.sidebar_organization == SidebarOrganization::InOneList
+                && !self.sessions_open
+            {
+                Some("sessions".to_owned())
+            } else {
+                None
+            };
+            let omit_closed_rows = self.sidebar_session_transfer.is_none()
+                && self.sidebar_session_return.is_none()
+                && self.pinned_session_drag.is_none()
+                && closed_motion_key.as_ref().is_some_and(|key| {
+                    !self.sidebar_disclosure_motion.get(key).is_some_and(|motion| motion.animating())
+                });
             let drag_group = if pinned_group {
                 "pinned".to_owned()
             } else {
@@ -4527,6 +4579,22 @@ impl Shell {
             };
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
+                if omit_closed_rows {
+                    let height = sidebar_row_height(
+                        self.settings.sidebar_compact,
+                        self.settings.sidebar_show_project_label,
+                        row.branch.is_some(),
+                        row.change_request.is_some(),
+                        crate::ui_style::current(cx).tokens,
+                    );
+                    slot += 1;
+                    rendered_rows.push((
+                        format!("c:{}", row.chat.id),
+                        height,
+                        div().h(px(height)).flex_none().into_any_element(),
+                    ));
+                    continue;
+                }
                 let ActiveChatRow {
                     status,
                     chat,
