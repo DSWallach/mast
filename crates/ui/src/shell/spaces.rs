@@ -63,8 +63,15 @@ impl gpui::Element for VisibleSidebarRow {
         window: &mut Window,
         cx: &mut gpui::App,
     ) -> bool {
-        let visible = bounds.intersect(&window.content_mask().bounds);
-        if visible.size.width <= px(0.0) || visible.size.height <= px(0.0) {
+        // Keep nearby rows alive for decorations that extend beyond the slot
+        // and for small scroll changes at either edge.
+        let clip = window.content_mask().bounds;
+        let margin = px(32.0);
+        if bounds.right() + margin <= clip.left()
+            || bounds.left() - margin >= clip.right()
+            || bounds.bottom() + margin <= clip.top()
+            || bounds.top() - margin >= clip.bottom()
+        {
             return false;
         }
         self.child.layout_as_root(bounds.size.into(), window, cx);
