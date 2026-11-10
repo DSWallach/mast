@@ -855,7 +855,7 @@ impl PrReviewLauncher {
             model: config.model.clone(),
             reasoning: config.reasoning,
             model_options: config.model_options.clone(),
-            cwd: space.path.clone(),
+            cwd: checkout.clone(),
             sandbox: config.sandbox,
             auto_approve: config.auto_approve,
             resume: None,
@@ -1182,7 +1182,7 @@ impl PrReviewLauncher {
         {
             let base = head.base_ref_name.as_deref().unwrap_or("main");
             if let Err(error) =
-                targets.bind_launched_pr(&chat_id, &found.repo_dir, p.number, &url, &branch, base)
+                targets.bind_launched_pr(&chat_id, &chosen.path, p.number, &url, &branch, base)
             {
                 tracing::warn!(%error, %chat_id, "could not bind review PR diff target");
             }
