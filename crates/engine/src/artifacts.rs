@@ -946,6 +946,10 @@ impl ArtifactsService {
                 kind.as_str()
             )));
         }
+        if kind == ArtifactKind::DecisionSheet {
+            mast_proto::decision_sheet::DecisionSheet::parse(std::str::from_utf8(&bytes).expect("validated UTF-8"))
+                .map_err(|e| ArtifactError::invalid(format!("invalid decision sheet: {e}")))?;
+        }
         let manifest = if kind == ArtifactKind::Options {
             Some(OptionsManifest::parse(&String::from_utf8_lossy(&bytes))?)
         } else {
@@ -2377,7 +2381,7 @@ impl ArtifactsService {
             Some(raw) => Some(ArtifactKind::parse(raw).ok_or_else(|| {
                 ArtifactError::invalid(format!(
                     "kind must be markdown, html-fragment, html-page, mermaid, image, or \
-                     options, not {raw:?}"
+                     options, or decision-sheet, not {raw:?}"
                 ))
             })?),
             None => None,

@@ -130,6 +130,15 @@ pub(crate) fn request_document(
         document::web_document(kind, source, &title, mime, theme, false, true)
     };
     match kind {
+        ArtifactKind::DecisionSheet => {
+            let sheet = mast_proto::decision_sheet::DecisionSheet::parse(&text()?)
+                .map_err(RenderSkip::Invalid)?;
+            Ok(web(
+                WebKind::Fragment,
+                &mast_proto::decision_sheet_render::render(&sheet),
+                "text/html",
+            ))
+        }
         ArtifactKind::HtmlFragment => Ok(web(WebKind::Fragment, &text()?, "text/html")),
         ArtifactKind::HtmlPage => Ok(web(WebKind::Page, &text()?, "text/html")),
         ArtifactKind::Mermaid => Ok(web(WebKind::Mermaid, &text()?, "text/plain")),
@@ -174,7 +183,9 @@ pub(crate) fn request_document(
             }
             Ok(web(WebKind::Fragment, &body, "text/html"))
         }
-        ArtifactKind::Markdown | ArtifactKind::Review | ArtifactKind::Unknown => Err(RenderSkip::Native),
+        ArtifactKind::Markdown | ArtifactKind::Review | ArtifactKind::Unknown => {
+            Err(RenderSkip::Native)
+        }
     }
 }
 

@@ -1,0 +1,633 @@
+{
+  "kind": "decision-sheet",
+  "title": "ENG-3338 / 3339 · Kit scheduled sections",
+  "models": [
+    {
+      "id": "scheduled-section",
+      "name": "KitRequestScheduledSection",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      },
+      "fields": [
+        {
+          "id": "field-kit_request",
+          "name": "kit_request",
+          "marker": "+",
+          "type": "FK",
+          "null": false,
+          "default": null,
+          "constraint": null,
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "field-start_date",
+          "name": "start_date",
+          "marker": "+",
+          "type": "date",
+          "null": false,
+          "default": null,
+          "constraint": "≤ end_date",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "field-end_date",
+          "name": "end_date",
+          "marker": "+",
+          "type": "date",
+          "null": false,
+          "default": null,
+          "constraint": "no overlap / kit",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "field-timestamps",
+          "name": "timestamps",
+          "marker": "+",
+          "type": "datetime",
+          "null": false,
+          "default": null,
+          "constraint": "automatic",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    },
+    {
+      "id": "kit-request",
+      "name": "KitRequest",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      },
+      "fields": [
+        {
+          "id": "schedule-version",
+          "name": "schedule_version",
+          "marker": "+",
+          "type": "uuid",
+          "null": false,
+          "default": null,
+          "constraint": "bumps every save",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "save-api",
+      "name": "POST save schedules",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      },
+      "request": [
+        {
+          "id": "request-0",
+          "marker": "",
+          "text": "kit_request_id",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "request-1",
+          "marker": "+",
+          "text": "schedule_version",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "request-2",
+          "marker": "−",
+          "text": "operation_id",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "request-3",
+          "marker": "+",
+          "text": "scheduled_sections[]",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ],
+      "response": [
+        {
+          "id": "response-0",
+          "marker": "+",
+          "text": "result: ok | conflict | invalid",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "response-1",
+          "marker": "+",
+          "text": "sections[] with id ← client_key",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "response-2",
+          "marker": "−",
+          "text": "replayed original response",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "id": "reason-event",
+      "columns": [
+        "reason required",
+        "event written",
+        "actor recorded"
+      ],
+      "rows": [
+        {
+          "id": "rule-no schedule",
+          "state": "no schedule",
+          "cells": [
+            "—",
+            "✓",
+            "✓"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "rule-has schedule",
+          "state": "has schedule",
+          "cells": [
+            "✓",
+            "✓",
+            "✓"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "rule-clear",
+          "state": "clear",
+          "cells": [
+            "?",
+            "✓",
+            "✓"
+          ],
+          "status": {
+            "state": "open",
+            "date": null
+          }
+        },
+        {
+          "id": "rule-legacy pair",
+          "state": "legacy pair",
+          "cells": [
+            "—",
+            "—",
+            "—"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    }
+  ],
+  "validations": [
+    {
+      "id": "validation-0",
+      "rule": "start ≤ end",
+      "enforced": [
+        "API",
+        "UI"
+      ],
+      "result": "invalid",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "validation-1",
+      "rule": "sections do not overlap",
+      "enforced": [
+        "API",
+        "UI"
+      ],
+      "result": "invalid",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "validation-2",
+      "rule": "stale schedule_version",
+      "enforced": [
+        "API",
+        "UI"
+      ],
+      "result": "conflict → UI refetch",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "validation-3",
+      "rule": "reason on reschedule",
+      "enforced": [
+        "API",
+        "UI"
+      ],
+      "result": "invalid",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    }
+  ],
+  "permissions": [
+    {
+      "id": "permission-0",
+      "subject": "scheduled sections",
+      "access": {
+        "customer": "hidden",
+        "warehouse": "read · write",
+        "Django admin": "read"
+      },
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "permission-1",
+      "subject": "internal notes",
+      "access": {
+        "customer": "hidden",
+        "warehouse": "read · write",
+        "Django admin": "read"
+      },
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    }
+  ],
+  "flows": [
+    {
+      "id": "flow-0",
+      "title": "Schedule a kit for the first time",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      },
+      "steps": [
+        {
+          "id": "flow-0-step-0",
+          "kind": "ui",
+          "label": "Sections dialog → Save",
+          "params": [
+            "no reason field"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-0-step-1",
+          "kind": "api",
+          "label": "POST save schedules",
+          "params": [
+            "schedule_version",
+            "scheduled_sections[N]"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-0-step-2",
+          "kind": "db",
+          "label": "KitRequestScheduledSection × N",
+          "params": [
+            "start_date, end_date"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-0-step-3",
+          "kind": "event",
+          "label": "scheduled",
+          "params": [
+            "kit_request",
+            "actor",
+            "sections"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-0-step-4",
+          "kind": "effect",
+          "label": "Gantt shows N bars",
+          "params": [],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    },
+    {
+      "id": "flow-1",
+      "title": "Reschedule an existing schedule",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      },
+      "steps": [
+        {
+          "id": "flow-1-step-0",
+          "kind": "ui",
+          "label": "Edit sections → Save",
+          "params": [
+            "reason required"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-1-step-1",
+          "kind": "api",
+          "label": "POST save schedules",
+          "params": [
+            "schedule_version"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-1-step-2",
+          "kind": "db",
+          "label": "Update schedule",
+          "params": [],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-1-step-3",
+          "kind": "event",
+          "label": "rescheduled",
+          "params": [
+            "before → after",
+            "reason"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    },
+    {
+      "id": "flow-2",
+      "title": "Clear a schedule",
+      "status": {
+        "state": "open",
+        "date": null
+      },
+      "steps": [
+        {
+          "id": "flow-2-step-0",
+          "kind": "ui",
+          "label": "Remove all sections → Save",
+          "params": [
+            "reason ?"
+          ],
+          "status": {
+            "state": "open",
+            "date": null
+          }
+        },
+        {
+          "id": "flow-2-step-1",
+          "kind": "api",
+          "label": "POST save schedules",
+          "params": [
+            "scheduled_sections: []"
+          ],
+          "status": {
+            "state": "open",
+            "date": null
+          }
+        },
+        {
+          "id": "flow-2-step-2",
+          "kind": "db",
+          "label": "Clear schedule",
+          "params": [],
+          "status": {
+            "state": "open",
+            "date": null
+          }
+        },
+        {
+          "id": "flow-2-step-3",
+          "kind": "event",
+          "label": "schedule_cleared",
+          "params": [],
+          "status": {
+            "state": "open",
+            "date": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "flow-3",
+      "title": "Save on a stale version",
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      },
+      "steps": [
+        {
+          "id": "flow-3-step-0",
+          "kind": "ui",
+          "label": "Save",
+          "params": [
+            "old schedule_version"
+          ],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-3-step-1",
+          "kind": "api",
+          "label": "result: conflict",
+          "params": [],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-3-step-2",
+          "kind": "none",
+          "label": "no write",
+          "params": [],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-3-step-3",
+          "kind": "none",
+          "label": "no event",
+          "params": [],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "flow-3-step-4",
+          "kind": "ui",
+          "label": "refetch kit",
+          "params": [],
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    }
+  ],
+  "ui_states": [
+    {
+      "id": "ui-0",
+      "label": "first schedule · no reason",
+      "image": null,
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "ui-1",
+      "label": "reschedule · reason",
+      "image": null,
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "ui-2",
+      "label": "2nd section · taken dates",
+      "image": null,
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "ui-3",
+      "label": "conflict · reload",
+      "image": null,
+      "status": {
+        "state": "decided",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "ui-4",
+      "label": "clear schedule",
+      "image": null,
+      "status": {
+        "state": "open",
+        "date": null
+      }
+    }
+  ],
+  "out_of_scope": [
+    {
+      "id": "scope-0",
+      "label": "backfill old kits",
+      "status": {
+        "state": "rejected",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "scope-1",
+      "label": "retry-dedupe table",
+      "status": {
+        "state": "rejected",
+        "date": "2026-11-09"
+      }
+    },
+    {
+      "id": "scope-2",
+      "label": "backend taken-date check",
+      "status": {
+        "state": "rejected",
+        "date": "2026-11-09"
+      }
+    }
+  ]
+}

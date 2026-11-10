@@ -164,7 +164,9 @@ impl CompareView {
 /// How a visual kind is wrapped for the web view.
 fn web_kind(kind: ArtifactKind) -> Option<WebKind> {
     match kind {
-        ArtifactKind::HtmlFragment | ArtifactKind::Options => Some(WebKind::Fragment),
+        ArtifactKind::DecisionSheet | ArtifactKind::HtmlFragment | ArtifactKind::Options => {
+            Some(WebKind::Fragment)
+        }
         ArtifactKind::HtmlPage => Some(WebKind::Page),
         ArtifactKind::Mermaid => Some(WebKind::Mermaid),
         ArtifactKind::Image => Some(WebKind::Image),
@@ -173,7 +175,16 @@ fn web_kind(kind: ArtifactKind) -> Option<WebKind> {
 }
 
 /// What the web wrapper is given for a side (the text, or an image's base64).
-fn web_source(side: &SideContent) -> (String, String) {
+fn web_source(side: &SideContent, kind: ArtifactKind) -> (String, String) {
+    if kind == ArtifactKind::DecisionSheet {
+        let html = side
+            .text
+            .as_deref()
+            .and_then(|s| mast_proto::decision_sheet::DecisionSheet::parse(s).ok())
+            .map(|s| mast_proto::decision_sheet_render::render(&s))
+            .unwrap_or_default();
+        return (html, "text/html".to_owned());
+    }
     match &side.image {
         Some((base64, mime)) => (base64.clone(), mime.clone()),
         None => (
@@ -688,8 +699,8 @@ impl ArtifactTab {
         };
         let key = render_key(cx);
         let title = self.document_title(cx);
-        let (left_source, left_mime) = web_source(&data.left);
-        let (right_source, right_mime) = web_source(&data.right);
+        let (left_source, left_mime) = web_source(&data.left, view.kind);
+        let (right_source, right_mime) = web_source(&data.right, view.kind);
         let left = document::compare_frame(
             kind,
             &left_source,
@@ -766,7 +777,7 @@ impl ArtifactTab {
             return;
         };
         let document = |side: &SideContent| {
-            let (source, mime) = web_source(side);
+            let (source, mime) = web_source(side, view.kind);
             document::web_document(kind, &source, &title, &mime, &key.0, false, true)
         };
         let (left_doc, right_doc) = (document(&data.left), document(&data.right));
@@ -1257,23 +1268,27 @@ impl ArtifactTab {
         let rows = entries
             .into_iter()
             .map(|(target, selector, label, age, selected)| {
-                crate::components::browser_parts::artifact_picker_row(SharedString::from(selector), selected, theme)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(label)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(age)),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_compare_target(side, target, window, cx)
-                    }))
+                crate::components::browser_parts::artifact_picker_row(
+                    SharedString::from(selector),
+                    selected,
+                    theme,
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(label)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(age)),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_compare_target(side, target, window, cx)
+                }))
             });
         Some(
             div()
@@ -1585,5 +1600,10 @@ fn compare_button(
     active: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    crate::components::browser_parts::artifact_compare_button(id.into(), label.into(), active, theme)
+    crate::components::browser_parts::artifact_compare_button(
+        id.into(),
+        label.into(),
+        active,
+        theme,
+    )
 }

@@ -82,7 +82,7 @@ pub(crate) fn kind_icon(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Mermaid => crate::icons::WIDGET,
         ArtifactKind::Image => crate::icons::FILE_IMAGE,
         ArtifactKind::Options => crate::icons::SPLIT_COLUMNS,
-        ArtifactKind::Review => crate::icons::DOCUMENT,
+        ArtifactKind::Review | ArtifactKind::DecisionSheet => crate::icons::DOCUMENT,
         ArtifactKind::Unknown => crate::icons::DOCUMENT,
     }
 }
@@ -96,6 +96,7 @@ pub(crate) fn kind_label(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Image => "Image",
         ArtifactKind::Options => "Options",
         ArtifactKind::Review => "Review",
+        ArtifactKind::DecisionSheet => "Decision sheet",
         ArtifactKind::Unknown => "File",
     }
 }
@@ -332,6 +333,15 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                     kind: WebKind::Mermaid,
                     source: text,
                 },
+                ArtifactKind::DecisionSheet => {
+                    match mast_proto::decision_sheet::DecisionSheet::parse(&text) {
+                        Ok(sheet) => ArtifactBody::Web {
+                            kind: WebKind::Fragment,
+                            source: mast_proto::decision_sheet_render::render(&sheet),
+                        },
+                        Err(error) => ArtifactBody::Invalid(error),
+                    }
+                }
                 ArtifactKind::Review => match serde_json::from_str::<ReviewCard>(&text) {
                     Ok(review) => ArtifactBody::Review(review),
                     Err(error) => {

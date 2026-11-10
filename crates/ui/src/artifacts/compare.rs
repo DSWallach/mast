@@ -33,7 +33,8 @@ pub(crate) enum Flavor {
 
 pub(crate) fn flavor(kind: ArtifactKind) -> Flavor {
     match kind {
-        ArtifactKind::HtmlFragment
+        ArtifactKind::DecisionSheet
+        | ArtifactKind::HtmlFragment
         | ArtifactKind::HtmlPage
         | ArtifactKind::Mermaid
         | ArtifactKind::Image => Flavor::Visual,

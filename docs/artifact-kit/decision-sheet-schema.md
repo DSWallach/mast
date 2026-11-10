@@ -1,31 +1,24 @@
-# Decision sheet artifact shape (proposal)
+# Decision sheet JSON
 
-This is a future `decision-sheet` artifact kind, not an implemented renderer. JSON strings are plain text; arrays retain display order. Dates are ISO 8601 calendar dates (`YYYY-MM-DD`). Every row's `status` is an object `{ "state": "decided" | "open" | "rejected", "date": "YYYY-MM-DD" }`; date is required for decided and rejected, and may be null for open. IDs are stable within the sheet. An absent optional value is null, not an inferred decision.
+Publish a UTF-8 `.json` file with `artifact_publish`, `kind: "decision-sheet"` and a title. See
+[decision-sheet-example.json](decision-sheet-example.json) for all sections. Arrays retain display
+order; strings are plain text. Unknown keys are rejected. Summary chips are computed by Mast.
 
-```json
-{
-  "kind": "decision-sheet",
-  "title": "Schedule sections",
-  "summary": ["1 model", "1 open"],
-  "models": [{
-    "id": "section", "name": "ScheduledSection",
-    "status": {"state": "decided", "date": "2026-11-09"},
-    "fields": [{"name": "start_date", "marker": "+", "type": "date",
-      "null": false, "default": null, "constraint": "≤ end_date",
-      "status": {"state": "decided", "date": "2026-11-09"}}]
-  }],
-  "endpoints": [{"id": "save", "name": "POST save",
-    "request": [{"marker": "+", "text": "schedule_version", "status": {"state": "decided", "date": "2026-11-09"}}],
-    "response": [{"marker": "−", "text": "operation_id", "status": {"state": "rejected", "date": "2026-11-09"}}],
-    "status": {"state": "decided", "date": "2026-11-09"}}],
-  "rules": [{"id": "reason", "columns": ["reason", "event"],
-    "rows": [{"state": "new", "cells": ["—", "✓"], "status": {"state": "decided", "date": "2026-11-09"}}]}],
-  "validations": [{"rule": "start ≤ end", "enforced": ["UI", "API"], "result": "invalid", "status": {"state": "decided", "date": "2026-11-09"}}],
-  "permissions": [{"subject": "sections", "access": {"customer": "hidden", "warehouse": "write"}, "status": {"state": "decided", "date": "2026-11-09"}}],
-  "flows": [{"id": "save", "title": "Save", "steps": [{"kind": "api", "label": "POST", "params": ["schedule_version"], "status": {"state": "decided", "date": "2026-11-09"}}], "status": {"state": "decided", "date": "2026-11-09"}}],
-  "ui_states": [{"id": "conflict", "label": "Reload", "image": null, "status": {"state": "open", "date": null}}],
-  "out_of_scope": [{"label": "Backfill", "status": {"state": "rejected", "date": "2026-11-09"}}]
-}
-```
+The top-level object has `kind`, `title` and optional arrays `flows`, `models`, `endpoints`, `rules`,
+`validations`, `permissions`, `ui_states`, and `out_of_scope`. Every object in those arrays and
+all nested row objects need a nonempty `id`, unique throughout the sheet and stable across
+revisions. Every row except the rules container has `status: {"state": "open" | "decided" |
+"rejected", "date": ...}`. Open rows use a null date; decided and rejected rows require an ISO
+calendar date (`YYYY-MM-DD`). Keep IDs when republishing; do not reuse an ID for a different row.
 
-Field markers are `+`, `~`, `−`, or empty (unchanged); endpoint line markers are `+`, `−`, or empty. Rule cells are `✓`, `—`, or `?` in column order. Flow kinds are `ui`, `api`, `db`, `event`, `effect`, and `none`; `none` means the step does not happen. `image` is an optional artifact reference. A future renderer must validate these values and preserve each row's status and date.
+- Models have `name`, `fields` (`name`, `marker`, `type`, `null`, `default`, `constraint`).
+- Endpoints have `name`, `request` and `response` lines (`marker`, `text`).
+- Rules have `columns` and `rows` (`state`, `cells`); cells are `✓`, `—`, or `?`, one per column.
+- Validations have `rule`, `enforced` (strings), and `result`. Permissions have `subject` and
+  `access` (subject-to-access string map).
+- Flows have `title` and `steps` (`kind`, `label`, `params`); kinds are `ui`, `api`, `db`, `event`,
+  `effect`, and `none`.
+- UI states have `label` and `image` (artifact reference or null); out-of-scope rows have `label`.
+
+Field markers are `+`, `~`, `−`, or empty; endpoint markers are `+`, `−`, or empty. Nullable
+`default`, `constraint`, and `image` are strings or null.

@@ -142,6 +142,8 @@ pub enum ArtifactKind {
     Options,
     /// A structured pull request review.
     Review,
+    #[serde(alias = "decision-sheet")]
+    DecisionSheet,
     #[default]
     #[serde(other)]
     Unknown,
@@ -157,6 +159,7 @@ impl ArtifactKind {
             Self::Image => "image",
             Self::Options => "options",
             Self::Review => "review",
+            Self::DecisionSheet => "decision-sheet",
             Self::Unknown => "unknown",
         }
     }
@@ -172,6 +175,7 @@ impl ArtifactKind {
             "image" => Some(Self::Image),
             "options" => Some(Self::Options),
             "review" => Some(Self::Review),
+            "decision-sheet" | "decisionSheet" => Some(Self::DecisionSheet),
             _ => None,
         }
     }
@@ -210,7 +214,7 @@ impl ArtifactKind {
     pub fn is_visual(self) -> bool {
         matches!(
             self,
-            Self::HtmlFragment | Self::HtmlPage | Self::Mermaid | Self::Image | Self::Options
+            Self::HtmlFragment | Self::HtmlPage | Self::Mermaid | Self::Image | Self::Options | Self::DecisionSheet
         )
     }
 }
