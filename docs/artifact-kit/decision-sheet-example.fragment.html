@@ -48,15 +48,15 @@
 <h2 class="mk-section">Data model</h2>
 <div class="mk-grid">
   <div class="mk-card"><div class="mk-card-header">KitRequestScheduledSection <span class="mk-chip mk-added">new</span></div>
-    <table class="mk-table"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th>constraint</th><th></th></tr>
+    <table class="mk-table"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class="mk-notes">constraint</th><th></th></tr>
       <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">kit_request</td><td class="mk-mono">FK</td><td>required</td><td>—</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
-      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">start_date</td><td class="mk-mono">date</td><td>required</td><td>≤ end_date</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
-      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">end_date</td><td class="mk-mono">date</td><td>required</td><td>no overlap / kit</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">start_date</td><td class="mk-mono">date</td><td>required</td><td>≤&nbsp;end_date</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">end_date</td><td class="mk-mono">date</td><td>required</td><td class="mk-notes">no overlap / kit</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
       <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">created_at · updated_at</td><td class="mk-mono">datetime</td><td>auto</td><td>—</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
     </table></div>
   <div class="mk-card"><div class="mk-card-header">KitRequest <span class="mk-chip mk-changed">changed</span></div>
-    <table class="mk-table"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th>constraint</th><th></th></tr>
-      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">schedule_version</td><td class="mk-mono">uuid</td><td>auto</td><td>bumps every save</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+    <table class="mk-table"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class="mk-notes">constraint</th><th></th></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">schedule_version</td><td class="mk-mono">uuid</td><td>auto</td><td class="mk-notes">bumps every save</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
       <tr><td class="mk-marker mk-context"></td><td class="mk-mono">scheduled_start · est. ship</td><td class="mk-mono">date</td><td colspan="2">unchanged · legacy pair kept</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
     </table></div>
   <div class="mk-card"><div class="mk-card-header">KitRequestScheduleOperation <span class="mk-chip mk-removed">rejected 11-09</span></div>

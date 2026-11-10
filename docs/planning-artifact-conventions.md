@@ -56,6 +56,16 @@ Everything the user should see is published; Mast never discovers artifacts by s
 - Scripts are allowed inside the sandbox. Network access is limited to the CDNs allowed by Codex's
   visualize policy; anything else fails and is reported by the render check.
 
+### Responsive behaviour
+
+The kit uses the `.mk-sheet` container width: flow lanes stack with downward arrows at narrow
+widths, grids become one column, and tables scroll horizontally inside their cards. Table cells
+stay on one line by default; mark descriptive constraint or notes cells (including their header)
+with `mk-notes` to allow wrapping. Keep short values together, for example `≤&nbsp;end_date`.
+For identifiers, use `mk-id` and add `<wbr>` after `_` or `.` where a natural break is useful:
+`<span class="mk-id">schedule_<wbr>version</span>`. WebKit can then break at those points;
+`overflow-wrap: break-word` is the fallback for an otherwise unbreakable token.
+
 ## 3. Checking what you made
 
 After creating or changing any visual artifact (HTML, Mermaid, image, options):

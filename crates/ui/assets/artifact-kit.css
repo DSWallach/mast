@@ -1,11 +1,12 @@
 /* Mast artifact components. All surfaces inherit the host theme. */
 :root { --mk-blue: #3F69CC; --mk-sage: #619C82; --mk-green: #38D059; --mk-mint: #D6F1DB; --mk-ink: #183028; --mk-grey: #B5B5B5; --mk-pale: #F3F3F3; }
 [data-theme="dark"] { --mk-blue: color-mix(in srgb, #3F69CC 45%, #D6F1DB); --mk-sage: #D6F1DB; --mk-green: #38D059; }
-.mk-sheet { color: var(--foreground); font-size: 13px; line-height: 1.45; }
+.mk-sheet { container-type: inline-size; color: var(--foreground); font-size: 13px; line-height: 1.45; }
 .mk-sheet h1 { font-size: 20px; margin: 0 0 4px; }
 .mk-section { color: var(--mk-sage); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin: 24px 0 8px; }
 .mk-muted { color: var(--muted-foreground); }
-.mk-mono { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.mk-mono { font-family: var(--font-mono); }
+.mk-id { word-break: normal; overflow-wrap: break-word; }
 .mk-chips, .mk-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
 .mk-legend { gap: 14px; color: var(--muted-foreground); font-size: 12px; }
 .mk-chip, .mk-status { display: inline-block; border-radius: 12px; padding: 2px 9px; font-size: 12px; font-weight: 600; }
@@ -16,10 +17,11 @@
 .mk-decided { color: var(--background); background: var(--foreground); }
 .mk-neutral { color: var(--foreground); background: var(--muted); }
 .mk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px; }
-.mk-card { min-width: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.mk-card { min-width: 0; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
 .mk-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; font-weight: 700; }
 .mk-table { width: 100%; border-collapse: collapse; text-align: left; }
-.mk-table th, .mk-table td { padding: 5px 10px; vertical-align: top; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.mk-table th, .mk-table td { padding: 5px 10px; vertical-align: top; border-top: 1px solid var(--border); white-space: nowrap; }
+.mk-table .mk-notes { white-space: normal; min-width: 12em; }
 .mk-table th { color: var(--muted-foreground); font-size: 11px; }
 .mk-marker { font-family: var(--font-mono); font-weight: 800; }
 .mk-marker.mk-added, .mk-marker.mk-changed, .mk-marker.mk-removed { background: none; }
@@ -33,7 +35,7 @@
 .mk-diff .mk-context::before { content: '  '; white-space: pre; }
 .mk-flow { margin: 0 0 12px; }
 .mk-lane { display: flex; align-items: stretch; gap: 5px; min-width: 0; }
-.mk-step { flex: 1 1 0; min-width: 0; padding: 6px; border-left: 3px solid var(--mk-sage); overflow-wrap: anywhere; }
+.mk-step { flex: 0 1 auto; min-width: min-content; max-width: 18em; padding: 6px; border-left: 3px solid var(--mk-sage); word-break: normal; }
 .mk-step strong { display: block; font-size: 11px; }
 .mk-step.mk-ui { border-color: var(--mk-blue); }
 .mk-step.mk-api { border-color: var(--foreground); }
@@ -48,6 +50,12 @@
 .mk-screenshot-placeholder { min-height: 86px; display: grid; place-items: center; background: var(--muted); color: var(--muted-foreground); }
 .mk-screenshot figcaption { padding: 6px 8px; }
 .mk-callout { padding: 10px 12px; border-left: 3px solid var(--mk-blue); background: var(--muted); }
-.mk-fan { display: flex; flex: 1 1 0; min-width: 0; flex-direction: column; gap: 6px; }
+.mk-fan { display: flex; flex: 0 1 auto; min-width: min-content; flex-direction: column; gap: 6px; }
 .mk-step-kind { font-size: 11px; font-weight: 700; }
+@container (max-width: 900px) {
+  .mk-lane { flex-direction: column; }
+  .mk-lane .mk-step, .mk-lane .mk-fan { min-width: 0; max-width: none; }
+  .mk-arrow { transform: rotate(90deg); }
+}
+@container (max-width: 800px) { .mk-grid { grid-template-columns: minmax(0, 1fr); } }
 .mk-caption { padding: 6px 8px; }
