@@ -87,12 +87,12 @@ Steps, on the device that owns the Space:
       `<space>/.worktrees`. An existing path is refused with launch.sh's
       message.
 5. **Behind.** `git rev-list --count HEAD..origin/<b>` in the chosen checkout.
-6. **Chat.** Created at the selected checkout with the
+6. **Chat.** Created at the Space root with the
    caller's agent config (the UI sends the composer's new-chat agent; the
    engine defaults to Claude Code), titled `Review <name>#<n>: <PR title>`
    (`Fix CI …` for fix-ci), linked to the PR (a `ChatPrLink` with source `review_launcher`),
    assigned to `workItemId` when given (the item must be in the same Space),
-   and the seeded prompt is queued last. The `review_launcher` PR link is what
+   and the seeded prompt instructs the agent to work only in the chosen checkout and is queued last. The `review_launcher` PR link is what
    marks the chat as a launcher-created review chat; there is no separate
    classification.
 

@@ -18,7 +18,7 @@
 //!    `$WORKSPACE_WORKTREES_DIR`, else `<space>/.worktrees`);
 //! 5. count commits behind `origin/<b>` and describe the location with
 //!    launch.sh's wording;
-//! 6. create the Chat at the selected checkout, titled,
+//! 6. create the Chat at the Space root, titled,
 //!    linked to the PR, optionally assigned to a work item, and queue the
 //!    seeded `/code-review` (or `/fix-ci`) Run last.
 //!
@@ -820,7 +820,7 @@ impl PrReviewLauncher {
                     Some(&space.id),
                     None,
                     Some(config.clone()),
-                    Some(checkout.clone()),
+                    Some(space.path.clone()),
                     None,
                 )
                 .map_err(engine)?;
@@ -847,7 +847,9 @@ impl PrReviewLauncher {
         }
         let target_json = serde_json::to_string(&target).map_err(|e| invalid(e.to_string()))?;
         let prompt = format!(
-            "Review the committed changes in {checkout} for bugs, risks, and missing tests. Compare the merge base with the target head, not local uncommitted changes. Publish a walkthrough using review_publish with target {target_json}; keep your chat message to five lines. Do not modify the branch or post to GitHub unless asked."
+            "Review the committed changes in {checkout} for bugs, risks, and missing tests. Compare the merge base with the target head, not local uncommitted changes. Publish a walkthrough using review_publish with target {target_json}; keep your chat message to five lines. Do not modify the branch or post to GitHub unless asked.
+
+Work only inside {checkout}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.", space.path
         );
         let request = RunRequest {
             prompt: prompt.clone(),
@@ -855,7 +857,7 @@ impl PrReviewLauncher {
             model: config.model.clone(),
             reasoning: config.reasoning,
             model_options: config.model_options.clone(),
-            cwd: checkout.clone(),
+            cwd: space.path.clone(),
             sandbox: config.sandbox,
             auto_approve: config.auto_approve,
             resume: None,
@@ -1111,14 +1113,14 @@ impl PrReviewLauncher {
         let prompts = settings
             .pr_review_prompts
             .unwrap_or_else(mast_proto::PrReviewPrompts::legacy);
-        let prompt = render_prompt(
+        let prompt = format!("{}\n\nWork only inside {}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.", render_prompt(
             &prompts,
             p.action,
             &url,
             &head.head_ref_name,
             &location,
             self_review,
-        );
+        ), chosen.path.display(), found.space.path);
         let branch = head.head_ref_name.clone();
         if matches!(p.action, PrReviewAction::CodeReview) {
             let pr_key = format!("pr:{slug}#{}", p.number);
@@ -1134,14 +1136,14 @@ impl PrReviewLauncher {
             ));
         }
 
-        // 6. The Chat, at the selected checkout.
+        // 6. The Chat, at the Space root.
         let title = chat_title(
             p.action,
             &p.repo_name,
             p.number,
             head.title.as_deref().unwrap_or(""),
         );
-        let cwd = chosen.path.to_string_lossy().into_owned();
+        let cwd = found.space.path.clone();
         let mut config = p.config.clone().unwrap_or_else(default_config);
         if config.fill_default_model() {
             tracing::debug!(chat = %chat_id, "review chat config had no model; filled in the Mast default");
