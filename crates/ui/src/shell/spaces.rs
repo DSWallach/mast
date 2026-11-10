@@ -14,6 +14,120 @@ use gpui::{FocusHandle, Window};
 use mast_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
 use std::collections::HashSet;
 
+/// Reserve a row's exact slot in the list, but lay out its contents only when
+/// the slot intersects the current scroll and disclosure clip.
+struct VisibleSidebarRow {
+    height: f32,
+    child: AnyElement,
+}
+
+impl gpui::IntoElement for VisibleSidebarRow {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for VisibleSidebarRow {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = bool;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, AnyElement) {
+        let mut slot = div()
+            .w_full()
+            .h(px(self.height))
+            .flex_none()
+            .into_any_element();
+        (slot.request_layout(window, cx), slot)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        _: &mut AnyElement,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> bool {
+        // Keep nearby rows alive for decorations that extend beyond the slot
+        // and for small scroll changes at either edge.
+        let clip = window.content_mask().bounds;
+        let margin = px(32.0);
+        if bounds.right() + margin <= clip.left()
+            || bounds.left() - margin >= clip.right()
+            || bounds.bottom() + margin <= clip.top()
+            || bounds.top() - margin >= clip.bottom()
+        {
+            return false;
+        }
+        self.child.layout_as_root(bounds.size.into(), window, cx);
+        self.child.prepaint_at(bounds.origin, window, cx);
+        true
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut AnyElement,
+        visible: &mut bool,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if *visible {
+            self.child.paint(window, cx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod visible_row_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn rows_follow_the_scroll_clip(cx: &mut gpui::TestAppContext) {
+        struct Host(gpui::ScrollHandle);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().id("visible-row-test").w(px(200.0)).h(px(100.0))
+                    .overflow_y_scroll().track_scroll(&self.0).flex().flex_col()
+                    .children((0..20).map(|index| {
+                        let selector = format!("visible-row-{index}");
+                        VisibleSidebarRow {
+                            height: 25.0,
+                            child: div().w_full().h(px(25.0))
+                                .debug_selector(move || selector.clone()).into_any_element(),
+                        }
+                    }))
+            }
+        }
+        let scroll = gpui::ScrollHandle::new();
+        let (_, vcx) = cx.add_window_view(|_, _| Host(scroll.clone()));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("visible-row-0").is_some());
+        assert!(vcx.debug_bounds("visible-row-19").is_none());
+        scroll.set_offset(gpui::point(px(0.0), px(-400.0)));
+        vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(vcx.debug_bounds("visible-row-0").is_none());
+        assert!(vcx.debug_bounds("visible-row-19").is_some());
+    }
+}
+
 /// Promote the user's ordered pins above the untouched activity projection.
 /// Every unpinned id keeps exactly the relative order supplied by recency.
 pub(super) fn project_pinned_first(recency_ids: &[String], pinned_ids: &[String]) -> Vec<String> {
@@ -1166,13 +1280,31 @@ mod pinned_session_tests {
                 shell
             }))
         });
-        let _ = host;
         cx.run_until_parked();
         assert!(cx.debug_bounds("chat-pinned").is_some(), "rows render");
         assert!(cx.debug_bounds("chat-plain").is_some());
         assert!(cx.debug_bounds("chat-account-pinned").is_some());
         assert!(cx.debug_bounds("chat-account-plain").is_none());
         assert!(cx.debug_bounds("chat-account-unpinned").is_none());
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        shell.update(cx, |shell, cx| {
+            shell.sessions_open = false;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("chat-pinned").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.sessions_open = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("chat-pinned").is_some());
     }
 
     fn exercise_session_section_drops(
@@ -4518,6 +4650,40 @@ impl Shell {
         let mut moving_row = None;
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
+            // A closed disclosure still needs row heights for its next opening
+            // animation, but its clipped children need no controls or text layout.
+            // Keep the children while a transition or drag is in progress.
+            let closed_motion_key = if pinned_group && !self.pinned_open {
+                Some("pinned".to_owned())
+            } else if let Some((key, _)) = &group {
+                if let Some(id) = key.strip_prefix("section:") {
+                    custom_sections.iter().find(|section| section.id == id)
+                        .filter(|section| section.collapsed)
+                        .map(|_| format!("custom:{id}"))
+                } else {
+                    let organization = match self.settings.sidebar_organization {
+                        SidebarOrganization::ByDevice => "device",
+                        SidebarOrganization::ByProject => "project",
+                        SidebarOrganization::InOneList => "list",
+                    };
+                    let collapse_key = format!("{organization}:{key}");
+                    self.sidebar_collapsed_groups.contains(&collapse_key)
+                        .then(|| format!("group:{collapse_key}"))
+                }
+            } else if !pinned_group
+                && self.settings.sidebar_organization == SidebarOrganization::InOneList
+                && !self.sessions_open
+            {
+                Some("sessions".to_owned())
+            } else {
+                None
+            };
+            let omit_closed_rows = self.sidebar_session_transfer.is_none()
+                && self.sidebar_session_return.is_none()
+                && self.pinned_session_drag.is_none()
+                && closed_motion_key.as_ref().is_some_and(|key| {
+                    !self.sidebar_disclosure_motion.get(key).is_some_and(|motion| motion.animating())
+                });
             let drag_group = if pinned_group {
                 "pinned".to_owned()
             } else {
@@ -4527,6 +4693,22 @@ impl Shell {
             };
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
+                if omit_closed_rows {
+                    let height = sidebar_row_height(
+                        self.settings.sidebar_compact,
+                        self.settings.sidebar_show_project_label,
+                        row.branch.is_some(),
+                        row.change_request.is_some(),
+                        crate::ui_style::current(cx).tokens,
+                    );
+                    slot += 1;
+                    rendered_rows.push((
+                        format!("c:{}", row.chat.id),
+                        height,
+                        div().h(px(height)).flex_none().into_any_element(),
+                    ));
+                    continue;
+                }
                 let ActiveChatRow {
                     status,
                     chat,
@@ -4676,6 +4858,19 @@ impl Shell {
                         },
                     ))
                     .into_any_element();
+                let element = if self.sidebar_session_transfer.is_none()
+                    && self.sidebar_session_return.is_none()
+                    && self.pinned_session_drag.is_none()
+                    && slot_height > 0.0
+                {
+                    VisibleSidebarRow {
+                        height: slot_height,
+                        child: element,
+                    }
+                    .into_any_element()
+                } else {
+                    element
+                };
                 rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
             }
 

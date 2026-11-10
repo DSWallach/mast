@@ -2065,24 +2065,7 @@ impl Shell {
                 let minute_changed = minute != displayed_minute;
                 displayed_minute = minute;
                 let alive = this.update(cx, |shell: &mut Shell, cx| {
-                    let live = {
-                        let s = shell.state.read(cx);
-                        s.selected_chat
-                            .as_deref()
-                            .is_some_and(|id| s.indicator_for(id, Utc::now()) != Indicator::None)
-                            // The connection pill's retry countdown needs the
-                            // same per-second refresh while degraded.
-                            || matches!(
-                                s.connectivity.state,
-                                mast_proto::ConnectivityState::Offline
-                                    | mast_proto::ConnectivityState::Reconnecting
-                            )
-                    };
-                    // Relative sidebar times still advance when unchanged
-                    // presence heartbeats no longer invalidate the whole UI.
-                    if live || minute_changed {
-                        cx.notify();
-                    }
+                    shell.refresh_heartbeat(Utc::now(), minute_changed, cx);
                     // Staleness ages sessions out with no state change, and the
                     // Dock debounce needs a clock: a once-a-second check does both.
                     shell.sync_status_light(cx);
@@ -2382,6 +2365,32 @@ impl Shell {
             _composer_events: composer_events,
             _transcript_events: transcript_events,
             _transcript_invalidation: transcript_invalidation,
+        }
+    }
+
+    fn refresh_heartbeat(&mut self, now: chrono::DateTime<Utc>, minute_changed: bool, cx: &mut Context<Self>) {
+        let (live, degraded, fingerprint) = {
+            let state = self.state.read(cx);
+            (
+                state.selected_chat.as_deref().is_some_and(|id| {
+                    state.indicator_for(id, now) != Indicator::None
+                }),
+                matches!(
+                    state.connectivity.state,
+                    mast_proto::ConnectivityState::Offline | mast_proto::ConnectivityState::Reconnecting
+                ),
+                state.shell_fingerprint(now),
+            )
+        };
+        let state_changed = self.state_fingerprint != Some(fingerprint);
+        self.state_fingerprint = Some(fingerprint);
+        // Time alone can expire a session or a pending-send overlay. The
+        // fingerprint catches those transitions, while relative sidebar times
+        // and the connection retry countdown keep their existing cadence.
+        if state_changed || minute_changed || degraded || (live && self.running.open) {
+            cx.notify();
+        } else if live {
+            self.transcript.update(cx, |_, cx| cx.notify());
         }
     }
 
