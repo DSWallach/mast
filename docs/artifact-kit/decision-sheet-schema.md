@@ -7,9 +7,9 @@ order; strings are plain text. Unknown keys are rejected. Summary chips are comp
 The top-level object has `kind`, `title` and optional arrays `flows`, `models`, `endpoints`, `rules`,
 `validations`, `permissions`, `ui_states`, and `out_of_scope`. Every object in those arrays and
 all nested row objects need a nonempty `id`, unique throughout the sheet and stable across
-revisions. Every row except the rules container has `status: {"state": "open" | "decided" |
+revisions. Every top-level decision row (including each rules row) has `status: {"state": "open" | "decided" |
 "rejected", "date": ...}`. Open rows use a null date; decided and rejected rows require an ISO
-calendar date (`YYYY-MM-DD`). Keep IDs when republishing; do not reuse an ID for a different row.
+calendar date (`YYYY-MM-DD`). Model fields, endpoint lines and callers, flow steps and parallel steps may omit status and inherit it from their parent. Top-level decision rows may include optional `recommendation` and `question` strings. Summary counts include top-level decision rows only, never their children. Keep IDs when republishing; do not reuse an ID for a different row.
 
 - Models have `name`, `fields` (`name`, `marker`, `type`, `null`, `default`, `constraint`).
 - Endpoints have `name`, `request` and `response` lines (`marker`, `text`), and optional `callers` (`name`, `effect`).

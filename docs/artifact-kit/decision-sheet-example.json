@@ -422,11 +422,7 @@
           "label": "Sections dialog → Save",
           "params": [
             "no reason field"
-          ],
-          "status": {
-            "state": "decided",
-            "date": "2026-11-09"
-          }
+          ]
         },
         {
           "id": "flow-0-step-1",
@@ -491,7 +487,9 @@
             "date": "2026-11-09"
           }
         }
-      ]
+      ],
+      "recommendation": "Use the flow described below.",
+      "question": "Should this flow be used?"
     },
     {
       "id": "flow-1",

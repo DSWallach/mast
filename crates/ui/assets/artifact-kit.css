@@ -6,7 +6,7 @@
 .mk-section { color: var(--mk-sage); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin: 24px 0 8px; }
 .mk-muted { color: var(--muted-foreground); }
 .mk-mono { font-family: var(--font-mono); overflow-wrap: normal; word-break: normal; }
-.mk-id { word-break: normal; overflow-wrap: break-word; }
+.mk-id { word-break: normal; overflow-wrap: normal; }
 .mk-chips, .mk-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
 .mk-legend { gap: 14px; color: var(--muted-foreground); font-size: 12px; }
 .mk-chip, .mk-status { display: inline-block; border-radius: 12px; padding: 2px 9px; font-size: 12px; font-weight: 600; }
@@ -29,7 +29,7 @@
 .mk-marker.mk-changed, .mk-question { color: var(--mk-blue); }
 .mk-no { color: var(--muted-foreground); }
 .mk-diff { font: 12px/1.5 var(--font-mono); padding: 8px 0; }
-.mk-diff > * { padding: 1px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mk-diff > * { padding: 1px 12px; white-space: pre-wrap; overflow-wrap: normal; }
 .mk-diff .mk-added::before { content: '+ '; }
 .mk-diff .mk-removed::before { content: '− '; }
 .mk-diff .mk-context::before { content: '  '; white-space: pre; }
@@ -64,3 +64,30 @@
 }
 @container (max-width: 700px) { .mk-grid { grid-template-columns: minmax(0, 1fr); } }
 .mk-caption { padding: 6px 8px; }
+/* Decision sheet summary and flow layout. */
+.mk-sheet { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; max-width: 1180px; padding: 4px 2px 40px; }
+.mk-sheet h1 { font-size: 24px; }
+.mk-sheet .mk-section { color: var(--foreground); font-size: 16px; letter-spacing: normal; text-transform: none; margin: 36px 0 12px; }
+.mk-summary { display: flex; flex-wrap: wrap; gap: 14px 30px; margin-top: 22px; }
+.mk-summary strong { display: block; font-size: 30px; line-height: 1; }
+.mk-summary div:first-child strong { color: var(--mk-blue); }
+.mk-summary span { display: block; color: var(--muted-foreground); font-size: 12px; margin-top: 4px; }
+.mk-decision { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 0; }
+.mk-recommendation { color: var(--muted-foreground); }
+.mk-recommendation b { color: var(--mk-sage); }
+.mk-flow { padding: 14px 0 8px; }
+.mk-flow .mk-card-header { padding: 0 0 8px; font-size: 15px; }
+.mk-lane { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px 8px; }
+.mk-step { min-width: 0; max-width: none; padding: 0; border: 0; }
+.mk-step.mk-ui { --mk-kind: var(--mk-blue); }
+.mk-step.mk-api { --mk-kind: var(--foreground); }
+.mk-step.mk-db { --mk-kind: var(--mk-green); }
+.mk-step.mk-event { --mk-kind: var(--mk-sage); }
+.mk-step.mk-effect { --mk-kind: var(--mk-grey); }
+.mk-step-chip { border-radius: 10px; padding: 7px 10px; background: color-mix(in srgb, var(--mk-kind) 24%, var(--background)); overflow-x: auto; overflow-wrap: normal; word-break: normal; }
+.mk-step-kind { color: var(--muted-foreground); font-size: 10px; letter-spacing: .05em; }
+.mk-step-kind::before { content: '●'; color: var(--mk-kind); margin-right: 5px; }
+.mk-step-chip strong { font-size: 13px; }
+.mk-step-params, .mk-does-not-happen { color: var(--muted-foreground); font-size: 12px; margin: 4px 2px 0; overflow-x: auto; overflow-wrap: normal; word-break: normal; }
+@container (max-width: 700px) { .mk-lane { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 380px) { .mk-lane { grid-template-columns: 1fr; } }
