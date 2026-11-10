@@ -10,6 +10,46 @@ use std::{cell::Cell, rc::Rc};
 
 type Counter = (&'static str, Rc<Cell<u64>>);
 
+#[gpui::test]
+fn working_heartbeat_notifies_transcript_without_notifying_sidebar(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        cx.set_global(Theme::default());
+        crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+        crate::app_menus::init(cx);
+    });
+    let now = Utc::now();
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = vec![chat_row(0)];
+        state.selected_chat = Some("c0".into());
+        state.sessions = vec![mast_proto::Session {
+            chat_id: "c0".into(), device_id: "local".into(),
+            status: mast_proto::SessionStatus::Working, started_at: Some(now), updated_at: now,
+            last_completed_turn: None, awaiting_input: None, last_turn_tool_failures: None,
+        }];
+    });
+    let shell = cx.new(|cx| Shell::new(state, EngineBootConfig {
+        data_dir: dir.path().to_path_buf(), ipc_port: 0,
+        edge_url: "http://127.0.0.1:1".into(), edge_token: None, org_id: None,
+        workos_client_id: None, default_harness: mast_proto::HarnessId::Mock,
+    }, cx));
+    shell.update(cx, |shell, cx| shell.refresh_heartbeat(now, false, cx));
+    cx.run_until_parked();
+    let (sidebar, transcript) = shell.read_with(cx, |shell, _| (shell.sidebar_pane.clone(), shell.transcript.clone()));
+    let counters = vec![watch(cx, "shell", &shell), watch(cx, "sidebar", &sidebar), watch(cx, "transcript", &transcript)];
+    shell.update(cx, |shell, cx| shell.refresh_heartbeat(now, false, cx));
+    cx.run_until_parked();
+    assert_eq!(totals(&counters), vec![("shell", 0), ("sidebar", 0), ("transcript", 1)]);
+    shell.update(cx, |shell, cx| {
+        shell.refresh_heartbeat(now + chrono::TimeDelta::seconds(46), false, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(totals(&counters), vec![("shell", 1), ("sidebar", 1), ("transcript", 2)]);
+}
+
 /// Set `MAST_BENCH_OPEN=1` to measure the open list; otherwise measure the closed disclosure.
 #[gpui::test]
 #[ignore]
