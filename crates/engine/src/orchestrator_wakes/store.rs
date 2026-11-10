@@ -230,7 +230,7 @@ impl WakeStore {
         if ids.len() > EVENT_CAP {
             let count = ids.len() - EVENT_CAP;
             ids.drain(..count);
-            tracing::warn!(%chat, count, "discarded oldest completed wake identities at capacity");
+            tracing::debug!(%chat, count, "discarded oldest completed wake identities at capacity");
         }
     }
     /// Update held events while retaining queue receipts until acknowledged.
