@@ -442,9 +442,16 @@ impl DiffTargets {
     ) -> Result<RefBindOutcome, DiffTargetError> {
         let chat = self.local_chat(chat_id)?;
         let family = Family::resolve(&chat, false)?;
-        let repo = self.repo_checkouts(&family).into_iter()
-            .find(|repo| canonical_lenient(&repo.path) == canonical_lenient(repo_path))
-            .ok_or_else(|| DiffTargetError::NoCheckout("PR repository is not in the chat's checkout family.".into()))?;
+        let checkout = family.member(repo_path)?;
+        let facts = checkout_facts(&checkout.path)
+            .ok_or_else(|| DiffTargetError::NoCheckout("PR checkout is unavailable.".into()))?;
+        let repo = RepoCheckout {
+            path: checkout.path.clone(),
+            name: checkout.repo_name.clone(),
+            slug: git_text(&checkout.path, &["config", "--get", "remote.origin.url"])
+                .and_then(|url| github_slug(&url)),
+            repo_id: repository_id(&self.device_id, &facts.common_dir),
+        };
         if !valid_branch(&repo.path, head_branch) || !valid_branch(&repo.path, base_branch) {
             return Err(DiffTargetError::Invalid("Invalid PR branch name.".into()));
         }

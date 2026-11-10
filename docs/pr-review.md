@@ -76,13 +76,10 @@ Steps, on the device that owns the Space:
 2. **PR.** `gh pr view <n> --repo <owner>/<name> --json
    headRefName,isCrossRepository,title,author`. Forks are refused.
 3. **Fetch.** `git fetch origin +refs/heads/<b>:refs/remotes/origin/<b>`.
-4. **Location**, in launch.sh's order:
+4. **Location**:
    1. wherever `<b>` is already checked out (the canonical checkout or any
       worktree; the first `git worktree list` entry maps to the checkout);
-   2. the canonical checkout, if it is on `main` with no tracked changes
-      (`git status --porcelain --untracked-files=no --ignore-submodules=all`):
-      `gh pr checkout <n>` there;
-   3. otherwise a new worktree `<root>/<name>-pr-<n>` (`git worktree add
+   2. otherwise a new worktree `<root>/<name>-pr-<n>` (`git worktree add
       <path> <b>` when the local branch exists, else `--track -b <b> <path>
       origin/<b>`). `<root>` is the first line of
       `<space>/.devcontainer/.current-worktrees-root`, else
@@ -90,12 +87,12 @@ Steps, on the device that owns the Space:
       `<space>/.worktrees`. An existing path is refused with launch.sh's
       message.
 5. **Behind.** `git rev-list --count HEAD..origin/<b>` in the chosen checkout.
-6. **Chat.** Created at the Space root (launch.sh `cd "$ws"`) with the
+6. **Chat.** Created at the Space root with the
    caller's agent config (the UI sends the composer's new-chat agent; the
    engine defaults to Claude Code), titled `Review <name>#<n>: <PR title>`
    (`Fix CI …` for fix-ci), linked to the PR (a `ChatPrLink` with source `review_launcher`),
    assigned to `workItemId` when given (the item must be in the same Space),
-   and the seeded prompt is queued last. The `review_launcher` PR link is what
+   and the seeded prompt instructs the agent to work only in the chosen checkout and is queued last. The `review_launcher` PR link is what
    marks the chat as a launcher-created review chat; there is no separate
    classification.
 
