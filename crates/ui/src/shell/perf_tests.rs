@@ -10,6 +10,59 @@ use std::{cell::Cell, rc::Rc};
 
 type Counter = (&'static str, Rc<Cell<u64>>);
 
+/// Run with `--ignored --nocapture` to measure a settled closed disclosure.
+#[gpui::test]
+#[ignore]
+fn sidebar_closed_section_frame_cost(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        cx.set_global(Theme::default());
+        crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+        crate::composer::init(cx, Default::default());
+        crate::terminal::panel::init(cx);
+        crate::app_menus::init(cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = (0..400).map(chat_row).collect();
+        state.sessions = (0..5).map(|index| mast_proto::Session {
+            last_completed_turn: None,
+            awaiting_input: None,
+            last_turn_tool_failures: None,
+            chat_id: format!("c{index}"),
+            device_id: "local".into(),
+            status: mast_proto::SessionStatus::Working,
+            started_at: None,
+            updated_at: Utc::now(),
+        }).collect();
+        state.chats_synced = true;
+        state.selected_chat = Some("c0".into());
+        state.no_project = true;
+        state.data_dir = Some(dir.path().to_path_buf());
+    });
+    let boot = EngineBootConfig { data_dir: dir.path().to_path_buf(), ipc_port: 0, edge_url: "http://127.0.0.1:1".into(), edge_token: None, org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock };
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let mut shell = Shell::new(state, boot, cx);
+        shell.route = Route::Chat;
+        shell.active_chat = "c0".into();
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+        shell.sessions_open = false;
+        shell
+    });
+    vcx.update(|window, cx| window.draw(cx).clear());
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+    eprintln!("BENCH closed sidebar: 400 chats, 5 working, 10 frames: {:?}", start.elapsed());
+}
+
 fn watch<T: 'static>(cx: &mut TestAppContext, name: &'static str, entity: &Entity<T>) -> Counter {
     let count = Rc::new(Cell::new(0));
     let seen = count.clone();
