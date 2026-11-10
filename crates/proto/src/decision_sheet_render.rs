@@ -405,6 +405,23 @@ mod tests {
         assert!(child_status(Some(&decided), &decided).is_empty());
     }
     #[test]
+    fn real_sheet_snapshot_when_fixture_available() {
+        let Ok(path) = std::env::var("MAST_DECISION_SHEET_SOURCE") else {
+            return;
+        };
+        let source = std::fs::read_to_string(path).unwrap();
+        let sheet = DecisionSheet::parse(&source).unwrap();
+        let html = render(&sheet);
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!("{:x}", Sha256::digest(html.as_bytes())),
+            "7ea710b252b922a6ba6a1ef894f4c6a97a842d8fc3a3082368aaf803abff46e1"
+        );
+        if let Ok(output) = std::env::var("MAST_DECISION_SHEET_RENDER_PATH") {
+            std::fs::write(output, html).unwrap();
+        }
+    }
+    #[test]
     fn sample_render_and_counts() {
         let sheet = DecisionSheet::parse(include_str!(
             "../../../docs/artifact-kit/decision-sheet-example.json"
