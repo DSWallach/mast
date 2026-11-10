@@ -281,6 +281,7 @@ pub(crate) fn review_head_drift<'a>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebKind {
     Fragment,
+    DecisionSheet,
     Page,
     Mermaid,
     /// An image shown in the web wrapper (render checks only).
@@ -336,7 +337,7 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                 ArtifactKind::DecisionSheet => {
                     match mast_proto::decision_sheet::DecisionSheet::parse(&text) {
                         Ok(sheet) => ArtifactBody::Web {
-                            kind: WebKind::Fragment,
+                            kind: WebKind::DecisionSheet,
                             source: mast_proto::decision_sheet_render::render(&sheet),
                         },
                         Err(error) => ArtifactBody::Invalid(error),

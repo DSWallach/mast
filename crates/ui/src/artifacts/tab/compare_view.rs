@@ -164,9 +164,8 @@ impl CompareView {
 /// How a visual kind is wrapped for the web view.
 fn web_kind(kind: ArtifactKind) -> Option<WebKind> {
     match kind {
-        ArtifactKind::DecisionSheet | ArtifactKind::HtmlFragment | ArtifactKind::Options => {
-            Some(WebKind::Fragment)
-        }
+        ArtifactKind::DecisionSheet => Some(WebKind::DecisionSheet),
+        ArtifactKind::HtmlFragment | ArtifactKind::Options => Some(WebKind::Fragment),
         ArtifactKind::HtmlPage => Some(WebKind::Page),
         ArtifactKind::Mermaid => Some(WebKind::Mermaid),
         ArtifactKind::Image => Some(WebKind::Image),

@@ -23,6 +23,24 @@ fn status(s: &Status) -> String {
             .unwrap_or_default()
     )
 }
+fn compact_status(s: &Status) -> String {
+    let (class, label) = match s.state.as_str() {
+        "decided" => ("mk-decided", "✓"),
+        "rejected" => ("mk-removed", "✗"),
+        _ => ("mk-open", "?"),
+    };
+    format!("<span class=\"mk-chip {class}\">{label}</span>")
+}
+fn child_status(child: &Status, parent: &Status) -> String {
+    if child.state == parent.state {
+        String::new()
+    } else {
+        compact_status(child)
+    }
+}
+fn count_label(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
+}
 fn section(out: &mut String, name: &str) {
     write!(out, "<h2 class=\"mk-section\">{}</h2>", esc(name)).unwrap();
 }
@@ -61,7 +79,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
     }
     statuses.extend(sheet.ui_states.iter().map(|x| &x.status));
     statuses.extend(sheet.out_of_scope.iter().map(|x| &x.status));
-    write!(out, "<div class=\"mk-chips\"><span class=\"mk-chip mk-added\">{} models</span><span class=\"mk-chip mk-added\">{} fields</span><span class=\"mk-chip mk-changed\">{} API shapes</span><span class=\"mk-chip mk-removed\">{} rejected</span><span class=\"mk-chip mk-open\">{} open</span></div>", sheet.models.len(), sheet.models.iter().map(|m| m.fields.len()).sum::<usize>(), sheet.endpoints.len(), statuses.iter().filter(|s| s.state == "rejected").count(), statuses.iter().filter(|s| s.state == "open").count()).unwrap();
+    write!(out, "<div class=\"mk-chips\"><span class=\"mk-chip mk-added\">{}</span><span class=\"mk-chip mk-added\">{}</span><span class=\"mk-chip mk-changed\">{}</span><span class=\"mk-chip mk-removed\">{} rejected</span><span class=\"mk-chip mk-open\">{} open</span></div>", count_label(sheet.models.len(), "model", "models"), count_label(sheet.models.iter().map(|m| m.fields.len()).sum::<usize>(), "field", "fields"), count_label(sheet.endpoints.len(), "API shape", "API shapes"), statuses.iter().filter(|s| s.state == "rejected").count(), statuses.iter().filter(|s| s.state == "open").count()).unwrap();
     out.push_str("<div class=\"mk-legend\"><span><b class=\"mk-yes\">+</b> new</span><span><b>~</b> changed</span><span><b class=\"mk-no\">−</b> removed / rejected</span><span><span class=\"mk-chip mk-decided\">✓</span> decided</span><span><span class=\"mk-chip mk-open\">?</span> open</span></div>");
     if !sheet.flows.is_empty() {
         section(&mut out, "Flows · what each action touches");
@@ -80,9 +98,9 @@ pub fn render(sheet: &DecisionSheet) -> String {
                 if !s.parallel.is_empty() {
                     out.push_str("<div class=\"mk-fan\">");
                 }
-                write!(out, "<div class=\"mk-step mk-{}\"><div class=\"mk-step-kind\">{}</div>{}<div class=\"mk-mono\">{}</div>{}</div>", s.kind, esc(&s.kind.to_uppercase()), esc(&s.label), s.params.iter().map(|x| esc(x)).collect::<Vec<_>>().join("<br>"), status(&s.status)).unwrap();
+                write!(out, "<div class=\"mk-step mk-{}\"><div class=\"mk-step-kind\">{}</div>{}<div class=\"mk-mono\">{}</div>{}</div>", s.kind, esc(&s.kind.to_uppercase()), esc(&s.label), s.params.iter().map(|x| esc(x)).collect::<Vec<_>>().join("<br>"), child_status(&s.status, &f.status)).unwrap();
                 for p in &s.parallel {
-                    write!(out, "<div class=\"mk-step mk-{}\"><div class=\"mk-step-kind\">{}</div>{}<div class=\"mk-mono\">{}</div>{}</div>", p.kind, esc(&p.kind.to_uppercase()), esc(&p.label), p.params.iter().map(|x| esc(x)).collect::<Vec<_>>().join("<br>"), status(&p.status)).unwrap();
+                    write!(out, "<div class=\"mk-step mk-{}\"><div class=\"mk-step-kind\">{}</div>{}<div class=\"mk-mono\">{}</div>{}</div>", p.kind, esc(&p.kind.to_uppercase()), esc(&p.label), p.params.iter().map(|x| esc(x)).collect::<Vec<_>>().join("<br>"), child_status(&p.status, &f.status)).unwrap();
                 }
                 if !s.parallel.is_empty() {
                     out.push_str("</div>");
@@ -97,7 +115,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
         for m in &sheet.models {
             write!(out,"<div class=\"mk-card\"><div class=\"mk-card-header\">{} {}</div><table class=\"mk-table\"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class=\"mk-notes\">constraint</th><th></th></tr>",esc(&m.name),status(&m.status)).unwrap();
             for f in &m.fields {
-                write!(out,"<tr><td class=\"mk-marker {}\">{}</td><td class=\"mk-mono\">{}</td><td class=\"mk-mono\">{}</td><td>{}{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>",marker(&f.marker),esc(&f.marker),esc(&f.name),esc(&f.field_type),if f.null { "nullable" } else { "required" }, f.default.as_ref().map(|x| format!(" / {}",esc(x))).unwrap_or_default(),f.constraint.as_deref().map(esc).unwrap_or_else(|| "—".into()),status(&f.status)).unwrap();
+                write!(out,"<tr><td class=\"mk-marker {}\">{}</td><td class=\"mk-mono\">{}</td><td class=\"mk-mono\">{}</td><td>{}{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>",marker(&f.marker),esc(&f.marker),esc(&f.name),esc(&f.field_type),if f.null { "nullable" } else { "required" }, f.default.as_ref().map(|x| format!(" / {}",esc(x))).unwrap_or_default(),f.constraint.as_deref().map(esc).unwrap_or_else(|| "—".into()),compact_status(&f.status)).unwrap();
             }
             out.push_str("</table></div>");
         }
@@ -115,7 +133,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                     marker(&l.marker),
                     esc(&l.marker),
                     esc(&l.text),
-                    status(&l.status)
+                    child_status(&l.status, &e.status)
                 )
                 .unwrap();
             }
@@ -124,7 +142,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
         if !e.callers.is_empty() {
             out.push_str("<div class=\"mk-card\"><div class=\"mk-card-header\">existing callers</div><table class=\"mk-table\">");
             for c in &e.callers {
-                write!(out, "<tr><td class=\"mk-mono\">{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>", esc(&c.name), esc(&c.effect), status(&c.status)).unwrap();
+                write!(out, "<tr><td class=\"mk-mono\">{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>", esc(&c.name), esc(&c.effect), compact_status(&c.status)).unwrap();
             }
             out.push_str("</table></div>");
         }
@@ -160,7 +178,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                     };
                     write!(out, "<td class=\"{class}\">{}</td>", esc(c)).unwrap();
                 }
-                write!(out, "<td>{}</td></tr>", status(&row.status)).unwrap();
+                write!(out, "<td>{}</td></tr>", compact_status(&row.status)).unwrap();
             }
             out.push_str("</table></div>");
         }
@@ -177,7 +195,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                 out,
                 "</td><td class=\"mk-mono\">{}</td><td>{}</td></tr>",
                 esc(&v.result),
-                status(&v.status)
+                compact_status(&v.status)
             )
             .unwrap();
         }
@@ -208,7 +226,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                 )
                 .unwrap();
             }
-            write!(out, "<td>{}</td></tr>", status(&p.status)).unwrap();
+            write!(out, "<td>{}</td></tr>", compact_status(&p.status)).unwrap();
         }
         out.push_str("</table></div>");
     }
@@ -227,7 +245,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                 out,
                 "<div class=\"mk-caption\">{} {}</div></div>",
                 esc(&s.label),
-                status(&s.status)
+                compact_status(&s.status)
             )
             .unwrap();
         }
@@ -241,7 +259,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                 out,
                 "<span class=\"mk-chip mk-removed\">{}</span> {}",
                 esc(&s.label),
-                status(&s.status)
+                compact_status(&s.status)
             )
             .unwrap();
         }
@@ -263,6 +281,38 @@ mod tests {
             DecisionSheet::parse(&source.replace("mast-artifact:abc", "javascript:alert(1)"))
                 .is_err()
         );
+    }
+    #[test]
+    fn child_statuses_are_compact_and_only_show_changes() {
+        let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"f","title":"Flow","status":{"state":"decided","date":"2026-11-09"},"steps":[{"id":"a","kind":"ui","label":"same","params":[],"status":{"state":"decided","date":"2026-11-09"}},{"id":"b","kind":"api","label":"open child","params":[],"status":{"state":"open","date":null}},{"id":"c","kind":"db","label":"rejected child","params":[],"status":{"state":"rejected","date":"2026-11-09"}}]}]}"#;
+        let html = render(&DecisionSheet::parse(source).unwrap());
+        assert_eq!(html.matches("2026-11-09").count(), 1);
+        assert!(html.contains(
+            "open child<div class=\"mk-mono\"></div><span class=\"mk-chip mk-open\">?</span>"
+        ));
+        assert!(html.contains(
+            "rejected child<div class=\"mk-mono\"></div><span class=\"mk-chip mk-removed\">✗</span>"
+        ));
+        assert_eq!(count_label(1, "model", "models"), "1 model");
+        assert_eq!(count_label(1, "field", "fields"), "1 field");
+        assert_eq!(count_label(1, "API shape", "API shapes"), "1 API shape");
+        assert_eq!(count_label(2, "model", "models"), "2 models");
+    }
+    #[test]
+    fn decided_child_in_open_flow_is_visible() {
+        let open = Status {
+            state: "open".into(),
+            date: None,
+        };
+        let decided = Status {
+            state: "decided".into(),
+            date: Some("2026-11-09".into()),
+        };
+        assert_eq!(
+            child_status(&decided, &open),
+            "<span class=\"mk-chip mk-decided\">✓</span>"
+        );
+        assert!(child_status(&decided, &decided).is_empty());
     }
     #[test]
     fn sample_render_and_counts() {

@@ -134,7 +134,7 @@ pub(crate) fn request_document(
             let sheet = mast_proto::decision_sheet::DecisionSheet::parse(&text()?)
                 .map_err(RenderSkip::Invalid)?;
             Ok(web(
-                WebKind::Fragment,
+                WebKind::DecisionSheet,
                 &mast_proto::decision_sheet_render::render(&sheet),
                 "text/html",
             ))
