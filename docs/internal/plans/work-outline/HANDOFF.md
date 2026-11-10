@@ -1078,6 +1078,28 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-10 17:30; coordinator 844aab58, near its weekly limit)
+
+- **Installed: release 74.** Mikey has restarted.
+- **Running:** Terra chat d1ac228d (item 3b9a83cb, branch `decision-sheet-v2`, worktree `.worktrees/zeron/decision-sheet-v2`).
+  - Mikey picked the decision-sheet redesign "B + C": B's "Needs you" list with Accept/Reject on top, C's tinted
+    flow chips below.
+  - Mockups and real data are in /private/tmp/sheet-v2/; the design artifact is mast-artifact:978a4499.
+  - Scope: optional child status (inherits), a `recommendation`/`question` field, top-level-only counts, the B+C
+    renderer and kit CSS, and row Accept/Reject/comment through the bridge, stored per artifact, read back via
+    artifact_get_decisions, with ONE aggregate Needs-you per sheet.
+  - When it lands: look at its 1200/520 light/dark screenshots, merge, release 75 using the detached runner
+    (/tmp/release74-run.sh pattern), then delete the worktree's target/.
+- **Next on the docket (Mikey hasn't said go):** freeze watchdog (17c9d278), render-probe bug (bb6e6f10), queue
+  race (79760f82), perf follow-ups (2694931e). Phase 0 go/no-go 9516dd7c is due 11-12.
+- **Disk:** about 113 GB free after clearing target/debug/incremental again; it refills quickly, so clear it
+  before releases.
+- **Skills** (all one copy each in ~/.agents/skills, linked into claude/codex/cursor): project-planner
+  (decision-sheet JSON, rows = changes only, top-level decisions, ~10–25 open, no recommendations in titles),
+  implement-ticket (orchestrated mode; workers read the sheet and never publish it), review-pr, code-review,
+  talk-to-me (the "LLM Writing Tics: never" table applies to all writing including UI and design). The Cofactr
+  Space-root instructions already carry review-pr + the quiet-orchestrator rule.
+
 ## In flight (snapshot 2026-11-10 13:00; coordinator 844aab58)
 
 - **Installed: release 74** (restart needed). Coworker testing handed off by Mikey 2026-11-10. No workers are running; the Horizon worker 8ac73b69 is
