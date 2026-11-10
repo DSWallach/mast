@@ -46,7 +46,7 @@ struct SpaceEntry {
     /// Keeps the folder watcher alive; dropped on entry close. Filled
     /// asynchronously — FSEvents registration blocks, so [`reconcile`] builds
     /// it off the runtime and attaches it here once ready.
-    folder_watch: Mutex<Option<notify::RecommendedWatcher>>,
+    folder_watch: Mutex<Option<crate::watch_budget::Watcher>>,
 }
 
 struct SpacesSyncInner {
@@ -167,7 +167,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
             };
             let tx = entry.kick_tx.clone();
             let result =
-                notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
+                crate::watch_budget::Watcher::new(move |event: Result<notify::Event, notify::Error>| {
                     let Ok(event) = event else { return };
                     if event
                         .paths
@@ -178,8 +178,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
                     }
                 });
             match result {
-                Ok(mut watcher) => {
-                    use notify::Watcher as _;
+                Some(mut watcher) => {
                     match watcher.watch(&entry.path, notify::RecursiveMode::NonRecursive) {
                         Ok(()) => {
                             *lock(&entry.folder_watch) = Some(watcher);
@@ -192,9 +191,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
                         }
                     }
                 }
-                Err(err) => {
-                    tracing::debug!(error = %err, "spaces: watcher create failed");
-                }
+                None => tracing::debug!("spaces: watcher unavailable; using repair polling"),
             }
         });
     }

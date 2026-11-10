@@ -150,7 +150,7 @@ struct CheckoutEntry {
     /// asynchronously — watcher setup (budget walk + FSEvents registration) can
     /// block for seconds, so [`add_entry`] does it off the runtime and attaches
     /// the result here once ready.
-    watchers: Mutex<Vec<notify::RecommendedWatcher>>,
+    watchers: Mutex<Vec<crate::watch_budget::Watcher>>,
     /// Fingerprint of the last cheap repair probe (see [`repair_probe`]).
     probe: Mutex<Option<u64>>,
     /// Set by the repair tick: the next sync may be skipped when the probe
@@ -1117,19 +1117,18 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
 fn build_watchers(
     identity: &CheckoutIdentity,
     kick_tx: &mpsc::UnboundedSender<()>,
-) -> Vec<notify::RecommendedWatcher> {
+) -> Vec<crate::watch_budget::Watcher> {
     let mut watchers = Vec::new();
     for target in watch_targets(identity) {
         let tx = kick_tx.clone();
         let watcher =
-            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
+            crate::watch_budget::Watcher::new(move |event: Result<notify::Event, notify::Error>| {
                 if event.as_ref().is_ok_and(is_checkout_change) {
                     let _ = tx.send(());
                 }
             });
         match watcher {
-            Ok(mut watcher) => {
-                use notify::Watcher as _;
+            Some(mut watcher) => {
                 match watcher.watch(&target, notify::RecursiveMode::Recursive) {
                     Ok(()) => watchers.push(watcher),
                     Err(err) => {
@@ -1137,7 +1136,7 @@ fn build_watchers(
                     }
                 }
             }
-            Err(err) => tracing::debug!(error = %err, "diff-sync: watcher create failed"),
+            None => tracing::debug!("diff-sync: watcher unavailable; using repair polling"),
         }
     }
     watchers
