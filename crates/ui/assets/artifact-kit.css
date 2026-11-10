@@ -1,6 +1,6 @@
 /* Mast artifact components. All surfaces inherit the host theme. */
 :root { --mk-blue: #3F69CC; --mk-sage: #619C82; --mk-green: #38D059; --mk-mint: #D6F1DB; --mk-ink: #183028; --mk-grey: #B5B5B5; --mk-pale: #F3F3F3; }
-[data-theme="dark"] { --mk-blue: #D6F1DB; --mk-sage: #D6F1DB; --mk-green: #38D059; }
+[data-theme="dark"] { --mk-blue: color-mix(in srgb, #3F69CC 45%, #D6F1DB); --mk-sage: #D6F1DB; --mk-green: #38D059; }
 .mk-sheet { color: var(--foreground); font-size: 13px; line-height: 1.45; }
 .mk-sheet h1 { font-size: 20px; margin: 0 0 4px; }
 .mk-section { color: var(--mk-sage); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin: 24px 0 8px; }

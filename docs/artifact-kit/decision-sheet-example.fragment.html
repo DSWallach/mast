@@ -8,42 +8,42 @@
 
 
 <h2 class="mk-section">Flows · what each action touches</h2>
-<div class="mk-legend"><span>UI</span><span>API</span><span>DB write</span><span>event</span><span>side effect</span><span>doesn't happen</span></div>
+<div class="mk-legend"><span class="mk-step mk-ui">UI</span><span class="mk-step mk-api">API</span><span class="mk-step mk-db">DB write</span><span class="mk-step mk-event">event</span><span class="mk-step mk-effect">side effect</span><span class="mk-step mk-none">doesn't happen</span></div>
 
 <div class="mk-flow"><div class="mk-card-header">Schedule a kit for the first time <span class="mk-chip mk-decided">✓ 11-09</span></div>
-<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Sections dialog → Save<div class="mk-added">no reason field</div></div><div class="mk-arrow">→</div>
-  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-added">schedule_version<br>scheduled_sections[N]<br>notes: null</div></div><div class="mk-arrow">→</div>
+<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Sections dialog → Save<div class="mk-mono">no reason field</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-mono">schedule_version<br>scheduled_sections[N]<br>notes: null</div></div><div class="mk-arrow">→</div>
   <div class="mk-fan">
-    <div class="mk-step mk-db"><div class="mk-step-kind">+ KitRequestScheduledSection × N</div><div class="mk-added">start_date, end_date</div></div>
-    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-added">schedule_version → new</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">+ KitRequestScheduledSection × N</div><div class="mk-mono">start_date, end_date</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-mono">schedule_version → new</div></div>
   </div><div class="mk-arrow">→</div>
-  <div class="mk-step mk-event"><div class="mk-step-kind">event · scheduled</div><div class="mk-added">kit_request<br>actor<br>sections<br>reason: null</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-event"><div class="mk-step-kind">event · scheduled</div><div class="mk-mono">kit_request<br>actor<br>sections<br>reason: null</div></div><div class="mk-arrow">→</div>
   <div class="mk-step mk-effect"><div class="mk-step-kind">side effect</div>Gantt shows N bars</div></div>
 </div>
 <div class="mk-flow"><div class="mk-card-header">Reschedule an existing schedule <span class="mk-chip mk-decided">✓</span></div>
-<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Edit sections → Save<div class="mk-added">reason required</div></div><div class="mk-arrow">→</div>
-  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-added">schedule_version (current)<br>scheduled_sections[]<br>notes: "reason"</div></div><div class="mk-arrow">→</div>
+<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Edit sections → Save<div class="mk-mono">reason required</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-mono">schedule_version (current)<br>scheduled_sections[]<br>notes: "reason"</div></div><div class="mk-arrow">→</div>
   <div class="mk-fan">
-    <div class="mk-step mk-db"><div class="mk-step-kind">± KitRequestScheduledSection</div><div class="mk-added">add / change / delete rows</div></div>
-    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-added">schedule_version → new</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">± KitRequestScheduledSection</div><div class="mk-mono">add / change / delete rows</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-mono">schedule_version → new</div></div>
   </div><div class="mk-arrow">→</div>
-  <div class="mk-step mk-event"><div class="mk-step-kind">event · rescheduled</div><div class="mk-added">kit_request<br>actor<br>before → after<br>reason</div></div></div>
+  <div class="mk-step mk-event"><div class="mk-step-kind">event · rescheduled</div><div class="mk-mono">kit_request<br>actor<br>before → after<br>reason</div></div></div>
 </div>
 <div class="mk-flow"><div class="mk-card-header">Clear a schedule <span class="mk-chip mk-open">open: reason?</span></div>
-<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Remove all sections → Save<div class="mk-added">reason ?</div></div><div class="mk-arrow">→</div>
-  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-added">scheduled_sections: []</div></div><div class="mk-arrow">→</div>
+<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Remove all sections → Save<div class="mk-mono">reason ?</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-mono">scheduled_sections: []</div></div><div class="mk-arrow">→</div>
   <div class="mk-fan">
-    <div class="mk-step mk-db"><div class="mk-step-kind">− KitRequestScheduledSection</div><div class="mk-added">all rows for kit</div></div>
-    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-added">legacy pair cleared<br>schedule_version → new</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">− KitRequestScheduledSection</div><div class="mk-mono">all rows for kit</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-mono">legacy pair cleared<br>schedule_version → new</div></div>
   </div><div class="mk-arrow">→</div>
-  <div class="mk-step mk-event"><div class="mk-step-kind">event · schedule_cleared</div><div class="mk-added">kit_request<br>actor<br>reason ?</div></div></div>
+  <div class="mk-step mk-event"><div class="mk-step-kind">event · schedule_cleared</div><div class="mk-mono">kit_request<br>actor<br>reason ?</div></div></div>
 </div>
 <div class="mk-flow"><div class="mk-card-header">Save on a stale version <span class="mk-chip mk-decided">✓</span></div>
-<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Save<div class="mk-added">old schedule_version</div></div><div class="mk-arrow">→</div>
+<div class="mk-lane">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Save<div class="mk-mono">old schedule_version</div></div><div class="mk-arrow">→</div>
   <div class="mk-step mk-api"><div class="mk-step-kind">API</div>result: conflict</div><div class="mk-arrow">→</div>
   <div class="mk-step mk-db mk-none"><div class="mk-step-kind">no write</div></div><div class="mk-arrow">→</div>
   <div class="mk-step mk-event mk-none"><div class="mk-step-kind">no event</div></div><div class="mk-arrow">→</div>
-  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>refetch kit<div class="mk-added">matches draft → saved<br>differs → "changed, reload"</div></div></div>
+  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>refetch kit<div class="mk-mono">matches draft → saved<br>differs → "changed, reload"</div></div></div>
 </div>
 <h2 class="mk-section">Data model</h2>
 <div class="mk-grid">
