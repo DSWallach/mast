@@ -12,12 +12,12 @@ revisions. Every row except the rules container has `status: {"state": "open" | 
 calendar date (`YYYY-MM-DD`). Keep IDs when republishing; do not reuse an ID for a different row.
 
 - Models have `name`, `fields` (`name`, `marker`, `type`, `null`, `default`, `constraint`).
-- Endpoints have `name`, `request` and `response` lines (`marker`, `text`).
-- Rules have `columns` and `rows` (`state`, `cells`); cells are `✓`, `—`, or `?`, one per column.
+- Endpoints have `name`, `request` and `response` lines (`marker`, `text`), and optional `callers` (`name`, `effect`).
+- Rules have `columns` and `rows` (`state`, optional `action`, `cells`); cells are `✓`, `—`, or `?`, one per column.
 - Validations have `rule`, `enforced` (strings), and `result`. Permissions have `subject` and
   `access` (subject-to-access string map).
 - Flows have `title` and `steps` (`kind`, `label`, `params`); kinds are `ui`, `api`, `db`, `event`,
-  `effect`, and `none`.
+  `effect`, and `none`. A step may include `parallel` steps with the same fields (except `parallel`) to show a fan.
 - UI states have `label` and `image` (a `mast-artifact:` reference or null); references render as links to the screenshot; out-of-scope rows have `label`.
 
 Field markers are `+`, `~`, `−`, or empty; endpoint markers are `+`, `−`, or empty. Nullable

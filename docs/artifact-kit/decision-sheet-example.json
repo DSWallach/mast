@@ -84,6 +84,42 @@
             "state": "decided",
             "date": "2026-11-09"
           }
+        },
+        {
+          "id": "legacy-dates",
+          "name": "scheduled_start · est. ship",
+          "marker": "",
+          "type": "date",
+          "null": true,
+          "default": null,
+          "constraint": "unchanged · legacy pair kept",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ]
+    },
+    {
+      "id": "operation-table",
+      "name": "KitRequestScheduleOperation",
+      "status": {
+        "state": "rejected",
+        "date": "2026-11-09"
+      },
+      "fields": [
+        {
+          "id": "operation-fields",
+          "name": "operation_id · payload_hash · response",
+          "marker": "−",
+          "type": "—",
+          "null": false,
+          "default": null,
+          "constraint": "retry dedupe · version check already blocks double saves",
+          "status": {
+            "state": "rejected",
+            "date": "2026-11-09"
+          }
         }
       ]
     }
@@ -132,6 +168,24 @@
             "state": "decided",
             "date": "2026-11-09"
           }
+        },
+        {
+          "id": "request-notes",
+          "marker": "+",
+          "text": "schedule_event_internal_notes // reason",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "request-keys",
+          "marker": "+",
+          "text": "client_key, start_date, end_date",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
         }
       ],
       "response": [
@@ -161,6 +215,44 @@
             "state": "decided",
             "date": "2026-11-09"
           }
+        },
+        {
+          "id": "response-version",
+          "marker": "+",
+          "text": "schedule_version",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        }
+      ],
+      "callers": [
+        {
+          "id": "caller-0",
+          "name": "client create",
+          "effect": "unchanged · no reason",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "caller-1",
+          "name": "client PATCH dates only",
+          "effect": "needs reason on reschedule",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
+        },
+        {
+          "id": "caller-2",
+          "name": "GET pair-only kit",
+          "effect": "sections: [] → UI falls back",
+          "status": {
+            "state": "decided",
+            "date": "2026-11-09"
+          }
         }
       ]
     }
@@ -185,7 +277,8 @@
           "status": {
             "state": "decided",
             "date": "2026-11-09"
-          }
+          },
+          "action": "schedule"
         },
         {
           "id": "rule-has schedule",
@@ -198,7 +291,8 @@
           "status": {
             "state": "decided",
             "date": "2026-11-09"
-          }
+          },
+          "action": "change"
         },
         {
           "id": "rule-clear",
@@ -211,7 +305,8 @@
           "status": {
             "state": "open",
             "date": null
-          }
+          },
+          "action": "clear"
         },
         {
           "id": "rule-legacy pair",
@@ -224,7 +319,8 @@
           "status": {
             "state": "decided",
             "date": "2026-11-09"
-          }
+          },
+          "action": "read"
         }
       ]
     }
@@ -355,7 +451,21 @@
           "status": {
             "state": "decided",
             "date": "2026-11-09"
-          }
+          },
+          "parallel": [
+            {
+              "id": "flow-0-step-2-kit",
+              "kind": "db",
+              "label": "~ KitRequest",
+              "params": [
+                "schedule_version → new"
+              ],
+              "status": {
+                "state": "decided",
+                "date": "2026-11-09"
+              }
+            }
+          ]
         },
         {
           "id": "flow-0-step-3",
@@ -423,7 +533,21 @@
           "status": {
             "state": "decided",
             "date": "2026-11-09"
-          }
+          },
+          "parallel": [
+            {
+              "id": "flow-1-step-2-kit",
+              "kind": "db",
+              "label": "~ KitRequest",
+              "params": [
+                "schedule_version → new"
+              ],
+              "status": {
+                "state": "decided",
+                "date": "2026-11-09"
+              }
+            }
+          ]
         },
         {
           "id": "flow-1-step-3",
@@ -480,7 +604,21 @@
           "status": {
             "state": "open",
             "date": null
-          }
+          },
+          "parallel": [
+            {
+              "id": "flow-2-step-2-kit",
+              "kind": "db",
+              "label": "~ KitRequest",
+              "params": [
+                "schedule_version → new"
+              ],
+              "status": {
+                "state": "decided",
+                "date": "2026-11-09"
+              }
+            }
+          ]
         },
         {
           "id": "flow-2-step-3",

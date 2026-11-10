@@ -58,6 +58,8 @@ pub struct Endpoint {
     pub name: String,
     pub request: Vec<DiffLine>,
     pub response: Vec<DiffLine>,
+    #[serde(default)]
+    pub callers: Vec<Caller>,
     pub status: Status,
 }
 #[derive(Debug, Deserialize)]
@@ -66,6 +68,14 @@ pub struct DiffLine {
     pub id: String,
     pub marker: String,
     pub text: String,
+    pub status: Status,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Caller {
+    pub id: String,
+    pub name: String,
+    pub effect: String,
     pub status: Status,
 }
 #[derive(Debug, Deserialize)]
@@ -80,6 +90,8 @@ pub struct Rules {
 pub struct RuleRow {
     pub id: String,
     pub state: String,
+    #[serde(default)]
+    pub action: Option<String>,
     pub cells: Vec<String>,
     pub status: Status,
 }
@@ -111,6 +123,17 @@ pub struct Flow {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub params: Vec<String>,
+    #[serde(default)]
+    pub parallel: Vec<ParallelStep>,
+    pub status: Status,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelStep {
     pub id: String,
     pub kind: String,
     pub label: String,
@@ -171,6 +194,9 @@ impl DecisionSheet {
         }
         for e in &sheet.endpoints {
             row(&mut ids, &e.id, &e.status)?;
+            for c in &e.callers {
+                row(&mut ids, &c.id, &c.status)?;
+            }
             for l in e.request.iter().chain(&e.response) {
                 row(&mut ids, &l.id, &l.status)?;
                 if !["+", "−", ""].contains(&l.marker.as_str()) {
@@ -203,6 +229,12 @@ impl DecisionSheet {
             row(&mut ids, &f.id, &f.status)?;
             for s in &f.steps {
                 row(&mut ids, &s.id, &s.status)?;
+                for p in &s.parallel {
+                    row(&mut ids, &p.id, &p.status)?;
+                    if !["ui", "api", "db", "event", "effect", "none"].contains(&p.kind.as_str()) {
+                        return Err(format!("invalid flow kind for {:?}", p.id));
+                    }
+                }
                 if !["ui", "api", "db", "event", "effect", "none"].contains(&s.kind.as_str()) {
                     return Err(format!("invalid flow kind for {:?}", s.id));
                 }

@@ -45,6 +45,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
     for e in &sheet.endpoints {
         statuses.push(&e.status);
         statuses.extend(e.request.iter().chain(&e.response).map(|l| &l.status));
+        statuses.extend(e.callers.iter().map(|c| &c.status));
     }
     for r in &sheet.rules {
         statuses.extend(r.rows.iter().map(|x| &x.status));
@@ -54,6 +55,9 @@ pub fn render(sheet: &DecisionSheet) -> String {
     for f in &sheet.flows {
         statuses.push(&f.status);
         statuses.extend(f.steps.iter().map(|x| &x.status));
+        for step in &f.steps {
+            statuses.extend(step.parallel.iter().map(|x| &x.status));
+        }
     }
     statuses.extend(sheet.ui_states.iter().map(|x| &x.status));
     statuses.extend(sheet.out_of_scope.iter().map(|x| &x.status));
@@ -73,7 +77,16 @@ pub fn render(sheet: &DecisionSheet) -> String {
                 if i > 0 {
                     out.push_str("<div class=\"mk-arrow\">→</div>");
                 }
+                if !s.parallel.is_empty() {
+                    out.push_str("<div class=\"mk-fan\">");
+                }
                 write!(out, "<div class=\"mk-step mk-{}\"><div class=\"mk-step-kind\">{}</div>{}<div class=\"mk-mono\">{}</div>{}</div>", s.kind, esc(&s.kind.to_uppercase()), esc(&s.label), s.params.iter().map(|x| esc(x)).collect::<Vec<_>>().join("<br>"), status(&s.status)).unwrap();
+                for p in &s.parallel {
+                    write!(out, "<div class=\"mk-step mk-{}\"><div class=\"mk-step-kind\">{}</div>{}<div class=\"mk-mono\">{}</div>{}</div>", p.kind, esc(&p.kind.to_uppercase()), esc(&p.label), p.params.iter().map(|x| esc(x)).collect::<Vec<_>>().join("<br>"), status(&p.status)).unwrap();
+                }
+                if !s.parallel.is_empty() {
+                    out.push_str("</div>");
+                }
             }
             out.push_str("</div></div>");
         }
@@ -108,18 +121,37 @@ pub fn render(sheet: &DecisionSheet) -> String {
             }
             out.push_str("</div></div>");
         }
+        if !e.callers.is_empty() {
+            out.push_str("<div class=\"mk-card\"><div class=\"mk-card-header\">existing callers</div><table class=\"mk-table\">");
+            for c in &e.callers {
+                write!(out, "<tr><td class=\"mk-mono\">{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>", esc(&c.name), esc(&c.effect), status(&c.status)).unwrap();
+            }
+            out.push_str("</table></div>");
+        }
         out.push_str("</div>");
     }
     if !sheet.rules.is_empty() {
         section(&mut out, "Rules");
         for r in &sheet.rules {
             out.push_str("<div class=\"mk-card\"><table class=\"mk-table\"><tr><th>state</th>");
+            let has_action = r.rows.iter().any(|row| row.action.is_some());
+            if has_action {
+                out.push_str("<th>action</th>");
+            }
             for c in &r.columns {
                 write!(out, "<th>{}</th>", esc(c)).unwrap();
             }
             out.push_str("<th></th></tr>");
             for row in &r.rows {
                 write!(out, "<tr><td>{}</td>", esc(&row.state)).unwrap();
+                if has_action {
+                    write!(
+                        out,
+                        "<td>{}</td>",
+                        row.action.as_deref().map(esc).unwrap_or_else(|| "—".into())
+                    )
+                    .unwrap();
+                }
                 for c in &row.cells {
                     let class = match c.as_str() {
                         "✓" => "mk-yes",
@@ -247,7 +279,7 @@ mod tests {
             include_str!("../tests/snapshots/decision-sheet.fragment.html")
         );
         assert!(html.contains("7 open"));
-        assert!(html.contains("3 rejected"));
+        assert!(html.contains("5 rejected"));
         for title in [
             "Flows",
             "Data model",
