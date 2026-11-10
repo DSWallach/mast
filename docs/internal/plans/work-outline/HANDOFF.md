@@ -28,6 +28,21 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 74: data-driven decision sheets + responsive kit** (2026-11-10, a68e8d99d):
+  - `decision-sheet` artifact kind: strict JSON validation, a kit renderer, computed chips, a dedicated 1024 px wide
+    host (other fragments keep their cap), compare. Child status pills show only when they differ from the parent.
+    Sample: docs/artifact-kit/decision-sheet-example.json. Phase 2 (row ✓/✗/💬 and one Needs-you per sheet) is
+    item 3b9a83cb.
+  - Kit: lanes stack under the container breakpoint (700 px; `mk-lane-dense` at 900 px), tables scroll in their
+    card, grids drop to one column.
+  - Tests: nextest 2455/2457 (the two WebRTC preview tests, `peer::actual_webrtc_pair_streams_in_both_directions`
+    and `leak::remote_preview_churn…`, fail only in this Mac's Tailscale environment; the crate is unchanged since
+    release 70), UI 2609/0. Backup: `~/zeron-dev-app-backups/mast-release-73`.
+  - The release ran detached from Mast (python setsid wrapper, /tmp/release74-run.sh), so restarts and
+    force-quits can't kill it. Use this for future releases.
+  - Release 73 froze once after a chat-row click (bug 17c9d278; next time `sample` before quitting).
+  - Skills: `talk-to-me` is now one shared copy in `~/.agents/skills` (linked for claude/codex/cursor), with an
+    "LLM writing tics: never" table that applies to all writing, including design and UI text.
 - **Release 73: PR reviews never move the main checkout** (2026-11-10, 3de8e23a5):
   - `choose_location` no longer runs `gh pr checkout` in a clean canonical checkout. It reuses an existing
     checkout of the branch, or creates `<root>/<repo>-pr-<n>`.
@@ -1065,7 +1080,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-10 13:00; coordinator 844aab58)
 
-- **Installed: release 73** (restart needed). Coworker testing handed off by Mikey 2026-11-10. No workers are running; the Horizon worker 8ac73b69 is
+- **Installed: release 74** (restart needed). Coworker testing handed off by Mikey 2026-11-10. No workers are running; the Horizon worker 8ac73b69 is
   idle.
 - **Coworker hand-off:** ready on the code side. Coworkers build from source off the public, standalone repo; there's
   no DMG and no workflow pack. Waiting on Mikey to pick the first coworker for a clean-Mac run. The iOS companion
