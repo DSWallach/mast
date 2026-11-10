@@ -158,6 +158,29 @@ fn file_limit_target(soft: libc::rlim_t, hard: libc::rlim_t) -> libc::rlim_t {
 
 #[cfg(all(test, unix))]
 #[test]
+fn raises_process_file_limit() {
+    const CHILD: &str = "MAST_TEST_FILE_LIMIT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) }, 0);
+        let mut limit = unsafe { limit.assume_init() };
+        limit.rlim_cur = limit.rlim_max.min(64);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let (before, after) = raise_file_limit().unwrap();
+        assert_eq!(before, limit.rlim_cur);
+        assert_eq!(after, file_limit_target(before, limit.rlim_max));
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "raises_process_file_limit", "--nocapture"])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(all(test, unix))]
+#[test]
 fn file_limit_target_respects_hard_limit_and_never_lowers_soft_limit() {
     assert_eq!(file_limit_target(256, 1024), 1024);
     assert_eq!(file_limit_target(256, 16384), 8192);
