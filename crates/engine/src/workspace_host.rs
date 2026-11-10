@@ -1618,6 +1618,7 @@ impl WorkspaceHost {
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 actual_model: None,
+                scheduled_task: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
@@ -1719,6 +1720,10 @@ impl WorkspaceHost {
 
     pub fn rename_chat(&self, chat_id: &str, title: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_chat(chat_id, title))?)
+    }
+
+    pub fn set_chat_scheduled_task(&self, chat_id: &str, task: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_scheduled_task(chat_id, task))?)
     }
 
     /// Backdate a chat's activity timestamps (epoch ms). Returns false when

@@ -413,6 +413,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
             parent_chat_id: None,
             space_id: Some("space".into()),
             last_seen_at: None,

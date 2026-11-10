@@ -1614,6 +1614,8 @@ pub struct Shell {
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
+    /// The Scheduled tasks group: closed by default, session-transient.
+    pub(super) scheduled_tasks_open: bool,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
@@ -2175,6 +2177,7 @@ impl Shell {
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
+            scheduled_tasks_open: false,
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
@@ -14373,6 +14376,7 @@ mod exit_regressions {
                         harness_session_id: None,
                         harness_session_cwd: None,
                         actual_model: None,
+                        scheduled_task: None,
                         parent_chat_id: None,
                         space_id: None,
                         last_seen_at: None,
@@ -15451,6 +15455,7 @@ mod titlebar_lamp_layout {
                             harness_session_id: None,
                             harness_session_cwd: None,
                             actual_model: None,
+                            scheduled_task: None,
                             parent_chat_id: None,
                             space_id: None,
                             last_seen_at: None,

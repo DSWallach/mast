@@ -1333,6 +1333,7 @@ impl RegistryDoc {
             ("linkedPrSource", opt_source(chat.linked_pr_source)),
             ("linkedTicketId", opt_str(chat.linked_ticket_id.as_deref())),
             ("linkedTicketSource", opt_source(chat.linked_ticket_source)),
+            ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1654,6 +1655,20 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("actualModel", json!(model))]),
+        );
+        Ok(true)
+    }
+
+    /// Engine-owned: the scheduled task an imported chat is a run of.
+    pub fn set_chat_scheduled_task(&mut self, chat_id: &str, task: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("scheduledTask", json!(task))]),
         );
         Ok(true)
     }
@@ -1994,6 +2009,7 @@ impl RegistryDoc {
                     ("spaceId", opt_str(chat.space_id.as_deref())),
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+                    ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
                 ]),
             );
         }
