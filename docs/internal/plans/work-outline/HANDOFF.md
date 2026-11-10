@@ -28,6 +28,20 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 72: open-file limit, log fixes, artifact kit** (2026-11-10, a9fb7d41b):
+  - The app raises its own RLIMIT_NOFILE (256 → min(hard, 8192)) at launch and logs it. Native watchers share a
+    budget, with repair polling as the fallback.
+  - Window updates from app actions are deferred; this targets "RefCell already borrowed", though the cause isn't
+    confirmed.
+  - Model-discovery failures keep their cause; wake pruning logs at debug.
+  - `mk-` artifact component kit (`crates/ui/assets/artifact-kit.css`) injected into every fragment host, plus
+    docs/artifact-kit/ (gallery, decision-sheet example, JSON schema) and the conventions doc.
+  - Tests: nextest 1296/1296, UI 2608/0. Backup: `~/zeron-dev-app-backups/mast-release-71`.
+  - Skills edited the same day, outside the repo (backups in `~/zeron-dev-app-backups/skills-2026-11-10/`):
+    - `implement-ticket`: orchestrated mode (decision-sheet rows only, push + draft PR without asking, one "Ready
+      for review" gate, screenshots on UI PRs).
+    - `project-planner` §2a: a decision sheet is required before tickets.
+  - Bug filed: artifact_render_check always reports "probe did not report" (bb6e6f10).
 - **Release 71: perf, Retry, Codex sign-in** (2026-11-10, 289bb5688):
   - Perf:
     - Loro 1.13 → 1.17: an upstream snapshot-growth fix (streaming test 1.13 GB → 2.8 MB; legacy 1.13.7 fixtures load).
@@ -1039,7 +1053,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-10 13:00; coordinator 844aab58)
 
-- **Installed: release 71.** Mikey needs to restart Mast. No workers are running; the Horizon worker 8ac73b69 is
+- **Installed: release 72** (restart needed). Coworker testing handed off by Mikey 2026-11-10. No workers are running; the Horizon worker 8ac73b69 is
   idle.
 - **Coworker hand-off:** ready on the code side. Coworkers build from source off the public, standalone repo; there's
   no DMG and no workflow pack. Waiting on Mikey to pick the first coworker for a clean-Mac run. The iOS companion
