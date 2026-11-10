@@ -2,8 +2,7 @@
 //! out like the Cofactr workspace (a superproject Space with a `flagship`
 //! submodule whose `origin` is `https://github.com/acme/flagship`, rewritten
 //! to a local bare repo with `url.<bare>.insteadOf`), and a fake `gh`:
-//! - the location-choice matrix of `launch.sh` (existing checkout reused;
-//!   clean `main` → `gh pr checkout`; dirty/off-main → a new worktree at
+//! - the location-choice matrix (existing checkout reused; otherwise a new worktree at
 //!   `<root>/flagship-pr-<n>`; both root overrides; occupied path refused);
 //! - forks refused; repositories matched by remote URL, not folder name;
 //! - the behind-origin warning;
@@ -221,10 +220,13 @@ async fn rig() -> Rig {
 async fn branch_review_launch_is_idempotent_and_binds_checkout() {
     let rig = rig().await;
     let head = git(&rig.flagship, &["rev-parse", "refs/remotes/origin/feature-x"]);
+    let checkout = rig.ws.join(".worktrees/branch-review");
+    std::fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+    git(&rig.flagship, &["worktree", "add", "-b", BRANCH, checkout.to_str().unwrap(), "refs/remotes/origin/feature-x"]);
     let p = mast_proto::StartBranchReviewParams {
         space_id: SPACE.into(), work_item_id: None,
         target: mast_proto::ReviewTarget::Branch {
-            repo: Some("acme/flagship".into()), checkout_path: Some(rig.flagship.to_string_lossy().into_owned()),
+            repo: Some("acme/flagship".into()), checkout_path: Some(checkout.to_string_lossy().into_owned()),
             branch: Some(BRANCH.into()), base_ref: Some("main".into()), base_sha: None, head_sha: head,
         },
         config: params("config", 7, PrReviewAction::CodeReview).config,
@@ -234,16 +236,20 @@ async fn branch_review_launch_is_idempotent_and_binds_checkout() {
     assert!(reply.prompt.contains("review_publish"));
     assert!(reply.prompt.contains("baseRef"));
     assert_eq!(rig.client.start_branch_review(&p).await.unwrap(), reply);
-    git(&rig.flagship, &["branch", BRANCH, "refs/remotes/origin/feature-x"]);
     let resolved = rig.client.call(methods::RESOLVE_BRANCH_REVIEW_BASE, json!({
-        "checkoutPath": rig.flagship.to_string_lossy(), "branch": BRANCH,
+        "checkoutPath": checkout.to_string_lossy(), "branch": BRANCH,
         "spaceId": SPACE, "workerChatId": "worker"
     })).await.unwrap();
     assert_eq!(resolved["aheadCount"], 1);
     assert_eq!(resolved["existingChatId"], reply.chat_id);
     let targets = rig.core.workspace.chat_diff_targets(&reply.chat_id).unwrap().unwrap();
     let selected = targets.ref_targets.iter().find(|target| Some(&target.id) == targets.selected_ref.as_ref()).unwrap();
-    assert_eq!(selected.path, rig.flagship.to_str().unwrap());
+    assert_eq!(selected.path, checkout.to_str().unwrap());
+    let chat = rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap();
+    assert_eq!(chat.cwd.as_deref(), checkout.to_str());
+    wait_for(|| !rig.mock.runs().is_empty(), "branch review starts").await;
+    assert_eq!(rig.mock.runs()[0].cwd, checkout.to_string_lossy());
+    assert_eq!(git(&rig.flagship, &["branch", "--show-current"]), "main");
     assert_eq!(selected.head_ref, git(&rig.flagship, &["rev-parse", "refs/remotes/origin/feature-x"]));
     let mut changed = p.clone();
     if let mast_proto::ReviewTarget::Branch { branch, .. } = &mut changed.target {
@@ -377,47 +383,45 @@ async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn clean_main_checks_out_with_gh_and_starts_the_review_at_the_workspace_root() {
+async fn clean_main_creates_a_worktree_and_starts_the_review_there() {
     let rig = rig().await;
+    let original_head = git(&rig.flagship, &["rev-parse", "HEAD"]);
     let reply = start(&rig, &params("op-clean", 7, PrReviewAction::CodeReview))
         .await
         .expect("start succeeds");
 
-    assert_eq!(reply.checkout_kind, PrCheckoutKind::CanonicalCheckout);
-    assert_eq!(Path::new(&reply.checkout_path), rig.flagship);
+    assert_eq!(reply.checkout_kind, PrCheckoutKind::NewWorktree);
+    let checkout = rig.ws.join(".worktrees/flagship-pr-7");
+    assert_eq!(Path::new(&reply.checkout_path), checkout);
     assert_eq!(reply.branch, BRANCH);
     assert_eq!(reply.behind_by, 0);
     assert_eq!(reply.space_id, SPACE);
-    assert_eq!(Path::new(&reply.cwd), rig.ws);
+    assert_eq!(Path::new(&reply.cwd), checkout);
     assert_eq!(reply.title, "Review flagship#7: Add feature X");
     assert_eq!(reply.pr_url, "https://github.com/acme/flagship/pull/7");
     assert_eq!(
         git(&rig.flagship, &["branch", "--show-current"]),
-        BRANCH,
-        "gh pr checkout ran in the canonical checkout"
+        "main",
+        "the canonical branch stays unchanged"
     );
+    assert_eq!(git(&rig.flagship, &["rev-parse", "HEAD"]), original_head);
     let calls = gh_calls(&rig);
-    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(
         calls[0].ends_with(
             "|pr view 7 --repo acme/flagship --json headRefName,baseRefName,isCrossRepository,title,author"
         ),
         "{calls:?}"
     );
-    assert_eq!(
-        calls[1],
-        format!("{}|pr checkout 7", rig.flagship.display())
-    );
-    // launch.sh's prompt, verbatim.
     let expected = review_prompt(
         BRANCH,
-        &format!("the canonical checkout `{}`", rig.flagship.display()),
+        &format!("the worktree `{}`", checkout.display()),
     );
     assert_eq!(reply.prompt, expected);
 
-    // The Chat: at the workspace root, titled, PR-linked.
+    // The Chat is at the review checkout, titled and PR-linked.
     let chat = rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap();
-    assert_eq!(chat.cwd.as_deref(), Some(rig.ws.to_str().unwrap()));
+    assert_eq!(chat.cwd.as_deref(), Some(checkout.to_str().unwrap()));
     assert_eq!(chat.space_id.as_deref(), Some(SPACE));
     assert_eq!(
         chat.title.as_deref(),
@@ -436,10 +440,10 @@ async fn clean_main_checks_out_with_gh_and_starts_the_review_at_the_workspace_ro
     assert_eq!(target.head_ref, format!("refs/remotes/origin/{BRANCH}"));
     assert_eq!(target.base_ref, "refs/remotes/origin/main");
 
-    // The first Turn runs the seeded prompt at the workspace root.
+    // The first Turn runs the seeded prompt at the review checkout.
     wait_for(|| !rig.mock.runs().is_empty(), "the review Run starts").await;
     let run = &rig.mock.runs()[0];
-    assert_eq!(run.cwd, rig.ws.to_string_lossy());
+    assert_eq!(run.cwd, checkout.to_string_lossy());
     assert!(run.prompt.contains(&expected), "{}", run.prompt);
 }
 
@@ -673,13 +677,13 @@ async fn repositories_match_by_remote_url_not_folder_name() {
     let reply = start(&rig, &params("op-renamed", 7, PrReviewAction::FixCi))
         .await
         .expect("start");
-    assert_eq!(Path::new(&reply.checkout_path), rig.ws.join("vendor/fs"));
+    assert_eq!(Path::new(&reply.checkout_path), rig.ws.join(".worktrees/flagship-pr-7"));
     assert_eq!(reply.title, "Fix CI flagship#7: Add feature X");
     assert_eq!(
         reply.prompt,
         format!(
-            "/fix-ci https://github.com/acme/flagship/pull/7 — my PR. Its branch `{BRANCH}` is checked out at the canonical checkout `{}`; do all the work there.",
-            rig.ws.join("vendor/fs").display()
+            "/fix-ci https://github.com/acme/flagship/pull/7 — my PR. Its branch `{BRANCH}` is checked out at the worktree `{}`; do all the work there.",
+            rig.ws.join(".worktrees/flagship-pr-7").display()
         )
     );
 }
@@ -699,7 +703,7 @@ async fn the_outermost_space_wins_over_a_space_on_the_submodule() {
         .await
         .expect("start");
     assert_eq!(reply.space_id, SPACE);
-    assert_eq!(Path::new(&reply.cwd), rig.ws);
+    assert_eq!(Path::new(&reply.cwd), rig.ws.join(".worktrees/flagship-pr-7"));
 
     // Pinning the inner Space starts there instead.
     let mut pinned = params("op-pinned", 7, PrReviewAction::FixCi);
@@ -710,7 +714,7 @@ async fn the_outermost_space_wins_over_a_space_on_the_submodule() {
     assert_eq!(
         reply.prompt,
         format!(
-            "Investigate and fix failing CI for https://github.com/acme/flagship/pull/7. The branch `{BRANCH}` is checked out at the canonical workspace checkout."
+            "Investigate and fix failing CI for https://github.com/acme/flagship/pull/7. The branch `{BRANCH}` is checked out at `{}`.", rig.ws.join(".worktrees/flagship-pr-7").display()
         )
     );
 }
@@ -837,7 +841,7 @@ async fn a_review_of_the_viewers_own_pr_is_seeded_as_a_self_review() {
     std::fs::write(rig.gh_dir.join("user.json"), r#"{"login":"Octo"}"#).unwrap();
     write_authored_view(&rig.gh_dir, 7, "octo");
     write_authored_view(&rig.gh_dir, 8, "someone-else");
-    let location = format!("the canonical checkout `{}`", rig.flagship.display());
+    let location = format!("the worktree `{}`", rig.ws.join(".worktrees/flagship-pr-7").display());
 
     // The viewer's login matches the author's, ignoring case.
     let own = start(&rig, &params("op-own", 7, PrReviewAction::CodeReview))
@@ -872,7 +876,7 @@ async fn an_unknown_viewer_keeps_the_reviewer_prompt() {
     // No `user.json`: the fake `gh api user` fails.
     let rig = rig().await;
     write_authored_view(&rig.gh_dir, 7, "octo");
-    let location = format!("the canonical checkout `{}`", rig.flagship.display());
+    let location = format!("the worktree `{}`", rig.ws.join(".worktrees/flagship-pr-7").display());
     let reply = start(&rig, &params("op-unknown", 7, PrReviewAction::CodeReview))
         .await
         .expect("start");

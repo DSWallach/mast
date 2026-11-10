@@ -12,15 +12,13 @@
 //! 2. `gh pr view` → head branch, `isCrossRepository` (forks refused) and the
 //!    author (a review of the viewer's own PR is seeded as a self-review);
 //! 3. `git fetch origin +refs/heads/<b>:refs/remotes/origin/<b>`;
-//! 4. choose the checkout exactly like launch.sh: the branch's existing
-//!    checkout (canonical or any worktree) → the canonical checkout when it
-//!    is on `main` with no tracked changes (`gh pr checkout <n>` there) → a
-//!    new worktree `<root>/<name>-pr-<n>` (root: first line of
+//! 4. choose the branch's existing checkout (canonical or any worktree),
+//!    otherwise create a new worktree `<root>/<name>-pr-<n>` (root: first line of
 //!    `<space>/.devcontainer/.current-worktrees-root`, else
 //!    `$WORKSPACE_WORKTREES_DIR`, else `<space>/.worktrees`);
 //! 5. count commits behind `origin/<b>` and describe the location with
 //!    launch.sh's wording;
-//! 6. create the Chat at the Space root (launch.sh `cd "$ws"`), titled,
+//! 6. create the Chat at the selected checkout, titled,
 //!    linked to the PR, optionally assigned to a work item, and queue the
 //!    seeded `/code-review` (or `/fix-ci`) Run last.
 //!
@@ -353,7 +351,7 @@ pub struct ChosenLocation {
     pub notes: Vec<String>,
 }
 
-/// Steps 3-4: fetch, then reuse / `gh pr checkout` / new worktree.
+/// Steps 3-4: fetch, then reuse a checkout or create a worktree.
 pub fn choose_location(
     tools: &PrReviewTools,
     ws: &Path,
@@ -383,42 +381,6 @@ pub fn choose_location(
             kind: PrCheckoutKind::Existing,
         });
     }
-    let current = git(repo_dir, &["branch", "--show-current"]).unwrap_or_default();
-    let tracked_changes = git(
-        repo_dir,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=no",
-            "--ignore-submodules=all",
-        ],
-    )
-    .map_err(|e| git_failed("git status", e))?;
-    if current == "main" && tracked_changes.is_empty() {
-        let output = tools
-            .gh()?
-            .args(["pr", "checkout", &number.to_string()])
-            .current_dir(repo_dir)
-            .output()
-            .map_err(|e| {
-                err(
-                    PrReviewErrorCode::GhUnavailable,
-                    format!("Could not run the GitHub CLI (gh): {e}"),
-                )
-            })?;
-        if !output.status.success() {
-            return Err(git_failed(
-                &format!("gh pr checkout {number} in {}", repo_dir.display()),
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ));
-        }
-        return Ok(ChosenLocation {
-            path: repo_dir.to_path_buf(),
-            kind: PrCheckoutKind::CanonicalCheckout,
-            notes: vec![format!("Checked out {branch} in {}", repo_dir.display())],
-        });
-    }
-
     let root = worktrees_root(ws, &tools.worktrees_dir_env);
     let path = root.join(format!("{repo_name}-pr-{number}"));
     if path.exists() {
@@ -460,17 +422,8 @@ pub fn choose_location(
         )
     };
     added.map_err(|e| git_failed(&format!("git worktree add {path_arg}"), e))?;
-    let why = if current.is_empty() {
-        "a detached HEAD".to_owned()
-    } else {
-        current
-    };
     Ok(ChosenLocation {
-        notes: vec![format!(
-            "{} is on {why} or has changes; added worktree {}",
-            repo_dir.display(),
-            path.display()
-        )],
+        notes: vec![format!("Added worktree {}", path.display())],
         path: canonical(&path),
         kind: PrCheckoutKind::NewWorktree,
     })
@@ -867,7 +820,7 @@ impl PrReviewLauncher {
                     Some(&space.id),
                     None,
                     Some(config.clone()),
-                    Some(space.path.clone()),
+                    Some(checkout.clone()),
                     None,
                 )
                 .map_err(engine)?;
@@ -1181,14 +1134,14 @@ impl PrReviewLauncher {
             ));
         }
 
-        // 6. The Chat, at the Space root.
+        // 6. The Chat, at the selected checkout.
         let title = chat_title(
             p.action,
             &p.repo_name,
             p.number,
             head.title.as_deref().unwrap_or(""),
         );
-        let cwd = found.space.path.clone();
+        let cwd = chosen.path.to_string_lossy().into_owned();
         let mut config = p.config.clone().unwrap_or_else(default_config);
         if config.fill_default_model() {
             tracing::debug!(chat = %chat_id, "review chat config had no model; filled in the Mast default");
