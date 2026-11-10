@@ -111,56 +111,12 @@ pub use mast_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
 /// bottom edge and converges toward the top-center cell), so the wave reads
 /// as travelling upward.
 pub fn gradient_spinner(
-    id: &'static str,
+    _id: &'static str,
     _theme: &Theme,
     cell_px: f32,
-    _view: EntityId,
-    _cx: &mut App,
+    view: EntityId,
+    cx: &mut App,
 ) -> impl IntoElement {
-    GradientSpinner { id, cell_px }
-}
-
-#[derive(IntoElement)]
-struct GradientSpinner {
-    id: &'static str,
-    cell_px: f32,
-}
-
-impl RenderOnce for GradientSpinner {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let view = window.with_global_id(self.id.into(), |id, window| {
-            window.with_element_state(id, |previous: Option<Entity<GradientSpinnerView>>, _| {
-                let view = previous.unwrap_or_else(|| {
-                    cx.new(|_| GradientSpinnerView { cell_px: self.cell_px })
-                });
-                view.update(cx, |view, cx| {
-                    if view.cell_px != self.cell_px {
-                        view.cell_px = self.cell_px;
-                        cx.notify();
-                    }
-                });
-                (view.clone(), view)
-            })
-        });
-        view.cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.cell_px * 4.0))
-                .h(px(self.cell_px * 4.0)),
-        )
-    }
-}
-
-struct GradientSpinnerView {
-    cell_px: f32,
-}
-
-impl Render for GradientSpinnerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        gradient_spinner_cells(self.cell_px, cx.entity_id(), cx)
-    }
-}
-
-fn gradient_spinner_cells(cell_px: f32, view: EntityId, cx: &mut App) -> impl IntoElement {
     let center = (MATRIX_SIDE as f32 - 1.0) / 2.0;
     let max = MATRIX_SIDE as f32 - 1.0 + center;
     let delta = motion::pulse_delta_slow(&GRADIENT_SPIN, view, cx);
