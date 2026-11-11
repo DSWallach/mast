@@ -2513,7 +2513,7 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
 async fn sheet_has_one_required_action_that_tracks_open_rows() {
     let rig = rig().await;
     let path = rig.worktree.join("sheet.json");
-    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","optional":true,"status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
     std::fs::write(&path, source).unwrap();
     let published = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": "sheet-action"})).await;
     let id = published["artifactId"].as_str().unwrap();
