@@ -345,6 +345,11 @@ impl ClaudeHarness {
         }
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
+        } else if let Some(source) = &request.fork_from {
+            // A new session id seeded with the source's history; the source
+            // session is left untouched.
+            cmd.arg(format!("--resume={source}"));
+            cmd.arg("--fork-session");
         }
         cmd.args(instruction_args);
         let mut settings = serde_json::Map::new();
@@ -556,6 +561,9 @@ impl Harness for ClaudeHarness {
     fn supports_steering(&self) -> bool {
         true
     }
+    fn supports_session_fork(&self) -> bool {
+        true
+    }
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::StepBoundary
     }
@@ -694,6 +702,7 @@ impl Harness for ClaudeHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         request.instructions = None;
         request.resume = None;
+        request.fork_from = None;
         request.worktree = None;
         request.attachments.clear();
         request.model_options.clear();
@@ -1285,6 +1294,23 @@ mod tests {
             flag_value(&danger, "--permission-mode"),
             Some("bypassPermissions")
         );
+    }
+
+    #[test]
+    fn fork_from_resumes_the_source_into_a_new_session() {
+        let harness = ClaudeHarness::new();
+        let mut request = plain_request();
+        request.fork_from = Some("main-session".into());
+        let args = argv(&harness, &request);
+        assert!(args.iter().any(|a| a == "--resume=main-session"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--fork-session"), "{args:?}");
+        // The side chat's own stored session wins once it has one.
+        request.resume = Some("side-session".into());
+        let args = argv(&harness, &request);
+        assert!(args.iter().any(|a| a == "--resume=side-session"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--fork-session" || a == "--resume=main-session"));
+        assert!(!argv(&harness, &plain_request()).iter().any(|a| a == "--fork-session"));
+        assert!(harness.supports_session_fork());
     }
 
     fn model_arg(args: &[String]) -> Option<&str> {
