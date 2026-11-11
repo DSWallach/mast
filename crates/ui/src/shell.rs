@@ -5086,6 +5086,7 @@ impl Shell {
                             self.settings.notifications_background_only,
                             self.settings.live_app_icon,
                             self.settings.show_menu_bar_item,
+                            self.settings.menu_bar_needs_you,
                             cx,
                         )
                     });
@@ -5102,6 +5103,7 @@ impl Shell {
                                 background_only,
                                 live_app_icon,
                                 menu_bar_item,
+                                menu_bar_needs_you,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -5111,6 +5113,7 @@ impl Shell {
                             this.settings.notifications_background_only = background_only;
                             this.settings.live_app_icon = live_app_icon;
                             this.settings.show_menu_bar_item = menu_bar_item;
+                            this.settings.menu_bar_needs_you = menu_bar_needs_you;
                             this.sync_status_light(cx);
                             this.sync_menu_bar(true, cx);
                             this.schedule_save(cx);

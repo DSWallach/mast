@@ -718,6 +718,8 @@ pub struct UiSettings {
     pub live_app_icon: bool,
     /// The macOS menu bar item: the lamp, the running list and account usage.
     pub show_menu_bar_item: bool,
+    /// Include Needs you in the menu bar popover.
+    pub menu_bar_needs_you: bool,
     pub files_panel_width: f32,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
@@ -855,6 +857,7 @@ impl Default for UiSettings {
             notifications_background_only: true,
             live_app_icon: true,
             show_menu_bar_item: true,
+            menu_bar_needs_you: false,
             files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
             right_pane_open: false,
@@ -1958,6 +1961,9 @@ impl UiSettings {
                 migrated = true;
             }
         }
+        if missing("menuBarNeedsYou") {
+            migrated = true;
+        }
         if migrated && let Err(error) = settings.save(data_dir) {
             tracing::warn!(%error, "failed to save ui settings migration");
         }
@@ -2394,6 +2400,7 @@ mod tests {
             assert!(settings.notifications_background_only);
             assert_eq!(settings.live_app_icon, existing);
             assert_eq!(settings.show_menu_bar_item, existing);
+            assert!(!settings.menu_bar_needs_you);
             let stored: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(UiSettings::path(&dir)).unwrap())
                     .unwrap();
@@ -2406,6 +2413,7 @@ mod tests {
                 "notificationsBackgroundOnly",
                 "liveAppIcon",
                 "showMenuBarItem",
+                "menuBarNeedsYou",
             ] {
                 assert!(stored.get(key).is_some(), "{key} was not persisted");
             }
@@ -2977,6 +2985,7 @@ mod tests {
             notifications_background_only: false,
             live_app_icon: false,
             show_menu_bar_item: false,
+            menu_bar_needs_you: true,
             files_panel_width: 310.0,
             right_pane_width: 700.0,
             right_pane_open: true,
