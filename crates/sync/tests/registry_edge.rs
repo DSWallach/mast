@@ -40,6 +40,8 @@ fn chat(id: &str, device_id: &str) -> Chat {
         harness_session_cwd: None,
         actual_model: None,
         parent_chat_id: None,
+        side_of: None,
+        side_absorbed_through: None,
         space_id: None,
         last_seen_at: None,
         room_gen: None,

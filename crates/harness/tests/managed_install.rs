@@ -45,6 +45,7 @@ async fn managed_install_reaches_session_started() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        fork_from: None,
         instructions: None,
     };
 

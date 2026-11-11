@@ -6046,6 +6046,7 @@ impl DocHost {
             auto_approve: config.as_ref().is_some_and(|c| c.auto_approve),
             attachments: Vec::new(),
             resume: None,
+            fork_from: None,
             worktree: None,
             instructions: None,
         })

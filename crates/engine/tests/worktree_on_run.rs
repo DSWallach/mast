@@ -119,6 +119,7 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
             auto_approve: true,
             attachments: Vec::new(),
             resume: None,
+            fork_from: None,
             worktree: Some(WorktreeSpec {
                 repo_path: repo_path.into(),
                 base: "main".into(),

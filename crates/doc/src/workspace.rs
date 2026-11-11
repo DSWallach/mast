@@ -286,6 +286,12 @@ impl WorkspaceDoc {
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
+        set_opt_str(&row, "sideOf", chat.side_of.as_deref())?;
+        set_opt_str(
+            &row,
+            "sideAbsorbedThrough",
+            chat.side_absorbed_through.as_deref(),
+        )?;
         self.doc.commit();
         Ok(())
     }
@@ -776,6 +782,10 @@ pub(crate) struct RawChat {
     #[serde(default)]
     parent_chat_id: Option<String>,
     #[serde(default)]
+    side_of: Option<String>,
+    #[serde(default)]
+    side_absorbed_through: Option<String>,
+    #[serde(default)]
     linked_pr_url: Option<String>,
     #[serde(default, deserialize_with = "lenient_chat_link_source")]
     linked_pr_source: Option<mast_proto::ChatLinkSource>,
@@ -838,6 +848,8 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            side_of: raw.side_of,
+            side_absorbed_through: raw.side_absorbed_through,
             linked_pr_url: raw.linked_pr_url,
             linked_pr_source: raw.linked_pr_source,
             linked_ticket_id: raw.linked_ticket_id,
@@ -956,6 +968,8 @@ mod tests {
             harness_session_cwd: None,
             actual_model: None,
             parent_chat_id: Some("parent-chat".into()),
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

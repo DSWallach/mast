@@ -1461,7 +1461,7 @@ impl SessionsEngine {
                     prompt: String::new(), harness: None, model: None, reasoning: None,
                     model_options: Default::default(), cwd,
                     sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
-                    attachments: Vec::new(), resume: None, worktree: None, instructions: None,
+                    attachments: Vec::new(), resume: None, fork_from: None, worktree: None, instructions: None,
                 })
             })?;
         request.prompt = prompt.to_owned();
@@ -4269,6 +4269,7 @@ mod tests {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
             resume: None,
+            fork_from: None,
             attachments: Vec::new(),
             worktree: None,
             instructions: None,

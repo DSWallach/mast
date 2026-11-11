@@ -1637,6 +1637,8 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                side_of: None,
+                side_absorbed_through: None,
                 linked_pr_url: None,
                 linked_pr_source: None,
                 linked_ticket_id: None,

@@ -1027,6 +1027,8 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,
             linked_ticket_id: None,

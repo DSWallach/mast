@@ -243,6 +243,7 @@ fn run_command(prompt: &str, cwd: &str) -> SessionCommandPayload {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
             resume: None,
+            fork_from: None,
             attachments: Vec::new(),
             worktree: None,
             instructions: None,
