@@ -120,6 +120,11 @@ impl ArtifactTab {
         cx: &mut Context<Self>,
     ) {
         let Some(message) = FrameMessage::parse(json) else {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json)
+                && value.get("t").and_then(|v| v.as_str()) == Some("sheet-stage") {
+                let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                self.sheet_refusal("The stage request was invalid.", Some(id), cx);
+            }
             return;
         };
         match message {
@@ -169,32 +174,49 @@ impl ArtifactTab {
         }
     }
 
-    fn current_sheet(&self, cx: &gpui::App) -> Option<(ArtifactView, mast_proto::decision_sheet::DecisionSheet)> {
-        let artifact = self.artifact(cx)?;
-        if artifact.kind != mast_proto::ArtifactKind::DecisionSheet
-            || self.shown_or_current_revision(&artifact) != artifact.current_revision
-            || self.mode != super::Mode::Rendered || self.loading {
-            return None;
-        }
-        let sheet = mast_proto::decision_sheet::DecisionSheet::parse(&self.shown_text()?).ok()?;
-        Some((artifact, sheet))
+    fn current_sheet(&self, cx: &gpui::App) -> Result<(ArtifactView, mast_proto::decision_sheet::DecisionSheet), String> {
+        let artifact = self.artifact(cx).ok_or("The artifact is unavailable.")?;
+        if artifact.kind != mast_proto::ArtifactKind::DecisionSheet { return Err("This artifact is not a decision sheet.".into()); }
+        if self.shown_or_current_revision(&artifact) != artifact.current_revision { return Err("This revision is no longer current.".into()); }
+        if self.mode != super::Mode::Rendered || self.loading { return Err("The decision sheet is not ready.".into()); }
+        let source = self.shown_text().ok_or("The decision sheet content is unavailable.")?;
+        let sheet = mast_proto::decision_sheet::DecisionSheet::parse(&source).map_err(|error| format!("Could not read the decision sheet: {error}"))?;
+        Ok((artifact, sheet))
+    }
+
+    fn sheet_refusal(&mut self, reason: &str, row_id: Option<&str>, cx: &mut Context<Self>) {
+        tracing::warn!(artifact_id = %self.artifact_id, reason, "decision sheet action refused");
+        self.notice = Some(reason.to_owned());
+        let message = match row_id {
+            Some(id) => serde_json::json!({"mastSheetStageRejected": {"id": id, "reason": reason}}),
+            None => serde_json::json!({"mastSheetEnableSend": true}),
+        };
+        if let Some(web) = &mut self.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&message), cx); }
+        cx.notify();
     }
 
     fn stage_sheet_decision(&mut self, id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, cx: &mut Context<Self>) {
         use mast_proto::decision_sheet::{SheetDecisionDraft, SheetDecisionDrafts};
-        let Some((artifact, sheet)) = self.current_sheet(cx) else { return; };
-        if !sheet.decision_rows().iter().any(|row| row.id == id && row.status.state == "open")
-            || artifact.decisions.iter().any(|saved| saved.row_id == id && saved.revision == artifact.current_revision) { return; }
+        let (artifact, sheet) = match self.current_sheet(cx) {
+            Ok(sheet) => sheet,
+            Err(reason) => { self.sheet_refusal(&reason, Some(&id), cx); return; }
+        };
+        let reason = if !sheet.decision_rows().iter().any(|row| row.id == id && row.status.state == "open") {
+            Some("This row is missing or no longer open.")
+        } else if artifact.decisions.iter().any(|saved| saved.row_id == id && saved.revision == artifact.current_revision) {
+            Some("This row has already been sent.")
+        } else { None };
+        if let Some(reason) = reason { self.sheet_refusal(reason, Some(&id), cx); return; }
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             let draft = settings.artifact_decision_drafts.entry(artifact.id).or_insert_with(|| SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() });
             if draft.revision != artifact.current_revision { *draft = SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() }; }
             draft.decisions.retain(|decision| decision.row_id != id);
-            draft.decisions.push(SheetDecisionDraft { row_id: id, outcome, note: Some(note) });
+            draft.decisions.push(SheetDecisionDraft { row_id: id.clone(), outcome, note: Some(note) });
         });
     }
 
     fn undo_sheet_decision(&mut self, row_id: Option<String>, cx: &mut Context<Self>) {
-        let Some((artifact, _)) = self.current_sheet(cx) else { return; };
+        let Ok((artifact, _)) = self.current_sheet(cx) else { return; };
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             if let Some(id) = row_id {
                 if let Some(draft) = settings.artifact_decision_drafts.get_mut(&artifact.id) {
@@ -207,15 +229,13 @@ impl ArtifactTab {
 
     fn send_sheet_decisions(&mut self, cx: &mut Context<Self>) {
         use mast_proto::decision_sheet::{SubmitSheetDecisionsParams, decision_batch_message};
-        let Some((artifact, _)) = self.current_sheet(cx) else { return; };
-        if self.comments.busy { return; }
+        let (artifact, _) = match self.current_sheet(cx) { Ok(sheet) => sheet, Err(reason) => { self.sheet_refusal(&reason, None, cx); return; } };
+        if self.comments.busy { self.sheet_refusal("A decision batch is already being sent.", None, cx); return; }
         let draft = crate::settings::current(cx).artifact_decision_drafts.get(&artifact.id).cloned();
-        let Some(draft) = draft.filter(|d| d.revision == artifact.current_revision && !d.decisions.is_empty()) else { return; };
+        let Some(draft) = draft.filter(|d| d.revision == artifact.current_revision && !d.decisions.is_empty()) else { self.sheet_refusal("There are no staged decisions for this revision.", None, cx); return; };
         let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
         let Some(chat) = chat else {
-            self.notice = Some("The origin chat is unavailable. Decisions remain staged.".into());
-            if let Some(web) = &mut self.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastSheetEnableSend": true})), cx); }
-            cx.notify();
+            self.sheet_refusal("The origin chat is unavailable. Decisions remain staged.", None, cx);
             return;
         };
         self.comments.busy = true;
@@ -228,8 +248,7 @@ impl ArtifactTab {
                 this.comments.busy = false;
                 match reply {
                     Err(error) => {
-                        this.notice = Some(format!("Couldn't save decisions: {}", error.text()));
-                        if let Some(web) = &mut this.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastSheetEnableSend": true})), cx); }
+                        this.sheet_refusal(&format!("Couldn't save decisions: {}", error.text()), None, cx);
                     }
                     Ok(reply) => {
                         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| { settings.artifact_decision_drafts.remove(&artifact.id); });
