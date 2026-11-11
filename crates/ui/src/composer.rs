@@ -7528,6 +7528,9 @@ impl Composer {
                 Ok(None)
             }
             .await;
+            if queue && let Err(error) = &result {
+                tracing::warn!(chat = %err_chat_id, %error, "queue message failed");
+            }
             if result.is_err() && is_new && !dispatch_attempted {
                 // A failed new-chat send must not strand a just-minted empty
                 // chat in the sidebar (v0.2.12 "empty transcript" report).
@@ -7566,8 +7569,6 @@ impl Composer {
                     } else {
                         err_chat_id.clone()
                     };
-                    composer.failure = Some(message.into());
-                    composer.failure_key = Some(restore_key.clone());
                     let mut failed_send = failed_send;
                     failed_send.key = restore_key.clone();
                     composer.failed_send = Some(failed_send);
@@ -7584,19 +7585,7 @@ impl Composer {
                         }
                         cx.notify();
                     });
-                    if is_new && composer.current_key != restore_key {
-                        // A re-key swap to the canvas is pending (the
-                        // select_chat(None) above); it loads this draft into
-                        // the input on flush — setting the input directly
-                        // here would be clobbered by that same swap.
-                        composer.drafts.insert(restore_key.clone(), restore_text.clone());
-                    } else {
-                        // Already keyed to the restore target (either an
-                        // existing chat, or the deleted row's watch event
-                        // re-keyed to the canvas before this handler ran —
-                        // no further swap will fire). Set the input directly.
-                        composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
-                    }
+                    composer.restore_failed_text(&restore_key, &restore_text, &message, cx);
                     if !staged_skills.is_empty() {
                         // Chips attached while the send was in flight stay;
                         // the failed send's chips rejoin them (deduped).
@@ -7629,6 +7618,23 @@ impl Composer {
             })
             .ok();
         }));
+    }
+
+    fn restore_failed_text(&mut self, key: &str, text: &str, error: &str, cx: &mut Context<Self>) {
+        self.failure = Some(error.to_owned().into());
+        self.failure_key = Some(key.to_owned());
+        let merge = |existing: &str| {
+            if existing.is_empty() { text.to_owned() }
+            else if text.is_empty() { existing.to_owned() }
+            else { format!("{text}\n\n{existing}") }
+        };
+        if self.current_key == key {
+            let restored = merge(self.input.read(cx).text());
+            self.input.update(cx, |input, cx| input.set_text(restored, cx));
+        } else {
+            let restored = merge(self.drafts.get(key).map(String::as_str).unwrap_or(""));
+            self.drafts.insert(key.to_owned(), restored);
+        }
     }
 
     pub(crate) fn interrupt_selected(&mut self, cx: &mut Context<Self>) {
@@ -9314,6 +9320,23 @@ mod tests {
             assert!(window.focused(cx).is_none());
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn failed_queue_send_restores_text_without_losing_new_drafts(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer.current_key = "other-chat".into();
+            composer.input.update(cx, |input, cx| input.set_text("other draft", cx));
+            composer.drafts.insert("queued-chat".into(), "new text".into());
+            composer.restore_failed_text("queued-chat", "not queued", "append failed", cx);
+            assert_eq!(composer.failure.as_deref(), Some("append failed"));
+            assert_eq!(composer.drafts["queued-chat"], "not queued\n\nnew text");
+            assert_eq!(composer.input.read(cx).text(), "other draft");
+            composer.restore_failed_text("other-chat", "failed", "append failed", cx);
+            assert_eq!(composer.input.read(cx).text(), "failed\n\nother draft");
+        });
     }
 
     #[gpui::test]
