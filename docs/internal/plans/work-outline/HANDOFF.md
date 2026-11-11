@@ -28,6 +28,16 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 78: decision-sheet keys + row outcomes** (2026-11-11, 14ef72b3f; fast-tracked, targeted tests only):
+  - Artifact frames report edit focus (`mastEditFocus`), so a focused note/answer field gets bare-key shortcuts
+    (e/n/p/t/v) and ⌘A/C/V/X/Z. Cmd/Ctrl app shortcuts and browser keys still go to Mast; Esc in a field returns
+    focus to the app (crates/ui/src/browser/macos.rs `key_route`, `FIELD_EDIT_KEYS`).
+  - Rows offer Accept / Answer differently / Don't do this. "Don't do this" (`rejected`) only on `optional: true`
+    rows, enforced by the engine; answers are `decided` + `overrideRecommendation` with the text in `answer` from
+    artifact_get_decisions. Contract: docs/artifact-kit/decision-sheet-schema.md.
+  - Tests: mast-proto 274, mast-ui artifacts 232 + browser 39, mast-engine `--test artifacts` 41. Real WebKit typing
+    not yet confirmed. Backup: `~/zeron-dev-app-backups/mast-release-77`.
+
 - **Release 74: data-driven decision sheets + responsive kit** (2026-11-10, a68e8d99d):
   - `decision-sheet` artifact kind: strict JSON validation, a kit renderer, computed chips, a dedicated 1024 px wide
     host (other fragments keep their cap), compare. Child status pills show only when they differ from the parent.
@@ -1078,6 +1088,17 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
+
+- **Installed: release 78** (fast-tracked; targeted tests only). The next normal release must run the full suite.
+- **main is kept current (Mikey, 2026-11-11):** after each integration push the coordinator fast-forwards `main` in
+  both repos (`git push origin origin/work-outline-implementation:refs/heads/main`; parent `zeron-work-outline`).
+  Fast-forward only. Workers never touch main.
+- **Resumed:** Terra chat 2bbe25e5 (workflow-pack export/import, branch `workflow-pack`).
+- **Next queued:** approach-question options (7db226ae); global pinned-chat tabs strip (design
+  mast-artifact:6b34d7fb, Mikey picked A, global); freeze watchdog (17c9d278), render-probe bug (bb6e6f10), perf
+  follow-ups (2694931e); Phase 0 go/no-go (9516dd7c) was due 11-12.
+
 ## In flight (snapshot 2026-11-11 late; coordinator 844aab58 handing off)
 
 - **Installed: release 77** (fast-tracked; targeted tests only). It has the decision sheet Send fix (be62a4719), row
@@ -1689,7 +1710,7 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   computer-use.
 - Never write to live `~/.zeron` stores; inspect with read-only sqlite `.backup` copies.
 - No real Linear/GitHub API calls in tests. Nothing is ever written to Linear.
-- Never commit or push to `main`.
+- Never commit to `main` directly; the coordinator fast-forwards it to the integration head after each push.
 - Registry operation ids must be ≤ 64 characters; hash long keys with `derive_id`.
 - **The Mast repo is public.** Never write these into it (docs, commits, fixtures):
   - device IDs (UDIDs), team IDs, account logins or emails
