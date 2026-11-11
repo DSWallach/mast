@@ -93,8 +93,9 @@ echo "build: zeron + e2e_driver"
 # bin — the smoke then dies on "No such file or directory".
 (cd "$ROOT" && cargo build -q -p mast)
 (cd "$ROOT" && cargo build -q -p mast-rpc --example e2e_driver)
-ZERON="$ROOT/target/debug/zeron"
-DRIVER="$ROOT/target/debug/examples/e2e_driver"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+ZERON="$TARGET_DIR/debug/zeron"
+DRIVER="$TARGET_DIR/debug/examples/e2e_driver"
 
 # ── 3. Two headless engines, one user, two devices ─────────────────────────────
 rm -rf "$A_DIR" "$B_DIR"

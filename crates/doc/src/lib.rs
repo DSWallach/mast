@@ -15,6 +15,7 @@ pub mod queue;
 pub mod rebuild;
 pub mod registry;
 pub mod schema;
+pub mod side_chat;
 pub mod transcript_delta;
 pub mod workspace;
 

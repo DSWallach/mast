@@ -2669,6 +2669,7 @@ fn child_run_request(
             .unwrap_or(SandboxLevel::WorkspaceWrite),
         auto_approve: config.is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments,
         worktree: None,
         instructions: None,

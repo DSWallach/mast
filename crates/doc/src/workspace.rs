@@ -286,7 +286,14 @@ impl WorkspaceDoc {
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
-        row.insert("scheduledTaskInfo", LoroValue::from(serde_json::to_value(&chat.scheduled_task)?))?;
+        row.insert("scheduledTaskInfo", LoroValue::from(serde_json::to_value(&chat.scheduled_task_info)?))?;
+        set_opt_str(&row, "scheduledTask", chat.scheduled_task.as_deref())?;
+        set_opt_str(&row, "sideOf", chat.side_of.as_deref())?;
+        set_opt_str(
+            &row,
+            "sideAbsorbedThrough",
+            chat.side_absorbed_through.as_deref(),
+        )?;
         self.doc.commit();
         Ok(())
     }
@@ -777,6 +784,10 @@ pub(crate) struct RawChat {
     #[serde(default)]
     parent_chat_id: Option<String>,
     #[serde(default)]
+    side_of: Option<String>,
+    #[serde(default)]
+    side_absorbed_through: Option<String>,
+    #[serde(default)]
     linked_pr_url: Option<String>,
     #[serde(default, deserialize_with = "lenient_chat_link_source")]
     linked_pr_source: Option<mast_proto::ChatLinkSource>,
@@ -786,7 +797,8 @@ pub(crate) struct RawChat {
     linked_ticket_source: Option<mast_proto::ChatLinkSource>,
     #[serde(default)]
     #[serde(rename = "scheduledTaskInfo")]
-    scheduled_task: Option<mast_proto::ScheduledChat>,
+    scheduled_task_info: Option<mast_proto::ScheduledChat>,
+    scheduled_task: Option<String>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -842,11 +854,14 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            side_of: raw.side_of,
+            side_absorbed_through: raw.side_absorbed_through,
             linked_pr_url: raw.linked_pr_url,
             linked_pr_source: raw.linked_pr_source,
             linked_ticket_id: raw.linked_ticket_id,
             linked_ticket_source: raw.linked_ticket_source,
             scheduled_task: raw.scheduled_task,
+            scheduled_task_info: raw.scheduled_task_info,
         }
     }
 }
@@ -960,7 +975,11 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
             parent_chat_id: Some("parent-chat".into()),
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -968,7 +987,6 @@ mod tests {
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
-            scheduled_task: None,
         }
     }
 
@@ -1107,7 +1125,16 @@ mod tests {
     fn snapshot_round_trips_between_docs() {
         let ws = WorkspaceDoc::new();
         ws.upsert_device(&device("dev-a", "laptop")).unwrap();
-        ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+        let mut row = chat("chat-1", "dev-a");
+        row.scheduled_task = Some("Daily".into());
+        row.scheduled_task_info = Some(mast_proto::ScheduledChat {
+            task_id: "task-id".into(),
+            task_name: "Daily".into(),
+            run_id: "run-id".into(),
+            session_created_at: Some(123),
+        });
+        ws.upsert_chat(&row).unwrap();
+        assert_eq!(ws.read_chats().unwrap(), vec![row]);
         let bytes = ws.export_snapshot().unwrap();
 
         let other = LoroDoc::new();

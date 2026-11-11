@@ -166,7 +166,7 @@ pub enum ScheduledTasksRequest {
 pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
     let mut latest = std::collections::HashMap::new();
     for chat in chats.iter().filter(|c| !c.archived) {
-        let Some(task) = &chat.scheduled_task else {
+        let Some(task) = &chat.scheduled_task_info else {
             continue;
         };
         let key = (&chat.device_id, &chat.space_id, &task.task_id);
@@ -180,7 +180,7 @@ pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<
 
 pub fn task_chat_order(chat: &crate::Chat) -> (i64, &str) {
     (
-        chat.scheduled_task
+        chat.scheduled_task_info
             .as_ref()
             .and_then(|t| t.session_created_at)
             .unwrap_or(chat.created_at.timestamp_millis()),
@@ -226,6 +226,6 @@ mod tests {
         value["scheduledTask"] = serde_json::json!("legacy-task-name");
         let decoded: crate::Chat = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.id, "old");
-        assert!(decoded.scheduled_task.is_none());
+        assert!(decoded.scheduled_task_info.is_none());
     }
 }

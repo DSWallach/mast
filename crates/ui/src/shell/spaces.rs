@@ -19,6 +19,8 @@ use std::collections::HashSet;
 struct VisibleSidebarRow {
     height: f32,
     child: AnyElement,
+    /// Runs with the slot's bounds every frame, whether or not it is visible.
+    on_slot: Option<Box<dyn FnOnce(gpui::Bounds<gpui::Pixels>, &mut gpui::App)>>,
 }
 
 impl gpui::IntoElement for VisibleSidebarRow {
@@ -63,6 +65,9 @@ impl gpui::Element for VisibleSidebarRow {
         window: &mut Window,
         cx: &mut gpui::App,
     ) -> bool {
+        if let Some(on_slot) = self.on_slot.take() {
+            on_slot(bounds, cx);
+        }
         // Keep nearby rows alive for decorations that extend beyond the slot
         // and for small scroll changes at either edge.
         let clip = window.content_mask().bounds;
@@ -112,6 +117,7 @@ mod visible_row_tests {
                             height: 25.0,
                             child: div().w_full().h(px(25.0))
                                 .debug_selector(move || selector.clone()).into_any_element(),
+                            on_slot: None,
                         }
                     }))
             }
@@ -279,6 +285,23 @@ fn sidebar_gap_offset(row: usize, source: Option<usize>, boundary: usize, height
         None if row >= boundary => height,
         _ => 0.0,
     }
+}
+
+/// Last laid-out `(slot, top, bottom)` of each session row, in sidebar
+/// scroll-content coordinates. Every slot re-records each frame, culled or not;
+/// an extent is trusted only while the row keeps its slot, since a re-sort
+/// moves it before any measurement does.
+pub(super) type SidebarRowExtents =
+    std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (usize, f32, f32)>>>;
+
+/// A row last laid out more than one viewport outside the visible range renders
+/// as an empty slot of the same height. Unmeasured rows always render, and
+/// every scroll re-renders the sidebar, so a row is filled before it shows.
+fn sidebar_row_offscreen(extent: Option<(f32, f32)>, scroll_top: f32, viewport: f32) -> bool {
+    let Some((top, bottom)) = extent else {
+        return false;
+    };
+    viewport > 0.0 && (bottom < scroll_top - viewport || top > scroll_top + 2.0 * viewport)
 }
 
 pub(super) fn pinned_drag_scroll_delta(
@@ -1013,6 +1036,65 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn scheduled_task_runs_group_last_unless_pinned(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .settings
+                    .sidebar_pins_mut("local".into())
+                    .push("run-pinned".into());
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.spaces = ["a", "b"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": "local", "path": format!("/project/{id}"), "createdAt": Utc::now()
+                    })).unwrap()).collect();
+                    state.chats = [
+                        ("run-new", "a", Some("briefing")),
+                        ("a-chat", "a", None),
+                        ("run-pinned", "b", Some("briefing")),
+                        ("other-run", "a", Some("other")),
+                        ("b-chat", "b", None),
+                        ("run-old", "b", Some("briefing")),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (id, project, task))| {
+                        let mut chat = pin_test_chat(id);
+                        chat.space_id = Some(project.into());
+                        chat.created_at = Utc::now() - chrono::Duration::minutes(ix as i64);
+                        chat.scheduled_task = task.map(Into::into);
+                        chat
+                    })
+                    .collect();
+                });
+                assert_eq!(
+                    shell.sidebar_visible_order(cx),
+                    ids(&["run-pinned", "a-chat", "b-chat"]),
+                    "the group starts closed"
+                );
+                shell.scheduled_tasks_open = true;
+                let open = ids(&["run-pinned", "a-chat", "b-chat", "run-new", "run-old", "other-run"]);
+                assert_eq!(shell.sidebar_visible_order(cx), open);
+                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+                assert_eq!(shell.sidebar_visible_order(cx), open);
+                shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
+                assert_eq!(shell.sidebar_visible_order(cx), open);
+                shell
+                    .sidebar_collapsed_groups
+                    .insert(scheduled_subgroup_key("briefing"));
+                assert_eq!(
+                    shell.sidebar_visible_order(cx),
+                    ids(&["run-pinned", "a-chat", "b-chat", "other-run"])
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn sidebar_remote_pins_ignore_old_local_preferences(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let window = pin_test_shell(cx, dir.path());
@@ -1202,6 +1284,129 @@ mod pinned_session_tests {
     #[gpui::test]
     fn hidden_label_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, false, false);
+    }
+
+    #[test]
+    fn sidebar_rows_cull_only_beyond_one_viewport_of_overscan() {
+        use super::sidebar_row_offscreen;
+        assert!(!sidebar_row_offscreen(None, 0.0, 800.0), "unmeasured rows render");
+        assert!(!sidebar_row_offscreen(Some((1590.0, 1620.0)), 0.0, 800.0));
+        assert!(sidebar_row_offscreen(Some((1610.0, 1640.0)), 0.0, 800.0));
+        assert!(!sidebar_row_offscreen(Some((1000.0, 1030.0)), 1800.0, 800.0));
+        assert!(sidebar_row_offscreen(Some((960.0, 990.0)), 1800.0, 800.0));
+        assert!(!sidebar_row_offscreen(Some((5000.0, 5030.0)), 0.0, 0.0), "unmeasured viewport");
+    }
+
+    /// Off-screen sessions keep their slot height but build no row content, and
+    /// scrolling to them fills them in.
+    #[gpui::test]
+    fn sidebar_culls_offscreen_session_rows(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(280.0))
+                        .h(px(800.0))
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        const COUNT: usize = 200;
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: mast_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.settings.sidebar_compact = true;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = (0..COUNT)
+                        .map(|ix| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": format!("s{ix}"), "title": format!("s{ix}"),
+                                "deviceId": "local", "archived": false,
+                                "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        cx.run_until_parked();
+        // The first frame measures every row; the next one culls.
+        shell.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+
+        assert_eq!(COUNT, 200, "ids below name the last row");
+        assert!(cx.debug_bounds("chat-s0").is_some(), "visible rows render");
+        assert!(cx.debug_bounds("chat-s199").is_none(), "far rows are culled");
+        // Unlaid-out slots still report where they sit, so far rows are not built.
+        shell.read_with(cx, |shell, _| {
+            let (_, top, bottom) = shell.sidebar_row_extents.borrow()["s199"];
+            assert!(super::sidebar_row_offscreen(
+                Some((top, bottom)),
+                -f32::from(shell.sidebar_scroll.offset().y),
+                f32::from(shell.sidebar_scroll.bounds().size.height),
+            ));
+        });
+
+        shell.update(cx, |shell, cx| {
+            let bottom = shell.sidebar_scroll.max_offset().y;
+            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), -bottom));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-s199").is_some(), "scrolled-to rows render");
+        assert!(cx.debug_bounds("chat-s0").is_none(), "rows scrolled far away are culled");
+
+        // A far row that re-sorts to the top fills in without another prompt.
+        // Reduced motion lands the re-sort glide at once on the frozen test clock.
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            shell.state.update(cx, |state, _| {
+                let chat = state.chats.iter_mut().find(|chat| chat.id == "s150").unwrap();
+                chat.created_at = Utc::now() + chrono::Duration::minutes(5);
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_visible_order(cx).first().map(String::as_str), Some("s150"));
+        });
+        assert!(cx.debug_bounds("chat-s150").is_some(), "re-sorted row renders");
     }
 
     /// The sidebar chat row wears the account pill only for a chat pinned to
@@ -2194,6 +2399,53 @@ fn promote_local_device_group<T>(
     }
 }
 
+/// Group key for scheduled-task runs, which group together under every
+/// organization and sit after all other groups.
+const SCHEDULED_GROUP_KEY: &str = "scheduled-tasks";
+
+fn sidebar_group_key(organization: SidebarOrganization, chat: &mast_proto::Chat) -> Option<String> {
+    if chat.scheduled_task.is_some() {
+        return Some(SCHEDULED_GROUP_KEY.to_owned());
+    }
+    match organization {
+        SidebarOrganization::ByProject => Some(
+            chat.space_id
+                .clone()
+                .unwrap_or_else(|| format!("home:{}", chat.device_id)),
+        ),
+        SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
+        SidebarOrganization::InOneList => None,
+    }
+}
+
+fn move_scheduled_group_last<T>(groups: &mut Vec<(Option<(String, String)>, Vec<T>)>) {
+    if let Some(index) = groups.iter().position(|(group, _)| {
+        group
+            .as_ref()
+            .is_some_and(|(key, _)| key == SCHEDULED_GROUP_KEY)
+    }) {
+        let scheduled = groups.remove(index);
+        groups.push(scheduled);
+    }
+}
+
+/// Scheduled-task runs split by task name, in first-appearance order so the
+/// task with the most recent run leads.
+fn group_by_scheduled_task<T>(rows: Vec<(String, T)>) -> Vec<(String, Vec<T>)> {
+    let mut groups: Vec<(String, Vec<T>)> = Vec::new();
+    for (task, row) in rows {
+        match groups.iter_mut().find(|(name, _)| *name == task) {
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((task, vec![row])),
+        }
+    }
+    groups
+}
+
+fn scheduled_subgroup_key(task: &str) -> String {
+    format!("scheduled:{task}")
+}
+
 pub(super) use crate::components::shell_parts::sidebar_separator;
 
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
@@ -2838,6 +3090,19 @@ impl Shell {
                 .any(|section| &section.id == id)
         {
             self.cancel_sidebar_session_transfer(cx);
+            return;
+        }
+        let sections = self.active_sidebar_sections(cx);
+        let managed_source = sections.iter().any(|section| {
+            section.id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX)
+                && section.session_ids.contains(&payload.chat_id)
+        });
+        let managed_target = matches!(&target, SidebarSessionDrop::Section(id)
+            if id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX));
+        if managed_target || (managed_source && !matches!(target, SidebarSessionDrop::Pinned(_))) {
+            self.sidebar_notice = Some("Move grouped sessions in Work Outline.".into());
+            self.cancel_sidebar_session_transfer(cx);
+            cx.notify();
             return;
         }
         let saved = self.raw_sidebar_pins(cx);
@@ -4310,19 +4575,11 @@ impl Shell {
                     .any(|section| section.session_ids.contains(&chat.id))
             })
             .collect();
-        let ordered = if self.settings.sidebar_organization != SidebarOrganization::InOneList {
+        let ordered = {
             let mut groups: Vec<(Option<(String, String)>, Vec<mast_proto::Chat>)> = Vec::new();
             for chat in chats {
-                let key = Some((
-                    if self.settings.sidebar_organization == SidebarOrganization::ByProject {
-                        chat.space_id
-                            .clone()
-                            .unwrap_or_else(|| format!("home:{}", chat.device_id))
-                    } else {
-                        chat.device_id.clone()
-                    },
-                    String::new(),
-                ));
+                let key = sidebar_group_key(self.settings.sidebar_organization, &chat)
+                    .map(|key| (key, String::new()));
                 if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
                     existing.push(chat);
                 } else {
@@ -4332,13 +4589,32 @@ impl Shell {
             if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
                 promote_local_device_group(&mut groups, state.local_device_id.as_deref());
             }
+            move_scheduled_group_last(&mut groups);
             groups
                 .into_iter()
-                .flat_map(|(_, rows)| rows)
+                .flat_map(|(group, rows)| {
+                    if !group.is_some_and(|(key, _)| key == SCHEDULED_GROUP_KEY) {
+                        return rows;
+                    }
+                    if !self.scheduled_tasks_open {
+                        return Vec::new();
+                    }
+                    let tagged = rows
+                        .into_iter()
+                        .map(|chat| (chat.scheduled_task.clone().unwrap_or_default(), chat))
+                        .collect();
+                    group_by_scheduled_task(tagged)
+                        .into_iter()
+                        .filter(|(task, _)| {
+                            !self
+                                .sidebar_collapsed_groups
+                                .contains(&scheduled_subgroup_key(task))
+                        })
+                        .flat_map(|(_, rows)| rows)
+                        .collect()
+                })
                 .map(|chat| chat.id)
                 .collect::<Vec<_>>()
-        } else {
-            chats.into_iter().map(|chat| chat.id).collect()
         };
         let ordered = pinned_chats
             .into_iter()
@@ -4394,16 +4670,17 @@ impl Shell {
             .change_request_for_chat(&chat)
             .cloned()
             .filter(|_| self.settings.sidebar_show_pull_request);
-        let group = match self.settings.sidebar_organization {
-            SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
-            SidebarOrganization::ByProject => Some((
-                chat.space_id
-                    .clone()
-                    .unwrap_or_else(|| format!("home:{}", chat.device_id)),
-                project,
-            )),
-            SidebarOrganization::InOneList => None,
-        };
+        let organization = self.settings.sidebar_organization;
+        let group = sidebar_group_key(organization, &chat).map(|key| {
+            let label = if chat.scheduled_task.is_some() {
+                "Scheduled tasks".to_owned()
+            } else if organization == SidebarOrganization::ByDevice {
+                device
+            } else {
+                project
+            };
+            (key, label)
+        });
         ActiveChatRow {
             status,
             chat: chat.clone(),
@@ -4522,6 +4799,7 @@ impl Shell {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
         }
+        move_scheduled_group_last(&mut regular_groups);
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
         if !pinned_rows.is_empty() {
             sections.push((None, pinned_rows));
@@ -4649,6 +4927,19 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         let mut moving_row = None;
+        // Drag previews animate sibling offsets, so every row stays mounted.
+        let cull = (self.sidebar_session_transfer.is_none()
+            && self.sidebar_session_return.is_none()
+            && self.pinned_session_drag.is_none())
+        .then(|| {
+            (
+                -f32::from(self.sidebar_scroll.offset().y),
+                f32::from(self.sidebar_scroll.bounds().size.height),
+            )
+        });
+        self.sidebar_row_extents
+            .borrow_mut()
+            .retain(|id, _| active.contains(id.as_str()));
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             // A closed disclosure still needs row heights for its next opening
@@ -4692,6 +4983,10 @@ impl Shell {
                     .as_ref()
                     .map_or_else(|| "regular".to_owned(), |(key, _)| format!("regular:{key}"))
             };
+            let row_tasks: Vec<String> = rows
+                .iter()
+                .map(|row| row.chat.scheduled_task.clone().unwrap_or_default())
+                .collect();
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
                 if omit_closed_rows {
@@ -4752,6 +5047,7 @@ impl Shell {
                         })
                     })
                     .flatten();
+                let ordinal = slot;
                 slot += 1;
                 let origin = self
                     .sidebar_session_transfer
@@ -4776,30 +5072,47 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                let offscreen = origin.is_none()
+                    && !is_selected
+                    && cull.is_some_and(|(scroll_top, viewport)| {
+                        let extent = self
+                            .sidebar_row_extents
+                            .borrow()
+                            .get(&chat.id)
+                            .filter(|(recorded, _, _)| *recorded == ordinal)
+                            .map(|&(_, top, bottom)| (top, bottom));
+                        sidebar_row_offscreen(extent, scroll_top, viewport)
+                    });
+                let element = if offscreen {
+                    div().h(px(slot_height.max(0.0))).into_any_element()
+                } else {
+                    self.render_chat_row(
+                        chat.id.clone(),
+                        transcript::single_line(
+                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        )
+                        .into(),
+                        time_ago,
+                        folder.into(),
+                        branch.map(SharedString::from),
+                        change_request,
+                        harness,
+                        status,
+                        is_selected,
+                        false,
+                        is_moving,
+                        if is_moving { None } else { drag },
+                        jump_label,
+                        None,
+                        theme,
+                        cx,
                     )
-                    .into(),
-                    time_ago,
-                    folder.into(),
-                    branch.map(SharedString::from),
-                    change_request,
-                    harness,
-                    status,
-                    is_selected,
-                    false,
-                    is_moving,
-                    if is_moving { None } else { drag },
-                    jump_label,
-                    None,
-                    theme,
-                    cx,
-                );
+                };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
-                let element = if let Some(origin) = origin {
+                let element = if offscreen {
+                    element
+                } else if let Some(origin) = origin {
                     moving_row = Some((element, height));
                     div()
                         .child(div().h(px(slot_height.max(0.0))))
@@ -4864,9 +5177,29 @@ impl Shell {
                     && self.pinned_session_drag.is_none()
                     && slot_height > 0.0
                 {
+                    let extents = self.sidebar_row_extents.clone();
+                    let scroll = self.sidebar_scroll.clone();
+                    let id = chat.id.clone();
+                    let shell = cx.entity_id();
                     VisibleSidebarRow {
                         height: slot_height,
                         child: element,
+                        on_slot: Some(Box::new(move |bounds, cx| {
+                            let top =
+                                f32::from(bounds.top() - scroll.bounds().top() - scroll.offset().y);
+                            let extent = (top, top + f32::from(bounds.size.height));
+                            extents.borrow_mut().insert(id, (ordinal, extent.0, extent.1));
+                            // A re-sort can move a culled row into view; fill it next frame.
+                            if offscreen
+                                && !sidebar_row_offscreen(
+                                    Some(extent),
+                                    -f32::from(scroll.offset().y),
+                                    f32::from(scroll.bounds().size.height),
+                                )
+                            {
+                                cx.notify(shell);
+                            }
+                        })),
                     }
                     .into_any_element()
                 } else {
@@ -4900,6 +5233,15 @@ impl Shell {
                     section.clone(),
                     rendered_rows,
                     drag_group,
+                    theme,
+                    cx,
+                ));
+                continue;
+            }
+            if key == SCHEDULED_GROUP_KEY {
+                rendered.push(self.render_scheduled_group(
+                    row_tasks.into_iter().zip(rendered_rows).collect(),
+                    &drag_group,
                     theme,
                     cx,
                 ));
@@ -5001,6 +5343,135 @@ impl Shell {
             pinned_count,
             moving_row,
         }
+    }
+
+    /// Scheduled-task runs: one disclosure, closed by default, holding a nested
+    /// disclosure per task name.
+    fn render_scheduled_group(
+        &mut self,
+        rows: Vec<(String, (String, f32, AnyElement))>,
+        drag_group: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> (String, f32, AnyElement) {
+        let total = rows.len();
+        let extra_gap = self.sidebar_transfer_extra_gap(drag_group);
+        let mut subgroups = Vec::new();
+        let mut subgroups_height = 0.0;
+        for (task, rows) in group_by_scheduled_task(rows) {
+            let key = scheduled_subgroup_key(&task);
+            let motion_key = format!("group:{key}");
+            let open = !self.sidebar_collapsed_groups.contains(&key);
+            let count = rows.len();
+            let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
+                + rows.iter().map(|(_, height, _)| *height).sum::<f32>()
+                + SIDEBAR_LIST_GAP * count.saturating_sub(1) as f32;
+            let label: SharedString = if open {
+                task.clone().into()
+            } else {
+                format!("{task} ({count})").into()
+            };
+            let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
+            let toggle_motion_key = motion_key.clone();
+            let header = sidebar_disclosure_header(theme, label, chevron)
+                .id(SharedString::from(format!("sidebar-group-{key}")))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let was_open = !this.sidebar_collapsed_groups.contains(&key);
+                    this.begin_sidebar_disclosure_motion(
+                        &toggle_motion_key,
+                        if was_open { body_height } else { 0.0 },
+                        if was_open { 0.0 } else { body_height },
+                    );
+                    if was_open {
+                        this.sidebar_collapsed_groups.insert(key.clone());
+                    } else {
+                        this.sidebar_collapsed_groups.remove(&key);
+                    }
+                    cx.notify();
+                }));
+            let list = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
+                .gap(px(SIDEBAR_LIST_GAP))
+                .children(rows.into_iter().map(|(_, _, row)| row));
+            let body = self.render_sidebar_disclosure_body(
+                &motion_key,
+                open,
+                body_height,
+                list.into_any_element(),
+            );
+            subgroups_height +=
+                SIDEBAR_DISCLOSURE_HEADER_HEIGHT + if open { body_height } else { 0.0 };
+            subgroups.push(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .pl(px(Theme::SPACE_SM))
+                    .child(header)
+                    .child(body),
+            );
+        }
+        let open = self.scheduled_tasks_open;
+        let motion_key = format!("group:{SCHEDULED_GROUP_KEY}");
+        let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
+            + extra_gap
+            + subgroups_height
+            + SIDEBAR_LIST_GAP * subgroups.len().saturating_sub(1) as f32;
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
+            .gap(px(SIDEBAR_LIST_GAP))
+            .children(subgroups)
+            .when(extra_gap > 0.0, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .h(px((extra_gap - SIDEBAR_LIST_GAP).max(0.0)))
+                        .mb(px((extra_gap - SIDEBAR_LIST_GAP).min(0.0))),
+                )
+            });
+        let label: SharedString = if open {
+            "Scheduled tasks".into()
+        } else {
+            format!("Scheduled tasks ({total})").into()
+        };
+        let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
+        let toggle_motion_key = motion_key.clone();
+        let header = sidebar_disclosure_header(theme, label, chevron)
+            .id(SharedString::from(format!(
+                "sidebar-group-{SCHEDULED_GROUP_KEY}"
+            )))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let was_open = this.scheduled_tasks_open;
+                this.begin_sidebar_disclosure_motion(
+                    &toggle_motion_key,
+                    if was_open { body_height } else { 0.0 },
+                    if was_open { 0.0 } else { body_height },
+                );
+                this.scheduled_tasks_open = !was_open;
+                cx.notify();
+            }));
+        let body = self.render_sidebar_disclosure_body(
+            &motion_key,
+            open,
+            body_height,
+            body.into_any_element(),
+        );
+        let height = SIDEBAR_DISCLOSURE_SECTION_HEIGHT + if open { body_height } else { 0.0 };
+        let element = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .pt(px(SIDEBAR_SECTION_GAP))
+            .child(header)
+            .child(body)
+            .into_any_element();
+        (format!("g:{SCHEDULED_GROUP_KEY}"), height, element)
     }
 
     pub(super) fn render_pinned_section(
@@ -5174,7 +5645,7 @@ impl Shell {
                 .iter()
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
-                .filter(|c| c.archived && c.parent_chat_id.is_none())
+                .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,
@@ -6888,7 +7359,11 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -6896,7 +7371,6 @@ mod tests {
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
-            scheduled_task: None,
         }
     }
 

@@ -2,6 +2,24 @@
 
 The outline arranges a project's chats under work items. An item can be a workstream, a ticket, a PR or an investigation. Every key, menu and rule is in the [reference](../work-outline.md). This page covers what you use every day.
 
+## Sidebar sections
+
+Enable **Settings → Appearance → Use Work Outline groups in the sidebar** to
+make the sidebar follow the outline. The setting is off by default. Turning it
+off restores your custom sections without changing their saved membership.
+
+When enabled, root groups become
+sections; projects get their own sections named by their outline path. Sessions
+on ticket or task items appear under their project's section, or the root group
+when there is no project. Moving or renaming an outline item updates the sidebar.
+An ordinary group such as Archive includes its descendants.
+
+Manage these sections in the Work Outline. Their disclosure arrows collapse the
+sidebar without changing the outline. Pinned sessions stay in Pinned; unpinning
+returns them to their outline section. Existing custom sections remain available
+for sessions without an outline group. Creating an Archive outline group does not
+set Mast's native session archive flag or disable schedules.
+
 ## Items
 
 - **New item:** `⇧⌘I` or `N` (a sibling), `⇧N` (a child). Type the title and press Enter.

@@ -237,7 +237,8 @@ impl ExternalSessionImporter {
         let stamp = file_stamp(transcript_path);
         let parsed = parse_transcript(transcript_path, &self.device_id)?;
         let cwd = parsed
-            .cwd.clone()
+            .cwd
+            .clone()
             .ok_or_else(|| EngineError::Other("transcript carries no cwd".into()))?;
 
         let space_id = self.resolve_space(&cwd, parsed.git_detected)?;
@@ -278,7 +279,7 @@ impl ExternalSessionImporter {
             Some(cwd.clone()),
         )?;
         if let Some(task) = scheduled_metadata(&parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy()) {
-            self.workspace.set_chat_scheduled_task(chat_id, &task)?;
+            self.workspace.set_chat_scheduled_task_info(chat_id, &task)?;
         }
         // Priority chain ported from `agent-mode-tools/session_canvas_server.py`
         // (its own multi-source name resolution): a human-chosen agent-mode
@@ -286,17 +287,12 @@ impl ExternalSessionImporter {
         // title derived from the first real user message — see
         // `resolve_chat_title`'s doc comment for the full reasoning.
         let registry = load_agent_mode_task_names();
-        let resolved_title = resolve_chat_title(
-            external_session_id,
-            parsed.title.as_deref(),
-            parsed.first_user_message.as_deref(),
-            &registry,
-        );
-        let resolved_title = if resolved_title.as_deref().is_none_or(|t|t.starts_with("<scheduled-task")||t.starts_with("<system-reminder>")) {
-            scheduled_metadata(&parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy()).map(|t|t.task_name).or(resolved_title)
-        } else { resolved_title };
+        let resolved_title = parsed_chat_title(external_session_id, &parsed, &registry);
         if let Some(title) = &resolved_title {
             self.workspace.rename_chat(chat_id, title)?;
+        }
+        if let Some(task) = &parsed.scheduled_task {
+            self.workspace.set_chat_scheduled_task(chat_id, task)?;
         }
         // Real transcript field (`gitBranch`), captured up front — needed for
         // PR/ticket linkage (`CHAT_LINK_STATUS` keys `gh pr view` off branch)
@@ -746,13 +742,7 @@ impl ExternalSessionImporter {
             let Ok(parsed) = parse_transcript(&path, &self.device_id) else {
                 continue; // source file moved/deleted since import — skip, not fatal
             };
-            let resolved = resolve_chat_title(
-                &session_id,
-                parsed.title.as_deref(),
-                parsed.first_user_message.as_deref(),
-                &registry,
-            );
-            match resolved {
+            match parsed_chat_title(&session_id, &parsed, &registry) {
                 Some(title) => {
                     if self.workspace.rename_chat(&chat.id, &title)? {
                         repaired += 1;
@@ -767,39 +757,66 @@ impl ExternalSessionImporter {
         Ok(repaired)
     }
 
-    /// One-time provenance backfill for existing imported scheduled sessions.
-    pub fn repair_scheduled_tasks(&self) -> Result<usize, EngineError> {
-        let markers = self.store.root().join("scheduled-task-scan-v1");
-        std::fs::create_dir_all(&markers)?;
-        let mut tagged = 0;
-        for chat in self.workspace.read_chats()? {
-            if chat.scheduled_task.is_some() || markers.join(&chat.id).is_file() {
-                continue;
-            }
-            let Some(cursor) = self.read_cursor(&chat.id)? else {
-                continue;
-            };
-            let Ok(parsed) = parse_transcript(Path::new(&cursor.transcript_path), &self.device_id)
-            else {
-                continue;
-            };
-            if let Some(task) =
-                scheduled_metadata(&parsed, &cursor.external_session_id, &self.device_id, &self.store.root().to_string_lossy())
-            {
-                self.workspace.set_chat_scheduled_task(&chat.id, &task)?;
-                tagged += 1;
-            }
-            std::fs::write(markers.join(&chat.id), b"")?;
-        }
-        Ok(tagged)
-    }
-
     fn title_repair_markers_dir(&self) -> PathBuf {
         self.store.root().join("title_repair_markers")
     }
 
     fn title_repair_marker_path(&self, chat_id: &str) -> PathBuf {
         self.title_repair_markers_dir().join(chat_id)
+    }
+
+    /// Stamps `Chat.scheduled_task` on chats imported before the field
+    /// existed, and retitles the ones still showing the prompt's tag line.
+    /// Each imported chat is scanned once, recorded by a marker file.
+    pub fn repair_scheduled_tasks(&self) -> Result<usize, EngineError> {
+        let registry = load_agent_mode_task_names();
+        let mut repaired = 0;
+        for chat in self.workspace.read_chats()? {
+            if chat.scheduled_task_info.is_some() || self.scheduled_task_marker_path(&chat.id).is_file()
+            {
+                continue;
+            }
+            let Some(cursor) = self.read_cursor(&chat.id)? else {
+                continue; // only imported chats can be scheduled runs
+            };
+            let path = Path::new(&cursor.transcript_path);
+            let tagged = first_raw_user_message(path)
+                .as_deref()
+                .and_then(scheduled_task_name)
+                .is_some();
+            if tagged
+                && let Ok(parsed) = parse_transcript(path, &self.device_id)
+                && let Some(task) = &parsed.scheduled_task
+            {
+                if let Some(info) = scheduled_metadata(&parsed, &cursor.external_session_id, &self.device_id, &self.store.root().to_string_lossy()) {
+                    self.workspace.set_chat_scheduled_task_info(&chat.id, &info)?;
+                } else {
+                    self.workspace.set_chat_scheduled_task(&chat.id, task)?;
+                }
+                let stale_title = chat
+                    .title
+                    .as_deref()
+                    .is_none_or(|t| t.trim().is_empty() || t.starts_with('<'));
+                if stale_title
+                    && let Some(title) =
+                        parsed_chat_title(&cursor.external_session_id, &parsed, &registry)
+                {
+                    self.workspace.rename_chat(&chat.id, &title)?;
+                }
+                repaired += 1;
+            }
+            let _ = std::fs::create_dir_all(self.scheduled_task_markers_dir());
+            let _ = std::fs::write(self.scheduled_task_marker_path(&chat.id), b"");
+        }
+        Ok(repaired)
+    }
+
+    fn scheduled_task_markers_dir(&self) -> PathBuf {
+        self.store.root().join("scheduled-task-scan-v2")
+    }
+
+    fn scheduled_task_marker_path(&self, chat_id: &str) -> PathBuf {
+        self.scheduled_task_markers_dir().join(chat_id)
     }
 
     /// Sibling to [`Self::repair_missing_timestamps`], same "called from the same
@@ -1435,11 +1452,16 @@ struct ParsedTranscript {
     /// `ai_title` for historical reasons: this predates the priority chain,
     /// back when it was the only source `import()` used).
     title: Option<String>,
+    /// The transcript's latest `custom-title` record (a user or Claude
+    /// Desktop rename), which outranks `title`.
+    custom_title: Option<String>,
     /// The first real (non-synthetic) user message's raw text, unfiltered by
     /// pasted-content stripping or truncation — tier 3 input for
     /// [`resolve_chat_title`], which does both. `None` when the transcript
     /// has no such message at all.
     first_user_message: Option<String>,
+    /// See [`scheduled_task_name`].
+    scheduled_task: Option<String>,
     cwd: Option<String>,
     git_branch: Option<String>,
     git_detected: bool,
@@ -1470,6 +1492,8 @@ pub(crate) struct RawLine {
     pub(crate) message: Option<RawMessage>,
     #[serde(rename = "aiTitle")]
     ai_title: Option<String>,
+    #[serde(rename = "customTitle")]
+    custom_title: Option<String>,
     attachment: Option<Value>,
 }
 
@@ -1924,6 +1948,49 @@ fn resolve_chat_title(
     first_user_message.and_then(derive_title_from_first_message)
 }
 
+/// [`resolve_chat_title`] over a parsed transcript, with `custom-title`
+/// outranking `ai-title`. A scheduled run's first message is the task's own
+/// prompt, so the task name stands in for it.
+fn parsed_chat_title(
+    external_session_id: &str,
+    parsed: &ParsedTranscript,
+    registry: &HashMap<String, String>,
+) -> Option<String> {
+    let title = parsed
+        .custom_title
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .or(parsed.title.as_deref());
+    match &parsed.scheduled_task {
+        Some(task) => {
+            resolve_chat_title(external_session_id, title, None, registry).or(Some(task.clone()))
+        }
+        None => resolve_chat_title(
+            external_session_id,
+            title,
+            parsed.first_user_message.as_deref(),
+            registry,
+        ),
+    }
+}
+
+const SCHEDULED_TASK_TAG: &str = "<scheduled-task name=\"";
+
+/// The task name when `first_user_message` is a Claude scheduled-task run's
+/// opening prompt, which starts a line with the tag. Only the first message
+/// is checked: later ones quoting the tag are ordinary chats about a task.
+fn scheduled_task_name(first_user_message: &str) -> Option<String> {
+    let (start, _) = first_user_message
+        .match_indices(SCHEDULED_TASK_TAG)
+        .find(|(ix, _)| {
+            let before = first_user_message[..*ix].trim_end_matches([' ', '\t']);
+            before.is_empty() || before.ends_with('\n')
+        })?;
+    let rest = &first_user_message[start + SCHEDULED_TASK_TAG.len()..];
+    let name = rest[..rest.find('"')?].trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 fn parse_ts(ts: Option<&str>) -> i64 {
     ts.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
         .map(|dt| dt.timestamp_millis())
@@ -1985,6 +2052,7 @@ fn parse_transcript(path: &Path, device_id: &str) -> Result<ParsedTranscript, En
     let mut cwd: Option<String> = None;
     let mut git_branch: Option<String> = None;
     let mut title: Option<String> = None;
+    let mut custom_title: Option<String> = None;
     let mut git_detected = false;
     let mut line_no: usize = 0;
     let mut safe_lines_consumed: usize = 0;
@@ -2023,6 +2091,11 @@ fn parse_transcript(path: &Path, device_id: &str) -> Result<ParsedTranscript, En
             Some("ai-title") => {
                 if raw.ai_title.is_some() {
                     title = raw.ai_title; // last one wins — the most complete summary
+                }
+            }
+            Some("custom-title") => {
+                if raw.custom_title.is_some() {
+                    custom_title = raw.custom_title;
                 }
             }
             Some("attachment") => {
@@ -2171,10 +2244,13 @@ fn parse_transcript(path: &Path, device_id: &str) -> Result<ParsedTranscript, En
     );
 
     let first_user_message = first_real_user_message_text(&entries);
+    let scheduled_task = first_user_message.as_deref().and_then(scheduled_task_name);
     Ok(ParsedTranscript {
         entries,
         title,
+        custom_title,
         first_user_message,
+        scheduled_task,
         cwd,
         git_branch,
         git_detected,

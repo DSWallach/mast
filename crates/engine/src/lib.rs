@@ -61,6 +61,7 @@ pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
 pub mod scheduled_tasks;
+pub mod side_chat;
 pub mod source_control;
 pub mod spaces;
 pub mod subagent_scan;
@@ -341,6 +342,13 @@ impl EngineCore {
         );
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        // Before recovery, so a side chat interrupted by the restart is
+        // retired instead of revived.
+        match doc_host.archive_orphaned_side_chats() {
+            0 => {}
+            archived => tracing::info!(archived, "archived side chats left without a pane"),
+        }
+        doc_host.spawn_side_chat_reaper();
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
@@ -469,6 +477,14 @@ impl EngineCore {
                     Ok(n) => tracing::info!(count = n, "resolved missing titles on imported chats"),
                     Err(err) => tracing::warn!(error = %err, "title repair pass failed"),
                 }
+            });
+        }
+        {
+            let importer = external_import.clone();
+            tokio::task::spawn_blocking(move || match importer.repair_scheduled_tasks() {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(count = n, "tagged imported scheduled-task runs"),
+                Err(err) => tracing::warn!(error = %err, "scheduled-task repair pass failed"),
             });
         }
         // Chats that ran before `Chat.actual_model` existed: recover the model
@@ -625,14 +641,6 @@ impl EngineCore {
         ));
         pr_ticket_cache.spawn_sweep_loop();
         let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
-        {
-            let importer = external_import.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(error) = importer.repair_scheduled_tasks() {
-                    tracing::warn!(%error, "scheduled task provenance repair failed");
-                }
-            });
-        }
         scheduled_tasks.start();
         Ok(Self {
             scheduled_tasks,

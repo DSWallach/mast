@@ -64,6 +64,7 @@ async fn check_persistence(
         attachments: vec![],
         worktree: None,
         resume: None,
+        fork_from: None,
         instructions: None,
     };
     core.sessions

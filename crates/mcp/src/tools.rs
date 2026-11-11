@@ -1561,7 +1561,11 @@ impl Tools {
                 harness_session_id: None,
                 harness_session_cwd: None,
                 actual_model: None,
+                scheduled_task: None,
+                scheduled_task_info: None,
                 parent_chat_id: parent_chat_id.clone(),
+                side_of: None,
+                side_absorbed_through: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
@@ -1569,7 +1573,6 @@ impl Tools {
                 linked_pr_source: None,
                 linked_ticket_id: None,
                 linked_ticket_source: None,
-                scheduled_task: None,
             };
             let sent = match agent_key.as_deref() {
                 // The launch already queued the first Turn.
@@ -2260,6 +2263,7 @@ fn run_request(chat: &Chat, space: Option<&Space>, harness: HarnessId, text: Str
         // The chat's own approval mode (default Ask).
         auto_approve: config.as_ref().is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments: Vec::new(),
         worktree: None,
         instructions: None,

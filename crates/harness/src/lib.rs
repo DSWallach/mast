@@ -152,6 +152,11 @@ pub trait Harness: Send + Sync {
     fn deterministic_turn_end(&self) -> bool {
         false
     }
+    /// Whether `RunRequest::fork_from` starts a new native session copied
+    /// from another one. Without it a side chat is seeded with text instead.
+    fn supports_session_fork(&self) -> bool {
+        false
+    }
     /// Whether a user-prompted turn has an authoritative completion signal.
     /// Such turns must never be parked merely because their stream is quiet.
     /// Unlike deterministic_turn_end, this need not cover autonomous activity.

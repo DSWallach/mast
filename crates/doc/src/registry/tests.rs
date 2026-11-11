@@ -274,7 +274,11 @@ pub(super) fn chat(id: &str, device_id: &str) -> Chat {
         harness_session_id: None,
         harness_session_cwd: None,
         actual_model: None,
+        scheduled_task: None,
+        scheduled_task_info: None,
         parent_chat_id: Some("parent-chat".into()),
+        side_of: None,
+        side_absorbed_through: None,
         space_id: None,
         last_seen_at: None,
         room_gen: None,
@@ -282,8 +286,47 @@ pub(super) fn chat(id: &str, device_id: &str) -> Chat {
         linked_pr_source: None,
         linked_ticket_id: None,
         linked_ticket_source: None,
-        scheduled_task: None,
     }
+}
+
+#[test]
+fn scheduled_metadata_preserves_the_legacy_name() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("scheduled", "dev-a")).unwrap();
+    let info = mast_proto::ScheduledChat {
+        task_id: "task-id".into(),
+        task_name: "Daily".into(),
+        run_id: "run-id".into(),
+        session_created_at: Some(123),
+    };
+    assert!(doc.set_chat_scheduled_task_info("scheduled", &info).unwrap());
+    let read = doc.chat("scheduled").unwrap().unwrap();
+    assert_eq!(read.scheduled_task.as_deref(), Some("Daily"));
+    assert_eq!(read.scheduled_task_info.as_ref(), Some(&info));
+    doc.upsert_chat(&read).unwrap();
+    assert_eq!(doc.chat("scheduled").unwrap().unwrap(), read);
+    assert!(!doc.set_chat_scheduled_task_info("missing", &info).unwrap());
+}
+
+#[test]
+fn side_chat_link_and_absorbed_marker_round_trip() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut row = chat("side", "dev-a");
+    row.parent_chat_id = None;
+    row.side_of = Some("main".into());
+    doc.upsert_chat(&row).unwrap();
+    assert!(doc.set_chat_side_absorbed_through("side", Some("a1")).unwrap());
+    assert!(!doc.set_chat_side_absorbed_through("missing", Some("a1")).unwrap());
+    let read = doc.chat("side").unwrap().unwrap();
+    assert_eq!(read.side_of.as_deref(), Some("main"));
+    assert_eq!(read.side_absorbed_through.as_deref(), Some("a1"));
+    assert!(read.is_side_chat() && read.parent_chat_id.is_none());
+    assert!(doc.set_chat_side_absorbed_through("side", None).unwrap());
+    assert_eq!(doc.chat("side").unwrap().unwrap().side_absorbed_through, None);
+    // Rows written before side chats existed read as ordinary chats.
+    let old = chat("old", "dev-a");
+    doc.upsert_chat(&old).unwrap();
+    assert!(!doc.chat("old").unwrap().unwrap().is_side_chat());
 }
 
 #[test]

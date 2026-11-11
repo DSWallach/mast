@@ -81,7 +81,7 @@ pub(crate) fn launch_scheduled_chat(
         Some(draft.config.clone()),
         Some(draft.cwd.clone()),
     )?;
-    workspace.set_chat_scheduled_task(
+    workspace.set_chat_scheduled_task_info(
         chat_id,
         &mast_proto::ScheduledChat {
             task_id: run.task_id.clone(),
@@ -1285,6 +1285,7 @@ fn prompt_request(prompt: &WorkItemPrompt, config: Option<&ChatConfig>, cwd: &st
             .unwrap_or(SandboxLevel::WorkspaceWrite),
         auto_approve: config.is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments: prompt.attachments.clone(),
         worktree: None,
         instructions: None,

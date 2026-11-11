@@ -12,6 +12,7 @@ cd "$(dirname "$0")/.."
 DAEMON_DIR=/tmp/zeron-demo-daemon
 UI_DIR=/tmp/zeron-demo-ui
 IPC=27921
+ZERON="${CARGO_TARGET_DIR:-target}/debug/zeron"
 DELAY=""
 [[ "${1:-}" == "--slow" ]] && DELAY=350
 
@@ -21,7 +22,7 @@ cargo build -p mast -q
 echo "▸ starting engine daemon on :$IPC"
 env MAST_DATA_DIR="$DAEMON_DIR" MAST_IPC_PORT=$IPC MAST_HARNESS=mock \
   ${DELAY:+MAST_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
-  ./target/debug/zeron headless &
+  "$ZERON" headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
 for _ in $(seq 1 40); do
@@ -62,4 +63,4 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
 fi
 
 echo "▸ opening Mast (composer is live — type into it; --slow shows streaming)"
-MAST_DATA_DIR="$UI_DIR" MAST_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/zeron
+MAST_DATA_DIR="$UI_DIR" MAST_IPC_PORT=$IPC RUST_LOG=warn "$ZERON"

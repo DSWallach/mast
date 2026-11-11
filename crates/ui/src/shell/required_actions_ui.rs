@@ -226,7 +226,11 @@ mod status_light_tests {
                 harness_session_id: None,
                 harness_session_cwd: None,
                 actual_model: None,
+                scheduled_task: None,
+                scheduled_task_info: None,
                 parent_chat_id: None,
+                side_of: None,
+                side_absorbed_through: None,
                 space_id: None,
                 last_seen_at: None,
                 room_gen: None,
@@ -234,7 +238,6 @@ mod status_light_tests {
                 linked_pr_source: None,
                 linked_ticket_id: None,
                 linked_ticket_source: None,
-                scheduled_task: None,
             }];
         });
         assert_eq!(light(cx), Some(AppLight::Error));

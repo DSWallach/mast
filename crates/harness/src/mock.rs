@@ -605,6 +605,7 @@ impl Harness for MockHarness {
 pub struct RecordedInstructionRun {
     pub prompt: String,
     pub resume: Option<String>,
+    pub fork_from: Option<String>,
     /// The native session id the run reported in `SessionStarted`.
     pub session_id: String,
     pub instructions: Option<mast_proto::InstructionDelivery>,
@@ -628,6 +629,7 @@ struct InstructionMockState {
     runs: Vec<RecordedInstructionRun>,
     turns: Vec<RecordedInstructionTurn>,
     next_session: usize,
+    session_fork: bool,
 }
 
 /// Instruction-aware test double: declares `Supported` (configurable),
@@ -688,6 +690,11 @@ impl InstructionMockHarness {
     pub fn release(&self) {
         self.release.notify_one();
     }
+
+    /// Advertise session forking: `fork_from` then mints a fresh session.
+    pub fn set_session_fork(&self, on: bool) {
+        self.state().session_fork = on;
+    }
 }
 
 #[async_trait]
@@ -716,6 +723,9 @@ impl Harness for InstructionMockHarness {
     fn instruction_support(&self) -> crate::InstructionSupport {
         self.support.clone()
     }
+    fn supports_session_fork(&self) -> bool {
+        self.state().session_fork
+    }
 
     async fn run(
         &self,
@@ -735,6 +745,7 @@ impl Harness for InstructionMockHarness {
             state.runs.push(RecordedInstructionRun {
                 prompt: request.prompt.clone(),
                 resume: request.resume.clone(),
+                fork_from: request.fork_from.clone(),
                 session_id: session_id.clone(),
                 instructions: request.instructions.clone(),
                 cwd: request.cwd.clone(),

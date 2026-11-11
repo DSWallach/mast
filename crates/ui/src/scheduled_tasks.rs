@@ -855,7 +855,7 @@ impl Render for ScheduledTasksPage {
                 .chats
                 .iter()
                 .filter(|c| {
-                    c.scheduled_task
+                    c.scheduled_task_info
                         .as_ref()
                         .is_some_and(|t| &t.task_id == task_id)
                         && Some(&c.device_id) == self.target.as_ref()
@@ -951,7 +951,7 @@ impl Render for ScheduledTasksPage {
                     .chats
                     .iter()
                     .filter(|c| {
-                        c.scheduled_task
+                        c.scheduled_task_info
                             .as_ref()
                             .is_some_and(|s| s.task_id == task.id)
                             && c.device_id == task.device_id
@@ -1126,6 +1126,36 @@ impl Render for ScheduledTasksPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn latest_editions_and_side_chat_filtering_work_together(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let row = |id: &str, created: i64, side: Option<&str>| {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "host", "archived": false,
+                "createdAt": "2026-01-01T00:00:00Z", "sideOf": side,
+                "scheduledTask": "Daily",
+                "scheduledTaskInfo": {
+                    "taskId": if side.is_some() { "other-task" } else { "task" },
+                    "taskName": "Daily", "runId": id, "sessionCreatedAt": created
+                }
+            }))
+            .unwrap()
+        };
+        state.update(cx, |s, _| {
+            s.chats = vec![
+                row("older", 1, None),
+                row("latest", 2, None),
+                row("side", 3, Some("latest")),
+            ];
+            let ids: Vec<_> = s
+                .overview_chats(chrono::Utc::now())
+                .into_iter()
+                .map(|(_, c)| c.id.as_str())
+                .collect();
+            assert_eq!(ids, vec!["latest"]);
+        });
+    }
+
     #[gpui::test]
     fn native_editor_preserves_instructions_and_constrains_model_options(
         cx: &mut gpui::TestAppContext,

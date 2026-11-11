@@ -1704,6 +1704,8 @@ pub struct ComposerInput {
     max_ascent: f32,
     #[cfg(test)]
     layout_rebuilds: usize,
+    #[cfg(test)]
+    projection_rebuilds: usize,
     /// Normally keeps the caret visible through edits and rewraps. Manual
     /// wheel scrolling pauses it until the next caret move or edit.
     follow_cursor: bool,
@@ -1807,6 +1809,8 @@ impl ComposerInput {
             max_ascent: INPUT_TEXT_SIZE,
             #[cfg(test)]
             layout_rebuilds: 0,
+            #[cfg(test)]
+            projection_rebuilds: 0,
             follow_cursor: true,
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
@@ -1966,14 +1970,20 @@ impl ComposerInput {
     }
 
     fn refresh_projection(&mut self) {
-        self.projection = if self.mentions_enabled {
-            TextProjection::new(&self.content)
+        #[cfg(test)]
+        {
+            self.projection_rebuilds += 1;
+        }
+        self.needs_measure = true;
+        if self.mentions_enabled
+            && (self.content.contains(FILE_MENTION_SCHEME)
+                || self.content.contains(LEGACY_FILE_MENTION_SCHEME))
+        {
+            self.projection = TextProjection::new(&self.content);
         } else {
-            TextProjection {
-                display: self.content.clone(),
-                mentions: Vec::new(),
-            }
-        };
+            self.projection.display.clone_from(&self.content);
+            self.projection.mentions.clear();
+        }
     }
 
     /// Replace a completed `@query` token as one non-coalescing undo step.
@@ -1997,8 +2007,7 @@ impl ComposerInput {
             format!("{path} ")
         };
         self.record_edit(&range, &inserted);
-        self.content =
-            self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
+        self.content.replace_range(range.clone(), &inserted);
         self.refresh_projection();
         let cursor =
             range.start + inserted.len() + existing_separator.map(char::len_utf8).unwrap_or(0);
@@ -2026,8 +2035,7 @@ impl ComposerInput {
         };
         self.invalidate_mention_tooltip();
         self.record_edit(&range, &inserted);
-        self.content =
-            self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
+        self.content.replace_range(range.clone(), &inserted);
         self.refresh_projection();
         let cursor = range.start + cursor_advance;
         self.selected_range = cursor..cursor;
@@ -2054,7 +2062,7 @@ impl ComposerInput {
             return;
         }
         self.record_edit(&range, "");
-        self.content = self.content[..range.start].to_owned() + &self.content[range.end..];
+        self.content.replace_range(range.clone(), "");
         self.refresh_projection();
         self.selected_range = range.start..range.start;
         self.selection_reversed = false;
@@ -2082,8 +2090,7 @@ impl ComposerInput {
             format!("{replacement} ")
         };
         self.record_edit(&range, &inserted);
-        self.content =
-            self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
+        self.content.replace_range(range.clone(), &inserted);
         self.refresh_projection();
         let cursor =
             range.start + inserted.len() + existing_separator.map(char::len_utf8).unwrap_or(0);
@@ -3122,11 +3129,6 @@ impl ComposerInput {
         {
             self.layout_rebuilds += 1;
         }
-        // Rebuild this even for an empty draft. Otherwise deleting the final
-        // mention can leave its previous paint geometry alive while the
-        // placeholder is already being shaped, tinting "Do anything" for a
-        // frame (or longer when no subsequent layout is requested).
-        self.refresh_projection();
         let (display, is_placeholder) = if self.content.is_empty() {
             (self.placeholder.clone(), true)
         } else {
@@ -3377,8 +3379,7 @@ impl EntityInputHandler for ComposerInput {
         if self.marked_range.is_none() {
             self.record_edit(&range, new_text);
         }
-        self.content =
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        self.content.replace_range(range.clone(), new_text);
         self.refresh_projection();
         let cursor = range.start + new_text.len();
         self.selected_range = cursor..cursor;
@@ -3425,8 +3426,7 @@ impl EntityInputHandler for ComposerInput {
             self.redo_stack.clear();
             self.last_edit = None;
         }
-        self.content =
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        self.content.replace_range(range.clone(), new_text);
         self.refresh_projection();
         if new_text.is_empty() {
             self.marked_range = None;
@@ -4360,7 +4360,7 @@ fn slash_error_message(err: &RpcError) -> SharedString {
 #[derive(Debug, Clone, PartialEq)]
 struct ComposerSlice {
     selected_chat: Option<String>,
-    chat: Option<mast_proto::Chat>,
+    chat: Option<crate::pickers::ChatControlsSlice>,
     space: Option<mast_proto::Space>,
     effective_device: Option<String>,
     local_device_id: Option<String>,
@@ -4379,7 +4379,9 @@ impl ComposerSlice {
         let selected = state.selected_chat.as_deref();
         Self {
             selected_chat: state.selected_chat.clone(),
-            chat: state.selected_chat_row().cloned(),
+            chat: state
+                .selected_chat_row()
+                .map(crate::pickers::ChatControlsSlice::from),
             space: state.selected_space_row().cloned(),
             effective_device: state.effective_device_id(),
             local_device_id: state.local_device_id.clone(),
@@ -4493,6 +4495,9 @@ pub struct Composer {
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
+    /// The draft the composer held when the question panel borrowed its
+    /// input. Kept out of the answer and handed back when the panel closes.
+    wizard_draft: Option<String>,
     send_task: Option<Task<()>>,
     /// The queued message being edited in the composer (see
     /// [`Composer::begin_queue_edit`]).
@@ -4703,8 +4708,20 @@ impl Composer {
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
-            ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
-                this.on_input_edited(cx)
+            ComposerInputEvent::Edited => this.on_input_edited(cx),
+            ComposerInputEvent::CursorMoved => {
+                let input = this.input.read(cx);
+                if this.mention.token.is_some()
+                    || this.slash.token.is_some()
+                    || this.mention.dismissed.is_some()
+                    || this.slash.dismissed.is_some()
+                    || mention_token(input.text(), input.cursor_offset()).is_some()
+                    || slash_token(input.text(), input.cursor_offset()).is_some()
+                {
+                    this.on_input_edited(cx);
+                } else {
+                    this.report_user_activity(cx);
+                }
             }
             ComposerInputEvent::ViewportChanged => cx.notify(),
             // The slash popup and the mention popup share the input's
@@ -4785,6 +4802,7 @@ impl Composer {
             wizard: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
+            wizard_draft: None,
             failure_key: None,
             failed_send: None,
             retry_send_id: None,
@@ -5657,26 +5675,36 @@ impl Composer {
             }
             return;
         }
-        let (text, cursor) = {
+        let (slash, slash_dismissed, mention, mention_dismissed) = {
             let input = self.input.read(cx);
-            (input.text().to_string(), input.cursor_offset())
+            let text = input.text();
+            let cursor = input.cursor_offset();
+            let slash = slash_token(text, cursor);
+            let mention = mention_token(text, cursor);
+            let slash_dismissed = slash.as_ref().is_some_and(|token| {
+                self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
+                    token.range == *range && text.get(range.clone()) == Some(value.as_str())
+                })
+            });
+            let mention_dismissed = mention.as_ref().is_some_and(|token| {
+                self.mention
+                    .dismissed
+                    .as_ref()
+                    .is_some_and(|(range, value)| {
+                        token.range == *range && text.get(range.clone()) == Some(value.as_str())
+                    })
+            });
+            (slash, slash_dismissed, mention, mention_dismissed)
         };
-        self.update_slash(&text, cursor, cx);
+        self.update_slash(slash, slash_dismissed, cx);
         // A live slash token owns the completion keys; never open the file
         // popup on top of it (defensive — the shapes are already disjoint).
         let token = if self.slash.token.is_some() {
             None
         } else {
-            mention_token(&text, cursor)
+            mention
         };
-        let still_dismissed = token.as_ref().is_some_and(|token| {
-            self.mention
-                .dismissed
-                .as_ref()
-                .is_some_and(|(range, value)| {
-                    token.range == *range && text.get(range.clone()) == Some(value.as_str())
-                })
-        });
+        let still_dismissed = token.is_some() && mention_dismissed;
         if still_dismissed {
             self.mention.token = None;
             self.mention_task = None;
@@ -5988,13 +6016,15 @@ impl Composer {
 
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
     /// harness's command list on first open, filter locally per keystroke.
-    fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
-        let token = slash_token(text, cursor);
-        let still_dismissed = token.as_ref().is_some_and(|token| {
-            self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
-                token.range == *range && text.get(range.clone()) == Some(value.as_str())
-            })
-        });
+    fn update_slash(
+        &mut self,
+        token: Option<MentionToken>,
+        still_dismissed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if token.is_none() && self.slash.token.is_none() {
+            return;
+        }
         if still_dismissed {
             self.slash.token = None;
             self.sync_mention_controls(cx);
@@ -6016,7 +6046,6 @@ impl Composer {
         };
         let key_changed = self.slash.harness != harness || self.slash.cwd != cwd;
         if token == self.slash.token && !key_changed {
-            self.refilter_slash(cx);
             return;
         }
         self.slash.token = token.clone();
@@ -6529,7 +6558,13 @@ impl Composer {
                 self.launching_new_chat && self.current_key.is_empty() && !key.is_empty();
             let returning_to_new_thread = !self.current_key.is_empty() && key.is_empty();
             self.launching_new_chat = false;
-            let old_text = self.input.read(cx).text().to_string();
+            // With the question panel up, the input holds an answer in
+            // progress; the chat's real draft is the stashed one.
+            let old_text = if self.wizard.is_some() {
+                self.wizard_draft.take().unwrap_or_default()
+            } else {
+                self.input.read(cx).text().to_string()
+            };
             if old_text.is_empty() {
                 self.drafts.remove(&self.current_key);
             } else {
@@ -6592,10 +6627,17 @@ impl Composer {
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
                     self.reset_mention(None, cx);
+                    // A replaced question's half-typed answer is dropped; the
+                    // draft stashed for the first question still stands.
+                    if self.wizard.is_none() {
+                        let draft = self.input.read(cx).text().to_string();
+                        self.wizard_draft = (!draft.is_empty()).then_some(draft);
+                    }
                     self.wizard = Some(Wizard::new(request_id, questions));
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
+                        input.set_text("", cx);
                         input.set_placeholder("Type your own answer, or pick an option above", cx)
                     });
                 }
@@ -6618,8 +6660,13 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
-                        self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                        let draft = self.wizard_draft.take();
+                        self.input.update(cx, |input, cx| {
+                            if let Some(draft) = draft {
+                                input.set_text(draft, cx);
+                            }
+                            input.set_placeholder("Do anything…", cx)
+                        });
                     }
                 }
             }
@@ -7427,6 +7474,7 @@ impl Composer {
                         // pickers row; new-chat draft on first send).
                         auto_approve: resolved.auto_approve,
                         resume: None,
+                        fork_from: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,
                         instructions: None,
@@ -7737,8 +7785,9 @@ impl Composer {
         };
         self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
+        let draft = self.wizard_draft.take().unwrap_or_default();
         self.input.update(cx, |input, cx| {
-            input.set_text("", cx);
+            input.set_text(draft, cx);
             // The panel borrowed the composer input; hand back its identity.
             input.set_placeholder("Do anything…", cx);
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
@@ -8906,6 +8955,99 @@ mod tests {
     }
 
     #[gpui::test]
+    fn input_layout_retains_projection_through_edits_ime_and_undo(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, window, cx| {
+                composer.input.update(cx, |input, cx| {
+                    input.enable_mentions();
+                    let mention = local_file_link("src/日本.rs", false);
+                    input.set_text(format!("café {mention}"), cx);
+                    let mut before = input.projection_rebuilds;
+                    let style = window.text_style();
+                    for width in [200.0, 300.0, 200.0] {
+                        input.layout_text(px(width), &style, window, cx);
+                    }
+                    assert_eq!(
+                        input.projection_rebuilds, before,
+                        "resizing must not reparse mentions"
+                    );
+                    input.selected_range = input.content.len()..input.content.len();
+                    input.replace_text_in_range(None, "!", window, cx);
+                    assert_eq!(input.projection_rebuilds, before + 1);
+                    input.undo(&Undo, window, cx);
+                    assert_eq!(input.content, format!("café {mention}"));
+                    input.redo(&Redo, window, cx);
+                    assert_eq!(input.content, format!("café {mention}!"));
+                    assert_eq!(input.projection.mentions.len(), 1);
+                    input.set_text("", cx);
+                    assert!(input.projection.mentions.is_empty());
+                    input.replace_and_mark_text_in_range(None, "に", Some(1..1), window, cx);
+                    input.replace_text_in_range(None, "日本", window, cx);
+                    assert_eq!(input.content, "日本");
+                    assert_eq!(input.projection.display, "日本");
+                    before = input.projection_rebuilds;
+                    input.layout_text(px(200.0), &style, window, cx);
+                    assert_eq!(input.projection_rebuilds, before);
+                    input.undo(&Undo, window, cx);
+                    assert!(input.content.is_empty());
+                    assert!(input.projection.display.is_empty());
+                });
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn plain_cursor_movement_does_not_redraw_composer(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let composer = handle.root(cx).unwrap();
+        let input = composer.read_with(cx, |composer, _| composer.input.clone());
+        input.update(cx, |input, cx| {
+            input.set_text("ordinary text with no completions", cx)
+        });
+        cx.run_until_parked();
+        let count = Rc::new(std::cell::Cell::new(0));
+        let seen = count.clone();
+        cx.update(|cx| {
+            cx.observe(&composer, move |_, _| seen.set(seen.get() + 1))
+                .detach()
+        });
+        for offset in 0..20 {
+            input.update(cx, |input, cx| input.move_to(offset, cx));
+            cx.run_until_parked();
+        }
+        assert_eq!(count.get(), 0);
+        input.update(cx, |input, cx| input.set_text("/comp tail", cx));
+        cx.run_until_parked();
+        count.set(0);
+        input.update(cx, |input, cx| input.move_to(4, cx));
+        cx.run_until_parked();
+        assert!(count.get() > 0, "moving into a completion must still update the composer");
+    }
+
+    #[gpui::test]
+    fn unchanged_slash_token_preserves_menu_selection(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("/comp", cx));
+                composer.on_input_edited(cx);
+                composer.slash.active = Some(2);
+                composer.on_input_edited(cx);
+                assert_eq!(composer.slash.active, Some(2));
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("plain text", cx));
+                composer.on_input_edited(cx);
+                assert!(composer.slash.token.is_none());
+                assert!(!composer.input.read(cx).mention_open);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn dropped_paths_include_files_folders_and_failures(cx: &mut gpui::TestAppContext) {
         let (workspace, handle) = composer_focus_window(cx);
         let outside = tempfile::tempdir().unwrap();
@@ -9339,10 +9481,13 @@ mod tests {
                 cwd: None, branch: None, checkout_id: None, source_context: None, config: None,
                 last_message_preview: None, last_message_at: None, created_at: chrono::Utc::now(),
                 harness_session_id: None, harness_session_cwd: None, actual_model: None,
+                scheduled_task: None,
+                scheduled_task_info: None,
                 parent_chat_id: None, space_id: None, last_seen_at: None, room_gen: None,
+                side_of: None,
+                side_absorbed_through: None,
                 linked_pr_url: None, linked_pr_source: None, linked_ticket_id: None,
                 linked_ticket_source: None,
-                scheduled_task: None,
             });
         });
         let composer = cx.new(|cx| Composer::new(state, cx));
@@ -10918,6 +11063,83 @@ mod tests {
             answers[1].labels,
             vec!["custom answer"],
             "typed overrides picked, trimmed"
+        );
+    }
+
+    fn asked(request_id: &str, resolved: bool) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "m".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: format!("in-{request_id}"),
+                request_id: request_id.into(),
+                questions: vec![question("q", &["yes", "no"], false)],
+                resolved,
+            }],
+            created_at: 0,
+            device_id: "d".into(),
+            status: Some(mast_doc::MessageStatus::Streaming),
+            continuation_of: None,
+        }
+    }
+
+    #[gpui::test]
+    fn picking_an_answer_sends_the_option_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+        use super::instruction_reset::tests::{draw, harness};
+        let (mut h, vcx) = harness(cx);
+        let _guard = h._runtime.enter();
+        let input = h.composer.read_with(vcx, |composer, _| composer.input.clone());
+        input.update(vcx, |input, cx| input.set_text("my unsent draft", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", false)]);
+            cx.notify();
+        });
+        draw(vcx);
+        h.composer.read_with(vcx, |composer, cx| {
+            assert!(composer.wizard.is_some());
+            assert!(composer.input.read(cx).is_empty(), "the draft is not the answer");
+        });
+
+        h.composer
+            .update(vcx, |composer, cx| composer.wizard_select(1, cx));
+        vcx.executor()
+            .advance_clock(Duration::from_millis(AUTO_ADVANCE_MS + 10));
+        draw(vcx);
+
+        let sent = h.sent(methods::QUEUE_COMMAND);
+        assert_eq!(sent.len(), 1);
+        let command = &sent[0]["params"]["command"];
+        assert_eq!(command["kind"], "respondInput");
+        assert_eq!(command["answers"][0]["labels"], serde_json::json!(["no"]));
+        assert_eq!(
+            input.read_with(vcx, |input, _| input.text().to_string()),
+            "my unsent draft"
+        );
+    }
+
+    #[gpui::test]
+    fn a_question_resolved_elsewhere_hands_the_draft_back(cx: &mut gpui::TestAppContext) {
+        use super::instruction_reset::tests::{draw, harness};
+        let (h, vcx) = harness(cx);
+        let _guard = h._runtime.enter();
+        let input = h.composer.read_with(vcx, |composer, _| composer.input.clone());
+        input.update(vcx, |input, cx| input.set_text("my unsent draft", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", false)]);
+            cx.notify();
+        });
+        draw(vcx);
+        input.update(vcx, |input, cx| input.set_text("half an answer", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", true)]);
+            cx.notify();
+        });
+        draw(vcx);
+        h.composer
+            .read_with(vcx, |composer, _| assert!(composer.wizard.is_none()));
+        assert_eq!(
+            input.read_with(vcx, |input, _| input.text().to_string()),
+            "my unsent draft"
         );
     }
 

@@ -58,6 +58,7 @@ fn section_icon(name: &str) -> &'static str {
         "plan" => crate::icons::CHECKLIST,
         "children" => crate::icons::LIST,
         "wakes" => crate::icons::BELL,
+        "subagents" => crate::icons::BOT,
         "work-item" => crate::icons::PLUS,
         _ => crate::icons::TAG,
     }
@@ -236,7 +237,7 @@ impl Shell {
         let badges = self.render_header_badges(&facts, theme, cx);
         let admin_badge = self.render_admin_badge(&chat_id, "chat-header", theme, cx);
         let chips = self.render_header_chips(&facts, theme, cx);
-        let scheduled_history = self.state.read(cx).selected_chat_row().and_then(|c| c.scheduled_task.clone()).map(|t| {
+        let scheduled_history = self.state.read(cx).selected_chat_row().and_then(|c| c.scheduled_task_info.clone()).map(|t| {
             let task_id = t.task_id.clone();
             popover::btn_ghost(theme, "Run history", "scheduled-session-history")
                 .id("scheduled-session-history")
@@ -246,8 +247,8 @@ impl Shell {
 
         let scheduled_latest = {
             let state=self.state.read(cx);
-            state.selected_chat_row().and_then(|selected|selected.scheduled_task.as_ref().and_then(|task| {
-                state.chats.iter().filter(|c|c.device_id==selected.device_id&&c.scheduled_task.as_ref().is_some_and(|t|t.task_id==task.task_id))
+            state.selected_chat_row().and_then(|selected|selected.scheduled_task_info.as_ref().and_then(|task| {
+                state.chats.iter().filter(|c|c.device_id==selected.device_id&&c.scheduled_task_info.as_ref().is_some_and(|t|t.task_id==task.task_id))
                     .max_by_key(|c|mast_proto::task_chat_order(c)).filter(|c|c.id!=selected.id).map(|c|c.id.clone())
             })).map(|latest|popover::btn_ghost(theme,"Latest run","scheduled-latest-run").id("scheduled-latest-run")
                 .on_click(cx.listener(move|this,_,_,cx|{this.state.update(cx,|s,cx|s.select_chat(Some(latest.clone()),cx));cx.notify();})).into_any_element())
@@ -712,6 +713,52 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The chat's running subagents, one row each; a click does what the
+    /// spawn chip does. `None` while nothing runs.
+    fn render_item_tab_subagents(
+        &mut self,
+        chat_id: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let running = self.state.read(cx).running_subagents(chat_id);
+        if running.is_empty() {
+            return None;
+        }
+        let status = crate::status_style::Status::Working;
+        let color = crate::status_style::status_style(status, theme.appearance).color;
+        let mut block = crate::components::linear_parts::team_column(theme, true)
+            .debug_selector(|| "chat-item-subagents".into())
+            .child(section_label(
+                theme,
+                section_icon("subagents"),
+                "Running subagents",
+                "chat-item-subagents-icon".into(),
+            ));
+        for subagent in running {
+            let doc_id = subagent.doc_id;
+            let indicator = crate::components::shell_parts::activity_indicator(
+                status,
+                format!("chat-item-subagent-status-{doc_id}"),
+                theme,
+                cx.entity_id(),
+                cx,
+            );
+            let open = subagent.open;
+            block = block.child(
+                crate::components::shell_parts::worker_row(theme, format!("chat-item-subagent-{doc_id}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.handle_transcript_event(&open, cx)))
+                    .child(
+                        crate::components::linear_parts::team_worker_header(theme)
+                            .child(div().flex_none().child(indicator))
+                            .child(crate::components::shell_parts::worker_title(theme, subagent.title))
+                            .child(crate::components::shell_parts::worker_metadata(theme, "running".into(), color)),
+                    ),
+            );
+        }
+        Some(block.into_any_element())
+    }
+
     fn render_item_tab_sections(
         &mut self,
         facts: &ChatItemFacts,
@@ -804,6 +851,11 @@ impl Shell {
         if !team.is_empty() {
             col = col.child(self.render_item_tab_team(&team, theme, cx));
             col = col.child(self.render_item_tab_wake(&facts.chat_id, theme, cx));
+        }
+
+        // Running subagents.
+        if let Some(block) = self.render_item_tab_subagents(&facts.chat_id, theme, cx) {
+            col = col.child(block);
         }
 
         // Instructions.

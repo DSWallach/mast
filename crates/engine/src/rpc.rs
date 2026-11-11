@@ -672,6 +672,11 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// "Ask on the side": the main chat this one is a side chat of. The
+        /// host copies Space, cwd, checkout, config and account pin from it
+        /// and ignores the other placement fields.
+        #[serde(default)]
+        side_of: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1926,7 +1931,22 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                side_of,
             } => {
+                if let Some(main_id) = side_of.filter(|id| !id.trim().is_empty()) {
+                    let side = self
+                        .workspace
+                        .create_side_chat(&chat_id, &main_id)
+                        .map_err(failed)?;
+                    if let (Some(accounts), Some(config)) = (&self.managed_accounts, &side.config)
+                        && let Some(pin) = accounts.chat_pin(&main_id, config.harness)
+                        && let Err(err) = accounts.pin_chat(&chat_id, config.harness, &pin)
+                    {
+                        tracing::warn!(chat = %chat_id, main = %main_id, error = %err,
+                            "side chat account pin failed");
+                    }
+                    return Ok(());
+                }
                 let parent_chat_id = parent_chat_id.filter(|p| !p.trim().is_empty());
                 // A child of a bound Chat in the same Space starts in the
                 // parent's execution root by default (acceptance 19), so it
@@ -2172,6 +2192,8 @@ fn forwardable(method: &str) -> bool {
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
             | methods::QUEUE_MESSAGE
+            // Reads the side chat and queues into its main chat on their host.
+            | methods::ABSORB_SIDE_CHAT
             | methods::UPDATE_QUEUED_MESSAGE
             | methods::BEGIN_QUEUED_MESSAGE_EDIT
             | methods::RENEW_QUEUED_MESSAGE_EDIT
@@ -2862,6 +2884,15 @@ impl RpcService for EngineRpc {
                         RpcError::Failed(e.to_string())
                     })?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::ABSORB_SIDE_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                let reply = self
+                    .doc_host
+                    .absorb_side_chat(&p.chat_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
             }
             methods::UPDATE_QUEUED_MESSAGE => {
                 let p: QueuedMessageParams = parse_params(params)?;

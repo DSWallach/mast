@@ -772,6 +772,11 @@ impl ManagedAccounts {
         Ok(())
     }
 
+    /// A chat's raw account pin for `harness` (empty = Default), if decided.
+    pub fn chat_pin(&self, chat_id: &str, harness: HarnessId) -> Option<String> {
+        lock(&self.store).chat_pins.get(&key(chat_id, harness)).cloned()
+    }
+
     /// The home a chat is already pinned to (no side effects): for work that
     /// belongs to the chat but runs outside its dispatch, such as titles.
     pub fn pinned_home(&self, chat_id: &str, harness: HarnessId) -> Option<PathBuf> {

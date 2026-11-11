@@ -62,7 +62,7 @@ async fn scheduled_launch_is_durable_idempotent_and_tagged() {
         .unwrap();
     let chat_id = snapshot.runs[0].chat_id.as_ref().unwrap();
     let chat = core.workspace.chat(chat_id).unwrap().unwrap();
-    assert_eq!(chat.scheduled_task.as_ref().unwrap().task_id, "task");
+    assert_eq!(chat.scheduled_task_info.as_ref().unwrap().task_id, "task");
     assert_eq!(chat.config.unwrap().reasoning, Some(ReasoningLevel::Medium));
     let doc = core.doc_host.open(chat_id).unwrap();
     assert_eq!(doc.doc().read_commands().unwrap().len(), 1);
@@ -209,7 +209,7 @@ async fn imported_sessions_keep_original_edition_order() {
         core.external_import.import(id, id, &path).unwrap();
     }
     let chats = core.workspace.read_chats().unwrap();
-    assert!(chats.iter().all(|c| c.scheduled_task.is_some()));
+    assert!(chats.iter().all(|c| c.scheduled_task_info.is_some()));
     let ids = latest_task_chat_ids(&chats);
     assert!(ids.contains("newer"));
     assert!(!ids.contains("older"));
