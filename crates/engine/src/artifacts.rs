@@ -1374,7 +1374,7 @@ impl ArtifactsService {
 
     /// The current text of an artifact (stored file, else the current
     /// snapshot).
-    fn current_bytes(&self, artifact: &ArtifactView) -> Outcome<Vec<u8>> {
+    pub(crate) fn current_bytes(&self, artifact: &ArtifactView) -> Outcome<Vec<u8>> {
         read_file(Path::new(&artifact.stored_path)).or_else(|error| {
             let current = artifact.current().ok_or(error)?;
             std::fs::read(self.snapshot_path(&artifact.id, &current.hash))

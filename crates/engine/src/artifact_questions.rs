@@ -209,10 +209,13 @@ impl ArtifactQuestionSync {
         let Some(item) = artifact.work_item_id.clone() else {
             return 0;
         };
-        if artifact.device_id != self.artifacts.device_id()
-            || artifact.archived_at.is_some()
-            || !(artifact.pinned_as_plan || artifact.role.as_deref() == Some("plan"))
-        {
+        if artifact.device_id != self.artifacts.device_id() || artifact.archived_at.is_some() {
+            return 0;
+        }
+        if artifact.kind == mast_proto::ArtifactKind::DecisionSheet {
+            return self.reconcile_sheet(&artifact, &item);
+        }
+        if !(artifact.pinned_as_plan || artifact.role.as_deref() == Some("plan")) {
             return 0;
         }
         let questions = self.artifacts.plan_questions(&artifact);
@@ -378,6 +381,35 @@ impl ArtifactQuestionSync {
                 rollup_info_full,
                 rollup_k,
             ) as usize;
+        }
+        changes
+    }
+
+    /// Keep one Required Action for all unanswered rows in a sheet.
+    fn reconcile_sheet(&self, artifact: &ArtifactView, item: &str) -> usize {
+        let Ok(bytes) = self.artifacts.current_bytes(artifact) else { return 0; };
+        let Ok(source) = std::str::from_utf8(&bytes) else { return 0; };
+        let Ok(sheet) = mast_proto::decision_sheet::DecisionSheet::parse(source) else { return 0; };
+        let open: Vec<_> = sheet.decision_rows().into_iter()
+            .filter(|row| row.status.state == "open" && !artifact.decisions.iter().any(|decision| decision.row_id == row.id)).collect();
+        let key = format!("artsheet:{}", artifact.id);
+        let snapshot = self.outline.snapshot(&artifact.space_id);
+        let requests: Vec<_> = snapshot.user_action_requests.iter()
+            .filter(|request| request.work_item_id == item && request.is_open() && request.dedupe_key.as_deref() == Some(key.as_str()))
+            .collect();
+        let text = truncate(&format!("Decide {} open rows in {}", open.len(), one_line(&artifact.title)), user_action_limits::MAX_REQUEST_TEXT_CHARS);
+        let info = format!("[Open sheet]({})\nRevision {}", artifact.url(), artifact.current_revision);
+        let mut current = false;
+        let mut changes = 0;
+        for request in requests {
+            if !open.is_empty() && request.text == text && request.info.as_deref() == Some(info.as_str()) && !current {
+                current = true;
+            } else {
+                changes += self.resolve(request, if open.is_empty() { "No open rows left in the sheet" } else { "Superseded: the open row count changed" }.to_owned()) as usize;
+            }
+        }
+        if !open.is_empty() && !current {
+            changes += self.create(item, &self.origin_for(artifact), text, info, key) as usize;
         }
         changes
     }

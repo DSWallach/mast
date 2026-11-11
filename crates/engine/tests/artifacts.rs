@@ -2496,3 +2496,24 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
     assert_eq!(result["orphanedRowIds"], json!([]));
     assert!(tool(&rig, &rig.other_token, "artifact_get_decisions", json!({"artifactId": id})).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_has_one_required_action_that_tracks_open_rows() {
+    let rig = rig().await;
+    let path = rig.worktree.join("sheet.json");
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    std::fs::write(&path, source).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": "sheet-action"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
+    let open = || {
+        mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()).snapshot(SPACE)
+            .user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).map(|r| r.text).collect::<Vec<_>>()
+    };
+    sync.reconcile(id);
+    assert_eq!(open(), ["Decide 2 open rows in Sheet"]);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-2", "outcome":"decided"}]})).await.unwrap();
+    assert_eq!(open(), ["Decide 1 open rows in Sheet"]);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-4", "outcome":"rejected"}]})).await.unwrap();
+    assert!(open().is_empty());
+}

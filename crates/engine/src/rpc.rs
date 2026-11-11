@@ -3320,8 +3320,12 @@ impl RpcService for EngineRpc {
             methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => {
                 let p: mast_proto::decision_sheet::SubmitSheetDecisionsParams =
                     parse_params(params)?;
-                self.artifact_reply(move |service| service.submit_sheet_decisions(&p))
-                    .await
+                let sync = crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
+                self.artifact_reply(move |service| {
+                    let reply = service.submit_sheet_decisions(&p)?;
+                    sync.reconcile(&p.artifact_id);
+                    Ok(reply)
+                }).await
             }
             methods::ARTIFACT_ADD_COMMENT => {
                 let p: mast_proto::ArtifactAddCommentParams = parse_params(params)?;
