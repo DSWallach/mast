@@ -3051,7 +3051,12 @@ mod tests {
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             artifact_compare_modes: HashMap::from([("mermaid".to_string(), "source".to_string())]),
             artifact_last_viewed: HashMap::from([("a1".to_string(), 3)]),
-            artifact_decision_drafts: HashMap::new(),
+            artifact_decision_drafts: HashMap::from([("a1".into(), mast_proto::decision_sheet::SheetDecisionDrafts {
+                revision: 3,
+                decisions: vec![mast_proto::decision_sheet::SheetDecisionDraft {
+                    row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, note: Some("keep".into()),
+                }],
+            })]),
             artifact_side_layouts: HashMap::new(),
             legacy_accent_color: None,
         };

@@ -1316,6 +1316,12 @@ pub mod agent_tools {
             example: "{}",
         },
         ToolUsage {
+            tool: tools::ARTIFACT_GET_DECISIONS,
+            required: &[p("artifactId", "decision sheet artifact id")],
+            optional: &[],
+            example: r#"{"artifactId": "<artifact id>"}"#,
+        },
+        ToolUsage {
             tool: tools::ARTIFACT_RENDER_CHECK,
             required: &[p("artifactId", "or path, for an unpublished file")],
             optional: &[
