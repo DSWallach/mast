@@ -115,6 +115,13 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
                 {"id":"failure","role":"assistant","parts":[{"id":"error","kind":"error","message":"The service is overloaded. Please try again."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
             ])).unwrap() }, cx).unwrap();
         }
+        if std::env::var_os("MAST_PREVIEW_SUBAGENTS").is_some() {
+            let spawn = |id: &str, description: &str, status: &str| serde_json::json!({"id":id,"kind":"tool","call":{"kind":"unknown","name":format!("Agent: {description}"),"input":{"description":description}},"resolved":true,"subagentRef":format!("fixture-chat--sub--{id}"),"subagentStatus":status});
+            state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
+                {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+                {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I'll split the review across subagents."},spawn("a1","Audit the sidebar layout","running"),spawn("a2","Check the theme contrast","running"),spawn("a3","List the changed files","done")],"createdAt":1788900001000_i64,"deviceId":"local","status":"streaming"}
+            ])).unwrap() }, cx).unwrap();
+        }
     });
     let boot = crate::EngineBootConfig {
         data_dir,
