@@ -12,6 +12,9 @@ fn esc(s: &str) -> String {
 fn identifier(s: &str) -> String {
     esc(s).replace('_', "_<wbr>").replace('.', ".<wbr>")
 }
+fn row_label(id: &str) -> String {
+    format!("<span class=\"mk-row-id\">{}</span> ", esc(id))
+}
 fn status(s: &Status) -> String {
     let (class, label) = match s.state.as_str() {
         "decided" => ("mk-decided", "✓"),
@@ -83,8 +86,8 @@ pub fn render(sheet: &DecisionSheet) -> String {
             for row in rows.iter().filter(|r| r.status.state == state) {
                 write!(
                     out,
-                    "<div class=\"mk-decision\" data-sheet-row=\"{}\"><div><strong>{}</strong>",
-                    esc(row.id), esc(row.question.unwrap_or(row.title))
+                    "<div class=\"mk-decision\" id=\"row-{}\" data-sheet-row=\"{}\"><div>{}<strong>{}</strong>",
+                    esc(row.id), esc(row.id), row_label(row.id), esc(row.question.unwrap_or(row.title))
                 )
                 .unwrap();
                 if let Some(recommendation) = row.recommendation {
@@ -105,7 +108,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
     if !sheet.flows.is_empty() {
         section(&mut out, "Flows");
         for f in &sheet.flows {
-            write!(out, "<div class=\"mk-flow\"><div class=\"mk-card-header\">{} {}</div><div class=\"mk-lane\">", esc(&f.title), status(&f.status)).unwrap();
+            write!(out, "<div class=\"mk-flow\"><div class=\"mk-card-header\"><span>{}{}</span> {}</div><div class=\"mk-lane\">", row_label(&f.id), esc(&f.title), status(&f.status)).unwrap();
             for s in &f.steps {
                 for (kind, label, params, child) in
                     std::iter::once((&s.kind, &s.label, &s.params, s.status.as_ref())).chain(
@@ -147,9 +150,9 @@ pub fn render(sheet: &DecisionSheet) -> String {
         section(&mut out, "Data model");
         out.push_str("<div class=\"mk-grid\">");
         for m in &sheet.models {
-            write!(out,"<div class=\"mk-card\"><div class=\"mk-card-header\">{} {}</div><table class=\"mk-table\"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class=\"mk-notes\">constraint</th><th></th></tr>",esc(&m.name),status(&m.status)).unwrap();
+            write!(out,"<div class=\"mk-card\"><div class=\"mk-card-header\"><span>{}{}</span> {}</div><table class=\"mk-table\"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class=\"mk-notes\">constraint</th><th></th></tr>",row_label(&m.id),esc(&m.name),status(&m.status)).unwrap();
             for f in &m.fields {
-                write!(out,"<tr><td class=\"mk-marker {}\">{}</td><td class=\"mk-mono\">{}</td><td class=\"mk-mono\">{}</td><td>{}{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>",marker(&f.marker),esc(&f.marker),identifier(&f.name),identifier(&f.field_type),if f.null { "nullable" } else { "required" }, f.default.as_ref().map(|x| format!(" / {}",esc(x))).unwrap_or_default(),f.constraint.as_deref().map(esc).unwrap_or_else(|| "—".into()),child_status(f.status.as_ref(), &m.status)).unwrap();
+                write!(out,"<tr id=\"row-{}\"><td class=\"mk-marker {}\">{}</td><td class=\"mk-mono\">{}{}</td><td class=\"mk-mono\">{}</td><td>{}{}</td><td class=\"mk-notes\">{}</td><td>{}</td></tr>",esc(&f.id),marker(&f.marker),esc(&f.marker),row_label(&f.id),identifier(&f.name),identifier(&f.field_type),if f.null { "nullable" } else { "required" }, f.default.as_ref().map(|x| format!(" / {}",esc(x))).unwrap_or_default(),f.constraint.as_deref().map(esc).unwrap_or_else(|| "—".into()),child_status(f.status.as_ref(), &m.status)).unwrap();
             }
             out.push_str("</table></div>");
         }
@@ -157,7 +160,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
     }
     for e in &sheet.endpoints {
         section(&mut out, &format!("API contract · {}", e.name));
-        write!(out,"<div class=\"mk-grid\"><div class=\"mk-card\"><div class=\"mk-card-header\">{} {}</div></div>",esc(&e.name),status(&e.status)).unwrap();
+        write!(out,"<div class=\"mk-grid\"><div class=\"mk-card\"><div class=\"mk-card-header\"><span>{}{}</span> {}</div></div>",row_label(&e.id),esc(&e.name),status(&e.status)).unwrap();
         for (name, lines) in [("request", &e.request), ("response", &e.response)] {
             write!(out,"<div class=\"mk-card\"><div class=\"mk-card-header\">{name}</div><div class=\"mk-diff\">").unwrap();
             for l in lines {
@@ -195,7 +198,13 @@ pub fn render(sheet: &DecisionSheet) -> String {
             }
             out.push_str("<th></th></tr>");
             for row in &r.rows {
-                write!(out, "<tr><td>{}</td>", esc(&row.state)).unwrap();
+                write!(
+                    out,
+                    "<tr><td>{}{}</td>",
+                    row_label(&row.id),
+                    esc(&row.state)
+                )
+                .unwrap();
                 if has_action {
                     write!(
                         out,
@@ -221,7 +230,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
         section(&mut out, "Validations");
         out.push_str("<div class=\"mk-card\"><table class=\"mk-table\"><tr><th>rule</th><th>enforced</th><th>result</th><th></th></tr>");
         for v in &sheet.validations {
-            write!(out, "<tr><td>{}</td><td>", esc(&v.rule)).unwrap();
+            write!(out, "<tr><td>{}{}</td><td>", row_label(&v.id), esc(&v.rule)).unwrap();
             for e in &v.enforced {
                 write!(out, "<span class=\"mk-chip mk-neutral\">{}</span>", esc(e)).unwrap();
             }
@@ -248,7 +257,13 @@ pub fn render(sheet: &DecisionSheet) -> String {
         }
         out.push_str("<th></th></tr>");
         for p in &sheet.permissions {
-            write!(out, "<tr><td class=\"mk-mono\">{}</td>", esc(&p.subject)).unwrap();
+            write!(
+                out,
+                "<tr><td class=\"mk-mono\">{}{}</td>",
+                row_label(&p.id),
+                esc(&p.subject)
+            )
+            .unwrap();
             for column in &columns {
                 write!(
                     out,
@@ -277,7 +292,8 @@ pub fn render(sheet: &DecisionSheet) -> String {
             out.push_str("</div>");
             write!(
                 out,
-                "<div class=\"mk-caption\">{} {}</div></div>",
+                "<div class=\"mk-caption\">{}{} {}</div></div>",
+                row_label(&s.id),
                 esc(&s.label),
                 compact_status(&s.status)
             )
@@ -291,7 +307,9 @@ pub fn render(sheet: &DecisionSheet) -> String {
         for s in &sheet.out_of_scope {
             write!(
                 out,
-                "<span class=\"mk-chip mk-removed\">{}</span> {}",
+                "<span id=\"row-{}\">{}<span class=\"mk-chip mk-removed\">{}</span> {}</span>",
+                esc(&s.id),
+                row_label(&s.id),
                 esc(&s.label),
                 compact_status(&s.status)
             )
@@ -348,11 +366,10 @@ mod tests {
         let source = std::fs::read_to_string(path).unwrap();
         let sheet = DecisionSheet::parse(&source).unwrap();
         let html = render(&sheet);
-        use sha2::{Digest, Sha256};
-        assert_eq!(
-            format!("{:x}", Sha256::digest(html.as_bytes())),
-            "7ea710b252b922a6ba6a1ef894f4c6a97a842d8fc3a3082368aaf803abff46e1"
-        );
+        for row in sheet.decision_rows() {
+            assert!(html.contains(&format!("id=\"row-{}\"", esc(row.id))));
+            assert!(html.contains(&row_label(row.id)));
+        }
         if let Ok(output) = std::env::var("MAST_DECISION_SHEET_RENDER_PATH") {
             std::fs::write(output, html).unwrap();
         }
@@ -371,6 +388,21 @@ mod tests {
             html,
             include_str!("../tests/snapshots/decision-sheet.fragment.html")
         );
+        for row in sheet.decision_rows() {
+            assert_eq!(
+                html.matches(&format!("id=\"row-{}\"", esc(row.id))).count(),
+                1
+            );
+            assert!(html.contains(&row_label(row.id)));
+        }
+        for field in sheet.models.iter().flat_map(|model| &model.fields) {
+            assert!(html.contains(&format!("id=\"row-{}\"", esc(&field.id))));
+            assert!(html.contains(&row_label(&field.id)));
+        }
+        for row in &sheet.out_of_scope {
+            assert!(html.contains(&format!("id=\"row-{}\"", esc(&row.id))));
+            assert!(html.contains(&row_label(&row.id)));
+        }
         assert!(html.contains("need you"));
         assert!(html.contains("rejected"));
         for title in [

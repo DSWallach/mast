@@ -6,6 +6,7 @@
 .mk-section { color: var(--mk-sage); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin: 24px 0 8px; }
 .mk-muted { color: var(--muted-foreground); }
 .mk-mono { font-family: var(--font-mono); overflow-wrap: normal; word-break: normal; }
+.mk-row-id { color: var(--muted-foreground); font: 11px var(--font-mono); white-space: nowrap; }
 .mk-id { word-break: normal; overflow-wrap: normal; }
 .mk-chips, .mk-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
 .mk-legend { gap: 14px; color: var(--muted-foreground); font-size: 12px; }
