@@ -45,6 +45,7 @@ by Zeron. Their names identify the corresponding palette adaptations.
 | Dracula for Visual Studio Code | `1b9ecf4d7e0c8cc2e2e890a7a41ad1db5fff1e6c` | [MIT](https://github.com/dracula/visual-studio-code/blob/1b9ecf4d7e0c8cc2e2e890a7a41ad1db5fff1e6c/LICENSE) |
 | GitHub VS Code Theme | `cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf` | [MIT](https://github.com/primer/github-vscode-theme/blob/cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf/LICENSE) |
 | Ayu for VS Code | `444ef92911cb75c3933c8003e3a7c79b6b6c914f` | [MIT](https://github.com/ayu-theme/vscode-ayu/blob/444ef92911cb75c3933c8003e3a7c79b6b6c914f/LICENSE) |
+| Solarized | `62f656a02f93c5190a8753159e34b385588d5ff3` | [MIT](https://github.com/altercation/solarized/blob/62f656a02f93c5190a8753159e34b385588d5ff3/LICENSE) |
 | Gruvbox Theme | `ca3b8ad203e84a884ca33fb84b5795cf43032709` | [MIT](https://github.com/jdinhify/vscode-theme-gruvbox/blob/ca3b8ad203e84a884ca33fb84b5795cf43032709/LICENSE) |
 | Rosé Pine for VS Code | `d8f5ebe8e096fa833e997c07eb7685ee1677a4ba` | [MIT](https://github.com/rose-pine/vscode/blob/d8f5ebe8e096fa833e997c07eb7685ee1677a4ba/LICENSE) |
 | Nord Visual Studio Code | `8ead09822c02d0d49d0f764104505e5a34d3689f` | [MIT](https://github.com/nordtheme/visual-studio-code/blob/8ead09822c02d0d49d0f764104505e5a34d3689f/license) |
@@ -141,3 +142,25 @@ Zeron code.
 The Zui native overlay renderer adapts Apache-2.0 GPUI code from
 [`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
 Attribution is retained in the pinned Zui dependency’s `NOTICE`.
+
+## Solarized copyright and license
+
+Copyright (c) 2011 Ethan Schoonover
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
