@@ -942,9 +942,13 @@ async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
         "request":"Review the result", "idempotencyKey":"review-result"
     })).await.unwrap();
     let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
-    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one"});
+    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one", "harness":"mock", "model":"mock-1", "reasoning":"medium"});
     let reply = tool(&rig, lease.token(), "hand_off_orchestrator", args.clone()).await.unwrap();
     let successor = reply["chatId"].as_str().unwrap();
+    let config = rig.core.workspace.chat(successor).unwrap().unwrap().config.unwrap();
+    assert_eq!(config.harness, HarnessId::Mock);
+    assert_eq!(config.model.as_deref(), Some("mock-1"));
+    assert_eq!(config.reasoning, Some(ReasoningLevel::Medium));
     let retry = tool(&rig, lease.token(), "hand_off_orchestrator", args).await.unwrap();
     assert_eq!(retry["chatId"], successor);
     assert!(tool(&rig, lease.token(), "hand_off_orchestrator", json!({
