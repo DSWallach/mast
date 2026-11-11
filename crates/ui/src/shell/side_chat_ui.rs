@@ -195,9 +195,7 @@ fn absorbed_notice(reply: &mast_proto::AbsorbSideChatReply) -> String {
     };
     match reply.delivery {
         mast_proto::SideChatDelivery::Run => format!("Sent {what} to the main chat"),
-        mast_proto::SideChatDelivery::Queue => {
-            format!("Queued {what} for when the main chat's turn ends")
-        }
+        mast_proto::SideChatDelivery::Queue => format!("Queued {what} in the main chat"),
     }
 }
 
@@ -342,7 +340,9 @@ impl Shell {
             let result = engine.client().call(methods::MUTATE, params).await;
             this.update(cx, |shell, cx| match result {
                 Ok(_) if shell.panel_key(cx) == main_id => shell.add_side_chat_surface(side_id, cx),
-                Ok(_) => {}
+                // The user moved on before it was created: nothing will show
+                // it, so it must not linger.
+                Ok(_) => shell.archive_chat(side_id, cx),
                 Err(err) => {
                     shell.sidebar_notice = Some(format!("Couldn't open a side chat: {err}").into());
                     cx.notify();
@@ -403,6 +403,63 @@ impl Shell {
             self.state
                 .update(cx, |s, _| s.unwatch_subagent_doc(&chat_id));
             self.archive_chat(chat_id, cx);
+        }
+    }
+
+    /// Drop the side chats in `main_id`'s pane (that chat is going away).
+    pub(super) fn drop_side_chats_of(&mut self, main_id: &str, cx: &mut Context<Self>) {
+        let Some(tabs) = self.right_tabs.get_mut(main_id) else {
+            return;
+        };
+        let ids: Vec<u64> = tabs
+            .iter()
+            .filter_map(|surface| match surface {
+                RightSurface::SideChat(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        tabs.retain(|surface| !matches!(surface, RightSurface::SideChat(_)));
+        for id in ids {
+            self.drop_side_chat(id, cx);
+        }
+    }
+
+    /// A side pane whose tab is gone, whose main chat is archived or gone, or
+    /// whose side chat was archived elsewhere is closed (and archived): it
+    /// could never be reached again.
+    pub(super) fn reconcile_side_chats(&mut self, cx: &mut Context<Self>) {
+        if self.side_chats.tabs.is_empty() {
+            return;
+        }
+        let state = self.state.read(cx);
+        let row = |id: &str| state.chats.iter().find(|chat| chat.id == id);
+        let stale: Vec<u64> = self
+            .side_chats
+            .tabs
+            .iter()
+            .filter(|(id, pane)| {
+                let surface = RightSurface::SideChat(**id);
+                let Some(main_id) = self
+                    .right_tabs
+                    .iter()
+                    .find(|(_, tabs)| tabs.contains(&surface))
+                    .map(|(key, _)| key.as_str())
+                else {
+                    return true;
+                };
+                let main_gone = match row(main_id) {
+                    Some(main) => main.archived,
+                    None => state.chats_synced,
+                };
+                main_gone || row(&pane.read(cx).chat_id).is_some_and(|side| side.archived)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            for tabs in self.right_tabs.values_mut() {
+                tabs.retain(|surface| *surface != RightSurface::SideChat(id));
+            }
+            self.drop_side_chat(id, cx);
         }
     }
 
@@ -511,6 +568,75 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn a_side_pane_that_can_no_longer_be_reached_is_closed_and_archived(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::work_outline::store::fixture_ids::{CHAT_API, CHAT_LOOSE_A, CHAT_UI};
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let archived = |shell: &Shell, id: &str| {
+            shell.mutations.iter().any(|m| {
+                m["op"] == "setChatArchived" && m["chatId"] == id && m["archived"] == true
+            })
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                for id in [CHAT_UI, CHAT_LOOSE_A] {
+                    state.chats.iter_mut().find(|chat| chat.id == id).unwrap().side_of =
+                        Some(CHAT_API.into());
+                }
+            });
+            shell.add_side_chat_surface(CHAT_UI.into(), cx);
+            shell.add_side_chat_surface(CHAT_LOOSE_A.into(), cx);
+            // Its tab vanished some other way.
+            shell
+                .right_tabs
+                .get_mut(CHAT_API)
+                .unwrap()
+                .retain(|surface| *surface != RightSurface::SideChat(1));
+            shell.state.update(cx, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.side_chat_pane(1).is_none());
+            assert!(archived(shell, CHAT_UI));
+            assert!(shell.side_chat_pane(2).is_some());
+        });
+        // The main chat is archived: its side panes go with it.
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().archived = true;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.side_chat_pane(2).is_none());
+            assert!(archived(shell, CHAT_LOOSE_A));
+            assert!(shell.right_tabs[CHAT_API].is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_the_main_chat_archives_its_side_chats(cx: &mut gpui::TestAppContext) {
+        use crate::work_outline::store::fixture_ids::{CHAT_API, CHAT_UI};
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().side_of =
+                    Some(CHAT_API.into());
+            });
+            shell.add_side_chat_surface(CHAT_UI.into(), cx);
+            shell.delete_chat(CHAT_API.into(), cx);
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.side_chat_pane(1).is_none());
+            assert!(shell.mutations.iter().any(|m| m["op"] == "setChatArchived"
+                && m["chatId"] == CHAT_UI));
+        });
+    }
+
     #[test]
     fn absorbed_notice_names_the_delivery() {
         let reply = |delivery, exchanges| mast_proto::AbsorbSideChatReply {
@@ -524,7 +650,7 @@ mod tests {
         );
         assert_eq!(
             absorbed_notice(&reply(mast_proto::SideChatDelivery::Queue, 2)),
-            "Queued 2 exchanges for when the main chat's turn ends"
+            "Queued 2 exchanges in the main chat"
         );
     }
 }
