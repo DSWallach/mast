@@ -100,7 +100,11 @@ impl Shell {
         let now = Utc::now();
         let state = self.state.read(cx);
         let mut inputs = Vec::new();
-        for chat in state.chats.iter().filter(|chat| !chat.archived) {
+        for chat in state
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived && !chat.is_side_chat())
+        {
             let background = 0; // not tracked at session level yet
             let session = state.session_for(&chat.id);
             let failed = session.is_some_and(|s| s.last_turn_tool_failures.is_some());

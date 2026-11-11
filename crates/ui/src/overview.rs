@@ -2512,9 +2512,11 @@ impl Overview {
             .chats
             .iter()
             .filter(|chat| {
-                chat.space_id
-                    .as_deref()
-                    .is_none_or(|space_id| state.space_row(space_id).is_some())
+                !chat.is_side_chat()
+                    && chat
+                        .space_id
+                        .as_deref()
+                        .is_none_or(|space_id| state.space_row(space_id).is_some())
             })
             .map(|chat| {
                 let row = by_id.get(chat.id.as_str());

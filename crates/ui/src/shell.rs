@@ -90,6 +90,7 @@ mod project_icon;
 mod required_actions_ui;
 mod menu_bar_ui;
 mod running_ui;
+mod side_chat_ui;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
@@ -659,6 +660,9 @@ pub enum RightSurface {
     /// A planning artifact (`mast-artifact:` links) — keys
     /// `Shell::artifact_tabs`.
     Artifact(u64),
+    /// A side chat ("Ask on the side") with its own composer — keys
+    /// `Shell::side_chats`. Closing it archives the side chat.
+    SideChat(u64),
     /// The sticky "Item" tab: what the chat is for (work item, instructions,
     /// where it runs, model, account, open asks). Always first in the strip,
     /// never stored in `right_tabs`, never closed.
@@ -1661,6 +1665,9 @@ pub struct Shell {
     subagent_seq: u64,
     /// Planning artifact tabs (`shell/artifacts_ui.rs`).
     pub(crate) artifact_tabs: artifacts_ui::ArtifactTabs,
+    /// "Ask on the side" panes (`shell/side_chat_ui.rs`).
+    side_chats: side_chat_ui::SideChatTabs,
+    side_chats_task: Option<Task<()>>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2182,6 +2189,8 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             artifact_tabs: Default::default(),
+            side_chats: Default::default(),
+            side_chats_task: None,
             subagent_seq: 0,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
@@ -3007,6 +3016,9 @@ impl Shell {
                 RightSurface::Artifact(id) => self
                     .artifact_tab_title(*id, cx)
                     .map(|title| (*surface, title, false, None)),
+                RightSurface::SideChat(id) => self
+                    .side_chat_pane(*id)
+                    .map(|_| (*surface, "Side chat".into(), false, None)),
                 RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
                     let browser = browser.read(cx);
                     (
@@ -3040,6 +3052,7 @@ impl Shell {
             | RightSurface::Terminal(_)
             | RightSurface::Subagent(_)
             | RightSurface::Artifact(_)
+            | RightSurface::SideChat(_)
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -3140,7 +3153,10 @@ impl Shell {
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
-            RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Artifact(_) => {}
+            RightSurface::Subagent(_)
+            | RightSurface::Browser(_)
+            | RightSurface::Artifact(_)
+            | RightSurface::SideChat(_) => {}
             RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.sync_explorer_selection(cx);
@@ -4144,6 +4160,7 @@ impl Shell {
                 }
             }
             RightSurface::Artifact(id) => self.close_artifact_tab(id, cx),
+            RightSurface::SideChat(id) => self.drop_side_chat(id, cx),
             RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.panels.update(&key, |p| {
@@ -9091,6 +9108,8 @@ impl Shell {
             let admin_id = chat_id.clone();
             let revoke_id = chat_id.clone();
             let hand_off_id = chat_id.clone();
+            let ask_side_id = chat_id.clone();
+            let can_ask_side = self.can_ask_on_side(&chat_id, cx);
             let branch_review_id = chat_id.clone();
             let branch_review_available = self.branch_review_targets.contains_key(&chat_id);
             let branch_review_exists = self.branch_review_targets.get(&chat_id)
@@ -9127,6 +9146,17 @@ impl Shell {
                             }))
                             .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Hand off to new chat…")),
+                    ))
+                    .when(can_ask_side, |menu| menu.child(
+                        popover::menu_row(&theme, false, format!("chat-menu-ask-side-{chat_id}"))
+                            .id("chat-menu-ask-side")
+                            .debug_selector(|| "chat-menu-ask-side".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.ask_on_side(ask_side_id.clone(), cx);
+                            }))
+                            .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from("Ask on the side…")),
                     ))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
@@ -10361,6 +10391,11 @@ impl Shell {
                     .artifact_tab(id)
                     .map(|tab| tab.into_any_element())
                     .unwrap_or_else(|| self.render_surface_picker(cx)),
+                RightSurface::SideChat(id) => self
+                    .side_chat_pane(id)
+                    .cloned()
+                    .map(|pane| pane.into_any_element())
+                    .unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Terminal(tab) => {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
@@ -10714,6 +10749,7 @@ impl Shell {
                     .unwrap_or(icons::LIST),
                 RightSurface::Review => icons::DOCUMENT,
                 RightSurface::Subagent(_) => icons::BOT,
+                RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Artifact(id) => self
                     .artifact_tab(id)
                     .and_then(|tab| tab.read(cx).artifact(cx))
@@ -10746,6 +10782,7 @@ impl Shell {
                         .last()
                         .is_some_and(|e| e.status == Some(mast_doc::MessageStatus::Streaming))
                 }),
+                RightSurface::SideChat(id) => self.side_chat_running(id, cx),
                 _ => false,
             };
             // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
