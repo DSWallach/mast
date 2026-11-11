@@ -437,3 +437,16 @@ fn sheet_drafts_stage_undo_and_send_once(cx: &mut TestAppContext) {
     assert!(message.contains("D-4 rejected (too slow)"));
     vcx.update(|_, cx| assert!(!crate::settings::current(cx).artifact_decision_drafts.contains_key(&id(1))));
 }
+
+#[gpui::test]
+fn sheet_drafts_survive_reopening(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    {
+        let (tab, _calls, _probe, _shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+        frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":"keep this"}));
+    }
+    let (_tab, _calls, _probe, shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+    let document = shown.borrow().last().unwrap().1.clone();
+    assert!(document.contains("keep this"));
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions[0].note.as_deref(), Some("keep this")));
+}

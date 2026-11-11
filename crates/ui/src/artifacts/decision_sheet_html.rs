@@ -20,7 +20,7 @@ const CSS: &str = r#"
 .mk-sheet-actions button,.mk-sheet-actions input,.mk-sheet-bar button { font:inherit; color:inherit; border:1px solid var(--border); border-radius:5px; background:var(--background); padding:4px 8px }
 .mk-sheet-actions button,.mk-sheet-bar button { cursor:pointer }
 .mk-sheet-actions input { max-width:180px }
-.mk-sheet-bar { position:sticky; bottom:0; display:flex; align-items:center; gap:10px; padding:10px; background:var(--background); border:1px solid var(--border); border-radius:6px; z-index:2 }
+.mk-sheet-bar { position:sticky; top:0; display:flex; align-items:center; gap:10px; padding:10px; background:var(--background); border:1px solid var(--border); border-radius:6px; z-index:2 }
 .mk-sheet-bar[hidden] { display:none }
 "#;
 
@@ -33,7 +33,7 @@ const SCRIPT: &str = r#"(() => {
   const label = document.createElement('span');
   const send = document.createElement('button'); send.type='button'; send.textContent='Send';
   const discard = document.createElement('button'); discard.type='button'; discard.textContent='Discard';
-  bar.append(label, send, discard); document.querySelector('.mk-sheet').appendChild(bar);
+  bar.append(label, send, discard); const sheet = document.querySelector('.mk-sheet'); sheet.insertBefore(bar, sheet.querySelector('h1').nextSibling);
   const update = () => {
     bar.hidden = drafts.size === 0; label.textContent = `${drafts.size} answers ready`;
     document.querySelectorAll('[data-sheet-row]').forEach(row => {
