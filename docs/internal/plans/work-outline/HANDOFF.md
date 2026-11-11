@@ -1080,7 +1080,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-10 17:30; coordinator 844aab58, near its weekly limit)
 
-- **Installed: release 76** (batched decisions, queue fix, usage-only menu bar, smaller dev builds; restart needed). Row ids (bb71e83f6) wait for release 77.
+- **Installed: release 77** (fast-tracked: decision sheet Send fix be62a4719 + row ids; targeted tests only — run a full release suite with the next release).
 - **Running:** Terra chat d1ac228d (item 3b9a83cb, branch `decision-sheet-v2`, worktree `.worktrees/zeron/decision-sheet-v2`).
   - Mikey picked the decision-sheet redesign "B + C": B's "Needs you" list with Accept/Reject on top, C's tinted
     flow chips below.
