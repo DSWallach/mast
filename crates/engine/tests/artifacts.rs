@@ -2474,12 +2474,12 @@ async fn decision_sheet_publish_validates_before_recording_revisions() {
 async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
     let rig = rig().await;
     let path = rig.worktree.join("sheet.json");
-    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","optional":true,"status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","optional":true,"status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
     std::fs::write(&path, source).unwrap();
     let published = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": "sheet-decisions"})).await;
     let id = published["artifactId"].as_str().unwrap();
     let call = |revision, second: &str| json!({"artifactId": id, "revision": revision, "decisions": [
-        {"rowId":"D-2", "outcome":"decided"}, {"rowId":second, "outcome":"rejected", "note":"too slow"}
+        {"rowId":"D-2", "outcome":"decided", "overrideRecommendation":true, "note":"Use UTC"}, {"rowId":second, "outcome":"rejected", "note":"too slow"}
     ]});
     assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(1, "missing")).await.is_err());
     assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(2, "D-4")).await.is_err());
@@ -2493,6 +2493,8 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
     assert_eq!(saved[1].note.as_deref(), Some("too slow"));
     let result = tool(&rig, &rig.token, "artifact_get_decisions", json!({"artifactId": id})).await.unwrap();
     assert_eq!(result["decisions"].as_array().unwrap().len(), 2);
+    assert_eq!(result["decisions"][0]["answer"], "Use UTC");
+    assert_eq!(result["decisions"][0]["overrideRecommendation"], true);
     assert_eq!(result["orphanedRowIds"], json!([]));
     assert!(tool(&rig, &rig.other_token, "artifact_get_decisions", json!({"artifactId": id})).await.is_err());
     let mut revised: Value = serde_json::from_str(source).unwrap();
