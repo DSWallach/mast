@@ -214,7 +214,12 @@ impl ArtifactKind {
     pub fn is_visual(self) -> bool {
         matches!(
             self,
-            Self::HtmlFragment | Self::HtmlPage | Self::Mermaid | Self::Image | Self::Options | Self::DecisionSheet
+            Self::HtmlFragment
+                | Self::HtmlPage
+                | Self::Mermaid
+                | Self::Image
+                | Self::Options
+                | Self::DecisionSheet
         )
     }
 }
@@ -320,6 +325,9 @@ pub struct ArtifactView {
     /// Answers given in Mast to the plan's questions (Artifacts phase 3 D).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<ArtifactQuestionAnswer>,
+    /// Decisions sent for a decision sheet, retained across revisions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<crate::decision_sheet::SheetDecision>,
     /// Comments on the rendered artifact (Artifacts phase 4 G). Never in the file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<ArtifactComment>,

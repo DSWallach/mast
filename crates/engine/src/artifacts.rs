@@ -2465,6 +2465,7 @@ impl ArtifactsService {
             "answeredQuestions": plan.answers.iter().map(|a| json!({
                 "id": a.id, "answer": a.answer, "at": a.at, "revision": a.revision,
             })).collect::<Vec<_>>(),
+            "decisions": plan.decisions,
             "comments": self.plan_comments(&plan, content.as_deref()),
             "pickedOptions": picked_options,
         }))

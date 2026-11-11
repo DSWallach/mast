@@ -1,5 +1,5 @@
 //! Validated, data-driven planning sheets shared by the engine and UI.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +170,64 @@ pub struct OutOfScope {
     pub status: Status,
 }
 
+/// A decision staged or sent for a sheet row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetDecision {
+    pub row_id: String,
+    pub outcome: DecisionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Epoch milliseconds at which the batch was sent.
+    pub at: i64,
+    pub revision: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionOutcome {
+    Decided,
+    Rejected,
+}
+
+/// Classify recorded decisions after a sheet revision, preserving both sets.
+pub fn partition_decisions<'a>(
+    sheet: &DecisionSheet,
+    decisions: &'a [SheetDecision],
+) -> (Vec<&'a SheetDecision>, Vec<&'a SheetDecision>) {
+    let ids: HashSet<&str> = sheet
+        .decision_rows()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    decisions
+        .iter()
+        .partition(|decision| ids.contains(decision.row_id.as_str()))
+}
+
+/// Format one user message for a sent batch in sheet order.
+pub fn decision_batch_message(title: &str, decisions: &[SheetDecision]) -> String {
+    let entries = decisions
+        .iter()
+        .map(|decision| {
+            let outcome = match decision.outcome {
+                DecisionOutcome::Decided => "accepted",
+                DecisionOutcome::Rejected => "rejected",
+            };
+            let note = decision
+                .note
+                .as_deref()
+                .map(str::trim)
+                .filter(|note| !note.is_empty())
+                .map(|note| format!(" ({note})"))
+                .unwrap_or_default();
+            format!("{} {outcome}{note}", decision.row_id)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Decisions for {title}: {entries}")
+}
+
 /// A top-level decision shown in the sheet summary.
 #[derive(Debug)]
 pub struct DecisionRow<'a> {
@@ -329,6 +387,40 @@ impl DecisionSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decisions_survive_republication_and_report_missing_rows() {
+        let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+        let sheet = DecisionSheet::parse(source).unwrap();
+        let decisions = vec![
+            SheetDecision {
+                row_id: "D-2".into(),
+                outcome: DecisionOutcome::Decided,
+                note: None,
+                at: 20,
+                revision: 1,
+            },
+            SheetDecision {
+                row_id: "D-4".into(),
+                outcome: DecisionOutcome::Rejected,
+                note: Some("too slow".into()),
+                at: 20,
+                revision: 1,
+            },
+        ];
+        let (surviving, orphaned) = partition_decisions(&sheet, &decisions);
+        assert_eq!(surviving[0].row_id, "D-2");
+        assert_eq!(orphaned[0].row_id, "D-4");
+        assert_eq!(
+            decision_batch_message("T", &decisions),
+            "Decisions for T: D-2 accepted, D-4 rejected (too slow)"
+        );
+        assert_eq!(
+            serde_json::from_str::<SheetDecision>(&serde_json::to_string(&decisions[0]).unwrap())
+                .unwrap(),
+            decisions[0]
+        );
+    }
+
     #[test]
     fn decision_rows_match_summary_order_and_exclude_children() {
         let source = r#"{"kind":"decision-sheet","title":"T","models":[{"id":"model","name":"Model","status":{"state":"open"},"recommendation":null,"question":null,"fields":[{"id":"field","name":"Field","marker":"","type":"text","null":false,"default":null,"constraint":null}]}],"flows":[{"id":"flow","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[{"id":"step","kind":"ui","label":"Open","params":[]}]}]}"#;
