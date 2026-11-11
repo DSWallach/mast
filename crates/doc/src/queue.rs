@@ -131,11 +131,11 @@ impl SessionDoc {
             .get_movable_list("queue")
             .get_deep_value()
             .to_json_value();
-        let items: Vec<serde_json::Value> = match serde_json::from_value(raw) {
-            Ok(items) => items,
-            Err(_) => return Ok(Vec::new()),
-        };
-        Ok(items.into_iter().filter_map(queued_from_json).collect())
+        let items: Vec<serde_json::Value> = serde_json::from_value(raw)?;
+        items
+            .into_iter()
+            .map(|item| queued_from_json(item).ok_or_else(|| DocError::Schema("invalid queued message".into())))
+            .collect()
     }
 
     /// Append to the back of the queue.
@@ -387,14 +387,29 @@ impl SessionDoc {
         if item.text.trim().is_empty() {
             return Err(DocError::Schema("queued message text required".into()));
         }
+        // Build the row before inserting it so a field error cannot leave a
+        // partially written row behind for the retry.
+        let append = || -> Result<(), DocError> {
+            let map = loro::LoroMap::new();
+            write_queued_map(&map, item)?;
+            if let Some(pin) = instructions {
+                map.insert(
+                    QUEUED_INSTRUCTIONS_KEY,
+                    crate::schema::loro_value_from_json(&serde_json::to_value(pin)?),
+                )?;
+            }
+            self.doc().get_movable_list("queue").push_container(map)?;
+            Ok(())
+        };
         let queue = self.doc().get_movable_list("queue");
-        let map = queue.push_container(loro::LoroMap::new())?;
-        write_queued_map(&map, item)?;
-        if let Some(pin) = instructions {
-            map.insert(
-                QUEUED_INSTRUCTIONS_KEY,
-                crate::schema::loro_value_from_json(&serde_json::to_value(pin)?),
-            )?;
+        let before = queue.len();
+        if let Err(error) = append() {
+            // Insertion can fail after Loro has inserted a container. Do not
+            // retry an ambiguous partial write as that could duplicate a row.
+            if queue.len() != before {
+                return Err(error);
+            }
+            append()?;
         }
         self.doc().commit();
         Ok(())
@@ -599,6 +614,13 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn malformed_queue_row_is_not_silently_discarded() {
+        let doc = super::SessionDoc::init("chat").unwrap();
+        doc.doc().get_movable_list("queue").push_container(loro::LoroMap::new()).unwrap();
+        assert!(doc.read_queue().is_err());
+    }
+
+    #[test]
     fn append_waits_for_queue_removal() {
         use std::sync::{Arc, Barrier};
 
@@ -611,7 +633,10 @@ mod tests {
         let worker_barrier = barrier.clone();
         let worker = std::thread::spawn(move || {
             worker_barrier.wait();
-            worker_doc.push_queued(&super::QueuedMessage::new("second", "second", "dev"))
+            worker_doc.push_queued_with_instructions(
+                &super::QueuedMessage::new("second", "second", "dev"),
+                None,
+            )
         });
         barrier.wait();
         // Model the drain's list removal while it holds the mutation lock.
