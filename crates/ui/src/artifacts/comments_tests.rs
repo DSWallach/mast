@@ -79,7 +79,7 @@ fn replies(kind: ArtifactKind, page: &'static str) -> Reply {
         methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => Ok(json!({
             "artifactId": params["artifactId"],
             "decisions": params["decisions"].as_array().unwrap().iter().map(|d| json!({
-                "rowId":d["rowId"], "outcome":d["outcome"], "note":d["note"], "at":1, "revision":params["revision"]
+                "rowId":d["rowId"], "outcome":d["outcome"], "overrideRecommendation":d["overrideRecommendation"], "note":d["note"], "at":1, "revision":params["revision"]
             })).collect::<Vec<_>>()
         })),
         methods::ARTIFACT_ANSWER_QUESTIONS => Ok(json!({
