@@ -190,6 +190,31 @@ pub enum DecisionOutcome {
     Rejected,
 }
 
+/// A decision awaiting submission from the local draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetDecisionDraft {
+    pub row_id: String,
+    pub outcome: DecisionOutcome,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitSheetDecisionsParams {
+    pub artifact_id: String,
+    pub revision: u32,
+    pub decisions: Vec<SheetDecisionDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitSheetDecisionsReply {
+    pub artifact_id: String,
+    pub decisions: Vec<SheetDecision>,
+}
+
 /// Classify recorded decisions after a sheet revision, preserving both sets.
 pub fn partition_decisions<'a>(
     sheet: &DecisionSheet,

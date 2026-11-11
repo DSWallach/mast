@@ -3317,6 +3317,12 @@ impl RpcService for EngineRpc {
                 })
                 .await
             }
+            methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => {
+                let p: mast_proto::decision_sheet::SubmitSheetDecisionsParams =
+                    parse_params(params)?;
+                self.artifact_reply(move |service| service.submit_sheet_decisions(&p))
+                    .await
+            }
             methods::ARTIFACT_ADD_COMMENT => {
                 let p: mast_proto::ArtifactAddCommentParams = parse_params(params)?;
                 let by = self.work_outline.local_user();

@@ -1549,6 +1549,97 @@ impl ArtifactsService {
         })
     }
 
+    /// Validate and commit a complete batch in one registry operation.
+    pub fn submit_sheet_decisions(
+        &self,
+        params: &mast_proto::decision_sheet::SubmitSheetDecisionsParams,
+    ) -> Outcome<mast_proto::decision_sheet::SubmitSheetDecisionsReply> {
+        use mast_proto::decision_sheet::{DecisionSheet, SheetDecision, SubmitSheetDecisionsReply};
+        use std::collections::HashSet;
+        let _gate = lock(&self.inner.gate);
+        let artifact = self
+            .workspace()
+            .artifact(&params.artifact_id)
+            .ok_or_else(|| ArtifactError::not_found("artifact not found"))?;
+        if artifact.kind != ArtifactKind::DecisionSheet || artifact.archived_at.is_some() {
+            return Err(ArtifactError::invalid(
+                "artifact is not an active decision sheet",
+            ));
+        }
+        if artifact.current_revision != params.revision {
+            return Err(ArtifactError::invalid(
+                "sheet revision changed; review the current sheet",
+            ));
+        }
+        if params.decisions.is_empty() {
+            return Err(ArtifactError::invalid("decision batch is empty"));
+        }
+        let bytes = self.current_bytes(&artifact)?;
+        let source = std::str::from_utf8(&bytes)
+            .map_err(|_| ArtifactError::invalid("sheet is not UTF-8"))?;
+        let sheet = DecisionSheet::parse(source).map_err(ArtifactError::invalid)?;
+        let rows = sheet.decision_rows();
+        let mut seen = HashSet::new();
+        for decision in &params.decisions {
+            let row = rows
+                .iter()
+                .find(|row| row.id == decision.row_id)
+                .ok_or_else(|| {
+                    ArtifactError::invalid(format!("unknown row {:?}", decision.row_id))
+                })?;
+            if row.status.state != "open"
+                || artifact.decisions.iter().any(|saved| saved.row_id == decision.row_id)
+                || !seen.insert(&decision.row_id)
+            {
+                return Err(ArtifactError::invalid(format!(
+                    "row {:?} is not open or is repeated",
+                    decision.row_id
+                )));
+            }
+            if decision
+                .note
+                .as_ref()
+                .is_some_and(|note| note.chars().count() > 600)
+            {
+                return Err(ArtifactError::invalid(
+                    "decision note exceeds 600 characters",
+                ));
+            }
+        }
+        let at = now_ms();
+        let sent: Vec<SheetDecision> = params
+            .decisions
+            .iter()
+            .map(|draft| SheetDecision {
+                row_id: draft.row_id.clone(),
+                outcome: draft.outcome,
+                note: draft
+                    .note
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|note| !note.is_empty())
+                    .map(str::to_owned),
+                at,
+                revision: params.revision,
+            })
+            .collect();
+        let mut decisions = artifact.decisions.clone();
+        decisions.retain(|decision| !seen.contains(&decision.row_id));
+        decisions.extend(sent.iter().cloned());
+        let saved = self.workspace()
+            .set_artifact_decisions(&artifact.id, &decisions)
+            .map_err(|error| {
+                ArtifactError::invalid(format!("could not save decisions: {error}"))
+            })?;
+        if !saved {
+            return Err(ArtifactError::not_found("artifact no longer exists"));
+        }
+        Ok(SubmitSheetDecisionsReply {
+            artifact_id: artifact.id,
+            decisions: sent,
+        })
+    }
+
     /// `ArtifactAddComment`: store a comment on an HTML or Mermaid artifact
     /// (the `comments` field only; the document is never edited).
     pub fn add_comment(
