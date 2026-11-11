@@ -3071,11 +3071,11 @@ mod tests {
         let registry = ThemeRegistry::builtin();
         assert_eq!(
             registry.variants_for(mast_theme::Appearance::Light).count(),
-            12
+            13
         );
         assert_eq!(
             registry.variants_for(mast_theme::Appearance::Dark).count(),
-            22
+            23
         );
     }
 
