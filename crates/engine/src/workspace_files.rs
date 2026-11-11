@@ -74,7 +74,7 @@ struct CheckoutWatch {
     subscribers: AtomicUsize,
     changes_tx: broadcast::Sender<WorkspaceFileChanges>,
     cancel: CancellationToken,
-    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    watcher: Mutex<Option<crate::watch_budget::Watcher>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -730,7 +730,7 @@ impl CheckoutWatch {
         } else {
             let callback_overflow = overflow.clone();
             let callback_notify = overflow_notify.clone();
-            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
+            crate::watch_budget::Watcher::new(move |event: Result<notify::Event, notify::Error>| {
                 if event
                     .as_ref()
                     .is_ok_and(|event| matches!(event.kind, notify::EventKind::Access(_)))
@@ -750,9 +750,7 @@ impl CheckoutWatch {
                     Err(mpsc::error::TrySendError::Closed(_)) => {}
                 }
             })
-            .ok()
             .and_then(|mut watcher| {
-                use notify::Watcher as _;
                 watcher
                     .watch(&root, notify::RecursiveMode::Recursive)
                     .ok()

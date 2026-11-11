@@ -310,36 +310,101 @@ async fn branch_review_publish_validates_range_anchors() {
     let target = json!({"kind": "branch", "repo": "owner/repo", "checkoutPath": rig.worktree, "branch": "feature", "baseRef": base, "headSha": head});
     let review = json!({"schema": "mast.review/v1", "summary": "Change readme", "steps": [], "questions": [], "suggestedComments": [],
         "highlights": [{"kind": "risk", "severity": "low", "text": "Check", "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}]});
-    let reply = tool(&rig, &rig.token, "review_publish", json!({"target": target, "review": review})).await.unwrap();
-    let read = tool(&rig, &rig.token, "review_get", json!({})).await.unwrap();
+    let reply = tool(
+        &rig,
+        &rig.token,
+        "review_publish",
+        json!({"target": target, "review": review}),
+    )
+    .await
+    .unwrap();
+    let read = tool(&rig, &rig.token, "review_get", json!({}))
+        .await
+        .unwrap();
     assert_eq!(read["artifactId"], reply["artifactId"]);
     assert_eq!(read["review"]["target"]["branch"], "feature");
-    let selected = tool(&rig, &rig.token, "review_get", json!({"target": target})).await.unwrap();
+    let selected = tool(&rig, &rig.token, "review_get", json!({"target": target}))
+        .await
+        .unwrap();
     assert_eq!(selected["artifactId"], reply["artifactId"]);
     let mut other_target = target.clone();
     other_target["branch"] = json!("other");
-    assert!(tool(&rig, &rig.token, "review_get", json!({"target": other_target})).await.unwrap()["artifactId"].is_null());
+    assert!(
+        tool(
+            &rig,
+            &rig.token,
+            "review_get",
+            json!({"target": other_target})
+        )
+        .await
+        .unwrap()["artifactId"]
+            .is_null()
+    );
     let path = PathBuf::from(reply["storedPath"].as_str().unwrap());
     let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     legacy["highlights"][0]["anchor"]["hunkHash"] = json!("legacy-patch-hash");
     std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let content: mast_proto::ArtifactContentReply = serde_json::from_value(
-        rig.client.call(methods::ARTIFACT_CONTENT, json!({"artifactId": reply["artifactId"]})).await.unwrap()
-    ).unwrap();
+        rig.client
+            .call(
+                methods::ARTIFACT_CONTENT,
+                json!({"artifactId": reply["artifactId"]}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let normalized: Value = serde_json::from_str(&content.content).unwrap();
-    assert_ne!(normalized["highlights"][0]["anchor"]["hunkHash"], "legacy-patch-hash");
-    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["highlights"][0]["anchor"]["hunkHash"], "legacy-patch-hash");
+    assert_ne!(
+        normalized["highlights"][0]["anchor"]["hunkHash"],
+        "legacy-patch-hash"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["highlights"][0]["anchor"]
+            ["hunkHash"],
+        "legacy-patch-hash"
+    );
     let mut invalid = review.clone();
     invalid["highlights"][0]["anchor"]["file"] = json!("missing");
-    let error = tool(&rig, &rig.token, "review_publish", json!({"target": target, "review": invalid})).await.unwrap_err();
-    assert!(error.contains("Valid hunks per file") && error.contains("README.md"), "{error}");
-    git(&rig.worktree, &["remote", "add", "origin", "https://github.com/owner/repo.git"]);
+    let error = tool(
+        &rig,
+        &rig.token,
+        "review_publish",
+        json!({"target": target, "review": invalid}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("Valid hunks per file") && error.contains("README.md"),
+        "{error}"
+    );
+    git(
+        &rig.worktree,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+    );
     let mut repo_only = target.clone();
     repo_only.as_object_mut().unwrap().remove("checkoutPath");
-    tool(&rig, &rig.token, "review_publish", json!({"target": repo_only, "review": review})).await.unwrap();
+    tool(
+        &rig,
+        &rig.token,
+        "review_publish",
+        json!({"target": repo_only, "review": review}),
+    )
+    .await
+    .unwrap();
     let mut path_only = target.clone();
     path_only.as_object_mut().unwrap().remove("repo");
-    assert!(!tool(&rig, &rig.token, "review_get", json!({"target": path_only})).await.unwrap()["artifactId"].is_null());
+    assert!(
+        !tool(&rig, &rig.token, "review_get", json!({"target": path_only}))
+            .await
+            .unwrap()["artifactId"]
+            .is_null()
+    );
 }
 
 /// `<profile store>/artifacts/<id>/<hash>` somewhere under the data dir.
@@ -1452,13 +1517,19 @@ async fn blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates(
     // The publishing Chat is the origin, so Reply & resolve reaches it.
     assert_eq!(blocking.chat_id, CHAT);
     assert!(blocking.info.as_deref().unwrap().contains("Blocks: ENG-1"));
-    assert_eq!(mast_proto::artifacts::artifact_links(blocking.info.as_deref().unwrap()).len(), 1);
+    assert_eq!(
+        mast_proto::artifacts::artifact_links(blocking.info.as_deref().unwrap()).len(),
+        1
+    );
     let rollup = all
         .iter()
         .find(|r| r.text.contains("open questions"))
         .unwrap();
     assert_eq!(rollup.dedupe_key.as_deref(), Some(rollup_key(&id).as_str()));
-    assert_eq!(mast_proto::artifacts::artifact_links(rollup.info.as_deref().unwrap()).len(), 1);
+    assert_eq!(
+        mast_proto::artifacts::artifact_links(rollup.info.as_deref().unwrap()).len(),
+        1
+    );
     assert!(
         rollup
             .info
@@ -2364,9 +2435,110 @@ async fn request_link_and_fact_limits() {
         .await
         .unwrap_or_else(|error| panic!("{key}: {error:?}"));
         let warnings = reply["warnings"].as_array().map_or(0, Vec::len);
-        assert!(warnings > 0, "{key}: expected a truncation warning, got {reply}");
+        assert!(
+            warnings > 0,
+            "{key}: expected a truncation warning, got {reply}"
+        );
     }
 }
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn decision_sheet_publish_validates_before_recording_revisions() {
+    let rig = rig().await;
+    let path = rig.worktree.join("sheet.json");
+    let good = include_str!("../../../docs/artifact-kit/decision-sheet-example.json");
+    std::fs::write(&path, good).unwrap();
+    let args = |key: &str| json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": key});
+    let first = publish(&rig, &rig.token, args("sheet-one")).await;
+    let id = first["artifactId"].as_str().unwrap();
+    assert_eq!(artifact(&rig, id).kind, ArtifactKind::DecisionSheet);
+    let mut bad: Value = serde_json::from_str(good).unwrap();
+    bad["flows"][0]["steps"][0]["status"]["state"] = json!("unknown");
+    std::fs::write(&path, bad.to_string()).unwrap();
+    let error = tool(&rig, &rig.token, "artifact_publish", args("sheet-bad"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("invalid status"), "{error}");
+    assert_eq!(artifact(&rig, id).current_revision, 1);
+    let changed = good.replace("Kit scheduled sections", "Kit schedule decisions");
+    std::fs::write(&path, changed).unwrap();
+    let second = publish(&rig, &rig.token, args("sheet-two")).await;
+    assert_eq!(second["artifactId"], id);
+    assert_eq!(second["revision"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
+    let rig = rig().await;
+    let path = rig.worktree.join("sheet.json");
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    std::fs::write(&path, source).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": "sheet-decisions"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let call = |revision, second: &str| json!({"artifactId": id, "revision": revision, "decisions": [
+        {"rowId":"D-2", "outcome":"decided"}, {"rowId":second, "outcome":"rejected", "note":"too slow"}
+    ]});
+    assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(1, "missing")).await.is_err());
+    assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(2, "D-4")).await.is_err());
+    assert!(artifact(&rig, id).decisions.is_empty());
+    let reply = rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(1, "D-4")).await.unwrap();
+    assert_eq!(reply["decisions"].as_array().unwrap().len(), 2);
+    let saved = artifact(&rig, id).decisions;
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0].revision, 1);
+    assert_eq!(saved[0].at, saved[1].at);
+    assert_eq!(saved[1].note.as_deref(), Some("too slow"));
+    let result = tool(&rig, &rig.token, "artifact_get_decisions", json!({"artifactId": id})).await.unwrap();
+    assert_eq!(result["decisions"].as_array().unwrap().len(), 2);
+    assert_eq!(result["orphanedRowIds"], json!([]));
+    assert!(tool(&rig, &rig.other_token, "artifact_get_decisions", json!({"artifactId": id})).await.is_err());
+    let mut revised: Value = serde_json::from_str(source).unwrap();
+    revised["flows"].as_array_mut().unwrap().pop();
+    std::fs::write(&path, revised.to_string()).unwrap();
+    let republished = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "revision", "idempotencyKey": "sheet-decisions-revision"})).await;
+    assert_eq!(republished["orphanedRowIds"], json!(["D-4"]));
+    assert_eq!(artifact(&rig, id).decisions.len(), 2);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId":id, "revision":2, "decisions":[{"rowId":"D-2", "outcome":"rejected"}]})).await.unwrap();
+    let decisions = artifact(&rig, id).decisions;
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions.iter().find(|d| d.row_id == "D-2").unwrap().revision, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_has_one_required_action_that_tracks_open_rows() {
+    let rig = rig().await;
+    let path = rig.worktree.join("sheet.json");
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    std::fs::write(&path, source).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": "sheet-action"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
+    let open = || {
+        mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()).snapshot(SPACE)
+            .user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).map(|r| r.text).collect::<Vec<_>>()
+    };
+    sync.reconcile(id);
+    assert_eq!(open(), ["Decide 2 open rows in Sheet"]);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-2", "outcome":"decided"}]})).await.unwrap();
+    assert_eq!(open(), ["Decide 1 open rows in Sheet"]);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-4", "outcome":"rejected"}]})).await.unwrap();
+    assert!(open().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_answers_are_recorded_as_one_batch() {
+    let rig = rig().await;
+    let id = publish_plan(&rig, PLAN_V1, "v1").await;
+    let invalid = json!({"artifactId":id,"revision":1,"answers":[{"questionId":"Q-1","answer":"yes"},{"questionId":"Q-99","answer":"no"}]});
+    assert!(rig.client.call(methods::ARTIFACT_ANSWER_QUESTIONS, invalid).await.is_err());
+    assert!(artifact(&rig, &id).answers.is_empty());
+    let valid = json!({"artifactId":id,"revision":1,"answers":[{"questionId":"Q-1","answer":"yes"},{"questionId":"Q-2","answer":"UTC"}]});
+    let result = rig.client.call(methods::ARTIFACT_ANSWER_QUESTIONS, valid).await.unwrap();
+    assert_eq!(result["answers"].as_array().unwrap().len(), 2);
+    let answers = artifact(&rig, &id).answers;
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].at, answers[1].at);
+}

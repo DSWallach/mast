@@ -28,6 +28,66 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 74: data-driven decision sheets + responsive kit** (2026-11-10, a68e8d99d):
+  - `decision-sheet` artifact kind: strict JSON validation, a kit renderer, computed chips, a dedicated 1024 px wide
+    host (other fragments keep their cap), compare. Child status pills show only when they differ from the parent.
+    Sample: docs/artifact-kit/decision-sheet-example.json. Phase 2 (row ✓/✗/💬 and one Needs-you per sheet) is
+    item 3b9a83cb.
+  - Kit: lanes stack under the container breakpoint (700 px; `mk-lane-dense` at 900 px), tables scroll in their
+    card, grids drop to one column.
+  - Tests: nextest 2455/2457 (the two WebRTC preview tests, `peer::actual_webrtc_pair_streams_in_both_directions`
+    and `leak::remote_preview_churn…`, fail only in this Mac's Tailscale environment; the crate is unchanged since
+    release 70), UI 2609/0. Backup: `~/zeron-dev-app-backups/mast-release-73`.
+  - The release ran detached from Mast (python setsid wrapper, /tmp/release74-run.sh), so restarts and
+    force-quits can't kill it. Use this for future releases.
+  - Release 73 froze once after a chat-row click (bug 17c9d278; next time `sample` before quitting).
+  - Skills: `talk-to-me` is now one shared copy in `~/.agents/skills` (linked for claude/codex/cursor), with an
+    "LLM writing tics: never" table that applies to all writing, including design and UI text.
+- **Release 73: PR reviews never move the main checkout** (2026-11-10, 3de8e23a5):
+  - `choose_location` no longer runs `gh pr checkout` in a clean canonical checkout. It reuses an existing
+    checkout of the branch, or creates `<root>/<repo>-pr-<n>`.
+  - Review chats still start at the Space root, so workspace skills resolve. The prompts confine work to the
+    checkout and forbid branch switches elsewhere. The diff binding uses the checkout.
+  - Tests: nextest 1296/1296, UI 2608/0. Backup: `~/zeron-dev-app-backups/mast-release-72`.
+  - Skills, outside the repo, now single copies in `~/.agents/skills`, symlinked into `~/.claude` and `~/.codex`:
+    - new `review-pr`: a safe review checkout, then the repo's `code-review`
+    - global `code-review`: routes named PRs to `review-pr`
+    - `~/.codex/skills/implement-ticket` synced with `~/.claude` (still two copies)
+  - The Cofactr Space-root lines (review-pr + quiet orchestrator) await Mikey's paste. Admin grants only reach
+    the chat's own Space.
+- **Release 72: open-file limit, log fixes, artifact kit** (2026-11-10, a9fb7d41b):
+  - The app raises its own RLIMIT_NOFILE (256 → min(hard, 8192)) at launch and logs it. Native watchers share a
+    budget, with repair polling as the fallback.
+  - Window updates from app actions are deferred; this targets "RefCell already borrowed", though the cause isn't
+    confirmed.
+  - Model-discovery failures keep their cause; wake pruning logs at debug.
+  - `mk-` artifact component kit (`crates/ui/assets/artifact-kit.css`) injected into every fragment host, plus
+    docs/artifact-kit/ (gallery, decision-sheet example, JSON schema) and the conventions doc.
+  - Tests: nextest 1296/1296, UI 2608/0. Backup: `~/zeron-dev-app-backups/mast-release-71`.
+  - Skills edited the same day, outside the repo (backups in `~/zeron-dev-app-backups/skills-2026-11-10/`):
+    - `implement-ticket`: orchestrated mode (decision-sheet rows only, push + draft PR without asking, one "Ready
+      for review" gate, screenshots on UI PRs).
+    - `project-planner` §2a: a decision sheet is required before tickets.
+  - Bug filed: artifact_render_check always reports "probe did not report" (bb6e6f10).
+- **Release 71: perf, Retry, Codex sign-in** (2026-11-10, 289bb5688):
+  - Perf:
+    - Loro 1.13 → 1.17: an upstream snapshot-growth fix (streaming test 1.13 GB → 2.8 MB; legacy 1.13.7 fixtures load).
+    - diff-sync ignores checkout read events, which stops a git feedback loop.
+    - The orchestrator-wake timer skips outline materialization when nothing is due.
+    - PR watches use a known repo root.
+    - Sidebar skips layout for off-screen/closed rows, and the heartbeat no longer redraws the sidebar (400 chats:
+      10 frames 330 → 129 ms; previews byte-identical).
+  - Retry on the latest errored turn and failed composer sends.
+  - A signed-out Codex shows "Authentication failed — sign in to Codex again."
+  - "Charting"/"Masting" working words; first-run regression tests; README Updating section.
+  - Tests: nextest 2502/2503; UI 2608/0. The one failure is `mast-preview::leak
+    remote_preview_churn_does_not_accumulate_tasks_or_memory`, which hangs even at 3 iterations. Its crate and deps
+    are unchanged since release 70, so it's likely ICE over the Tailscale utun interfaces; quarantine it if it
+    recurs.
+  - Pre-release backups: `~/zeron-dev-app-backups/pre-release-71-2026-11-10/` (docs.sqlite3 read-only copy,
+    mast-release-70).
+  - Baseline before restart: 4.4 GB RSS fresh, 5.4–6.4 GB after 2 days, UI thread 94% busy. Profiles are in
+    `~/zeron-dev-app-backups/perf/`. Follow-ups: item 2694931e.
 - **Release 70: Horizon polish + Linear/team migration** (2026-11-08): Horizon SEND is muted on any theme; Horizon
   selected Appearance cards are marked; Linear and team screens are on shared components (all planned screen
   migrations done).
@@ -1018,6 +1078,48 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-10 17:30; coordinator 844aab58, near its weekly limit)
+
+- **Installed: release 76** (batched decisions, queue fix, usage-only menu bar, smaller dev builds; restart needed). Row ids (bb71e83f6) wait for release 77.
+- **Running:** Terra chat d1ac228d (item 3b9a83cb, branch `decision-sheet-v2`, worktree `.worktrees/zeron/decision-sheet-v2`).
+  - Mikey picked the decision-sheet redesign "B + C": B's "Needs you" list with Accept/Reject on top, C's tinted
+    flow chips below.
+  - Mockups and real data are in /private/tmp/sheet-v2/; the design artifact is mast-artifact:978a4499.
+  - Scope: optional child status (inherits), a `recommendation`/`question` field, top-level-only counts, the B+C
+    renderer and kit CSS, and row Accept/Reject/comment through the bridge, stored per artifact, read back via
+    artifact_get_decisions, with ONE aggregate Needs-you per sheet.
+  - When it lands: look at its 1200/520 light/dark screenshots, merge, release 75 using the detached runner
+    (/tmp/release74-run.sh pattern), then delete the worktree's target/.
+- **Next on the docket (Mikey hasn't said go):** freeze watchdog (17c9d278), render-probe bug (bb6e6f10), queue
+  race (79760f82), perf follow-ups (2694931e). Phase 0 go/no-go 9516dd7c is due 11-12.
+- **Disk:** about 113 GB free after clearing target/debug/incremental again; it refills quickly, so clear it
+  before releases.
+- **Skills** (all one copy each in ~/.agents/skills, linked into claude/codex/cursor): project-planner
+  (decision-sheet JSON, rows = changes only, top-level decisions, ~10–25 open, no recommendations in titles),
+  implement-ticket (orchestrated mode; workers read the sheet and never publish it), review-pr, code-review,
+  talk-to-me (the "LLM Writing Tics: never" table applies to all writing including UI and design). The Cofactr
+  Space-root instructions already carry review-pr + the quiet-orchestrator rule.
+
+## In flight (snapshot 2026-11-10 13:00; coordinator 844aab58)
+
+- **Installed: release 74** (restart needed). Coworker testing handed off by Mikey 2026-11-10. No workers are running; the Horizon worker 8ac73b69 is
+  idle.
+- **Coworker hand-off:** ready on the code side. Coworkers build from source off the public, standalone repo; there's
+  no DMG and no workflow pack. Waiting on Mikey to pick the first coworker for a clean-Mac run. The iOS companion
+  stays undocumented in the README until DevOps approves it.
+- **Process redesign (from the Kit Scheduler session a2e6b013, Cofactr Space):**
+  - Diagnosis: three gates per ticket in `implement-ticket`, about 70 repeated "Waiting on you" lists, decisions
+    buried in a plan that reached rev 44, and UI seen only at local QA.
+  - Proposed: one gate per ticket (workers push and open draft PRs; Mikey reviews and merges), a quiet orchestrator,
+    a **decision sheet** (contracts and constraints plus flows, mast-artifact:1af1d319), and a saved local-test
+    recipe.
+  - Mikey wants an **artifact component library**. Recommended: A, a built-in CSS kit injected by the fragment
+    host, then B, data-driven kinds like `decision-sheet` JSON → kit HTML. Not C, native gpui. Awaiting his go.
+  - Skill edits (`~/.claude/skills/project-planner`, `implement-ticket`) need his OK.
+- **Parked today:** upstream Zeron port triage (07486a45), chat fork/rollback (729bb9ad, design mast-artifact:7b47bc3d).
+- **Repo:** detached from the fork network; public; credits and cleanup merged. Personal values live in parent
+  `docs/private/`.
+
 ## In flight (snapshot 2026-11-08 21:15; coordinator 844aab58 handing off)
 
 - **Installed Mast: still release 70.** No Mast-side workers are running. The Horizon worker (8ac73b69) waits for Mikey's
@@ -1520,9 +1622,14 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
 
 - **Worktrees:** `<home>/Projects/agent-mode-tools/.worktrees/zeron/<branch>`, branched from
   the integration head. Seed the build cache with
-  `cp -c -R target/debug/{deps,build,.fingerprint}` (APFS clones), add a `.workspace-root` file.
+  `cp -c -R target/debug/{deps,build,.fingerprint}` (APFS clones), add a `.workspace-root` file,
+  and write `.cargo/config.toml` with `[build]\nincremental = false` (untracked; `.cargo/` is in
+  info/exclude). Incremental caches were roughly 20 GB per worktree.
   Merge with `--no-ff` into `work-outline-implementation`. **Delete each worktree's `target/` after
-  merging**; keep at least 100 GB free.
+  merging**; keep at least 100 GB free. **At most 2 building workers at once.**
+  Since 7c53f6b54, dev builds use line tables only and no dependency debug info.
+  If disk still nears 100 GB, clear `target/debug/incremental` and `target/installed` in the main
+  checkout; both rebuild.
 - **Subagents:** one narrow task per agent with clear file ownership; read files in ≤200-line
   slices (they stall on huge files like `overview.rs` / `shell.rs`); commit early and often.
 - **Tests:** release runs use `caffeinate -i scripts/run_release_tests.sh [BASE_REF]` (nextest

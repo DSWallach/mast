@@ -455,7 +455,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder)." },
                     "title": { "type": "string", "description": "Human title, e.g. \"Receiving flow — plan\". Same title + role on the same work item = same artifact." },
-                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options"], "description": "Defaults from the file extension." },
+                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet"], "description": "Defaults from the file extension." },
                     "role": { "type": "string", "description": "plan, diagram, state-machine, comparison, or doc (free-form)." },
                     "note": { "type": "string", "description": "One line: what changed in this revision." },
                     "pinAsPlan": { "type": "boolean", "default": false, "description": "Make this the work item's plan (unpins the previous one)." },
@@ -469,6 +469,11 @@ fn artifact_catalog() -> Vec<ToolDef> {
             name: agent_tool_names::ARTIFACT_GET_PLAN,
             description: "The pinned plan of your chat's work item: {artifactId, title, revision, storedPath, content, openQuestions, unverifiedClaims, answeredQuestions: [{id, answer, at, revision}], comments: [{id, text, quote, anchor, revision, at, anchorStatus}], pickedOptions: [{artifactId, title, optionId, label, note, at, revision}]}, or null. answeredQuestions are answers the user gave in Mast (the plan's question card or Required Actions) that the document may not reflect yet: fold each into the plan (`status: resolved` + `decision:`) in your next revision. comments are the open comments on an HTML or Mermaid plan, each with its anchor and quoted text (anchorStatus found|outdated|unknown): address them in the next revision and pass their ids as addressedComments to artifact_publish. pickedOptions are the options the user picked on your options artifacts (also in the plan-less reply): continue with that option. Call it at the start of every chat under a work item; if a plan exists, work from it and publish new revisions of it instead of writing a new one.",
             input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: agent_tool_names::ARTIFACT_GET_DECISIONS,
+            description: "Read sent decisions for a decision sheet in your work item, including row IDs, outcomes, notes, timestamps, revisions, and IDs no longer present in the sheet.",
+            input_schema: json!({"type": "object", "properties": {"artifactId": {"type": "string"}}, "required": ["artifactId"]}),
         },
         ToolDef {
             name: agent_tool_names::ARTIFACT_RENDER_CHECK,

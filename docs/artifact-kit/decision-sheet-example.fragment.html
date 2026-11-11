@@ -1,0 +1,120 @@
+<div class="mk-sheet">
+<h1>ENG-3338 / 3339 · Kit scheduled sections</h1>
+<div class="mk-muted mk-mono">decision sheet · rev 2026-11-09 · example from the Kit Scheduler session · event names and params illustrative</div>
+<div class="mk-chips">
+  <span class="mk-chip mk-added">+ 1 table</span><span class="mk-chip mk-added">+ 5 fields</span><span class="mk-chip mk-changed">~ 2 API shapes</span><span class="mk-chip mk-removed">1 rejected</span><span class="mk-chip mk-open">1 open</span><span class="mk-chip mk-decided">migration 0230 · no backfill</span>
+</div>
+<div class="mk-legend"><span><b class="mk-yes">+</b> new</span><span><b>~</b> changed</span><span><b class="mk-no">−</b> removed / rejected</span><span><span class="mk-chip mk-decided">✓</span> decided</span><span><span class="mk-chip mk-open">?</span> open</span></div>
+
+
+<h2 class="mk-section">Flows · what each action touches</h2>
+<div class="mk-legend"><span class="mk-step mk-ui">UI</span><span class="mk-step mk-api">API</span><span class="mk-step mk-db">DB write</span><span class="mk-step mk-event">event</span><span class="mk-step mk-effect">side effect</span><span class="mk-step mk-none">doesn't happen</span></div>
+
+<div class="mk-flow"><div class="mk-card-header">Schedule a kit for the first time <span class="mk-chip mk-decided">✓ 11-09</span></div>
+<div class="mk-lane mk-lane-dense">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Sections dialog → Save<div class="mk-mono">no reason field</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-mono">schedule_version<br>scheduled_sections[N]<br>notes: null</div></div><div class="mk-arrow">→</div>
+  <div class="mk-fan">
+    <div class="mk-step mk-db"><div class="mk-step-kind">+ KitRequestScheduledSection × N</div><div class="mk-mono">start_date, end_date</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-mono">schedule_version → new</div></div>
+  </div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-event"><div class="mk-step-kind">event · scheduled</div><div class="mk-mono">kit_request<br>actor<br>sections<br>reason: null</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-effect"><div class="mk-step-kind">side effect</div>Gantt shows N bars</div></div>
+</div>
+<div class="mk-flow"><div class="mk-card-header">Reschedule an existing schedule <span class="mk-chip mk-decided">✓</span></div>
+<div class="mk-lane mk-lane-dense">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Edit sections → Save<div class="mk-mono">reason required</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-mono">schedule_version (current)<br>scheduled_sections[]<br>notes: "reason"</div></div><div class="mk-arrow">→</div>
+  <div class="mk-fan">
+    <div class="mk-step mk-db"><div class="mk-step-kind">± KitRequestScheduledSection</div><div class="mk-mono">add / change / delete rows</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-mono">schedule_version → new</div></div>
+  </div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-event"><div class="mk-step-kind">event · rescheduled</div><div class="mk-mono">kit_request<br>actor<br>before → after<br>reason</div></div></div>
+</div>
+<div class="mk-flow"><div class="mk-card-header">Clear a schedule <span class="mk-chip mk-open">open: reason?</span></div>
+<div class="mk-lane mk-lane-dense">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Remove all sections → Save<div class="mk-mono">reason ?</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>POST save schedules<div class="mk-mono">scheduled_sections: []</div></div><div class="mk-arrow">→</div>
+  <div class="mk-fan">
+    <div class="mk-step mk-db"><div class="mk-step-kind">− KitRequestScheduledSection</div><div class="mk-mono">all rows for kit</div></div>
+    <div class="mk-step mk-db"><div class="mk-step-kind">~ KitRequest</div><div class="mk-mono">legacy pair cleared<br>schedule_version → new</div></div>
+  </div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-event"><div class="mk-step-kind">event · schedule_cleared</div><div class="mk-mono">kit_request<br>actor<br>reason ?</div></div></div>
+</div>
+<div class="mk-flow"><div class="mk-card-header">Save on a stale version <span class="mk-chip mk-decided">✓</span></div>
+<div class="mk-lane mk-lane-dense">  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>Save<div class="mk-mono">old schedule_version</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-api"><div class="mk-step-kind">API</div>result: conflict</div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-db mk-none"><div class="mk-step-kind">no write</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-event mk-none"><div class="mk-step-kind">no event</div></div><div class="mk-arrow">→</div>
+  <div class="mk-step mk-ui"><div class="mk-step-kind">UI</div>refetch kit<div class="mk-mono">matches draft → saved<br>differs → "changed, reload"</div></div></div>
+</div>
+<h2 class="mk-section">Data model</h2>
+<div class="mk-grid">
+  <div class="mk-card"><div class="mk-card-header">KitRequestScheduledSection <span class="mk-chip mk-added">new</span></div>
+    <table class="mk-table"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class="mk-notes">constraint</th><th></th></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">kit_request</td><td class="mk-mono">FK</td><td>required</td><td>—</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">start_date</td><td class="mk-mono">date</td><td>required</td><td>≤&nbsp;end_date</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">end_date</td><td class="mk-mono">date</td><td>required</td><td class="mk-notes">no overlap / kit</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">created_at · updated_at</td><td class="mk-mono">datetime</td><td>auto</td><td>—</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+    </table></div>
+  <div class="mk-card"><div class="mk-card-header">KitRequest <span class="mk-chip mk-changed">changed</span></div>
+    <table class="mk-table"><tr><th></th><th>field</th><th>type</th><th>null / default</th><th class="mk-notes">constraint</th><th></th></tr>
+      <tr><td class="mk-marker mk-added">+</td><td class="mk-mono">schedule_version</td><td class="mk-mono">uuid</td><td>auto</td><td class="mk-notes">bumps every save</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+      <tr><td class="mk-marker mk-context"></td><td class="mk-mono">scheduled_start · est. ship</td><td class="mk-mono">date</td><td colspan="2">unchanged · legacy pair kept</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+    </table></div>
+  <div class="mk-card"><div class="mk-card-header">KitRequestScheduleOperation <span class="mk-chip mk-removed">rejected 11-09</span></div>
+    <table class="mk-table"><tr><th></th><th>field</th><th>type</th><th colspan="3">reason</th></tr>
+      <tr class="mk-removed"><td class="mk-marker mk-removed">−</td><td class="mk-mono">operation_id · payload_hash · response</td><td class="mk-mono">—</td><td colspan="3">retry dedupe</td></tr>
+      <tr><td></td><td colspan="5">version check already blocks double saves · UI handles lost response</td></tr>
+    </table></div>
+</div>
+
+<h2 class="mk-section">API contract · POST save schedules</h2>
+<div class="mk-grid">
+  <div class="mk-card"><div class="mk-card-header">request <span class="mk-chip mk-changed">~</span></div><div class="mk-diff">
+    <div class="mk-context">kit_request_id</div><div class="mk-added">schedule_version</div><div class="mk-removed">operation_id</div><div class="mk-added">schedule_event_internal_notes   <span>// reason</span></div><div class="mk-added">scheduled_sections[]</div><div class="mk-added">    client_key, start_date, end_date</div>
+  </div></div>
+  <div class="mk-card"><div class="mk-card-header">response <span class="mk-chip mk-changed">~</span></div><div class="mk-diff">
+    <div class="mk-added">result: ok | conflict | invalid</div><div class="mk-added">sections[] with id ← client_key</div><div class="mk-added">schedule_version</div><div class="mk-removed">replayed original response</div>
+  </div></div>
+  <div class="mk-card"><div class="mk-card-header">existing callers</div><table class="mk-table">
+    <tr><td class="mk-mono">client create</td><td>unchanged · no reason</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+    <tr><td class="mk-mono">client PATCH dates only</td><td><b>needs reason on reschedule</b></td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+    <tr><td class="mk-mono">GET pair-only kit</td><td>sections: [] → UI falls back</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+  </table></div>
+</div>
+
+<h2 class="mk-section">Rules · reason / event by state</h2>
+<div class="mk-card"><table class="mk-table">
+  <tr><th>state</th><th>action</th><th>reason required</th><th>event written</th><th>actor recorded</th><th></th></tr>
+  <tr><td>no schedule</td><td>schedule</td><td class="mk-no">—</td><td class="mk-yes">✓</td><td class="mk-yes">✓</td><td><span class="mk-chip mk-decided">✓ 11-09</span></td></tr>
+  <tr><td>has schedule</td><td>change</td><td class="mk-yes">✓</td><td class="mk-yes">✓</td><td class="mk-yes">✓</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+  <tr><td>has schedule</td><td>clear</td><td class="mk-question">?</td><td class="mk-yes">✓ schedule_cleared</td><td class="mk-yes">✓</td><td><span class="mk-chip mk-open">open</span></td></tr>
+  <tr><td>legacy pair only</td><td>read</td><td class="mk-no">—</td><td class="mk-no">—</td><td class="mk-no">—</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+</table></div>
+
+<h2 class="mk-section">Validations</h2>
+<div class="mk-card"><table class="mk-table">
+  <tr><th>rule</th><th>enforced</th><th>result</th><th></th></tr>
+  <tr><td>start ≤ end</td><td><span class="mk-chip mk-neutral">API</span><span class="mk-chip mk-neutral">UI</span></td><td class="mk-mono">invalid</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+  <tr><td>sections don't overlap</td><td><span class="mk-chip mk-neutral">API</span><span class="mk-chip mk-neutral">UI picker</span></td><td class="mk-mono">invalid · taken dates greyed</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+  <tr><td>stale schedule_version</td><td><span class="mk-chip mk-neutral">API</span></td><td class="mk-mono">conflict → UI refetch</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+  <tr><td>reason on reschedule</td><td><span class="mk-chip mk-neutral">API</span><span class="mk-chip mk-neutral">UI</span></td><td class="mk-mono">invalid</td><td><span class="mk-chip mk-decided">✓</span></td></tr>
+</table></div>
+
+<h2 class="mk-section">Permissions</h2>
+<div class="mk-card"><table class="mk-table">
+  <tr><th></th><th>customer</th><th>warehouse</th><th>Django admin</th></tr>
+  <tr><td class="mk-mono">scheduled sections</td><td class="mk-no">hidden</td><td class="mk-yes">read · write</td><td class="mk-yes">read</td></tr>
+  <tr><td class="mk-mono">internal notes</td><td class="mk-no">hidden</td><td class="mk-yes">write</td><td class="mk-yes">read</td></tr>
+</table></div>
+
+<h2 class="mk-section">UI states</h2>
+<div class="mk-screenshots">
+  <div class="mk-screenshot"><div class="mk-screenshot-placeholder">screenshot</div><div class="mk-caption">first schedule · no reason<span class="mk-chip mk-decided">✓</span></div></div>
+  <div class="mk-screenshot"><div class="mk-screenshot-placeholder">screenshot</div><div class="mk-caption">reschedule · reason<span class="mk-chip mk-decided">✓</span></div></div>
+  <div class="mk-screenshot"><div class="mk-screenshot-placeholder">screenshot</div><div class="mk-caption">2nd section · taken dates<span class="mk-chip mk-decided">✓</span></div></div>
+  <div class="mk-screenshot"><div class="mk-screenshot-placeholder">screenshot</div><div class="mk-caption">conflict · reload<span class="mk-chip mk-decided">✓</span></div></div>
+  <div class="mk-screenshot"><div class="mk-screenshot-placeholder">screenshot</div><div class="mk-caption">clear schedule<span class="mk-chip mk-open">?</span></div></div>
+</div>
+
+<h2 class="mk-section">Out of scope</h2>
+<div class="mk-chips"><span class="mk-chip mk-removed">backfill old kits</span><span class="mk-chip mk-removed">retry-dedupe table</span><span class="mk-chip mk-removed">backend taken-date check</span></div>
+</div>

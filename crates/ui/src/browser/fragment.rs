@@ -179,6 +179,7 @@ fn base_stylesheet(theme: &FragmentTheme, reduced_motion: bool) -> String {
         theme.font_sans, theme.font_mono
     ));
     out.push_str(BASE_CSS);
+    out.push_str(include_str!("../../assets/artifact-kit.css"));
     let motion = "*, *::before, *::after { animation-duration: 0.01ms !important; \
 animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; \
 scroll-behavior: auto !important; }\n";
@@ -552,6 +553,8 @@ mod tests {
         let fragment =
             r#"<div id="chart" class="card">Q3 "sales" & more</div><script>draw()</script>"#;
         let document = host_document(fragment, "Sales <Q3>", true, &theme, false);
+        assert!(document.contains(".mk-sheet"));
+        assert!(document.contains(".mk-lane"));
         // Exactly one frame, sandboxed to scripts only.
         assert_eq!(document.matches("<iframe").count(), 1);
         assert!(

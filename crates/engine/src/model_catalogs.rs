@@ -153,7 +153,12 @@ pub(crate) async fn list(
             }
         }
         result => {
-            tracing::warn!(error = ?result, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery unavailable");
+            match &result {
+                None => tracing::debug!(binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery still refreshing; using saved catalog"),
+                Some(Ok(Ok(_))) => tracing::warn!(binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery returned an empty catalog"),
+                Some(Ok(Err(error))) => tracing::warn!(%error, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery unavailable"),
+                Some(Err(error)) => tracing::warn!(%error, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery task failed"),
+            }
             match disk {
                 Some(models) => ModelCatalog {
                     models,

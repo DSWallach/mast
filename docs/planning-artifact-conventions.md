@@ -23,7 +23,7 @@ Everything the user should see is published; Mast never discovers artifacts by s
   artifact_publish {
     path:          "<file you wrote>",
     title:         "Receiving flow — plan",
-    kind?:         "markdown" | "html-fragment" | "html-page" | "mermaid" | "image" | "options",
+    kind?:         "markdown" | "html-fragment" | "html-page" | "mermaid" | "image" | "options" | "decision-sheet",
     role?:         "plan" | "diagram" | "state-machine" | "comparison" | "doc",
     note:          "<one line: what changed in this revision>",
     pinAsPlan?:    true,
@@ -47,6 +47,8 @@ Everything the user should see is published; Mast never discovers artifacts by s
 - **Existing files** (`work/`, `.local/`, earlier artifacts): publish them the same way; the first
   publish imports them as revision 1.
 
+For a data-driven decision sheet, write JSON following [the schema](artifact-kit/decision-sheet-schema.md) and publish it with `kind: "decision-sheet"`. Keep row IDs stable across revisions. Mast validates the JSON and renders the sheet using the artifact kit.
+
 ## 2. HTML
 
 - Write `<name>.fragment.html` containing body content only: no `<html>`, `<head>`, or `<body>`.
@@ -55,6 +57,17 @@ Everything the user should see is published; Mast never discovers artifacts by s
 - Publish the **fragment**. A link to either file opens the rendered fragment.
 - Scripts are allowed inside the sandbox. Network access is limited to the CDNs allowed by Codex's
   visualize policy; anything else fails and is reported by the render check.
+
+### Responsive behaviour
+
+The kit uses the `.mk-sheet` container width: flow lanes stack with downward arrows at narrow
+widths, grids become one column, and tables scroll horizontally inside their cards. Add
+`mk-lane-dense` to a lane with many or long steps so it stacks at a wider container width. Table cells
+stay on one line by default; mark descriptive constraint or notes cells (including their header)
+with `mk-notes` to allow wrapping. Keep short values together, for example `≤&nbsp;end_date`.
+For identifiers, use `mk-id` and add `<wbr>` after `_` or `.` where a natural break is useful:
+`<span class="mk-id">schedule_<wbr>version</span>`. WebKit can then break at those points;
+`overflow-wrap: break-word` is the fallback for an otherwise unbreakable token.
 
 ## 3. Checking what you made
 
@@ -226,3 +239,24 @@ text and goes *outdated* once that text is gone. Call `artifact_get_plan` to rea
 `comments` (each has its anchor and quoted text), address them in the next revision, and pass their
 ids as `addressedComments` (for example `["C-1", "C-3"]`) to `artifact_publish`; they are then
 marked resolved.
+
+## Artifact component kit
+
+Use kit classes; no inline colours. The fragment host supplies the stylesheet in light and dark themes, including compare panes. Wrap content in `mk-sheet`. See `docs/artifact-kit/gallery.fragment.html` for all variants and `decision-sheet-example.fragment.html` for a complete sheet.
+
+```html
+<h2 class="mk-section">Models</h2>
+<div class="mk-chips"><span class="mk-chip mk-added">+ added</span></div>
+<span class="mk-status mk-decided">✓ decided</span>
+<div class="mk-legend"><span><b class="mk-marker mk-changed">~</b> changed</span></div>
+<div class="mk-card"><div class="mk-card-header">Model</div>Content</div>
+<table class="mk-table"><tr><th>Field</th></tr><tr><td><span class="mk-marker mk-added">+</span> name</td></tr></table>
+<div class="mk-diff"><div class="mk-added">added</div><div class="mk-removed">removed</div><div class="mk-context">context</div></div>
+<table class="mk-table"><tr><td class="mk-yes">✓</td><td class="mk-no">—</td><td class="mk-question">?</td></tr></table>
+<div class="mk-grid"><div class="mk-card">Grid item</div></div>
+<div class="mk-lane"><div class="mk-step mk-ui"><strong>UI</strong>Save</div><span class="mk-arrow">→</span><div class="mk-step mk-api">POST</div></div>
+<figure class="mk-screenshot"><div class="mk-screenshot-placeholder">Screenshot</div><figcaption>State</figcaption></figure>
+<div class="mk-callout">Warning</div>
+```
+
+Chip variants: `mk-added`, `mk-changed`, `mk-removed`, `mk-open`, `mk-decided`, `mk-neutral`; use the same variants on `mk-status`. Flow step kinds: `mk-ui`, `mk-api`, `mk-db`, `mk-event`, `mk-effect`, `mk-none` (dashed). Use `mk-flow` around a lane, `mk-fan` for parallel steps, `mk-screenshots` for tiles, and `mk-mono` for identifiers. Tables use `mk-table` for schemas, matrices, validation and permissions.

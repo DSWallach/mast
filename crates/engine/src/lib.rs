@@ -73,6 +73,7 @@ pub mod uploads;
 pub mod work_outline;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
+mod watch_budget;
 pub mod workspace_files;
 pub mod workspace_content_search;
 pub mod workspace_host;

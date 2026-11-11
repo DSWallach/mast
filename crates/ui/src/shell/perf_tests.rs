@@ -10,6 +10,106 @@ use std::{cell::Cell, rc::Rc};
 
 type Counter = (&'static str, Rc<Cell<u64>>);
 
+#[gpui::test]
+fn working_heartbeat_notifies_transcript_without_notifying_sidebar(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        cx.set_global(Theme::default());
+        crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+        crate::app_menus::init(cx);
+    });
+    let now = Utc::now();
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = vec![chat_row(0)];
+        state.selected_chat = Some("c0".into());
+        state.sessions = vec![mast_proto::Session {
+            chat_id: "c0".into(), device_id: "local".into(),
+            status: mast_proto::SessionStatus::Working, started_at: Some(now), updated_at: now,
+            last_completed_turn: None, awaiting_input: None, last_turn_tool_failures: None,
+        }];
+    });
+    let shell = cx.new(|cx| Shell::new(state, EngineBootConfig {
+        data_dir: dir.path().to_path_buf(), ipc_port: 0,
+        edge_url: "http://127.0.0.1:1".into(), edge_token: None, org_id: None,
+        workos_client_id: None, default_harness: mast_proto::HarnessId::Mock,
+    }, cx));
+    shell.update(cx, |shell, cx| shell.refresh_heartbeat(now, false, cx));
+    cx.run_until_parked();
+    let (sidebar, transcript) = shell.read_with(cx, |shell, _| (shell.sidebar_pane.clone(), shell.transcript.clone()));
+    let counters = vec![watch(cx, "shell", &shell), watch(cx, "sidebar", &sidebar), watch(cx, "transcript", &transcript)];
+    shell.update(cx, |shell, cx| shell.refresh_heartbeat(now, false, cx));
+    cx.run_until_parked();
+    assert_eq!(totals(&counters), vec![("shell", 0), ("sidebar", 0), ("transcript", 1)]);
+    shell.update(cx, |shell, cx| {
+        shell.running.open = true;
+        shell.refresh_heartbeat(now, false, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(totals(&counters), vec![("shell", 1), ("sidebar", 1), ("transcript", 2)]);
+    shell.update(cx, |shell, cx| {
+        shell.running.open = false;
+        shell.refresh_heartbeat(now + chrono::TimeDelta::seconds(46), false, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(totals(&counters), vec![("shell", 2), ("sidebar", 2), ("transcript", 3)]);
+}
+
+/// Set `MAST_BENCH_OPEN=1` to measure the open list; otherwise measure the closed disclosure.
+#[gpui::test]
+#[ignore]
+fn sidebar_frame_cost(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        cx.set_global(Theme::default());
+        crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+        crate::composer::init(cx, Default::default());
+        crate::terminal::panel::init(cx);
+        crate::app_menus::init(cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = (0..400).map(chat_row).collect();
+        state.sessions = (395..400).map(|index| mast_proto::Session {
+            last_completed_turn: None,
+            awaiting_input: None,
+            last_turn_tool_failures: None,
+            chat_id: format!("c{index}"),
+            device_id: "local".into(),
+            status: mast_proto::SessionStatus::Working,
+            started_at: None,
+            updated_at: Utc::now(),
+        }).collect();
+        state.chats_synced = true;
+        state.selected_chat = Some("c0".into());
+        state.no_project = true;
+        state.data_dir = Some(dir.path().to_path_buf());
+    });
+    let boot = EngineBootConfig { data_dir: dir.path().to_path_buf(), ipc_port: 0, edge_url: "http://127.0.0.1:1".into(), edge_token: None, org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock };
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let mut shell = Shell::new(state, boot, cx);
+        shell.route = Route::Chat;
+        shell.active_chat = "c0".into();
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+        shell.sessions_open = std::env::var_os("MAST_BENCH_OPEN").is_some();
+        shell
+    });
+    vcx.update(|window, cx| window.draw(cx).clear());
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+    eprintln!("BENCH sidebar (open={}): 400 chats, 5 working, 10 frames: {:?}", std::env::var_os("MAST_BENCH_OPEN").is_some(), start.elapsed());
+}
+
 fn watch<T: 'static>(cx: &mut TestAppContext, name: &'static str, entity: &Entity<T>) -> Counter {
     let count = Rc::new(Cell::new(0));
     let seen = count.clone();
