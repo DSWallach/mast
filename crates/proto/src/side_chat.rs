@@ -49,13 +49,13 @@ pub fn absorb_message(exchanges: &[SideExchange]) -> String {
         .iter()
         .map(|exchange| {
             format!(
-                "**Q:** {}\n\n**A:** {}",
+                "Q: {}\nA: {}",
                 exchange.question.trim(),
                 exchange.answer.trim()
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n---\n\n");
+        .join("\n\n");
     format!(
         "{SYSTEM_MESSAGE_PREFIX}, not from the user: {SIDE_CHAT_KEYWORD} context. The user asked \
          these questions in a side chat that branched from this conversation. Take them in as \
@@ -113,10 +113,7 @@ mod tests {
                 label: "Side chat".into()
             }
         );
-        assert_eq!(
-            body,
-            "**Q:** What is X?\n\n**A:** X is Y.\n\n---\n\n**Q:** And Z?\n\n**A:** Z too."
-        );
+        assert_eq!(body, "Q: What is X?\nA: X is Y.\n\nQ: And Z?\nA: Z too.");
         assert!(text.contains("not a new instruction"));
         assert_eq!(
             crate::message_source::preview(&text),

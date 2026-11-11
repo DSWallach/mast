@@ -300,16 +300,8 @@ async fn side_chat_forks_once_then_resumes_its_own_session_and_absorbs_once() {
             .prompt
             .starts_with("[Mast system message, not from the user: side chat context.")
     );
-    assert!(
-        absorbed
-            .prompt
-            .contains("**Q:** why a parser?\n\n**A:** answer 2")
-    );
-    assert!(
-        absorbed
-            .prompt
-            .contains("**Q:** and the lexer?\n\n**A:** answer 3")
-    );
+    assert!(absorbed.prompt.contains("Q: why a parser?\nA: answer 2"));
+    assert!(absorbed.prompt.contains("Q: and the lexer?\nA: answer 3"));
     let marker = rig
         .core
         .workspace

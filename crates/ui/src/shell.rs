@@ -91,6 +91,8 @@ mod required_actions_ui;
 mod menu_bar_ui;
 mod running_ui;
 mod side_chat_ui;
+#[cfg(feature = "snapshot")]
+pub(crate) use side_chat_ui::fixture_side_chat_state;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;

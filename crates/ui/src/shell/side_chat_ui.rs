@@ -295,18 +295,33 @@ impl Shell {
     /// "Ask on the side…" is offered when both this engine and the chat's
     /// host understand side chats, and never on a side chat itself.
     pub(super) fn can_ask_on_side(&self, chat_id: &str, cx: &App) -> bool {
+        use mast_proto::capabilities::SIDE_CHAT_V1;
         let state = self.state.read(cx);
-        let local = state.engine().is_some_and(|engine| {
-            engine
-                .engine_info()
-                .supports(mast_proto::capabilities::SIDE_CHAT_V1)
-        });
+        let local = match state.engine() {
+            Some(engine) => engine.engine_info().supports(SIDE_CHAT_V1),
+            None => state
+                .local_device_id
+                .as_deref()
+                .is_some_and(|device| state.device_supports(device, SIDE_CHAT_V1)),
+        };
         local
             && state
                 .chats
                 .iter()
                 .any(|chat| chat.id == chat_id && !chat.archived && !chat.is_side_chat())
-            && state.chat_host_supports(chat_id, mast_proto::capabilities::SIDE_CHAT_V1)
+            && state.chat_host_supports(chat_id, SIDE_CHAT_V1)
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_snapshot_side_chat(&mut self, cx: &mut Context<Self>) {
+        self.active_chat = "fixture-chat".into();
+        self.add_side_chat_surface("fixture-side".into(), cx);
+        self.chat_menu.open(ChatMenuState {
+            chat_id: "fixture-chat".into(),
+            position: gpui::point(px(560.0), px(64.0)),
+            page: ChatMenuPage::Root,
+            closeable: false,
+        });
     }
 
     /// Create a side chat of `main_id` and open it in the main chat's right
@@ -512,4 +527,48 @@ mod tests {
             "Queued 2 exchanges for when the main chat's turn ends"
         );
     }
+}
+
+/// Preview state: a side chat with two answered questions (the first one
+/// absorbed) and the main transcript showing the absorbed pill.
+#[cfg(feature = "snapshot")]
+pub(crate) fn fixture_side_chat_state(state: &mut AppState, cx: &mut Context<AppState>) {
+    let entries = |value: serde_json::Value| -> Vec<mast_doc::SessionMessageEntry> {
+        serde_json::from_value(value).unwrap()
+    };
+    let side = entries(serde_json::json!([
+        {"id":"s-u1","role":"user","parts":[{"id":"t","kind":"text","text":"Why did the spacing drift in the first place?"}],"createdAt":1788900100000_i64,"deviceId":"local"},
+        {"id":"s-a1","role":"assistant","parts":[{"id":"r","kind":"reasoning","text":"Checking the layout history."},{"id":"x","kind":"tool","call":{"kind":"exec","command":"git log -S gap -- crates/ui"},"resolved":true,"output":"3 commits"},{"id":"t","kind":"text","text":"The caption row used a hard-coded 6px gap while the controls used the theme's control gap, so the two drifted when the compact layout shrank the tokens."}],"createdAt":1788900101000_i64,"deviceId":"local","status":"complete"},
+        {"id":"s-u2","role":"user","parts":[{"id":"t","kind":"text","text":"Does that affect the Overview too?"}],"createdAt":1788900102000_i64,"deviceId":"local"},
+        {"id":"s-a2","role":"assistant","parts":[{"id":"t","kind":"text","text":"No. The Overview rows take their gap from the same token, so only the sidebar caption was off."}],"createdAt":1788900103000_i64,"deviceId":"local","status":"complete"}
+    ]));
+    let absorbed = mast_proto::side_chat::absorb_message(&[mast_proto::SideExchange {
+        question: "Why did the spacing drift in the first place?".into(),
+        answer: "The caption row used a hard-coded 6px gap while the controls used the theme's control gap.".into(),
+    }]);
+    let main = entries(serde_json::json!([
+        {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+        {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I inspected the layout. The controls now align with their captions."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"},
+        {"id":"absorbed","role":"user","parts":[{"id":"text","kind":"text","text":absorbed}],"createdAt":1788900104000_i64,"deviceId":"local"},
+        {"id":"ack","role":"assistant","parts":[{"id":"text","kind":"text","text":"Noted. I'll keep the caption gap on the control token from now on."}],"createdAt":1788900105000_i64,"deviceId":"local","status":"complete"}
+    ]));
+    state.devices.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "local", "name": "This Mac", "platform": "macos",
+            "capabilities": [mast_proto::capabilities::SIDE_CHAT_V1],
+        }))
+        .unwrap(),
+    );
+    state.chats.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "fixture-side", "deviceId": "local", "spaceId": "fixture-space",
+            "sideOf": "fixture-chat", "sideAbsorbedThrough": "s-a1", "title": "Side chat",
+            "archived": false, "createdAt": "2026-09-08T00:00:00Z"
+        }))
+        .unwrap(),
+    );
+    state
+        .receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: main }, cx)
+        .unwrap();
+    state.set_subagent_snapshot("fixture-side".into(), side);
 }
