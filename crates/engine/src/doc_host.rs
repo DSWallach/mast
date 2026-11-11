@@ -768,6 +768,12 @@ pub struct ChatDocHandle {
 }
 
 impl ChatDocHandle {
+    /// Hold the queue drain for deterministic integration tests.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn test_queue_drain_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.drain_lock.lock().await
+    }
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
