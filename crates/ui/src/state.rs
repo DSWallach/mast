@@ -777,6 +777,8 @@ pub struct AppState {
     work_outline_tasks: HashMap<String, Task<()>>,
     /// Live admin grants and the admin audit cache (`crate::admin`).
     pub(crate) admin: crate::admin::AdminState,
+    /// This device's personal assistant chat (`crate::personal_assistant`).
+    pub(crate) personal_assistant: crate::personal_assistant::PersonalAssistantState,
     /// Spaces the Outline presentation declared visible; the reconciler
     /// watches exactly these (intersected with live Spaces).
     work_outline_visible: Vec<String>,
@@ -900,6 +902,7 @@ impl AppState {
             action_log: Default::default(),
             work_outline_tasks: HashMap::new(),
             admin: Default::default(),
+            personal_assistant: Default::default(),
             work_outline_visible: Vec::new(),
             sidebar_outline_sections: false,
             work_outline_runtime: None,
@@ -1921,7 +1924,8 @@ impl AppState {
     }
 
     /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
-    /// narrowed to the current project filter. The jump shortcuts and their
+    /// narrowed to the current project filter, without the personal assistant
+    /// (it has its own section above the filter). The jump shortcuts and their
     /// hints both count positions here, so neither can drift from the rows on
     /// screen.
     pub fn sidebar_chats(
@@ -1931,6 +1935,7 @@ impl AppState {
     ) -> Vec<(ChatIndicator, &Chat)> {
         self.overview_chats(now)
             .into_iter()
+            .filter(|(_, chat)| !self.personal_assistant.is(&chat.id))
             .filter(|(_, chat)| match space_filter {
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,
@@ -6357,6 +6362,26 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(filtered, ["b"]);
+    }
+
+    #[test]
+    fn the_personal_assistant_leaves_the_sidebar_lists() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        state.apply_chats(vec![chat("pa", 0, Some(2)), chat("b", 1, Some(1))]);
+        state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
+            assistant: Some(mast_proto::PersonalAssistant {
+                chat_id: "pa".into(),
+                designated_at_ms: 0,
+            }),
+        });
+        let rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(rows, ["b"]);
+        assert!(state.overview_chats(now).iter().any(|(_, c)| c.id == "pa"));
     }
 
     #[test]

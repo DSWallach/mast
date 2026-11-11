@@ -5549,6 +5549,77 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The personal assistant's own section, above the space filter: it stays
+    /// put whatever the filter, sort or grouping.
+    pub(super) fn render_personal_assistant_section(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let now = Utc::now();
+        let (row, selected) = {
+            let state = self.state.read(cx);
+            let chat = state
+                .chats
+                .iter()
+                .find(|chat| state.personal_assistant.is(&chat.id))?
+                .clone();
+            let selected = state.selected_chat.as_deref() == Some(chat.id.as_str());
+            (
+                self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
+                selected,
+            )
+        };
+        let chat = row.chat;
+        let harness = self
+            .settings
+            .sidebar_show_harness
+            .then(|| chat.config.as_ref().map(|c| c.harness))
+            .flatten();
+        let element = self.render_chat_row(
+            chat.id.clone(),
+            transcript::single_line(&chat.title.clone().unwrap_or_else(|| "New session".into()))
+                .into(),
+            format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+            row.folder.into(),
+            row.branch.map(SharedString::from),
+            row.change_request,
+            harness,
+            row.status,
+            selected,
+            chat.archived,
+            false,
+            None,
+            None,
+            None,
+            theme,
+            cx,
+        );
+        Some(
+            div()
+                .id("sidebar-personal-assistant")
+                .debug_selector(|| "sidebar-personal-assistant".into())
+                .flex_none()
+                .flex()
+                .flex_col()
+                .px(px(Theme::SPACE_SM))
+                .pt(px(8.0))
+                .child(
+                    div()
+                        .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .px(px(Theme::SPACE_SM))
+                        .child(crate::components::shell_parts::sidebar_section_label(
+                            theme,
+                            crate::personal_assistant::SECTION_LABEL.into(),
+                        )),
+                )
+                .child(element)
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_sessions_section(
         &mut self,
         content: AnyElement,
@@ -5646,6 +5717,7 @@ impl Shell {
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
                 .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
+                .filter(|c| !state.personal_assistant.is(&c.id))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,

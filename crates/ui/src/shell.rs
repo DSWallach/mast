@@ -8121,6 +8121,7 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
+        let assistant_section = self.render_personal_assistant_section(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
@@ -8290,6 +8291,7 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
+            .children(assistant_section)
             .child(filter_row)
             .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
@@ -9189,6 +9191,8 @@ impl Shell {
             let has_workers = self.has_hand_off_workers(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
+            let assistant_id = chat_id.clone();
+            let is_assistant = self.state.read(cx).personal_assistant.is(&chat_id);
             let closeable = menu_state.closeable;
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
@@ -9323,6 +9327,34 @@ impl Shell {
                                 .child(SharedString::from(crate::admin::REVOKE_LABEL)),
                             )
                         })
+                    })
+                    .when(admin_space || is_assistant, |menu| {
+                        menu.child(
+                            popover::menu_row(&theme, false, format!("chat-menu-assistant-{chat_id}"))
+                                .id("chat-menu-assistant")
+                                .debug_selector(|| "chat-menu-assistant".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    let chat_id = assistant_id.clone();
+                                    this.state.update(cx, |state, cx| {
+                                        if is_assistant {
+                                            state.clear_personal_assistant(cx);
+                                        } else {
+                                            state.set_personal_assistant(&chat_id, cx);
+                                        }
+                                    });
+                                }))
+                                .child(
+                                    icon(icons::BOT)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from(if is_assistant {
+                                    crate::personal_assistant::CLEAR_LABEL
+                                } else {
+                                    crate::personal_assistant::SET_LABEL
+                                })),
+                        )
                     })
                     .when(closeable, |menu| {
                         menu.child(

@@ -987,6 +987,10 @@ pub mod agent_tools {
         /// checked at every authenticate), else absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub admin_space_id: Option<String>,
+        /// This chat is the device's personal assistant: it may read (never
+        /// write to) every chat in every Space. Checked at every authenticate.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub reads_all_chats: bool,
     }
 
     /// Params of [`TOOL_CALL_METHOD`].
