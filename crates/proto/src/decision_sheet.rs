@@ -272,6 +272,48 @@ pub struct DecisionRow<'a> {
 }
 
 impl DecisionSheet {
+    /// Apply sent decisions for presentation without changing the published JSON.
+    pub fn apply_decisions(&mut self, decisions: &[SheetDecision]) {
+        fn apply(id: &str, status: &mut Status, decisions: &[SheetDecision]) {
+            if let Some(decision) = decisions
+                .iter()
+                .rev()
+                .find(|decision| decision.row_id == id)
+            {
+                status.state = match decision.outcome {
+                    DecisionOutcome::Decided => "decided",
+                    DecisionOutcome::Rejected => "rejected",
+                }
+                .into();
+                status.date = chrono::DateTime::from_timestamp_millis(decision.at)
+                    .map(|at| at.format("%Y-%m-%d").to_string());
+            }
+        }
+        for row in &mut self.flows {
+            apply(&row.id, &mut row.status, decisions);
+        }
+        for row in &mut self.models {
+            apply(&row.id, &mut row.status, decisions);
+        }
+        for row in &mut self.endpoints {
+            apply(&row.id, &mut row.status, decisions);
+        }
+        for group in &mut self.rules {
+            for row in &mut group.rows {
+                apply(&row.id, &mut row.status, decisions);
+            }
+        }
+        for row in &mut self.validations {
+            apply(&row.id, &mut row.status, decisions);
+        }
+        for row in &mut self.permissions {
+            apply(&row.id, &mut row.status, decisions);
+        }
+        for row in &mut self.ui_states {
+            apply(&row.id, &mut row.status, decisions);
+        }
+    }
+
     /// The decisions displayed in the summary, in display order.
     pub fn decision_rows(&self) -> Vec<DecisionRow<'_>> {
         let mut rows = Vec::new();

@@ -693,6 +693,17 @@ impl ArtifactTab {
         let key = render_key(cx);
         let title = self.document_title(cx);
         let source = super::question_html::with_answers(source, &self.questions.html_answers);
+        let source = if kind == WebKind::DecisionSheet {
+            if let Some(artifact) = self.artifact(cx).filter(|artifact| self.shown_or_current_revision(artifact) == artifact.current_revision) {
+                let rendered = self.shown_text().and_then(|text| mast_proto::decision_sheet::DecisionSheet::parse(&text).ok()).map(|mut sheet| {
+                    sheet.apply_decisions(&artifact.decisions);
+                    mast_proto::decision_sheet_render::render(&sheet)
+                }).unwrap_or(source);
+                let settings = crate::settings::current(cx);
+                let drafts = settings.artifact_decision_drafts.get(&artifact.id).filter(|drafts| drafts.revision == artifact.current_revision);
+                super::decision_sheet_html::with_state(&rendered, drafts, &artifact.decisions)
+            } else { source }
+        } else { source };
         let html = document::web_document(kind, &source, &title, mime, &key.0, key.1, false);
         self.rendered_key = Some(key);
         self.comments_document_loading();

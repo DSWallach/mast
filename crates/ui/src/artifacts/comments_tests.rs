@@ -19,6 +19,8 @@ const PAGE: &str = "<h2 id=\"intake\">Receiving intake</h2>\
 <p>Parts arrive at the dock.</p>\
 <div data-mast-question=\"Q-1\" data-status=\"open\">Merge by MPN?</div>";
 
+const SHEET: &str = r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+
 fn chat(id: &str) -> mast_proto::Chat {
     serde_json::from_value(json!({
         "id": id, "deviceId": "dev", "archived": false,
@@ -74,6 +76,12 @@ fn replies(kind: ArtifactKind, page: &'static str) -> Reply {
         methods::ARTIFACT_ANSWER_QUESTION => Ok(json!({
             "artifactId": params["artifactId"], "questionId": params["questionId"],
         })),
+        methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => Ok(json!({
+            "artifactId": params["artifactId"],
+            "decisions": params["decisions"].as_array().unwrap().iter().map(|d| json!({
+                "rowId":d["rowId"], "outcome":d["outcome"], "note":d["note"], "at":1, "revision":params["revision"]
+            })).collect::<Vec<_>>()
+        })),
         methods::CONTINUE_CHAT_FOR_WORK_ITEM => Ok(json!({
             "chatId": params["chatId"], "messageId": "m", "commandId": "k", "state": "started",
         })),
@@ -107,7 +115,7 @@ fn open(
     Shown,
     &mut VisualTestContext,
 ) {
-    let (actions, calls) = scripted(replies(kind, PAGE));
+    let (actions, calls) = scripted(replies(kind, if kind == ArtifactKind::DecisionSheet { SHEET } else { PAGE }));
     let shown: Shown = Default::default();
     let probe = WebProbe::default();
     let factory = FakeWebHost::probed_factory(shown.clone(), probe.clone());
@@ -405,4 +413,27 @@ fn app_documents_carry_the_bridge_and_render_checks_do_not() {
             "{kind:?} probe stays passive"
         );
     }
+}
+
+#[gpui::test]
+fn sheet_drafts_stage_undo_and_send_once(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let (tab, calls, _probe, shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+    assert!(shown.borrow().last().unwrap().1.contains("sheet-stage"));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":""}));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-4","outcome":"rejected","note":"too slow"}));
+    assert!(method_calls(&calls, methods::ARTIFACT_SUBMIT_SHEET_DECISIONS).is_empty());
+    assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions.len(), 2));
+    frame(&tab, vcx, json!({"t":"sheet-undo","id":"D-2"}));
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions.len(), 1));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":""}));
+    frame(&tab, vcx, json!({"t":"sheet-send"}));
+    assert_eq!(method_calls(&calls, methods::ARTIFACT_SUBMIT_SHEET_DECISIONS).len(), 1);
+    let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
+    assert_eq!(sent.len(), 1);
+    let message = sent[0].to_string();
+    assert!(message.contains("D-2 accepted"));
+    assert!(message.contains("D-4 rejected (too slow)"));
+    vcx.update(|_, cx| assert!(!crate::settings::current(cx).artifact_decision_drafts.contains_key(&id(1))));
 }
