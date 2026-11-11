@@ -391,7 +391,7 @@ impl ArtifactQuestionSync {
         let Ok(source) = std::str::from_utf8(&bytes) else { return 0; };
         let Ok(sheet) = mast_proto::decision_sheet::DecisionSheet::parse(source) else { return 0; };
         let open: Vec<_> = sheet.decision_rows().into_iter()
-            .filter(|row| row.status.state == "open" && !artifact.decisions.iter().any(|decision| decision.row_id == row.id)).collect();
+            .filter(|row| row.status.state == "open" && !artifact.decisions.iter().any(|decision| decision.row_id == row.id && decision.revision == artifact.current_revision)).collect();
         let key = format!("artsheet:{}", artifact.id);
         let snapshot = self.outline.snapshot(&artifact.space_id);
         let requests: Vec<_> = snapshot.user_action_requests.iter()

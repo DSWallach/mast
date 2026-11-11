@@ -1626,7 +1626,7 @@ impl ArtifactsService {
                     ArtifactError::invalid(format!("unknown row {:?}", decision.row_id))
                 })?;
             if row.status.state != "open"
-                || artifact.decisions.iter().any(|saved| saved.row_id == decision.row_id)
+                || artifact.decisions.iter().any(|saved| saved.row_id == decision.row_id && saved.revision == artifact.current_revision)
                 || !seen.insert(&decision.row_id)
             {
                 return Err(ArtifactError::invalid(format!(

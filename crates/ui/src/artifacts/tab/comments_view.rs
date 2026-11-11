@@ -184,7 +184,7 @@ impl ArtifactTab {
         use mast_proto::decision_sheet::{SheetDecisionDraft, SheetDecisionDrafts};
         let Some((artifact, sheet)) = self.current_sheet(cx) else { return; };
         if !sheet.decision_rows().iter().any(|row| row.id == id && row.status.state == "open")
-            || artifact.decisions.iter().any(|saved| saved.row_id == id) { return; }
+            || artifact.decisions.iter().any(|saved| saved.row_id == id && saved.revision == artifact.current_revision) { return; }
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             let draft = settings.artifact_decision_drafts.entry(artifact.id).or_insert_with(|| SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() });
             if draft.revision != artifact.current_revision { *draft = SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() }; }

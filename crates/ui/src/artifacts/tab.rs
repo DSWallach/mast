@@ -695,13 +695,14 @@ impl ArtifactTab {
         let source = super::question_html::with_answers(source, &self.questions.html_answers);
         let source = if kind == WebKind::DecisionSheet {
             if let Some(artifact) = self.artifact(cx).filter(|artifact| self.shown_or_current_revision(artifact) == artifact.current_revision) {
+                let current_decisions: Vec<_> = artifact.decisions.iter().filter(|decision| decision.revision == artifact.current_revision).cloned().collect();
                 let rendered = self.shown_text().and_then(|text| mast_proto::decision_sheet::DecisionSheet::parse(&text).ok()).map(|mut sheet| {
-                    sheet.apply_decisions(&artifact.decisions);
+                    sheet.apply_decisions(&current_decisions);
                     mast_proto::decision_sheet_render::render(&sheet)
                 }).unwrap_or(source);
                 let settings = crate::settings::current(cx);
                 let drafts = settings.artifact_decision_drafts.get(&artifact.id).filter(|drafts| drafts.revision == artifact.current_revision);
-                super::decision_sheet_html::with_state(&rendered, drafts, &artifact.decisions)
+                super::decision_sheet_html::with_state(&rendered, drafts, &current_decisions)
             } else { source }
         } else { source };
         let source = if matches!(kind, WebKind::Fragment | WebKind::Page) {

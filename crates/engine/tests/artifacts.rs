@@ -2501,6 +2501,10 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
     let republished = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "revision", "idempotencyKey": "sheet-decisions-revision"})).await;
     assert_eq!(republished["orphanedRowIds"], json!(["D-4"]));
     assert_eq!(artifact(&rig, id).decisions.len(), 2);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId":id, "revision":2, "decisions":[{"rowId":"D-2", "outcome":"rejected"}]})).await.unwrap();
+    let decisions = artifact(&rig, id).decisions;
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions.iter().find(|d| d.row_id == "D-2").unwrap().revision, 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
