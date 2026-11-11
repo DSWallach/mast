@@ -24,6 +24,9 @@
 //! - `list_projects` / `list_devices` list only the token's Space / device;
 //!   `list_harnesses` / `list_models` (this device's capabilities) and
 //!   `whoami` are unscoped.
+//! - the personal assistant chat (`reads_all_chats`, user-designated) widens
+//!   `list_chats`, `get_chat`, `read_chat`, `list_projects` and
+//!   `list_devices` to the whole workspace; every other reach is unchanged.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -170,7 +173,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads the chats you created, yourself, and (read-only) the chats on items inside your own project.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads the chats you created, yourself, and (read-only) the chats on items inside your own project. The personal assistant chat reads every chat in every Space.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -989,6 +992,7 @@ impl Tools {
             "originDeviceId": origin.map(|o| o.device_id.clone()),
             "runId": origin.map(|o| o.run_id.clone()),
             "adminSpaceId": origin.and_then(|o| o.admin_space_id.clone()),
+            "readsAllChats": origin.is_some_and(|o| o.reads_all_chats),
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
             "workOutlineTools": if origin.is_some() {
@@ -1007,7 +1011,9 @@ impl Tools {
                  create_chat works only in this chat's Space, never with a wider \
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
                  need an idempotency key. Admin chats (user-granted, per Space, expiring) \
-                 also reach every chat and item of their Space; see adminSpaceId."
+                 also reach every chat and item of their Space; see adminSpaceId. The \
+                 personal assistant chat (user-designated; see readsAllChats) can \
+                 list_chats, get_chat and read_chat every chat in every Space, read-only."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
@@ -1017,7 +1023,7 @@ impl Tools {
     async fn list_devices(&self, origin: Option<&AgentOrigin>) -> anyhow::Result<Value> {
         let (mut devices, local) =
             tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
-        if let Some(origin) = origin {
+        if let Some(origin) = origin.filter(|o| !o.reads_all_chats) {
             devices.retain(|d| d.id == origin.device_id);
         }
         Ok(json!({
@@ -1034,7 +1040,7 @@ impl Tools {
 
     async fn list_projects(&self, origin: Option<&AgentOrigin>) -> anyhow::Result<Value> {
         let (mut spaces, devices) = tokio::try_join!(self.zeron.spaces(), self.zeron.devices())?;
-        if let Some(origin) = origin {
+        if let Some(origin) = origin.filter(|o| !o.reads_all_chats) {
             spaces.retain(|s| s.id == origin.space_id);
         }
         let device_name = |id: &str| devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
@@ -1089,7 +1095,7 @@ impl Tools {
             self.zeron.spaces(),
             self.zeron.sessions()
         )?;
-        if let Some(origin) = origin {
+        if let Some(origin) = origin.filter(|o| !o.reads_all_chats) {
             let scope = if args.workers {
                 self.archive_info(&[]).await.unwrap_or_default()
             } else {
@@ -1917,6 +1923,11 @@ impl Tools {
         // Admin chats reach their whole Space for everything but interrupt/respond.
         let admin_ok = reach != Reach::Child;
         let all = self.zeron.chats().await?;
+        // The personal assistant reads every chat, but its sends, waits and
+        // archives keep the ordinary reach.
+        if origin.reads_all_chats && matches!(reach, Reach::SelfOrChild | Reach::ReadScope) {
+            return resolve_chat_in(&all, key);
+        }
         let parent = (reach == Reach::SelfChildOrParent)
             .then(|| {
                 all.iter()
@@ -2165,8 +2176,9 @@ impl Tools {
 enum Reach {
     /// Only chats the caller created (`parentChatId` = the caller).
     Child,
-    /// Those, or the caller itself (reads, sends). An admin chat also
-    /// reaches every chat of its Space.
+    /// Those, or the caller itself (`get_chat`, the `list_chats` parent
+    /// filter). An admin chat also reaches every chat of its Space, and the
+    /// personal assistant every chat, so keep this variant read-only.
     SelfOrChild,
     /// Those, the caller itself, or the caller's parent chat (`send_message`).
     SelfChildOrParent,
@@ -2295,6 +2307,8 @@ mod tests {
     const BETA_TOKEN: &str = "tok-beta";
     /// Chat beta holding a live user grant over space-1.
     const ADMIN_TOKEN: &str = "tok-admin";
+    /// Chat beta designated as the personal assistant.
+    const ASSISTANT_TOKEN: &str = "tok-assistant";
 
     /// A fixed little workspace: one device, one project, two chats with a
     /// two-message transcript, and one live agent token (`tok-beta`, minted
@@ -2423,7 +2437,7 @@ mod tests {
                                       |n| format!("HEAD{}TAIL", "x".repeat(n))) }] }
                 ]})),
                 agent_tools::AUTHENTICATE_METHOD => {
-                    if params["token"] != BETA_TOKEN && params["token"] != ADMIN_TOKEN {
+                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -2435,10 +2449,13 @@ mod tests {
                     if params["token"] == ADMIN_TOKEN {
                         origin["adminSpaceId"] = json!("space-1");
                     }
+                    if params["token"] == ASSISTANT_TOKEN {
+                        origin["readsAllChats"] = json!(true);
+                    }
                     RpcReply::Value(origin)
                 }
                 agent_tools::TOOL_CALL_METHOD => {
-                    if params["token"] != BETA_TOKEN && params["token"] != ADMIN_TOKEN {
+                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -3079,6 +3096,44 @@ mod tests {
         );
         // An expired or revoked grant is gone from the next authenticate.
         assert!(plain.call("get_chat", json!({ "chat": "chat-alpha-1" })).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_personal_assistant_reads_every_space_and_writes_nowhere_new() {
+        let world = Arc::new(World::default());
+        world.created.lock().unwrap().push(json!({
+            "id": "chat-nova-3", "deviceId": "dev-other", "title": "Nova",
+            "archived": false, "spaceId": "space-2", "createdAt": "2026-09-03T00:00:00Z"
+        }));
+        let assistant = tools(world.clone(), Some(ASSISTANT_TOKEN));
+        for chat in ["chat-alpha-1", "chat-nova-3"] {
+            for name in ["get_chat", "read_chat"] {
+                assistant.call(name, json!({ "chat": chat })).await.unwrap();
+            }
+            for (name, extra) in [
+                ("send_message", json!({ "text": "hi" })),
+                ("wait_for_turn", json!({ "timeout_secs": 1 })),
+                ("archive_chat", json!({})),
+                ("interrupt_chat", json!({})),
+            ] {
+                let mut args = extra;
+                args["chat"] = json!(chat);
+                assert!(assistant.call(name, args).await.is_err(), "{name} {chat}");
+            }
+        }
+        assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
+        let listed = assistant.call("list_chats", json!({})).await.unwrap();
+        let ids: Vec<&str> = listed["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"chat-alpha-1") && ids.contains(&"chat-nova-3"), "{ids:?}");
+        let projects = assistant.call("list_projects", json!({})).await.unwrap();
+        assert_eq!(projects["projects"].as_array().unwrap().len(), 2);
+        let me = assistant.call("whoami", json!({})).await.unwrap();
+        assert_eq!(me["readsAllChats"], json!(true));
     }
 
     #[tokio::test]

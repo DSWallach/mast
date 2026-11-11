@@ -111,7 +111,12 @@ impl Shell {
     pub(super) fn admin_tick(&mut self, cx: &mut Context<Self>) {
         // Not under test: shell tests with a fake engine count every request.
         let polling = cfg!(not(test));
-        self.state.update(cx, |state, cx| state.admin_tick(polling, cx));
+        self.state.update(cx, |state, cx| {
+            state.admin_tick(polling, cx);
+            if polling {
+                state.personal_assistant_tick(cx);
+            }
+        });
     }
 
     /// The dialog overlay, when open.

@@ -163,6 +163,7 @@ impl AgentGrant {
             space_id: self.space_id.clone(),
             device_id: self.device_id.clone(),
             admin_space_id: None,
+            reads_all_chats: false,
         }
     }
 }
@@ -183,6 +184,8 @@ pub struct AgentTokens {
     grants: Mutex<HashMap<TokenKey, AgentGrant>>,
     /// User-granted admin chats (device-local; RPC-written only).
     admin: crate::admin::AdminGrants,
+    /// The user-designated personal assistant chat (device-local; RPC-written only).
+    personal_assistant: crate::personal_assistant::PersonalAssistantStore,
 }
 
 impl AgentTokens {
@@ -193,6 +196,10 @@ impl AgentTokens {
     /// The admin grant store (shared by every RPC surface of this engine).
     pub fn admin(&self) -> &crate::admin::AdminGrants {
         &self.admin
+    }
+
+    pub fn personal_assistant(&self) -> &crate::personal_assistant::PersonalAssistantStore {
+        &self.personal_assistant
     }
 
     /// Mint a token for one Run. Valid until the returned lease drops or
@@ -971,6 +978,10 @@ impl AgentToolsService {
         let context = self.context(token)?;
         let mut origin = context.grant.origin();
         origin.admin_space_id = context.admin_space.clone();
+        origin.reads_all_chats = self
+            .tokens
+            .personal_assistant()
+            .is_assistant(&context.grant.chat_id);
         Ok(origin)
     }
 

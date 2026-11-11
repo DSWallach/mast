@@ -82,6 +82,16 @@ pub mod methods {
     /// Live admin grants on this device. No params; replies `AdminGrant[]`.
     /// IPC-only.
     pub const LIST_ADMIN_GRANTS: &str = "ListAdminGrants";
+    /// This device's personal assistant chat. No params; replies
+    /// `PersonalAssistantReply`. IPC-only.
+    pub const GET_PERSONAL_ASSISTANT: &str = "GetPersonalAssistant";
+    /// Make a chat this device's personal assistant (replacing any other).
+    /// Params `{chatId}`; replies `PersonalAssistantReply`. IPC-only, user
+    /// action: no agent tool reaches it.
+    pub const SET_PERSONAL_ASSISTANT: &str = "SetPersonalAssistant";
+    /// Clear the personal assistant. No params; replies
+    /// `PersonalAssistantReply`. IPC-only.
+    pub const CLEAR_PERSONAL_ASSISTANT: &str = "ClearPersonalAssistant";
     /// Admin audit turns, newest last. Params `AdminAuditListParams`; replies
     /// `AdminAuditTurn[]`. IPC-only.
     pub const ADMIN_AUDIT_LIST: &str = "AdminAuditList";

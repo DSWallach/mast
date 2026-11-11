@@ -2735,6 +2735,31 @@ impl RpcService for EngineRpc {
             methods::LIST_ADMIN_GRANTS => {
                 RpcReply::value(&self.agent_tools.tokens().admin().list())
             }
+            methods::GET_PERSONAL_ASSISTANT => RpcReply::value(&mast_proto::PersonalAssistantReply {
+                assistant: self.agent_tools.tokens().personal_assistant().get(),
+            }),
+            methods::SET_PERSONAL_ASSISTANT => {
+                // User action only: no agent tool reaches this method.
+                let p: ChatParams = parse_params(params)?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
+                if chat.space_id.as_deref().is_none_or(str::is_empty) {
+                    return Err(RpcError::Failed(
+                        "only chats in a Space can be the personal assistant".into(),
+                    ));
+                }
+                RpcReply::value(&mast_proto::PersonalAssistantReply {
+                    assistant: Some(self.agent_tools.tokens().personal_assistant().set(&p.chat_id)),
+                })
+            }
+            methods::CLEAR_PERSONAL_ASSISTANT => {
+                self.agent_tools.tokens().personal_assistant().clear();
+                RpcReply::value(&mast_proto::PersonalAssistantReply::default())
+            }
             methods::ADMIN_AUDIT_LIST => {
                 let p: mast_proto::AdminAuditListParams = parse_params(params)?;
                 RpcReply::value(
@@ -5612,6 +5637,13 @@ mod tests {
     /// neither method is in `forwardable`'s allow-list, so both default to
     /// IPC-only. A silent future addition to that list would relay-forward a
     /// method whose doc comment explicitly promises otherwise.
+    #[test]
+    fn personal_assistant_methods_are_ipc_only() {
+        assert!(!forwardable(methods::GET_PERSONAL_ASSISTANT));
+        assert!(!forwardable(methods::SET_PERSONAL_ASSISTANT));
+        assert!(!forwardable(methods::CLEAR_PERSONAL_ASSISTANT));
+    }
+
     #[test]
     fn chat_link_methods_are_ipc_only() {
         assert!(!forwardable(methods::CHAT_LINK_STATUS));

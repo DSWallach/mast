@@ -71,6 +71,7 @@ pub mod overview_grouping;
 pub mod overview_positions;
 #[cfg(test)]
 mod perf;
+pub(crate) mod personal_assistant;
 #[cfg(feature = "startup-bench")]
 mod startup_measurement;
 pub mod pickers;

@@ -97,6 +97,15 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
             ("fixture-design", "Design review"),
             ("fixture-tests", "Verify the changes"),
         ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
+        if std::env::var_os("MAST_PREVIEW_ASSISTANT").is_some() {
+            state.chats.push(serde_json::from_value(serde_json::json!({"id":"fixture-assistant","deviceId":"local","spaceId":"fixture-space","title":"Daily briefing assistant","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap());
+            state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
+                assistant: Some(mast_proto::PersonalAssistant {
+                    chat_id: "fixture-assistant".into(),
+                    designated_at_ms: 0,
+                }),
+            });
+        }
         preview_chat_outline(&mut state);
         state
     });
