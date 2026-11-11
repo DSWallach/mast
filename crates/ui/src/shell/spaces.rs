@@ -167,6 +167,23 @@ fn sidebar_gap_offset(row: usize, source: Option<usize>, boundary: usize, height
     }
 }
 
+/// Last laid-out `(slot, top, bottom)` of each session row, in sidebar
+/// scroll-content coordinates. Every slot re-records each frame, culled or not;
+/// an extent is trusted only while the row keeps its slot, since a re-sort
+/// moves it before any measurement does.
+pub(super) type SidebarRowExtents =
+    std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (usize, f32, f32)>>>;
+
+/// A row last laid out more than one viewport outside the visible range renders
+/// as an empty slot of the same height. Unmeasured rows always render, and
+/// every scroll re-renders the sidebar, so a row is filled before it shows.
+fn sidebar_row_offscreen(extent: Option<(f32, f32)>, scroll_top: f32, viewport: f32) -> bool {
+    let Some((top, bottom)) = extent else {
+        return false;
+    };
+    viewport > 0.0 && (bottom < scroll_top - viewport || top > scroll_top + 2.0 * viewport)
+}
+
 pub(super) fn pinned_drag_scroll_delta(
     pointer_y: f32,
     viewport_top: f32,
@@ -1147,6 +1164,121 @@ mod pinned_session_tests {
     #[gpui::test]
     fn hidden_label_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, false, false);
+    }
+
+    #[test]
+    fn sidebar_rows_cull_only_beyond_one_viewport_of_overscan() {
+        use super::sidebar_row_offscreen;
+        assert!(!sidebar_row_offscreen(None, 0.0, 800.0), "unmeasured rows render");
+        assert!(!sidebar_row_offscreen(Some((1590.0, 1620.0)), 0.0, 800.0));
+        assert!(sidebar_row_offscreen(Some((1610.0, 1640.0)), 0.0, 800.0));
+        assert!(!sidebar_row_offscreen(Some((1000.0, 1030.0)), 1800.0, 800.0));
+        assert!(sidebar_row_offscreen(Some((960.0, 990.0)), 1800.0, 800.0));
+        assert!(!sidebar_row_offscreen(Some((5000.0, 5030.0)), 0.0, 0.0), "unmeasured viewport");
+    }
+
+    /// Off-screen sessions keep their slot height but build no row content, and
+    /// scrolling to them fills them in.
+    #[gpui::test]
+    fn sidebar_culls_offscreen_session_rows(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(280.0))
+                        .h(px(800.0))
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        const COUNT: usize = 200;
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: mast_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.settings.sidebar_compact = true;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = (0..COUNT)
+                        .map(|ix| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": format!("s{ix}"), "title": format!("s{ix}"),
+                                "deviceId": "local", "archived": false,
+                                "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        cx.run_until_parked();
+        // The first frame measures every row; the next one culls.
+        shell.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+
+        assert_eq!(COUNT, 200, "ids below name the last row");
+        assert!(cx.debug_bounds("chat-s0").is_some(), "visible rows render");
+        assert!(cx.debug_bounds("chat-s199").is_none(), "far rows are culled");
+        let first_slot = cx.debug_bounds("session-slot-s0").unwrap();
+        let last_slot = cx.debug_bounds("session-slot-s199").unwrap();
+        assert_eq!(first_slot.size.height, last_slot.size.height, "culled slots keep height");
+
+        shell.update(cx, |shell, cx| {
+            let bottom = shell.sidebar_scroll.max_offset().y;
+            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), -bottom));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-s199").is_some(), "scrolled-to rows render");
+        assert!(cx.debug_bounds("chat-s0").is_none(), "rows scrolled far away are culled");
+
+        // A far row that re-sorts to the top fills in without another prompt.
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            shell.state.update(cx, |state, _| {
+                let chat = state.chats.iter_mut().find(|chat| chat.id == "s150").unwrap();
+                chat.created_at = Utc::now() + chrono::Duration::minutes(5);
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_visible_order(cx).first().map(String::as_str), Some("s150"));
+        });
+        assert!(cx.debug_bounds("chat-s150").is_some(), "re-sorted row renders");
     }
 
     /// The sidebar chat row wears the account pill only for a chat pinned to
@@ -4635,6 +4767,19 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         let mut moving_row = None;
+        // Drag previews animate sibling offsets, so every row stays mounted.
+        let cull = (self.sidebar_session_transfer.is_none()
+            && self.sidebar_session_return.is_none()
+            && self.pinned_session_drag.is_none())
+        .then(|| {
+            (
+                -f32::from(self.sidebar_scroll.offset().y),
+                f32::from(self.sidebar_scroll.bounds().size.height),
+            )
+        });
+        self.sidebar_row_extents
+            .borrow_mut()
+            .retain(|id, _| active.contains(id.as_str()));
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -4692,6 +4837,7 @@ impl Shell {
                         })
                     })
                     .flatten();
+                let ordinal = slot;
                 slot += 1;
                 let origin = self
                     .sidebar_session_transfer
@@ -4716,30 +4862,47 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                let offscreen = origin.is_none()
+                    && !is_selected
+                    && cull.is_some_and(|(scroll_top, viewport)| {
+                        let extent = self
+                            .sidebar_row_extents
+                            .borrow()
+                            .get(&chat.id)
+                            .filter(|(recorded, _, _)| *recorded == ordinal)
+                            .map(|&(_, top, bottom)| (top, bottom));
+                        sidebar_row_offscreen(extent, scroll_top, viewport)
+                    });
+                let element = if offscreen {
+                    div().h(px(slot_height.max(0.0))).into_any_element()
+                } else {
+                    self.render_chat_row(
+                        chat.id.clone(),
+                        transcript::single_line(
+                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        )
+                        .into(),
+                        time_ago,
+                        folder.into(),
+                        branch.map(SharedString::from),
+                        change_request,
+                        harness,
+                        status,
+                        is_selected,
+                        false,
+                        is_moving,
+                        if is_moving { None } else { drag },
+                        jump_label,
+                        None,
+                        theme,
+                        cx,
                     )
-                    .into(),
-                    time_ago,
-                    folder.into(),
-                    branch.map(SharedString::from),
-                    change_request,
-                    harness,
-                    status,
-                    is_selected,
-                    false,
-                    is_moving,
-                    if is_moving { None } else { drag },
-                    jump_label,
-                    None,
-                    theme,
-                    cx,
-                );
+                };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
-                let element = if let Some(origin) = origin {
+                let element = if offscreen {
+                    element
+                } else if let Some(origin) = origin {
                     moving_row = Some((element, height));
                     div()
                         .child(div().h(px(slot_height.max(0.0))))
@@ -4764,7 +4927,36 @@ impl Shell {
                     .h(px(slot_height.max(0.0)))
                     .mb(px(slot_height.min(0.0)))
                     .flex_none()
+                    .relative()
                     .child(element)
+                    .child({
+                        let extents = self.sidebar_row_extents.clone();
+                        let scroll = self.sidebar_scroll.clone();
+                        let id = chat.id.clone();
+                        let shell = cx.entity_id();
+                        gpui::canvas(
+                            move |bounds, _, cx| {
+                                let top = f32::from(
+                                    bounds.top() - scroll.bounds().top() - scroll.offset().y,
+                                );
+                                let extent = (top, top + f32::from(bounds.size.height));
+                                extents.borrow_mut().insert(id, (ordinal, extent.0, extent.1));
+                                // A re-sort can move a culled row into view; fill it next frame.
+                                if offscreen
+                                    && !sidebar_row_offscreen(
+                                        Some(extent),
+                                        -f32::from(scroll.offset().y),
+                                        f32::from(scroll.bounds().size.height),
+                                    )
+                                {
+                                    cx.notify(shell);
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0()
+                    })
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                             if !event.bounds.contains(&event.event.position)
