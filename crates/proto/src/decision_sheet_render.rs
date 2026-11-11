@@ -99,7 +99,9 @@ pub fn render(sheet: &DecisionSheet) -> String {
                     .unwrap();
                 }
                 if state == "open" {
-                    out.push_str("<div class=\"mk-sheet-actions\" hidden><button type=\"button\" data-sheet-accept>Accept</button><button type=\"button\" data-sheet-reject>Reject</button><button type=\"button\" data-sheet-undo>Undo</button><label>💬 <input data-sheet-note maxlength=\"600\" placeholder=\"Note\"></label><span data-sheet-status></span></div>");
+                    out.push_str("<div class=\"mk-sheet-actions\" hidden><button type=\"button\" data-sheet-accept>Accept</button><button type=\"button\" data-sheet-answer>Answer differently</button>");
+                    if row.optional { out.push_str("<button type=\"button\" data-sheet-reject>Don't do this</button>"); }
+                    out.push_str("<button type=\"button\" data-sheet-undo>Undo</button><label>💬 <input data-sheet-note maxlength=\"600\" placeholder=\"Note\"></label><span data-sheet-status></span></div>");
                 }
                 write!(out, "</div>{}</div>", status(row.status)).unwrap();
             }

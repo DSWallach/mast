@@ -63,7 +63,7 @@ pub(crate) enum FrameMessage {
     FocusComment(String),
     /// The reader answered a plan question card in place.
     Answer { id: String, text: String },
-    SheetStage { id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String },
+    SheetStage { id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, override_recommendation: bool },
     QuestionUndo(String),
     SheetUndo(String),
     SheetDiscard,
@@ -107,7 +107,7 @@ impl FrameMessage {
                     _ => return None,
                 };
                 let note = text("note", 600).unwrap_or_default();
-                Some(FrameMessage::SheetStage { id, outcome, note })
+                Some(FrameMessage::SheetStage { id, outcome, note, override_recommendation: object.get("overrideRecommendation").and_then(Value::as_bool).unwrap_or(false) })
             }
             "question-undo" => {
                 let id = text("id", 16)?.trim().to_ascii_uppercase();
