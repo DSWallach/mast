@@ -4495,6 +4495,9 @@ pub struct Composer {
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
+    /// The draft the composer held when the question panel borrowed its
+    /// input. Kept out of the answer and handed back when the panel closes.
+    wizard_draft: Option<String>,
     send_task: Option<Task<()>>,
     /// The queued message being edited in the composer (see
     /// [`Composer::begin_queue_edit`]).
@@ -4799,6 +4802,7 @@ impl Composer {
             wizard: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
+            wizard_draft: None,
             failure_key: None,
             failed_send: None,
             retry_send_id: None,
@@ -6554,7 +6558,13 @@ impl Composer {
                 self.launching_new_chat && self.current_key.is_empty() && !key.is_empty();
             let returning_to_new_thread = !self.current_key.is_empty() && key.is_empty();
             self.launching_new_chat = false;
-            let old_text = self.input.read(cx).text().to_string();
+            // With the question panel up, the input holds an answer in
+            // progress; the chat's real draft is the stashed one.
+            let old_text = if self.wizard.is_some() {
+                self.wizard_draft.take().unwrap_or_default()
+            } else {
+                self.input.read(cx).text().to_string()
+            };
             if old_text.is_empty() {
                 self.drafts.remove(&self.current_key);
             } else {
@@ -6617,10 +6627,17 @@ impl Composer {
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
                     self.reset_mention(None, cx);
+                    // A replaced question's half-typed answer is dropped; the
+                    // draft stashed for the first question still stands.
+                    if self.wizard.is_none() {
+                        let draft = self.input.read(cx).text().to_string();
+                        self.wizard_draft = (!draft.is_empty()).then_some(draft);
+                    }
                     self.wizard = Some(Wizard::new(request_id, questions));
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
+                        input.set_text("", cx);
                         input.set_placeholder("Type your own answer, or pick an option above", cx)
                     });
                 }
@@ -6643,8 +6660,13 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
-                        self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                        let draft = self.wizard_draft.take();
+                        self.input.update(cx, |input, cx| {
+                            if let Some(draft) = draft {
+                                input.set_text(draft, cx);
+                            }
+                            input.set_placeholder("Do anything…", cx)
+                        });
                     }
                 }
             }
@@ -7762,8 +7784,9 @@ impl Composer {
         };
         self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
+        let draft = self.wizard_draft.take().unwrap_or_default();
         self.input.update(cx, |input, cx| {
-            input.set_text("", cx);
+            input.set_text(draft, cx);
             // The panel borrowed the composer input; hand back its identity.
             input.set_placeholder("Do anything…", cx);
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
@@ -11036,6 +11059,83 @@ mod tests {
             answers[1].labels,
             vec!["custom answer"],
             "typed overrides picked, trimmed"
+        );
+    }
+
+    fn asked(request_id: &str, resolved: bool) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "m".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: format!("in-{request_id}"),
+                request_id: request_id.into(),
+                questions: vec![question("q", &["yes", "no"], false)],
+                resolved,
+            }],
+            created_at: 0,
+            device_id: "d".into(),
+            status: Some(mast_doc::MessageStatus::Streaming),
+            continuation_of: None,
+        }
+    }
+
+    #[gpui::test]
+    fn picking_an_answer_sends_the_option_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+        use super::instruction_reset::tests::{draw, harness};
+        let (mut h, vcx) = harness(cx);
+        let _guard = h._runtime.enter();
+        let input = h.composer.read_with(vcx, |composer, _| composer.input.clone());
+        input.update(vcx, |input, cx| input.set_text("my unsent draft", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", false)]);
+            cx.notify();
+        });
+        draw(vcx);
+        h.composer.read_with(vcx, |composer, cx| {
+            assert!(composer.wizard.is_some());
+            assert!(composer.input.read(cx).is_empty(), "the draft is not the answer");
+        });
+
+        h.composer
+            .update(vcx, |composer, cx| composer.wizard_select(1, cx));
+        vcx.executor()
+            .advance_clock(Duration::from_millis(AUTO_ADVANCE_MS + 10));
+        draw(vcx);
+
+        let sent = h.sent(methods::QUEUE_COMMAND);
+        assert_eq!(sent.len(), 1);
+        let command = &sent[0]["params"]["command"];
+        assert_eq!(command["kind"], "respondInput");
+        assert_eq!(command["answers"][0]["labels"], serde_json::json!(["no"]));
+        assert_eq!(
+            input.read_with(vcx, |input, _| input.text().to_string()),
+            "my unsent draft"
+        );
+    }
+
+    #[gpui::test]
+    fn a_question_resolved_elsewhere_hands_the_draft_back(cx: &mut gpui::TestAppContext) {
+        use super::instruction_reset::tests::{draw, harness};
+        let (h, vcx) = harness(cx);
+        let _guard = h._runtime.enter();
+        let input = h.composer.read_with(vcx, |composer, _| composer.input.clone());
+        input.update(vcx, |input, cx| input.set_text("my unsent draft", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", false)]);
+            cx.notify();
+        });
+        draw(vcx);
+        input.update(vcx, |input, cx| input.set_text("half an answer", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", true)]);
+            cx.notify();
+        });
+        draw(vcx);
+        h.composer
+            .read_with(vcx, |composer, _| assert!(composer.wizard.is_none()));
+        assert_eq!(
+            input.read_with(vcx, |input, _| input.text().to_string()),
+            "my unsent draft"
         );
     }
 
