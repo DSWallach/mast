@@ -118,7 +118,13 @@ fn open(
     Shown,
     &mut VisualTestContext,
 ) {
-    let (actions, calls) = scripted(replies(kind, if kind == ArtifactKind::DecisionSheet { SHEET } else { PAGE }));
+    open_page(cx, kind, comments, if kind == ArtifactKind::DecisionSheet { SHEET } else { PAGE })
+}
+
+fn open_page<'a>(
+    cx: &'a mut TestAppContext, kind: ArtifactKind, comments: Vec<ArtifactComment>, page: &'static str,
+) -> (Entity<ArtifactTab>, Calls, WebProbe, Shown, &'a mut VisualTestContext) {
+    let (actions, calls) = scripted(replies(kind, page));
     let shown: Shown = Default::default();
     let probe = WebProbe::default();
     let factory = FakeWebHost::probed_factory(shown.clone(), probe.clone());
@@ -450,4 +456,33 @@ fn sheet_drafts_survive_reopening(cx: &mut TestAppContext) {
     let document = shown.borrow().last().unwrap().1.clone();
     assert!(document.contains("keep this"));
     vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions[0].note.as_deref(), Some("keep this")));
+}
+
+#[gpui::test]
+fn real_sheet_stages_and_sends(cx: &mut TestAppContext) {
+    let dir = init_ui(cx);
+    let Ok(path) = std::env::var("MAST_REAL_SHEET_TEST") else { return; };
+    let page: &'static str = Box::leak(std::fs::read_to_string(path).unwrap().into_boxed_str());
+    let (tab, calls, _probe, shown, vcx) = open_page(cx, ArtifactKind::DecisionSheet, Vec::new(), page);
+    assert!(shown.borrow().last().unwrap().1.contains("sheet-stage"));
+    for id in ["flow-release-hold", "ui-draft", "ui-partial", "rule-move-first"] {
+        frame(&tab, vcx, json!({"t":"sheet-stage","id":id,"outcome":"decided","note":""}));
+        vcx.update(|_, cx| assert!(crate::settings::current(cx).artifact_decision_drafts.get(&super::tests::id(1)).is_some_and(|d| d.decisions.iter().any(|d| d.row_id == id)), "{id}"));
+    }
+    let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("settings/ui-settings.json")).unwrap()).unwrap();
+    assert_eq!(settings["artifactDecisionDrafts"][id(1)]["decisions"].as_array().unwrap().len(), 4);
+    frame(&tab, vcx, json!({"t":"sheet-send"}));
+    assert_eq!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).len(), 1);
+}
+
+#[gpui::test]
+fn sheet_refusals_notify_the_tab_and_frame(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let (tab, _calls, probe, _shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"missing","outcome":"decided","note":""}));
+    assert!(tab.read_with(vcx, |tab, _| tab.notice().unwrap().contains("no longer open")));
+    assert!(probe.scripts.borrow().iter().any(|s| s.contains("mastSheetStageRejected") && s.contains("missing")));
+    frame(&tab, vcx, json!({"t":"sheet-send"}));
+    assert!(tab.read_with(vcx, |tab, _| tab.notice().unwrap().contains("no staged decisions")));
+    assert!(probe.scripts.borrow().iter().any(|s| s.contains("mastSheetEnableSend")));
 }
