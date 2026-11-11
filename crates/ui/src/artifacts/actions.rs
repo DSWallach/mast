@@ -142,6 +142,13 @@ impl ArtifactActions {
         self.call(methods::ARTIFACT_ANSWER_QUESTION, &params)
     }
 
+    pub(crate) fn answer_questions(
+        &self,
+        params: mast_proto::artifacts::ArtifactAnswerQuestionsParams,
+    ) -> ArtifactTask<mast_proto::artifacts::ArtifactAnswerQuestionsReply> {
+        self.call(methods::ARTIFACT_ANSWER_QUESTIONS, &params)
+    }
+
     pub(crate) fn submit_sheet_decisions(
         &self,
         params: mast_proto::decision_sheet::SubmitSheetDecisionsParams,

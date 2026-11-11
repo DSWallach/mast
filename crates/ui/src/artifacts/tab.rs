@@ -704,6 +704,14 @@ impl ArtifactTab {
                 super::decision_sheet_html::with_state(&rendered, drafts, &artifact.decisions)
             } else { source }
         } else { source };
+        let source = if matches!(kind, WebKind::Fragment | WebKind::Page) {
+            if let Some(artifact) = self.artifact(cx).filter(|a| self.shown_or_current_revision(a) == a.current_revision) {
+                let settings = crate::settings::current(cx);
+                let drafts = settings.artifact_question_drafts.get(&artifact.id).filter(|(revision, _)| *revision == artifact.current_revision).map(|(_, drafts)| drafts.clone()).unwrap_or_default();
+                let json = serde_json::to_string(&drafts).unwrap_or_default().replace('<', "\\u003c").replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
+                format!("{source}<script>window.__mastQuestionDrafts={json};</script>")
+            } else { source }
+        } else { source };
         let html = document::web_document(kind, &source, &title, mime, &key.0, key.1, false);
         self.rendered_key = Some(key);
         self.comments_document_loading();
@@ -1632,6 +1640,7 @@ impl gpui::Render for ArtifactTab {
         let body = self.with_section_index(body, &theme, window, cx);
         let body = self.with_comments_panel(body, &artifact, &theme, cx);
         let horizon_footer = self.render_horizon_footer(&artifact, &theme, cx);
+        let question_batch_bar = self.render_question_batch_bar(&artifact, &theme, cx);
         self.with_find_keys(root, cx)
             .on_action(cx.listener(|this, _: &super::zoom::ZoomIn, _, cx| {
                 if !this.zoom_step(1, cx) {
@@ -1657,6 +1666,7 @@ impl gpui::Render for ArtifactTab {
             .children(find_bar)
             .child(div().flex_1().min_h_0().relative().child(body))
             .children(horizon_footer)
+            .children(question_batch_bar)
     }
 }
 

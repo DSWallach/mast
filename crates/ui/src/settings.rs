@@ -809,6 +809,9 @@ pub struct UiSettings {
     /// Decision sheet drafts, keyed by artifact id and kept only on this device.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub artifact_decision_drafts: HashMap<String, mast_proto::decision_sheet::SheetDecisionDrafts>,
+    /// Staged plan answers, keyed by artifact id and revision.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub artifact_question_drafts: HashMap<String, (u32, HashMap<String, String>)>,
     /// Side-by-side layout per options artifact (artifact id to an encoded
     /// `SideLayout`). Unknown values are ignored on read.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -846,6 +849,7 @@ impl Default for UiSettings {
             artifact_compare_modes: HashMap::new(),
             artifact_last_viewed: HashMap::new(),
             artifact_decision_drafts: HashMap::new(),
+            artifact_question_drafts: HashMap::new(),
             artifact_side_layouts: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
@@ -3057,6 +3061,7 @@ mod tests {
                     row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, note: Some("keep".into()),
                 }],
             })]),
+            artifact_question_drafts: HashMap::new(),
             artifact_side_layouts: HashMap::new(),
             legacy_accent_color: None,
         };

@@ -147,6 +147,9 @@ impl ArtifactTab {
                 self.comments.focused = Some(id);
                 cx.notify();
             }
+            FrameMessage::QuestionUndo(id) => {
+                if self.artifact(cx).is_some_and(|artifact| self.can_comment(&artifact)) { self.undo_question_draft(id, cx); }
+            }
             FrameMessage::SheetStage { id, outcome, note } => {
                 self.stage_sheet_decision(id, outcome, note, cx);
             }
@@ -160,7 +163,7 @@ impl ArtifactTab {
                     .artifact(cx)
                     .is_some_and(|artifact| self.can_comment(&artifact))
                 {
-                    self.submit_answer(id, text, cx)
+                    self.stage_question_answer(id, text, cx)
                 }
             }
         }

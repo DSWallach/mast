@@ -82,6 +82,9 @@ fn replies(kind: ArtifactKind, page: &'static str) -> Reply {
                 "rowId":d["rowId"], "outcome":d["outcome"], "note":d["note"], "at":1, "revision":params["revision"]
             })).collect::<Vec<_>>()
         })),
+        methods::ARTIFACT_ANSWER_QUESTIONS => Ok(json!({
+            "artifactId": params["artifactId"], "answers": params["answers"].as_array().unwrap().iter().map(|a| json!({"id":a["questionId"], "answer":a["answer"], "at":1, "revision":params["revision"]})).collect::<Vec<_>>()
+        })),
         methods::CONTINUE_CHAT_FOR_WORK_ITEM => Ok(json!({
             "chatId": params["chatId"], "messageId": "m", "commandId": "k", "state": "started",
         })),
@@ -328,19 +331,17 @@ fn html_question_cards_are_answered_through_the_bridge(cx: &mut TestAppContext) 
         vcx,
         json!({ "t": "answer", "id": "q-1", "text": "  By MPN " }),
     );
-    let answered = method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTION);
+    assert!(method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS).is_empty());
+    assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
+    tab.update(vcx, |tab, cx| tab.send_question_batch(cx));
+    settle(vcx);
+    let answered = method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS);
     assert_eq!(answered.len(), 1, "{answered:?}");
-    assert_eq!(answered[0]["questionId"], "Q-1");
-    assert_eq!(answered[0]["answer"], "By MPN");
+    assert_eq!(answered[0]["answers"][0]["questionId"], "Q-1");
+    assert_eq!(answered[0]["answers"][0]["answer"], "By MPN");
     let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
     assert_eq!(sent.len(), 1);
-    assert!(
-        sent[0]
-            .to_string()
-            .contains("Re: \\\"Q-1: Merge by MPN?\\\": By MPN"),
-        "{}",
-        sent[0]
-    );
+    assert_eq!(sent[0]["prompt"]["text"], "Answers for Flow: Q-1: By MPN");
     // The card updates in place: a command to the page, no reload.
     settle(vcx);
     let updates: Vec<_> = probe

@@ -64,6 +64,7 @@ pub(crate) enum FrameMessage {
     /// The reader answered a plan question card in place.
     Answer { id: String, text: String },
     SheetStage { id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String },
+    QuestionUndo(String),
     SheetUndo(String),
     SheetDiscard,
     SheetSend,
@@ -107,6 +108,11 @@ impl FrameMessage {
                 };
                 let note = text("note", 600).unwrap_or_default();
                 Some(FrameMessage::SheetStage { id, outcome, note })
+            }
+            "question-undo" => {
+                let id = text("id", 16)?.trim().to_ascii_uppercase();
+                id.strip_prefix("Q-").filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))?;
+                Some(FrameMessage::QuestionUndo(id))
             }
             "sheet-undo" => Some(FrameMessage::SheetUndo(text("id", 256)?)),
             "sheet-discard" => Some(FrameMessage::SheetDiscard),
