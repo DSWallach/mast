@@ -1873,3 +1873,64 @@ fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
     assert!(has(vcx, "required-actions-info-markdown-detail"));
 }
+
+/// One assistant turn of spawn chips, `(id, status)` each.
+fn spawn_turn(chips: &[(&str, &str)]) -> mast_doc::SessionMessageEntry {
+    let parts: Vec<_> = chips
+        .iter()
+        .map(|(id, status)| {
+            serde_json::json!({
+                "id": id, "kind": "tool", "resolved": true,
+                "call": {"kind": "unknown", "name": format!("Agent: task {id}")},
+                "subagentRef": format!("{CHAT_API}--sub--{id}"), "subagentStatus": status,
+            })
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "id": "turn", "role": "assistant", "parts": parts,
+        "createdAt": 0, "deviceId": "device", "status": "streaming",
+    }))
+    .unwrap()
+}
+
+#[gpui::test]
+fn the_item_tab_lists_running_subagents_and_opens_them_like_their_chips(
+    cx: &mut TestAppContext,
+) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    assert!(!has(vcx, "chat-item-subagents"), "hidden while nothing runs");
+    let state = shell.read_with(vcx, |shell, _| shell.state.clone());
+    let set = |vcx: &mut VisualTestContext, chips: &[(&str, &str)]| {
+        let entry = spawn_turn(chips);
+        state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![entry]);
+            cx.notify();
+        });
+        draw(vcx);
+    };
+
+    set(vcx, &[("a1", "running"), ("a2", "running"), ("a3", "done")]);
+    assert!(has(vcx, "chat-item-subagents"));
+    assert!(has(vcx, "chat-item-subagent-chat-api--sub--a1"));
+    assert!(has(vcx, "chat-item-subagent-chat-api--sub--a2"));
+    assert!(!has(vcx, "chat-item-subagent-chat-api--sub--a3"));
+
+    // A row click opens the subagent's tab; a second focuses it.
+    for _ in 0..2 {
+        click_selector(vcx, "chat-item-subagent-chat-api--sub--a1");
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(shell.subagent_tabs.len(), 1);
+            let (&id, tab) = shell.subagent_tabs.iter().next().unwrap();
+            assert_eq!(tab.doc_id, "chat-api--sub--a1");
+            assert_eq!(tab.title.as_ref(), "task a1");
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(id));
+        });
+    }
+
+    // Live: finishing and failing drop rows, and the section with them.
+    set(vcx, &[("a1", "done"), ("a2", "running"), ("a3", "done")]);
+    assert!(!has(vcx, "chat-item-subagent-chat-api--sub--a1"));
+    assert!(has(vcx, "chat-item-subagent-chat-api--sub--a2"));
+    set(vcx, &[("a1", "done"), ("a2", "failed"), ("a3", "done")]);
+    assert!(!has(vcx, "chat-item-subagents"));
+}

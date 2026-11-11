@@ -58,6 +58,7 @@ fn section_icon(name: &str) -> &'static str {
         "plan" => crate::icons::CHECKLIST,
         "children" => crate::icons::LIST,
         "wakes" => crate::icons::BELL,
+        "subagents" => crate::icons::BOT,
         "work-item" => crate::icons::PLUS,
         _ => crate::icons::TAG,
     }
@@ -694,6 +695,52 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The chat's running subagents, one row each; a click does what the
+    /// spawn chip does. `None` while nothing runs.
+    fn render_item_tab_subagents(
+        &mut self,
+        chat_id: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let running = self.state.read(cx).running_subagents(chat_id);
+        if running.is_empty() {
+            return None;
+        }
+        let status = crate::status_style::Status::Working;
+        let color = crate::status_style::status_style(status, theme.appearance).color;
+        let mut block = crate::components::linear_parts::team_column(theme, true)
+            .debug_selector(|| "chat-item-subagents".into())
+            .child(section_label(
+                theme,
+                section_icon("subagents"),
+                "Running subagents",
+                "chat-item-subagents-icon".into(),
+            ));
+        for subagent in running {
+            let doc_id = subagent.doc_id;
+            let indicator = crate::components::shell_parts::activity_indicator(
+                status,
+                format!("chat-item-subagent-status-{doc_id}"),
+                theme,
+                cx.entity_id(),
+                cx,
+            );
+            let open = subagent.open;
+            block = block.child(
+                crate::components::shell_parts::worker_row(theme, format!("chat-item-subagent-{doc_id}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.handle_transcript_event(&open, cx)))
+                    .child(
+                        crate::components::linear_parts::team_worker_header(theme)
+                            .child(div().flex_none().child(indicator))
+                            .child(crate::components::shell_parts::worker_title(theme, subagent.title))
+                            .child(crate::components::shell_parts::worker_metadata(theme, "running".into(), color)),
+                    ),
+            );
+        }
+        Some(block.into_any_element())
+    }
+
     fn render_item_tab_sections(
         &mut self,
         facts: &ChatItemFacts,
@@ -786,6 +833,11 @@ impl Shell {
         if !team.is_empty() {
             col = col.child(self.render_item_tab_team(&team, theme, cx));
             col = col.child(self.render_item_tab_wake(&facts.chat_id, theme, cx));
+        }
+
+        // Running subagents.
+        if let Some(block) = self.render_item_tab_subagents(&facts.chat_id, theme, cx) {
+            col = col.child(block);
         }
 
         // Instructions.

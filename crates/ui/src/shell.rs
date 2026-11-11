@@ -3899,6 +3899,11 @@ impl Shell {
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
+        self.handle_transcript_event(event, cx);
+    }
+
+    /// Also run directly by the Item tab's running-subagent rows.
+    fn handle_transcript_event(&mut self, event: &TranscriptEvent, cx: &mut Context<Self>) {
         match event {
             TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::SignInAgain(chat_id) => self.sign_in_for_chat(chat_id.clone(), cx),
