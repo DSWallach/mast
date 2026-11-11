@@ -58,72 +58,7 @@ fn marker(m: &str) -> &'static str {
 
 pub fn render(sheet: &DecisionSheet) -> String {
     let mut out = format!("<div class=\"mk-sheet\"><h1>{}</h1>", esc(&sheet.title));
-    let mut rows: Vec<(&str, &str, &Status, Option<&str>, Option<&str>)> = Vec::new();
-    for f in &sheet.flows {
-        rows.push((
-            &f.id,
-            &f.title,
-            &f.status,
-            f.recommendation.as_deref(),
-            f.question.as_deref(),
-        ));
-    }
-    for m in &sheet.models {
-        rows.push((
-            &m.id,
-            &m.name,
-            &m.status,
-            m.recommendation.as_deref(),
-            m.question.as_deref(),
-        ));
-    }
-    for e in &sheet.endpoints {
-        rows.push((
-            &e.id,
-            &e.name,
-            &e.status,
-            e.recommendation.as_deref(),
-            e.question.as_deref(),
-        ));
-    }
-    for r in &sheet.rules {
-        for x in &r.rows {
-            rows.push((
-                &x.id,
-                &x.state,
-                &x.status,
-                x.recommendation.as_deref(),
-                x.question.as_deref(),
-            ));
-        }
-    }
-    for x in &sheet.validations {
-        rows.push((
-            &x.id,
-            &x.rule,
-            &x.status,
-            x.recommendation.as_deref(),
-            x.question.as_deref(),
-        ));
-    }
-    for x in &sheet.permissions {
-        rows.push((
-            &x.id,
-            &x.subject,
-            &x.status,
-            x.recommendation.as_deref(),
-            x.question.as_deref(),
-        ));
-    }
-    for x in &sheet.ui_states {
-        rows.push((
-            &x.id,
-            &x.label,
-            &x.status,
-            x.recommendation.as_deref(),
-            x.question.as_deref(),
-        ));
-    }
+    let rows = sheet.decision_rows();
     out.push_str("<div class=\"mk-summary\">");
     for (state, label) in [
         ("open", "need you"),
@@ -133,7 +68,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
         write!(
             out,
             "<div><strong>{}</strong><span>{label}</span></div>",
-            rows.iter().filter(|r| r.2.state == state).count()
+            rows.iter().filter(|r| r.status.state == state).count()
         )
         .unwrap();
     }
@@ -143,18 +78,16 @@ pub fn render(sheet: &DecisionSheet) -> String {
         ("decided", "Decided"),
         ("rejected", "Rejected"),
     ] {
-        if rows.iter().any(|r| r.2.state == state) {
+        if rows.iter().any(|r| r.status.state == state) {
             section(&mut out, heading);
-            for (_, title, row_status, recommendation, question) in
-                rows.iter().filter(|r| r.2.state == state)
-            {
+            for row in rows.iter().filter(|r| r.status.state == state) {
                 write!(
                     out,
                     "<div class=\"mk-decision\"><div><strong>{}</strong>",
-                    esc(question.unwrap_or(title))
+                    esc(row.question.unwrap_or(row.title))
                 )
                 .unwrap();
-                if let Some(recommendation) = recommendation {
+                if let Some(recommendation) = row.recommendation {
                     write!(
                         out,
                         "<div class=\"mk-recommendation\"><b>Recommendation:</b> {}</div>",
@@ -162,7 +95,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                     )
                     .unwrap();
                 }
-                write!(out, "</div>{}</div>", status(row_status)).unwrap();
+                write!(out, "</div>{}</div>", status(row.status)).unwrap();
             }
         }
     }

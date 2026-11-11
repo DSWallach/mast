@@ -170,7 +170,57 @@ pub struct OutOfScope {
     pub status: Status,
 }
 
+/// A top-level decision shown in the sheet summary.
+#[derive(Debug)]
+pub struct DecisionRow<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub status: &'a Status,
+    pub recommendation: Option<&'a str>,
+    pub question: Option<&'a str>,
+}
+
 impl DecisionSheet {
+    /// The decisions displayed in the summary, in display order.
+    pub fn decision_rows(&self) -> Vec<DecisionRow<'_>> {
+        let mut rows = Vec::new();
+        macro_rules! add {
+            ($row:expr, $title:expr) => {
+                rows.push(DecisionRow {
+                    id: &$row.id,
+                    title: $title,
+                    status: &$row.status,
+                    recommendation: $row.recommendation.as_deref(),
+                    question: $row.question.as_deref(),
+                });
+            };
+        }
+        for row in &self.flows {
+            add!(row, &row.title);
+        }
+        for row in &self.models {
+            add!(row, &row.name);
+        }
+        for row in &self.endpoints {
+            add!(row, &row.name);
+        }
+        for group in &self.rules {
+            for row in &group.rows {
+                add!(row, &row.state);
+            }
+        }
+        for row in &self.validations {
+            add!(row, &row.rule);
+        }
+        for row in &self.permissions {
+            add!(row, &row.subject);
+        }
+        for row in &self.ui_states {
+            add!(row, &row.label);
+        }
+        rows
+    }
+
     pub fn parse(source: &str) -> Result<Self, String> {
         let sheet: Self = serde_json::from_str(source).map_err(|e| e.to_string())?;
         if sheet.kind != "decision-sheet" {
@@ -279,6 +329,19 @@ impl DecisionSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decision_rows_match_summary_order_and_exclude_children() {
+        let source = r#"{"kind":"decision-sheet","title":"T","models":[{"id":"model","name":"Model","status":{"state":"open"},"recommendation":null,"question":null,"fields":[{"id":"field","name":"Field","marker":"","type":"text","null":false,"default":null,"constraint":null}]}],"flows":[{"id":"flow","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[{"id":"step","kind":"ui","label":"Open","params":[]}]}]}"#;
+        let sheet = DecisionSheet::parse(source).unwrap();
+        let rows = sheet.decision_rows();
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            ["flow", "model"]
+        );
+        assert_eq!(rows[0].question, Some("Proceed?"));
+        assert_eq!(rows[0].recommendation, Some("Proceed"));
+    }
+
     #[test]
     fn children_can_inherit_parent_status() {
         let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"flow","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[{"id":"step","kind":"ui","label":"Open","params":[]}]}]}"#;
