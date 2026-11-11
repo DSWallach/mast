@@ -464,8 +464,7 @@ impl NativePage {
             tracing::debug!(target: "focus", %combo, ?route, "web view key");
             if route != KeyRoute::Page {
                 // Decided asynchronously: take the key now, probe the page,
-                // then either forward it to GPUI or hand it back to the page
-                // (Esc also returns focus to the app, as a bare Esc does).
+                // then either forward it to GPUI or hand it back to the page.
                 let kept = unsafe { Retained::retain(event.as_ptr()) };
                 let Some(kept) = kept else {
                     return event.as_ptr();
@@ -478,7 +477,7 @@ impl NativePage {
                             && unsafe { value.as_ref() }
                                 .and_then(|value| value.downcast_ref::<NSString>())
                                 .is_some_and(|value| value.to_string() == "1");
-                        if !editable && tx.try_send(NativeEvent::Key(keystroke.clone())).is_ok() {
+                        if dispatch_after_focus_probe(editable) && tx.try_send(NativeEvent::Key(keystroke.clone())).is_ok() {
                             return;
                         }
                         replayed.set(kept.timestamp());
@@ -768,6 +767,10 @@ fn is_forwarded_key(
     extra: &[String],
 ) -> bool {
     key_route(combo, keystroke, shortcuts, extra) != KeyRoute::Page
+}
+
+fn dispatch_after_focus_probe(editable: bool) -> bool {
+    !editable
 }
 
 /// Whether the focused element of the page (looking through same-origin
@@ -1219,6 +1222,20 @@ mod forwarded_key_tests {
         // Anything unlisted stays with the page.
         assert_eq!(route("escape", &[], &[]), KeyRoute::Page);
         assert_eq!(route("up", &[], &extra), KeyRoute::Page);
+    }
+
+    #[test]
+    fn artifact_edit_focus_keeps_shortcuts_and_editing_keys_in_page() {
+        use super::dispatch_after_focus_probe;
+        let extra: Vec<String> = ["e", "n", "p", "t", "v", "backspace", "cmd-a", "cmd-c", "cmd-v"]
+            .iter().map(|s| s.to_string()).collect();
+        for combo in &extra {
+            let key = gpui::Keystroke::parse(combo).unwrap();
+            assert_ne!(key_route(combo, &key, &[], &extra), KeyRoute::Page);
+            assert!(!dispatch_after_focus_probe(true), "{combo} must stay in the page");
+            assert!(dispatch_after_focus_probe(false));
+        }
+        assert!(super::EDITABLE_FOCUS_SCRIPT.contains("window.__mastEditFocus === true"));
     }
 
     #[test]
