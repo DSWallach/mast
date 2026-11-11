@@ -462,7 +462,7 @@ impl NativePage {
                 &monitor_extra_keys.borrow(),
             );
             tracing::debug!(target: "focus", %combo, ?route, "web view key");
-            if route == KeyRoute::AppUnlessPageField {
+            if route != KeyRoute::Page {
                 // Decided asynchronously: take the key now, probe the page,
                 // then either forward it to GPUI or hand it back to the page
                 // (Esc also returns focus to the app, as a bare Esc does).
@@ -471,9 +471,7 @@ impl NativePage {
                     return event.as_ptr();
                 };
                 let tx = monitor_tx.clone();
-                let parent = monitor_parent.clone();
                 let replayed = monitor_replayed.clone();
-                let is_escape = combo == "escape";
                 let completion =
                     block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
                         let editable = error.is_null()
@@ -482,9 +480,6 @@ impl NativePage {
                                 .is_some_and(|value| value.to_string() == "1");
                         if !editable && tx.try_send(NativeEvent::Key(keystroke.clone())).is_ok() {
                             return;
-                        }
-                        if editable && is_escape {
-                            focus_view(&parent);
                         }
                         replayed.set(kept.timestamp());
                         NSApplication::sharedApplication(mtm).postEvent_atStart(&kept, true);
@@ -778,6 +773,7 @@ fn is_forwarded_key(
 /// Whether the focused element of the page (looking through same-origin
 /// frames) takes typed text. Resolves to "1" or "0".
 const EDITABLE_FOCUS_SCRIPT: &str = r#"(function () {
+  if (document.activeElement && document.activeElement.tagName === "IFRAME" && window.__mastEditFocus === true) return "1";
   let doc = document, el = doc.activeElement;
   for (let i = 0; i < 8 && el && el.tagName === "IFRAME"; i++) {
     try { doc = el.contentDocument; el = doc && doc.activeElement; } catch (_) { return "0"; }

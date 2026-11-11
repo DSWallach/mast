@@ -257,6 +257,14 @@ pub(crate) fn compare_frame(
 pub(crate) const LINK_FRAME_SCRIPT: &str = r##"(() => {
   if (window.__mastLinksInstalled) return;
   window.__mastLinksInstalled = true;
+  const reportEditFocus = () => {
+    const el = document.activeElement;
+    const editable = !!el && (el.isContentEditable || el.tagName === "TEXTAREA" ||
+      (el.tagName === "INPUT" && !/^(button|checkbox|radio|submit|reset|range|color|file|image)$/i.test(el.type)));
+    try { parent.postMessage({ mastEditFocus: editable }, "*"); } catch (_) {}
+  };
+  document.addEventListener("focusin", reportEditFocus, true);
+  document.addEventListener("focusout", () => setTimeout(reportEditFocus, 0), true);
   const handle = (event) => {
     const node = event.target;
     const a = node && node.closest ? node.closest("a, area") : null;
@@ -280,6 +288,10 @@ pub(crate) const LINK_FRAME_SCRIPT: &str = r##"(() => {
 pub(crate) const LINK_HOST_SCRIPT: &str = r##"window.addEventListener("message", (event) => {
   const frame = document.querySelector("iframe");
   if (!frame || event.source !== frame.contentWindow) return;
+  if (event.data && typeof event.data.mastEditFocus === "boolean") {
+    window.__mastEditFocus = event.data.mastEditFocus;
+    return;
+  }
   const href = event.data && event.data.mastLink;
   if (typeof href !== "string" || href.length > 4096) return;
   const a = document.createElement("a");
