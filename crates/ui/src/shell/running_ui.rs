@@ -1244,6 +1244,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
             parent_chat_id: parent.map(str::to_owned),
             space_id: None,
             last_seen_at: None,

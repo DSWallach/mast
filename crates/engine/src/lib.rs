@@ -469,6 +469,14 @@ impl EngineCore {
                 }
             });
         }
+        {
+            let importer = external_import.clone();
+            tokio::task::spawn_blocking(move || match importer.repair_scheduled_tasks() {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(count = n, "tagged imported scheduled-task runs"),
+                Err(err) => tracing::warn!(error = %err, "scheduled-task repair pass failed"),
+            });
+        }
         // Chats that ran before `Chat.actual_model` existed: recover the model
         // the harness reported from the run journal (read-only on the journal).
         {

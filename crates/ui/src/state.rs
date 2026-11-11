@@ -2022,6 +2022,7 @@ impl AppState {
             chat.linked_ticket_source
                 .map(|s| discriminant(&s))
                 .hash(&mut h);
+            chat.scheduled_task.hash(&mut h);
             discriminant(&self.display_status_for(chat, now)).hash(&mut h);
         }
         self.spaces.len().hash(&mut h);
@@ -4724,6 +4725,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,

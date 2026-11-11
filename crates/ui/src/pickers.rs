@@ -563,6 +563,34 @@ pub(crate) struct NewChatLauncher {
     pub device_id: Option<String>,
 }
 
+/// Chat fields used by the composer controls, independent of message previews and read markers.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChatControlsSlice {
+    id: String,
+    device_id: String,
+    cwd: Option<String>,
+    branch: Option<String>,
+    checkout_id: Option<String>,
+    space_id: Option<String>,
+    config: Option<ChatConfig>,
+    actual_model: Option<String>,
+}
+
+impl From<&mast_proto::Chat> for ChatControlsSlice {
+    fn from(chat: &mast_proto::Chat) -> Self {
+        Self {
+            id: chat.id.clone(),
+            device_id: chat.device_id.clone(),
+            cwd: chat.cwd.clone(),
+            branch: chat.branch.clone(),
+            checkout_id: chat.checkout_id.clone(),
+            space_id: chat.space_id.clone(),
+            config: chat.config.clone(),
+            actual_model: chat.actual_model.clone(),
+        }
+    }
+}
+
 /// Everything the pickers' render and menus read from `AppState` outside
 /// their own fields: the selected chat and project rows, the project and
 /// device lists (with presence, which is time-based), the selected chat's
@@ -571,7 +599,7 @@ pub(crate) struct NewChatLauncher {
 #[derive(Debug, Clone, PartialEq)]
 struct PickersSlice {
     selected_chat: Option<String>,
-    chat: Option<mast_proto::Chat>,
+    chat: Option<ChatControlsSlice>,
     selected_space: Option<String>,
     no_project: bool,
     selected_device: Option<String>,
@@ -590,7 +618,7 @@ impl PickersSlice {
         let chat = state.selected_chat_row();
         Self {
             selected_chat: state.selected_chat.clone(),
-            chat: chat.cloned(),
+            chat: chat.map(ChatControlsSlice::from),
             selected_space: state.selected_space.clone(),
             no_project: state.no_project,
             selected_device: state.selected_device.clone(),
@@ -7556,6 +7584,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: actual.map(str::to_owned),
+            scheduled_task: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

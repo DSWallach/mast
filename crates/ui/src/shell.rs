@@ -1555,12 +1555,16 @@ struct SubagentTab {
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
 struct SidebarPane {
+    #[cfg(test)]
+    renders: usize,
     shell: gpui::WeakEntity<Shell>,
     _observation: Subscription,
 }
 
 impl Render for SidebarPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        { self.renders += 1; }
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("sidebar");
         crate::transcript::record_view_frame("sidebar");
@@ -1614,6 +1618,8 @@ pub struct Shell {
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
+    /// The Scheduled tasks group: closed by default, session-transient.
+    pub(super) scheduled_tasks_open: bool,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
@@ -1776,6 +1782,7 @@ pub struct Shell {
     chat_status_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
+    sidebar_row_extents: spaces::SidebarRowExtents,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -2142,6 +2149,8 @@ impl Shell {
         });
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
+            #[cfg(test)]
+            renders: 0,
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
@@ -2158,6 +2167,7 @@ impl Shell {
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
+            scheduled_tasks_open: false,
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
@@ -2262,6 +2272,7 @@ impl Shell {
             project_icons: Default::default(),
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_row_extents: Default::default(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -7081,6 +7092,10 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let width = self.sidebar_now();
+        if width <= 0.0 {
+            return div().w(px(0.0)).h_full().flex_none().into_any_element();
+        }
         let theme = Theme::of(cx).clone();
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
@@ -7097,7 +7112,7 @@ impl Shell {
         // itself below the chrome.
         crate::components::shell_parts::sidebar_frame(
             &theme,
-            self.sidebar_now(),
+            width,
             inner.into_any_element(),
             cx.listener(|this, _, _, cx| this.open_new_session(cx)),
         )
@@ -14385,6 +14400,7 @@ mod exit_regressions {
                         harness_session_id: None,
                         harness_session_cwd: None,
                         actual_model: None,
+                        scheduled_task: None,
                         parent_chat_id: None,
                         space_id: None,
                         last_seen_at: None,
@@ -15463,6 +15479,7 @@ mod titlebar_lamp_layout {
                             harness_session_id: None,
                             harness_session_cwd: None,
                             actual_model: None,
+                            scheduled_task: None,
                             parent_chat_id: None,
                             space_id: None,
                             last_seen_at: None,

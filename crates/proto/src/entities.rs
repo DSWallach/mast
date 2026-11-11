@@ -382,6 +382,10 @@ pub struct Chat {
     /// `linked_pr_source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_ticket_source: Option<ChatLinkSource>,
+    /// Name of the Claude scheduled task whose run this imported chat is.
+    /// Engine-owned, stamped at import; the sidebar groups these together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task: Option<String>,
 }
 
 impl Chat {
@@ -1501,6 +1505,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: actual.map(str::to_owned),
+            scheduled_task: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
