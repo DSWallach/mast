@@ -236,6 +236,22 @@ impl Shell {
         let badges = self.render_header_badges(&facts, theme, cx);
         let admin_badge = self.render_admin_badge(&chat_id, "chat-header", theme, cx);
         let chips = self.render_header_chips(&facts, theme, cx);
+        let scheduled_history = self.state.read(cx).selected_chat_row().and_then(|c| c.scheduled_task.clone()).map(|t| {
+            let task_id = t.task_id.clone();
+            popover::btn_ghost(theme, "Run history", "scheduled-session-history")
+                .id("scheduled-session-history")
+                .on_click(cx.listener(move |this, _, _, cx| this.open_scheduled_tasks(Some(task_id.clone()), cx)))
+                .into_any_element()
+        });
+
+        let scheduled_latest = {
+            let state=self.state.read(cx);
+            state.selected_chat_row().and_then(|selected|selected.scheduled_task.as_ref().and_then(|task| {
+                state.chats.iter().filter(|c|c.device_id==selected.device_id&&c.scheduled_task.as_ref().is_some_and(|t|t.task_id==task.task_id))
+                    .max_by_key(|c|mast_proto::task_chat_order(c)).filter(|c|c.id!=selected.id).map(|c|c.id.clone())
+            })).map(|latest|popover::btn_ghost(theme,"Latest run","scheduled-latest-run").id("scheduled-latest-run")
+                .on_click(cx.listener(move|this,_,_,cx|{this.state.update(cx,|s,cx|s.select_chat(Some(latest.clone()),cx));cx.notify();})).into_any_element())
+        };
         let menu_chat_id = chat_id.clone();
         let title = crate::components::shell_parts::chat_header_title(theme, facts.title.clone());
         let stacked = crumbs.is_some();
@@ -269,6 +285,8 @@ impl Shell {
                                 .when_some(crumbs, |col, crumbs| col.child(crumbs))
                                 .child(title),
                         )
+                        .children(scheduled_latest)
+                        .children(scheduled_history)
                         .children(admin_badge)
                         .children(badges)
                         .child(crate::components::shell_parts::chat_header_menu(theme)

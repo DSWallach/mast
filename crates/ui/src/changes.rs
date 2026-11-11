@@ -8279,6 +8279,7 @@ index 1111111..2222222 160000
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
+            scheduled_task: None,
         }
     }
 

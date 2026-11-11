@@ -237,7 +237,7 @@ impl ExternalSessionImporter {
         let stamp = file_stamp(transcript_path);
         let parsed = parse_transcript(transcript_path, &self.device_id)?;
         let cwd = parsed
-            .cwd
+            .cwd.clone()
             .ok_or_else(|| EngineError::Other("transcript carries no cwd".into()))?;
 
         let space_id = self.resolve_space(&cwd, parsed.git_detected)?;
@@ -277,6 +277,9 @@ impl ExternalSessionImporter {
             }),
             Some(cwd.clone()),
         )?;
+        if let Some(task) = scheduled_metadata(&parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy()) {
+            self.workspace.set_chat_scheduled_task(chat_id, &task)?;
+        }
         // Priority chain ported from `agent-mode-tools/session_canvas_server.py`
         // (its own multi-source name resolution): a human-chosen agent-mode
         // task name beats the transcript's own `ai-title`, which beats a
@@ -289,6 +292,9 @@ impl ExternalSessionImporter {
             parsed.first_user_message.as_deref(),
             &registry,
         );
+        let resolved_title = if resolved_title.as_deref().is_none_or(|t|t.starts_with("<scheduled-task")||t.starts_with("<system-reminder>")) {
+            scheduled_metadata(&parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy()).map(|t|t.task_name).or(resolved_title)
+        } else { resolved_title };
         if let Some(title) = &resolved_title {
             self.workspace.rename_chat(chat_id, title)?;
         }
@@ -759,6 +765,33 @@ impl ExternalSessionImporter {
             }
         }
         Ok(repaired)
+    }
+
+    /// One-time provenance backfill for existing imported scheduled sessions.
+    pub fn repair_scheduled_tasks(&self) -> Result<usize, EngineError> {
+        let markers = self.store.root().join("scheduled-task-scan-v1");
+        std::fs::create_dir_all(&markers)?;
+        let mut tagged = 0;
+        for chat in self.workspace.read_chats()? {
+            if chat.scheduled_task.is_some() || markers.join(&chat.id).is_file() {
+                continue;
+            }
+            let Some(cursor) = self.read_cursor(&chat.id)? else {
+                continue;
+            };
+            let Ok(parsed) = parse_transcript(Path::new(&cursor.transcript_path), &self.device_id)
+            else {
+                continue;
+            };
+            if let Some(task) =
+                scheduled_metadata(&parsed, &cursor.external_session_id, &self.device_id, &self.store.root().to_string_lossy())
+            {
+                self.workspace.set_chat_scheduled_task(&chat.id, &task)?;
+                tagged += 1;
+            }
+            std::fs::write(markers.join(&chat.id), b"")?;
+        }
+        Ok(tagged)
     }
 
     fn title_repair_markers_dir(&self) -> PathBuf {
@@ -1361,6 +1394,34 @@ fn mine_links_from_entries(entries: &[(usize, SessionMessageEntry)]) -> MinedLin
         }
     }
     mined
+}
+
+fn scheduled_metadata(
+    parsed: &ParsedTranscript,
+    session_id: &str,
+    device: &str,
+    scope: &str,
+) -> Option<mast_proto::ScheduledChat> {
+    let text = parsed.first_user_message.as_deref()?;
+    // A task wrapper must start a line; discussing a tag in prose is not a run.
+    let tag = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("<scheduled-task name=\""))?
+        .trim();
+    let name = tag
+        .strip_prefix("<scheduled-task name=\"")?
+        .split('"')
+        .next()?;
+    let file = tag.split("file=\"").nth(1)?.split('"').next()?;
+    if name.is_empty() || file.is_empty() {
+        return None;
+    }
+    Some(mast_proto::ScheduledChat {
+        task_id: crate::scheduled_tasks::import::imported_identity(file, name, device, session_id, scope),
+        task_name: name.to_owned(),
+        run_id: session_id.to_owned(),
+        session_created_at: parsed.entries.first().map(|(_, e)| e.created_at),
+    })
 }
 
 struct ParsedTranscript {

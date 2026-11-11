@@ -1,0 +1,1232 @@
+//! Native scheduled-task management. All mutations go through the owning engine.
+use crate::{composer::ComposerInput, popover, state::AppState, theme::Theme};
+use gpui::{
+    AnyElement, Context, Entity, EventEmitter, Render, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
+};
+use mast_proto::*;
+use mast_rpc::methods;
+
+pub enum TaskPageEvent {
+    OpenChat(String),
+}
+pub struct TaskEditor {
+    id: String,
+    revision: u64,
+    draft: ScheduledTaskDraft,
+    name: Entity<ComposerInput>,
+    prompt: Entity<ComposerInput>,
+    cwd: Entity<ComposerInput>,
+    cron: Entity<ComposerInput>,
+    timezone: Entity<ComposerInput>,
+    grace: Entity<ComposerInput>,
+    once: Entity<ComposerInput>,
+    subscriptions: Vec<Subscription>,
+}
+pub struct ScheduledTasksPage {
+    state: Entity<AppState>,
+    snapshot: ScheduledTasksSnapshot,
+    target: Option<String>,
+    connection: Option<crate::state::EngineHandle>,
+    models: Vec<Model>,
+    editor: Option<TaskEditor>,
+    history: Option<String>,
+    error: Option<String>,
+    message: Option<String>,
+    busy: bool,
+    active: bool,
+    choices: Option<&'static str>,
+    task: Option<Task<()>>,
+    poll: Option<Task<()>>,
+    _observe: Subscription,
+}
+impl EventEmitter<TaskPageEvent> for ScheduledTasksPage {}
+impl ScheduledTasksPage {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let target = state.read(cx).effective_device_id();
+        let connection = state.read(cx).engine().cloned();
+        let observe = cx.observe(&state, |this: &mut Self, state, cx| {
+            let next = state.read(cx).engine().cloned();
+            let changed = match (&this.connection, &next) {
+                (Some(a), Some(b)) => !a.same_connection(b),
+                (None, None) => false,
+                _ => true,
+            };
+            if changed {
+                this.task = None;
+                this.busy = false;
+                this.snapshot = Default::default();
+                this.editor = None;
+                this.history = None;
+                this.models.clear();
+                this.target = state.read(cx).effective_device_id();
+                this.connection = next;
+                this.load(cx);
+            }
+            cx.notify();
+        });
+        let mut page = Self {
+            state,
+            snapshot: Default::default(),
+            target,
+            connection,
+            models: vec![],
+            editor: None,
+            history: None,
+            error: None,
+            message: None,
+            busy: false,
+            active: true,
+            choices: None,
+            task: None,
+            poll: None,
+            _observe: observe,
+        };
+        page.load(cx);
+        page.poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(10))
+                    .await;
+                if this
+                    .update(cx, |p, cx| {
+                        if p.active
+                            && !p.busy
+                            && p.editor.is_none()
+                            && p.snapshot.candidates.is_empty()
+                        {
+                            p.load(cx)
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+        page
+    }
+    pub fn show_history(&mut self, id: String, device: Option<String>, cx: &mut Context<Self>) {
+        if let Some(device) = device {
+            if self.target.as_ref() != Some(&device) {
+                self.task = None;
+                self.busy = false;
+                self.target = Some(device);
+                self.snapshot = Default::default();
+                self.models.clear();
+            }
+        }
+        self.history = Some(id);
+        self.editor = None;
+        self.load(cx);
+        cx.notify();
+    }
+    pub(crate) fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+    fn load(&mut self, cx: &mut Context<Self>) {
+        self.call(ScheduledTasksRequest::List, cx);
+    }
+    fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine disconnected".into());
+            return;
+        };
+        self.busy = true;
+        self.error = None;
+        let target = self.target.clone();
+        let is_import = matches!(request, ScheduledTasksRequest::Import { .. });
+        let is_save = matches!(request, ScheduledTasksRequest::Save { .. });
+        let is_preview = matches!(request, ScheduledTasksRequest::Preview { .. });
+        let is_import_preview = matches!(request, ScheduledTasksRequest::ImportPreview { .. });
+        let mut params = serde_json::to_value(request).unwrap();
+        params["targetDeviceId"] = serde_json::json!(target);
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<ScheduledTasksSnapshot>(methods::SCHEDULED_TASKS, params)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = this.update(cx, |p, cx| {
+                if p.target != target {
+                    return;
+                }
+                if !p
+                    .state
+                    .read(cx)
+                    .engine()
+                    .is_some_and(|current| current.same_connection(&engine))
+                {
+                    return;
+                }
+                p.busy = false;
+                match result {
+                    Ok(snapshot) => {
+                        if is_preview {
+                            p.snapshot.preview = snapshot.preview;
+                        } else if is_import_preview {
+                            p.snapshot.candidates = snapshot.candidates;
+                        } else {
+                            let candidates = if is_import {
+                                p.snapshot
+                                    .candidates
+                                    .iter()
+                                    .filter(|c| {
+                                        !snapshot.tasks.iter().any(|t| {
+                                            t.import_source.as_deref() == Some(c.source.as_str())
+                                        })
+                                    })
+                                    .cloned()
+                                    .collect()
+                            } else {
+                                vec![]
+                            };
+                            p.snapshot = snapshot;
+                            p.snapshot.candidates = candidates;
+                            if is_save {
+                                p.editor = None;
+                                p.message = Some("Task saved".into());
+                            }
+                        }
+                    }
+                    Err(e) => p.error = Some(e),
+                }
+                cx.notify();
+            });
+            // The catalog is account/host scoped and uses the same RPC as the composer.
+            let result = engine
+                .client()
+                .call_as::<Vec<Model>>(
+                    methods::LIST_MODELS,
+                    serde_json::json!({"harness":HarnessId::ClaudeCode,"targetDeviceId":target}),
+                )
+                .await;
+            let _ = this.update(cx, |p, cx| {
+                if p.target != target {
+                    return;
+                }
+                if p.state
+                    .read(cx)
+                    .engine()
+                    .is_some_and(|current| current.same_connection(&engine))
+                {
+                    match result {
+                        Ok(models) => {
+                            p.models =
+                                crate::pickers::normalize_model_rows(HarnessId::ClaudeCode, models)
+                        }
+                        Err(error) => {
+                            if p.error.is_none() {
+                                p.error =
+                                    Some(format!("Could not load the model catalog: {error}"));
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+    fn edit(&mut self, task: Option<ScheduledTask>, cx: &mut Context<Self>) {
+        let (id, revision, draft) = if let Some(t) = task {
+            (t.id, t.revision, t.draft)
+        } else {
+            let state = self.state.read(cx);
+            let space = state
+                .selected_space_row()
+                .filter(|s| Some(&s.device_id) == self.target.as_ref());
+            let cwd = space
+                .map(|s| s.path.clone())
+                .unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
+            (
+                uuid::Uuid::new_v4().to_string(),
+                0,
+                ScheduledTaskDraft {
+                    name: String::new(),
+                    prompt: String::new(),
+                    cwd,
+                    space_id: space.map(|s| s.id.clone()),
+                    config: ChatConfig {
+                        harness: HarnessId::ClaudeCode,
+                        model: self.models.first().map(|m| m.id.clone()),
+                        reasoning: None,
+                        model_options: Default::default(),
+                        sandbox: SandboxLevel::WorkspaceWrite,
+                        auto_approve: false,
+                    },
+                    schedule: TaskSchedule::Cron {
+                        expression: "0 8 * * 1-5".into(),
+                        timezone: "America/New_York".into(),
+                    },
+                    enabled: false,
+                    grace_minutes: 360,
+                    cutover_confirmed: false,
+                },
+            )
+        };
+        let mut subscriptions = vec![];
+        let mut input = |label: &str, text: String, cx: &mut Context<Self>| {
+            let e = cx.new(|cx| ComposerInput::new(label, cx));
+            e.update(cx, |i, cx| i.set_text(text, cx));
+            subscriptions.push(cx.subscribe(&e, |_: &mut Self, _, _, cx| cx.notify()));
+            e
+        };
+        let (expression, timezone, once) = match &draft.schedule {
+            TaskSchedule::Cron {
+                expression,
+                timezone,
+            } => (expression.clone(), timezone.clone(), String::new()),
+            TaskSchedule::Once { at } => (
+                String::new(),
+                "America/New_York".into(),
+                chrono::DateTime::from_timestamp_millis(*at)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default(),
+            ),
+        };
+        self.editor = Some(TaskEditor {
+            id,
+            revision,
+            name: input("Task name", draft.name.clone(), cx),
+            prompt: input("Instructions", draft.prompt.clone(), cx),
+            cwd: input("Absolute working directory", draft.cwd.clone(), cx),
+            cron: input("Five-field cron", expression, cx),
+            timezone: input("IANA timezone", timezone, cx),
+            grace: input("Grace in minutes", draft.grace_minutes.to_string(), cx),
+            once: input("One-time date: RFC 3339 with timezone", once, cx),
+            draft,
+            subscriptions,
+        });
+        self.history = None;
+        self.message = None;
+        self.snapshot.preview.clear();
+        self.choices = None;
+        cx.notify();
+    }
+    fn editor_draft(&self, cx: &gpui::App) -> Result<ScheduledTaskDraft, String> {
+        let e = self.editor.as_ref().ok_or("No task selected")?;
+        let mut d = e.draft.clone();
+        d.name = e.name.read(cx).text().trim().into();
+        d.prompt = e.prompt.read(cx).text().into();
+        d.cwd = e.cwd.read(cx).text().trim().into();
+        d.grace_minutes = e
+            .grace
+            .read(cx)
+            .text()
+            .trim()
+            .parse()
+            .map_err(|_| "Grace must be a number of minutes")?;
+        let once = e.once.read(cx).text().trim();
+        d.schedule = if !once.is_empty() {
+            TaskSchedule::Once {
+                at: chrono::DateTime::parse_from_rfc3339(once)
+                    .map_err(
+                        |_| "Enter a one-time date with timezone, e.g. 2026-12-01T08:00:00-05:00",
+                    )?
+                    .timestamp_millis(),
+            }
+        } else {
+            TaskSchedule::Cron {
+                expression: e.cron.read(cx).text().trim().into(),
+                timezone: e.timezone.read(cx).text().trim().into(),
+            }
+        };
+        Ok(d)
+    }
+    fn save(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        match self.editor_draft(cx) {
+            Ok(draft) => {
+                let e = self.editor.as_ref().unwrap();
+                let req = ScheduledTasksRequest::Save {
+                    id: e.id.clone(),
+                    expected_revision: e.revision,
+                    draft,
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                };
+                self.call(req, cx);
+            }
+            Err(e) => {
+                self.error = Some(e);
+                cx.notify();
+            }
+        }
+    }
+    fn choice(&mut self, key: &'static str, value: String, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        if let Some(e) = self.editor.as_mut() {
+            match key {
+                "space" => {
+                    e.draft.space_id = (!value.is_empty()).then_some(value.clone());
+                    if let Some(space) = self.state.read(cx).spaces.iter().find(|s| s.id == value) {
+                        let path = space.path.clone();
+                        e.cwd.update(cx, |i, cx| i.set_text(path, cx));
+                    }
+                }
+                "model" => {
+                    e.draft.config.model = Some(value.clone());
+                    if let Some(m) = self.models.iter().find(|m| m.id == value) {
+                        if e.draft
+                            .config
+                            .reasoning
+                            .is_some_and(|r| !m.reasoning_levels.contains(&r))
+                        {
+                            e.draft.config.reasoning = None;
+                        }
+                        e.draft.config.model_options.retain(|id, v| {
+                            m.options.iter().any(|o| {
+                                &o.id == id && o.choices.iter().any(|c| v.as_str() == Some(&c.id))
+                            })
+                        });
+                    }
+                }
+                "thinking" => {
+                    let toggle = self
+                        .models
+                        .iter()
+                        .find(|m| Some(&m.id) == e.draft.config.model.as_ref())
+                        .is_some_and(|m| {
+                            m.reasoning_levels.is_empty()
+                                && m.options.iter().any(|o| o.id == "thinking")
+                        });
+                    if toggle {
+                        e.draft.config.reasoning = None;
+                        if value == "null" {
+                            e.draft.config.model_options.remove("thinking");
+                        } else {
+                            e.draft
+                                .config
+                                .model_options
+                                .insert("thinking".into(), serde_json::json!(value));
+                        }
+                    } else {
+                        e.draft.config.reasoning =
+                            serde_json::from_value(serde_json::json!(value)).ok();
+                    }
+                }
+                "contextWindow" => {
+                    e.draft
+                        .config
+                        .model_options
+                        .insert(key.into(), serde_json::json!(value));
+                }
+                _ => {}
+            }
+        }
+        self.choices = None;
+        cx.notify();
+    }
+    fn open_chat(&mut self, id: String, cx: &mut Context<Self>) {
+        cx.emit(TaskPageEvent::OpenChat(id));
+    }
+}
+
+fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>, height: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(label.to_owned())),
+        )
+        .child(popover::dialog_field(
+            theme,
+            div().h(px(height)).child(input).into_any_element(),
+        ))
+        .into_any_element()
+}
+impl Render for ScheduledTasksPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).clone();
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .p(px(24.0))
+            .max_w(px(1050.0))
+            .w_full()
+            .text_color(theme.text);
+        let title = if self.editor.is_some() {
+            "Edit scheduled task"
+        } else if self.history.is_some() {
+            "Task run history"
+        } else {
+            "Scheduled tasks"
+        };
+        content = content.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(div().text_size(px(22.0)).child(title))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            popover::btn_ghost(&theme, "Refresh", "tasks-refresh")
+                                .id("tasks-refresh")
+                                .on_click(cx.listener(|p, _, _, cx| p.load(cx))),
+                        )
+                        .child(
+                            popover::btn_primary(&theme, "New task")
+                                .id("tasks-new")
+                                .on_click(cx.listener(|p, _, _, cx| {
+                                    if !p.busy {
+                                        p.edit(None, cx)
+                                    }
+                                })),
+                        ),
+                ),
+        );
+        let devices = self.state.read(cx).devices.clone();
+        let device_label = self
+            .target
+            .as_deref()
+            .and_then(|id| self.state.read(cx).device_name(id))
+            .unwrap_or("This device")
+            .to_owned();
+        content = content.child(
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.text_muted)
+                .child(format!(
+                    "Run on {device_label} · Host must be awake with Mast’s engine running"
+                )),
+        );
+        let mut hosts = div().flex().flex_wrap().gap(px(6.0));
+        for d in devices {
+            let id = d.id.clone();
+            hosts = hosts.child(
+                popover::btn_ghost(&theme, &d.name, format!("task-host-{}", d.id))
+                    .id(SharedString::from(format!("task-host-{}", d.id)))
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        if !p.busy {
+                            p.target = Some(id.clone());
+                            p.editor = None;
+                            p.history = None;
+                            p.snapshot = Default::default();
+                            p.models.clear();
+                            p.load(cx)
+                        }
+                    })),
+            );
+        }
+        content = content.child(hosts);
+        if let Some(error) = &self.error {
+            content = content.child(
+                div()
+                    .text_color(theme.danger)
+                    .child(SharedString::from(error.clone())),
+            );
+        }
+        if let Some(msg) = &self.message {
+            content = content.child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(msg.clone())),
+            );
+        }
+        if self.busy {
+            content = content.child(div().text_color(theme.text_muted).child("Loading…"));
+        }
+        if let Some(e) = &self.editor {
+            let _ = &e.subscriptions;
+            content = content
+                .child(field(&theme, "Task name", e.name.clone(), 24.0))
+                .child(field(&theme, "Working directory", e.cwd.clone(), 24.0));
+            let config = e.draft.config.clone();
+            let model = self
+                .models
+                .iter()
+                .find(|m| Some(&m.id) == config.model.as_ref());
+            let model_label = model
+                .map(|m| m.label.clone())
+                .or(config.model.clone())
+                .unwrap_or("Choose model".into());
+            let thinking_option = model
+                .filter(|m| m.reasoning_levels.is_empty())
+                .and_then(|m| m.options.iter().find(|o| o.id == "thinking"));
+            let thinking_label = thinking_option
+                .and_then(|o| {
+                    config
+                        .model_options
+                        .get("thinking")
+                        .and_then(|v| v.as_str())
+                        .and_then(|value| o.choices.iter().find(|c| c.id == value))
+                })
+                .map(|c| c.label.clone())
+                .unwrap_or_else(|| {
+                    config
+                        .reasoning
+                        .map(|r| crate::pickers::reasoning_label(r).to_owned())
+                        .unwrap_or("Model default".into())
+                });
+            let context_label = config
+                .model_options
+                .get("contextWindow")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Model default");
+            let mut selects = div().flex().flex_wrap().gap(px(10.0));
+            let space_label = e
+                .draft
+                .space_id
+                .as_deref()
+                .and_then(|id| self.state.read(cx).spaces.iter().find(|s| s.id == id))
+                .map(|s| s.name.clone().unwrap_or_else(|| s.path.clone()))
+                .unwrap_or("No Space".into());
+            for (key, label, value) in [
+                ("space", "Space", space_label.as_str()),
+                ("model", "Model", model_label.as_str()),
+                ("thinking", "Thinking level", thinking_label.as_str()),
+                ("contextWindow", "Context window", context_label),
+            ] {
+                selects = selects.child(
+                    div().flex().flex_col().gap(px(4.0)).child(label).child(
+                        popover::btn_ghost(&theme, value, format!("task-select-{key}"))
+                            .id(SharedString::from(format!("task-select-{key}")))
+                            .debug_selector(move || format!("task-select-{key}").into())
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.choices = if p.choices == Some(key) {
+                                    None
+                                } else {
+                                    Some(key)
+                                };
+                                cx.notify();
+                            })),
+                    ),
+                );
+            }
+            content = content.child(selects);
+            if let Some(key) = self.choices {
+                let choices: Vec<(String, String)> = match key {
+                    "space" => std::iter::once((String::new(), "No Space".into()))
+                        .chain(
+                            self.state
+                                .read(cx)
+                                .spaces
+                                .iter()
+                                .filter(|s| Some(&s.device_id) == self.target.as_ref())
+                                .map(|s| {
+                                    (
+                                        s.id.clone(),
+                                        s.name.clone().unwrap_or_else(|| s.path.clone()),
+                                    )
+                                }),
+                        )
+                        .collect(),
+                    "model" => self
+                        .models
+                        .iter()
+                        .map(|m| (m.id.clone(), m.label.clone()))
+                        .collect(),
+                    "thinking" if thinking_option.is_some() => {
+                        std::iter::once(("null".into(), "Model default".into()))
+                            .chain(
+                                thinking_option
+                                    .into_iter()
+                                    .flat_map(|o| o.choices.iter())
+                                    .map(|c| (c.id.clone(), c.label.clone())),
+                            )
+                            .collect()
+                    }
+                    "thinking" => std::iter::once(("null".into(), "Model default".into()))
+                        .chain(
+                            model
+                                .into_iter()
+                                .flat_map(|m| m.reasoning_levels.iter())
+                                .map(|r| {
+                                    (
+                                        serde_json::to_value(r)
+                                            .unwrap()
+                                            .as_str()
+                                            .unwrap()
+                                            .to_owned(),
+                                        crate::pickers::reasoning_label(*r).to_owned(),
+                                    )
+                                }),
+                        )
+                        .collect(),
+                    _ => model
+                        .into_iter()
+                        .flat_map(|m| m.options.iter())
+                        .filter(|o| o.id == "contextWindow")
+                        .flat_map(|o| o.choices.iter())
+                        .map(|c| (c.id.clone(), c.label.clone()))
+                        .collect(),
+                };
+                let mut menu = div().flex().flex_wrap().gap(px(5.0));
+                if choices.is_empty() {
+                    menu = menu.child("This model uses its default setting.");
+                }
+                for (value, label) in choices {
+                    menu = menu.child(
+                        popover::btn_ghost(&theme, &label, format!("task-option-{key}-{value}"))
+                            .id(SharedString::from(format!("task-option-{key}-{value}")))
+                            .on_click(
+                                cx.listener(move |p, _, _, cx| p.choice(key, value.clone(), cx)),
+                            ),
+                    );
+                }
+                content = content.child(menu);
+            }
+            content=content.child(div().text_size(px(12.0)).text_color(theme.text_muted).child("Model settings apply to future editions. Past sessions keep their original settings."));
+            let mut presets = div().flex().flex_wrap().gap(px(6.0));
+            for (key, label, expression) in [
+                ("weekdays", "Weekdays at 08:00", "0 8 * * 1-5"),
+                ("daily", "Daily at 08:00", "0 8 * * *"),
+                ("weekly", "Mondays at 08:00", "0 8 * * 1"),
+                (
+                    "half-hour",
+                    "Every 30 min during work hours",
+                    "*/30 9-17 * * 1-5",
+                ),
+            ] {
+                presets = presets.child(
+                    popover::btn_ghost(&theme, label, format!("task-preset-{key}"))
+                        .id(SharedString::from(format!("task-preset-{key}")))
+                        .on_click(cx.listener(move |p, _, _, cx| {
+                            if p.busy {
+                                return;
+                            }
+                            if let Some(e) = p.editor.as_ref() {
+                                e.cron.update(cx, |i, cx| i.set_text(expression, cx));
+                                e.once.update(cx, |i, cx| i.set_text("", cx));
+                            }
+                            p.snapshot.preview.clear();
+                            cx.notify();
+                        })),
+                );
+            }
+            content = content.child(presets);
+            content = content
+                .child(field(&theme, "Instructions", e.prompt.clone(), 120.0))
+                .child(field(
+                    &theme,
+                    "Cron · minute hour day month weekday",
+                    e.cron.clone(),
+                    24.0,
+                ))
+                .child(field(&theme, "Timezone", e.timezone.clone(), 24.0))
+                .child(field(
+                    &theme,
+                    "One-time date (optional, replaces cron)",
+                    e.once.clone(),
+                    24.0,
+                ))
+                .child(field(
+                    &theme,
+                    "Run latest missed edition within this many minutes (0 = skip)",
+                    e.grace.clone(),
+                    24.0,
+                ));
+            if self
+                .snapshot
+                .tasks
+                .iter()
+                .any(|t| t.id == e.id && t.import_source.is_some())
+            {
+                let confirmed = e.draft.cutover_confirmed;
+                content = content.child(
+                    popover::btn_ghost(
+                        &theme,
+                        if confirmed {
+                            "✓ Claude schedule paused; no source run active"
+                        } else {
+                            "○ Confirm Claude is paused and no source run is active"
+                        },
+                        "task-cutover",
+                    )
+                    .id("task-cutover")
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        if let Some(e) = p.editor.as_mut() {
+                            e.draft.cutover_confirmed = !e.draft.cutover_confirmed;
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            let enabled = e.draft.enabled;
+            let auto = e.draft.config.auto_approve;
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(
+                            &theme,
+                            if enabled {
+                                "✓ Scheduled runs enabled"
+                            } else {
+                                "○ Scheduled runs paused"
+                            },
+                            "task-enabled",
+                        )
+                        .id("task-enabled")
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            if let Some(e) = p.editor.as_mut() {
+                                e.draft.enabled = !e.draft.enabled;
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        popover::btn_ghost(
+                            &theme,
+                            if auto {
+                                "Permissions: Auto-approve"
+                            } else {
+                                "Permissions: Ask"
+                            },
+                            "task-permissions",
+                        )
+                        .id("task-permissions")
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            if let Some(e) = p.editor.as_mut() {
+                                e.draft.config.auto_approve = !e.draft.config.auto_approve;
+                            }
+                            cx.notify();
+                        })),
+                    ),
+            );
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_primary(&theme, "Save changes")
+                            .id("task-save")
+                            .on_click(cx.listener(|p, _, _, cx| p.save(cx))),
+                    )
+                    .child(
+                        popover::btn_ghost(&theme, "Preview next five runs", "task-preview")
+                            .id("task-preview")
+                            .on_click(cx.listener(|p, _, _, cx| match p.editor_draft(cx) {
+                                Ok(d) => p.call(
+                                    ScheduledTasksRequest::Preview {
+                                        schedule: d.schedule,
+                                    },
+                                    cx,
+                                ),
+                                Err(e) => {
+                                    p.error = Some(e);
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(
+                        popover::btn_ghost(&theme, "Back to tasks", "task-back")
+                            .id("task-back")
+                            .on_click(cx.listener(|p, _, _, cx| {
+                                p.editor = None;
+                                p.history = None;
+                                p.load(cx)
+                            })),
+                    ),
+            );
+            for at in &self.snapshot.preview {
+                let stamp = self
+                    .editor_draft(cx)
+                    .map(|d| {
+                        mast_engine::scheduled_tasks::evaluator::display_time(&d.schedule, *at)
+                    })
+                    .unwrap_or_default();
+                content = content.child(div().text_size(px(12.0)).child(stamp));
+            }
+        } else if let Some(task_id) = &self.history {
+            let mut chats: Vec<_> = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .filter(|c| {
+                    c.scheduled_task
+                        .as_ref()
+                        .is_some_and(|t| &t.task_id == task_id)
+                        && Some(&c.device_id) == self.target.as_ref()
+                })
+                .cloned()
+                .collect();
+            chats.sort_by(|a, b| {
+                mast_proto::task_chat_order(b).cmp(&mast_proto::task_chat_order(a))
+            });
+            content = content.child(
+                popover::btn_ghost(&theme, "Back to tasks", "history-back")
+                    .id("history-back")
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        p.history = None;
+                        cx.notify();
+                    })),
+            );
+            for (i, chat) in chats.into_iter().enumerate() {
+                let id = chat.id.clone();
+                content = content.child(
+                    popover::btn_ghost(
+                        &theme,
+                        &format!(
+                            "{} · {}{}",
+                            chrono::DateTime::from_timestamp_millis(
+                                mast_proto::task_chat_order(&chat).0
+                            )
+                            .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+                            .unwrap_or_default(),
+                            chat.title.as_deref().unwrap_or("Task run"),
+                            if i == 0 { " · Latest" } else { "" }
+                        ),
+                        format!("history-{}", chat.id),
+                    )
+                    .id(SharedString::from(format!("history-{}", chat.id)))
+                    .on_click(cx.listener(move |p, _, _, cx| p.open_chat(id.clone(), cx))),
+                );
+            }
+        } else {
+            content = content.child(
+                popover::btn_ghost(&theme, "Import from Claude…", "tasks-import")
+                    .id("tasks-import")
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        p.call(
+                            ScheduledTasksRequest::ImportPreview {
+                                registry_path: None,
+                                timezone: "America/New_York".into(),
+                                space_id: None,
+                            },
+                            cx,
+                        )
+                    })),
+            );
+            if self.snapshot.tasks.is_empty() {
+                content = content.child(
+                    "No scheduled tasks yet. Create a task or preview your Claude schedules.",
+                );
+            }
+            for task in self.snapshot.tasks.clone() {
+                let edit = task.clone();
+                let toggle = task.clone();
+                let delete = task.clone();
+                let run_id = task.id.clone();
+                let history_id = task.id.clone();
+                let recent = self.snapshot.runs.iter().find(|r| r.task_id == task.id);
+                let detail = recent
+                    .map(|r| {
+                        format!(
+                            "{:?}{}",
+                            r.state,
+                            r.detail
+                                .as_ref()
+                                .map(|d| format!(" · {d}"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or("No sessions yet".into());
+                let schedule = match &task.draft.schedule {
+                    TaskSchedule::Cron {
+                        expression,
+                        timezone,
+                    } => format!("{expression} · {timezone}"),
+                    TaskSchedule::Once { at } => format!(
+                        "Once · {}",
+                        chrono::DateTime::from_timestamp_millis(*at)
+                            .map(|d| d.to_rfc3339())
+                            .unwrap_or_default()
+                    ),
+                };
+                let latest = self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .filter(|c| {
+                        c.scheduled_task
+                            .as_ref()
+                            .is_some_and(|s| s.task_id == task.id)
+                            && c.device_id == task.device_id
+                    })
+                    .max_by_key(|c| mast_proto::task_chat_order(c))
+                    .map(|c| c.id.clone());
+                let mut row = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .py(px(12.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(div().text_size(px(15.0)).child(task.draft.name.clone()))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(format!(
+                                "{} · {schedule} · {detail}{}",
+                                if task.draft.enabled {
+                                    "Enabled"
+                                } else {
+                                    "Paused"
+                                },
+                                task.next_due
+                                    .map(|at| format!(
+                                        " · Next: {}",
+                                        mast_engine::scheduled_tasks::evaluator::display_time(
+                                            &task.draft.schedule,
+                                            at
+                                        )
+                                    ))
+                                    .unwrap_or_default()
+                            )),
+                    );
+                let mut actions = div().flex().flex_wrap().gap(px(6.0));
+                if let Some(chat) = latest {
+                    actions = actions.child(
+                        popover::btn_ghost(&theme, "Open latest", format!("latest-{}", task.id))
+                            .id(SharedString::from(format!("latest-{}", task.id)))
+                            .on_click(
+                                cx.listener(move |p, _, _, cx| p.open_chat(chat.clone(), cx)),
+                            ),
+                    );
+                }
+                actions = actions
+                    .child(
+                        popover::btn_ghost(&theme, "Edit", format!("edit-{}", task.id))
+                            .id(SharedString::from(format!("edit-{}", task.id)))
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                if !p.busy {
+                                    p.edit(Some(edit.clone()), cx)
+                                }
+                            })),
+                    )
+                    .child(
+                        popover::btn_ghost(&theme, "Run now", format!("run-{}", task.id))
+                            .id(SharedString::from(format!("run-{}", task.id)))
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.call(
+                                    ScheduledTasksRequest::RunNow {
+                                        id: run_id.clone(),
+                                        operation_id: uuid::Uuid::new_v4().to_string(),
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        popover::btn_ghost(
+                            &theme,
+                            if task.draft.enabled {
+                                "Pause"
+                            } else {
+                                "Enable"
+                            },
+                            format!("toggle-{}", task.id),
+                        )
+                        .id(SharedString::from(format!("toggle-{}", task.id)))
+                        .on_click(cx.listener(move |p, _, _, cx| {
+                            let mut draft = toggle.draft.clone();
+                            draft.enabled = !draft.enabled;
+                            p.call(
+                                ScheduledTasksRequest::Save {
+                                    id: toggle.id.clone(),
+                                    expected_revision: toggle.revision,
+                                    draft,
+                                    operation_id: uuid::Uuid::new_v4().to_string(),
+                                },
+                                cx,
+                            )
+                        })),
+                    )
+                    .child(
+                        popover::btn_ghost(
+                            &theme,
+                            "Run history",
+                            format!("history-task-{}", task.id),
+                        )
+                        .id(SharedString::from(format!("history-task-{}", task.id)))
+                        .on_click(cx.listener(move |p, _, _, cx| {
+                            p.show_history(history_id.clone(), None, cx)
+                        })),
+                    )
+                    .child(
+                        popover::btn_ghost(&theme, "Delete", format!("delete-{}", task.id))
+                            .id(SharedString::from(format!("delete-{}", task.id)))
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.call(
+                                    ScheduledTasksRequest::Delete {
+                                        id: delete.id.clone(),
+                                        expected_revision: delete.revision,
+                                        operation_id: uuid::Uuid::new_v4().to_string(),
+                                    },
+                                    cx,
+                                )
+                            })),
+                    );
+                row = row.child(actions);
+                content = content.child(row);
+            }
+            for candidate in self.snapshot.candidates.clone() {
+                let draft = candidate.clone();
+                let name = candidate.draft.name.clone();
+                content = content.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .py(px(10.0))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(format!(
+                            "{name} · {} in Claude",
+                            if candidate.source_enabled {
+                                "Enabled"
+                            } else {
+                                "Disabled"
+                            }
+                        ))
+                        .children(candidate.warnings.into_iter().map(|w| {
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(w)
+                        }))
+                        .child(
+                            popover::btn_ghost(&theme, "Import paused", format!("import-{name}"))
+                                .id(SharedString::from(format!("import-{name}")))
+                                .on_click(cx.listener(move |p, _, _, cx| {
+                                    p.call(
+                                        ScheduledTasksRequest::Import {
+                                            candidate: draft.clone(),
+                                            operation_id: uuid::Uuid::new_v4().to_string(),
+                                        },
+                                        cx,
+                                    )
+                                })),
+                        ),
+                );
+            }
+        }
+        div()
+            .id("scheduled-tasks-page")
+            .size_full()
+            .overflow_y_scroll()
+            .child(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[gpui::test]
+    fn native_editor_preserves_instructions_and_constrains_model_options(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut page = ScheduledTasksPage::new(state, cx);
+            page.models = vec![
+                Model {
+                    id: "capable".into(),
+                    label: "Capable model".into(),
+                    description: None,
+                    reasoning_levels: vec![ReasoningLevel::Low, ReasoningLevel::High],
+                    options: vec![ModelOption {
+                        id: "contextWindow".into(),
+                        label: "Context window".into(),
+                        choices: vec![
+                            ModelOptionChoice {
+                                id: "200k".into(),
+                                label: "200K".into(),
+                            },
+                            ModelOptionChoice {
+                                id: "1m".into(),
+                                label: "1M".into(),
+                            },
+                        ],
+                        default_choice: "200k".into(),
+                    }],
+                },
+                Model {
+                    id: "small".into(),
+                    label: "Small model".into(),
+                    description: None,
+                    reasoning_levels: vec![],
+                    options: vec![ModelOption {
+                        id: "thinking".into(),
+                        label: "Thinking".into(),
+                        choices: vec![
+                            ModelOptionChoice {
+                                id: "on".into(),
+                                label: "On".into(),
+                            },
+                            ModelOptionChoice {
+                                id: "off".into(),
+                                label: "Off".into(),
+                            },
+                        ],
+                        default_choice: "off".into(),
+                    }],
+                },
+            ];
+            page.edit(None, cx);
+            page
+        });
+        page.update(cx, |p, cx| {
+            p.editor.as_ref().unwrap().prompt.update(cx, |input, cx| {
+                input.set_text("Keep these instructions", cx)
+            });
+            p.choice("thinking", "high".into(), cx);
+            p.choice("contextWindow", "1m".into(), cx);
+            assert_eq!(
+                p.editor_draft(cx).unwrap().config.reasoning,
+                Some(ReasoningLevel::High)
+            );
+            assert_eq!(
+                p.editor_draft(cx).unwrap().config.model_options["contextWindow"],
+                "1m"
+            );
+            p.choice("model", "small".into(), cx);
+            let draft = p.editor_draft(cx).unwrap();
+            assert!(draft.config.reasoning.is_none());
+            assert!(draft.config.model_options.is_empty());
+            assert_eq!(draft.prompt, "Keep these instructions");
+            p.choice("thinking", "on".into(), cx);
+            assert_eq!(
+                p.editor_draft(cx).unwrap().config.model_options["thinking"],
+                "on"
+            );
+            assert!(p.editor_draft(cx).unwrap().config.reasoning.is_none());
+
+            p.choices = Some("contextWindow");
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(800.0), px(900.0)));
+        cx.run_until_parked();
+    }
+    #[gpui::test]
+    fn history_from_a_session_targets_its_host_without_retargeting_task_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| ScheduledTasksPage::new(state, cx));
+        page.update(cx, |p, cx| {
+            p.target = Some("device-b".into());
+            p.show_history("task".into(), Some("device-a".into()), cx);
+            assert_eq!(p.target.as_deref(), Some("device-a"));
+            p.target = Some("device-b".into());
+            p.show_history("task".into(), None, cx);
+            assert_eq!(p.target.as_deref(), Some("device-b"));
+        });
+    }
+}

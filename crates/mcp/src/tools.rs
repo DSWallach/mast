@@ -1569,6 +1569,7 @@ impl Tools {
                 linked_pr_source: None,
                 linked_ticket_id: None,
                 linked_ticket_source: None,
+                scheduled_task: None,
             };
             let sent = match agent_key.as_deref() {
                 // The launch already queued the first Turn.

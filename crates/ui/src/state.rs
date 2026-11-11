@@ -1890,10 +1890,12 @@ impl AppState {
         now: DateTime<Utc>,
         include_archived: bool,
     ) -> Vec<(ChatIndicator, &Chat)> {
+        let latest = mast_proto::latest_task_chat_ids(&self.chats);
         let mut rows: Vec<(ChatIndicator, &Chat)> = self
             .chats
             .iter()
             .filter(|c| c.parent_chat_id.is_none())
+            .filter(|c| c.scheduled_task.is_none() || latest.contains(c.id.as_str()))
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
                 // Project-less sessions are first-class rows.
@@ -2016,6 +2018,7 @@ impl AppState {
             chat.last_seen_at.hash(&mut h);
             chat.room_gen.hash(&mut h);
             chat.parent_chat_id.hash(&mut h);
+            chat.scheduled_task.hash(&mut h);
             chat.linked_pr_url.hash(&mut h);
             chat.linked_pr_source.map(|s| discriminant(&s)).hash(&mut h);
             chat.linked_ticket_id.hash(&mut h);
@@ -4732,6 +4735,7 @@ mod tests {
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
+            scheduled_task: None,
         }
     }
 

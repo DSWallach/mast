@@ -9342,6 +9342,7 @@ mod tests {
                 parent_chat_id: None, space_id: None, last_seen_at: None, room_gen: None,
                 linked_pr_url: None, linked_pr_source: None, linked_ticket_id: None,
                 linked_ticket_source: None,
+                scheduled_task: None,
             });
         });
         let composer = cx.new(|cx| Composer::new(state, cx));

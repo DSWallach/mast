@@ -60,6 +60,7 @@ pub mod repository_discovery;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
+pub mod scheduled_tasks;
 pub mod source_control;
 pub mod spaces;
 pub mod subagent_scan;
@@ -170,6 +171,7 @@ pub struct EngineConfig {
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
 pub struct EngineCore {
+    pub scheduled_tasks: scheduled_tasks::ScheduledTasks,
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
     pub workspace: WorkspaceHost,
@@ -622,7 +624,18 @@ impl EngineCore {
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));
         pr_ticket_cache.spawn_sweep_loop();
+        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
+        {
+            let importer = external_import.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = importer.repair_scheduled_tasks() {
+                    tracing::warn!(%error, "scheduled task provenance repair failed");
+                }
+            });
+        }
+        scheduled_tasks.start();
         Ok(Self {
+            scheduled_tasks,
             sessions,
             doc_host,
             workspace,
@@ -789,6 +802,7 @@ impl EngineCore {
         .with_context_usage(self.context_usage.clone())
         .with_artifacts(self.artifacts.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
+        rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -817,6 +831,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.scheduled_tasks.shutdown().await;
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts

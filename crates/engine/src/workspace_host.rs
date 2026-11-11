@@ -1641,6 +1641,7 @@ impl WorkspaceHost {
                 linked_pr_source: None,
                 linked_ticket_id: None,
                 linked_ticket_source: None,
+                scheduled_task: None,
             })
         })?;
         Ok(())
@@ -1807,6 +1808,14 @@ impl WorkspaceHost {
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.
+    pub fn set_chat_scheduled_task(
+        &self,
+        chat_id: &str,
+        task: &mast_proto::ScheduledChat,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_scheduled_task(chat_id, task))?)
+    }
+
     pub fn set_chat_config(&self, chat_id: &str, config: &ChatConfig) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_config(chat_id, config))?)
     }

@@ -1333,6 +1333,7 @@ impl RegistryDoc {
             ("linkedPrSource", opt_source(chat.linked_pr_source)),
             ("linkedTicketId", opt_str(chat.linked_ticket_id.as_deref())),
             ("linkedTicketSource", opt_source(chat.linked_ticket_source)),
+            ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task)?),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1639,6 +1640,26 @@ impl RegistryDoc {
             fields([
                 ("harnessSessionId", json!(session_id)),
                 ("harnessSessionCwd", json!(cwd)),
+            ]),
+        );
+        Ok(true)
+    }
+
+    pub fn set_chat_scheduled_task(
+        &mut self,
+        chat_id: &str,
+        task: &mast_proto::ScheduledChat,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([
+                ("scheduledTaskInfo", serde_json::to_value(task)?),
+                ("scheduledTask", json!(task.task_name)),
             ]),
         );
         Ok(true)
@@ -1994,6 +2015,7 @@ impl RegistryDoc {
                     ("spaceId", opt_str(chat.space_id.as_deref())),
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+                    ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task)?),
                 ]),
             );
         }

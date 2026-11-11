@@ -559,6 +559,7 @@ pub mod methods {
     /// Errors say why. IPC-only: device-local filesystem + git state.
     pub const CLOSE_CHAT_WORKTREE: &str = "CloseChatWorktree";
     // Project Actions are private state on the device that owns the project.
+    pub const SCHEDULED_TASKS: &str = "ScheduledTasks";
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";

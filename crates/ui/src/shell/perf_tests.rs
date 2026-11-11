@@ -151,6 +151,7 @@ fn chat_row(index: usize) -> mast_proto::Chat {
         linked_pr_source: None,
         linked_ticket_id: None,
         linked_ticket_source: None,
+        scheduled_task: None,
     }
 }
 

@@ -307,6 +307,9 @@ pub struct ConversationSourceContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "scheduledTaskInfo")]
+    pub scheduled_task: Option<crate::ScheduledChat>,
     pub id: String,
     /// Owning (host) device.
     pub device_id: String,
@@ -1509,6 +1512,7 @@ mod tests {
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
+            scheduled_task: None,
         }
     }
 

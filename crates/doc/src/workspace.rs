@@ -286,6 +286,7 @@ impl WorkspaceDoc {
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
+        row.insert("scheduledTaskInfo", LoroValue::from(serde_json::to_value(&chat.scheduled_task)?))?;
         self.doc.commit();
         Ok(())
     }
@@ -783,6 +784,9 @@ pub(crate) struct RawChat {
     linked_ticket_id: Option<String>,
     #[serde(default, deserialize_with = "lenient_chat_link_source")]
     linked_ticket_source: Option<mast_proto::ChatLinkSource>,
+    #[serde(default)]
+    #[serde(rename = "scheduledTaskInfo")]
+    scheduled_task: Option<mast_proto::ScheduledChat>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -842,6 +846,7 @@ impl From<RawChat> for Chat {
             linked_pr_source: raw.linked_pr_source,
             linked_ticket_id: raw.linked_ticket_id,
             linked_ticket_source: raw.linked_ticket_source,
+            scheduled_task: raw.scheduled_task,
         }
     }
 }
@@ -963,6 +968,7 @@ mod tests {
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
+            scheduled_task: None,
         }
     }
 

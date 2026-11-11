@@ -804,6 +804,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 linked_pr_source: None,
                 linked_ticket_id: None,
                 linked_ticket_source: None,
+                scheduled_task: None,
             })
             .unwrap();
         legacy

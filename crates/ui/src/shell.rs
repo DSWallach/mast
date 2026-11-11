@@ -622,6 +622,7 @@ pub enum Route {
     Settings(SettingsSection),
     /// Multi-chat overview (ticket 002): every chat at once, not one at a time.
     Overview,
+    ScheduledTasks,
     /// The PR page: dashboards plus the chats launched to review PRs.
     PrReviewChats,
     Review,
@@ -743,6 +744,7 @@ pub enum NavEntry {
     Chat(String),
     Settings(SettingsSection),
     Overview,
+    ScheduledTasks,
     PrReviewChats,
 }
 
@@ -1572,7 +1574,7 @@ impl Render for SidebarPane {
             match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
                 // Overview keeps the normal chat sidebar.
-                Route::Chat | Route::Overview | Route::PrReviewChats | Route::Review => {
+                Route::Chat | Route::Overview | Route::ScheduledTasks | Route::PrReviewChats | Route::Review => {
                     shell.render_chat_sidebar(&theme, cx)
                 }
             }
@@ -1680,6 +1682,8 @@ pub struct Shell {
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
     overview_page: Option<Entity<crate::overview::Overview>>,
+    scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
+    scheduled_tasks_events: Option<Subscription>,
     pr_review_chats_page: Option<Entity<crate::chat_type_view::ChatTypeView>>,
     /// `StartPrReview` operation ids (one per PR + action + agent).
     pr_review_ops: crate::pr_review_launch::PrReviewOperations,
@@ -2132,6 +2136,7 @@ impl Shell {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Overview => NavEntry::Overview,
+            Route::ScheduledTasks => NavEntry::ScheduledTasks,
             Route::PrReviewChats => NavEntry::PrReviewChats,
             Route::Review => NavEntry::Chat(String::new()),
         });
@@ -2195,6 +2200,8 @@ impl Shell {
             nav,
             devices_page: None,
             overview_page: None,
+            scheduled_tasks_page: None,
+            scheduled_tasks_events: None,
             pr_review_chats_page: None,
             review_hosts: Default::default(),
             pr_review_ops: Default::default(),
@@ -4790,11 +4797,43 @@ impl Shell {
     /// web link) opens in the right pane, which only exists on the chat
     /// route — go there first so it isn't opened somewhere nobody can see.
     fn leave_overview_for_chat(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.route, Route::Overview) {
+        if matches!(self.route, Route::Overview | Route::ScheduledTasks) {
             self.route = Route::Chat;
             self.nav.push(NavEntry::Chat(self.active_chat.clone()));
             cx.notify();
         }
+    }
+
+    pub(super) fn ensure_scheduled_tasks_page(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::scheduled_tasks::ScheduledTasksPage> {
+        if let Some(page) = &self.scheduled_tasks_page {
+            return page.clone();
+        }
+        let state = self.state.clone();
+        let page = cx.new(|cx| crate::scheduled_tasks::ScheduledTasksPage::new(state, cx));
+        self.scheduled_tasks_events = Some(cx.subscribe(&page, |shell, _, event, cx| {
+            let crate::scheduled_tasks::TaskPageEvent::OpenChat(id) = event;
+            shell.route = Route::Chat;
+            shell
+                .state
+                .update(cx, |s, cx| s.select_chat(Some(id.clone()), cx));
+            cx.notify();
+        }));
+        self.scheduled_tasks_page = Some(page.clone());
+        page
+    }
+
+    pub(super) fn open_scheduled_tasks(&mut self, history: Option<String>, cx: &mut Context<Self>) {
+        self.route = Route::ScheduledTasks;
+        self.nav.push(NavEntry::ScheduledTasks);
+        let page = self.ensure_scheduled_tasks_page(cx);
+        if let Some(id) = history {
+            let device=self.state.read(cx).selected_chat_row().filter(|c|c.scheduled_task.as_ref().is_some_and(|t|t.task_id==id)).map(|c|c.device_id.clone());
+            page.update(cx, |p, cx| p.show_history(id, device, cx));
+        }
+        cx.notify();
     }
 
     pub(crate) fn open_overview(&mut self, cx: &mut Context<Self>) {
@@ -4932,6 +4971,7 @@ impl Shell {
             NavEntry::Settings(section) => {
                 self.route = Route::Settings(section);
             }
+            NavEntry::ScheduledTasks => { self.route = Route::ScheduledTasks; }
             NavEntry::Overview => {
                 self.route = Route::Overview;
             }
@@ -6484,7 +6524,7 @@ impl Shell {
     fn render_title_bar(&mut self, viewport_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
             Route::Chat | Route::Review => self.render_session_title_bar(viewport_height, cx),
-            Route::Settings(_) => {
+            Route::Settings(_) | Route::ScheduledTasks => {
                 let inner = div()
                     .size_full()
                     .flex()
@@ -9617,6 +9657,10 @@ impl Shell {
         transcript_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(page)=&self.scheduled_tasks_page {
+            let active=self.route==Route::ScheduledTasks;
+            page.update(cx,|p,_|p.set_active(active));
+        }
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
@@ -9635,6 +9679,11 @@ impl Shell {
                 .flex_col()
                 .child(div().flex_1().min_h_0().child(outlet))
                 .into_any_element();
+        }
+
+        if self.route == Route::ScheduledTasks {
+            let outlet = self.ensure_scheduled_tasks_page(cx);
+            return div().flex_1().min_w_0().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(outlet).into_any_element();
         }
 
         // Overview route: same shape as Settings (an outlet under the
@@ -14393,6 +14442,7 @@ mod exit_regressions {
                         linked_pr_source: None,
                         linked_ticket_id: None,
                         linked_ticket_source: None,
+                        scheduled_task: None,
                     });
                 });
                 let activate = |shell: &mut Shell,
@@ -15471,6 +15521,7 @@ mod titlebar_lamp_layout {
                             linked_pr_source: None,
                             linked_ticket_id: None,
                             linked_ticket_source: None,
+                            scheduled_task: None,
                         });
                     });
                 }

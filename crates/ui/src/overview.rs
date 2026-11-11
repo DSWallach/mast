@@ -8337,6 +8337,7 @@ mod logic_tests {
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
+            scheduled_task: None,
         };
         OverviewRow {
             status: ChatIndicator::Idle,

@@ -763,3 +763,6 @@ mod sandbox_support_tests {
 #[cfg(test)]
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+mod model_rows;
+pub use model_rows::normalize_model_rows;

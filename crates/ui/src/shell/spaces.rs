@@ -4060,6 +4060,7 @@ impl Shell {
             .pb(px(4.0))
             .child(trigger)
             .child(overview_trigger)
+            .child(div().id("scheduled-tasks-navigation").size(px(29.0)).flex().items_center().justify_center().rounded(px(8.0)).cursor_pointer().aria_label("Scheduled tasks").hover(|el| el.bg(theme.glass_hover())).on_click(cx.listener(|this, _, _, cx| this.open_scheduled_tasks(None, cx))).child(icon(icons::CLOCK_CIRCLE).size(px(15.0)).text_color(theme.text_muted)))
             .child(view_trigger)
             .into_any_element()
     }
@@ -6895,6 +6896,7 @@ mod tests {
             linked_pr_source: None,
             linked_ticket_id: None,
             linked_ticket_source: None,
+            scheduled_task: None,
         }
     }
 

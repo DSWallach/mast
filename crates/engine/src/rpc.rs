@@ -765,6 +765,7 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     project_actions: ProjectActionsStore,
+    scheduled_tasks: Option<crate::scheduled_tasks::ScheduledTasks>,
     previews: Option<mast_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
@@ -929,6 +930,7 @@ impl EngineRpc {
             workspace_files,
             terminals,
             project_actions,
+            scheduled_tasks: None,
             previews: None,
             change_requests,
             diff_sync,
@@ -960,6 +962,11 @@ impl EngineRpc {
 
     /// Share the engine's artifact service (render broker, watcher cache)
     /// with this RPC surface and its agent tools.
+    pub fn with_scheduled_tasks(mut self, service: crate::scheduled_tasks::ScheduledTasks) -> Self {
+        self.scheduled_tasks = Some(service);
+        self
+    }
+
     pub fn with_artifacts(mut self, artifacts: crate::artifacts::ArtifactsService) -> Self {
         self.agent_tools.set_artifacts(artifacts.clone());
         self.artifacts = artifacts;
@@ -2199,6 +2206,7 @@ fn forwardable(method: &str) -> bool {
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
             // Project Actions live in the owning engine's private profile store.
+            | methods::SCHEDULED_TASKS
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
@@ -5180,6 +5188,12 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::SCHEDULED_TASKS => {
+                let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;
+                let service = self.scheduled_tasks.as_ref().ok_or_else(|| RpcError::Failed("Scheduled tasks unavailable".into()))?;
+                let result = service.request(request).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&result)
             }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;
