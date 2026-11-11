@@ -249,6 +249,25 @@ impl RegistryDoc {
         }
     }
 
+    /// Atomically replace answers without dropping any to fit the operation budget.
+    pub fn set_artifact_answers_exact(
+        &mut self, id: &str, answers: &[mast_proto::ArtifactQuestionAnswer], now_ms: i64,
+    ) -> Result<bool, DocError> {
+        if self.artifact(id).is_none() { return Ok(false); }
+        self.observe_row(KIND_ARTIFACTS, id);
+        let op = RowOp {
+            kind: KIND_ARTIFACTS.to_owned(), id: id.to_owned(), op: OpKind::Update,
+            set: Some(BTreeMap::from([
+                ("answers".to_owned(), serde_json::to_value(answers)?),
+                ("updatedAt".to_owned(), Value::from(now_ms)),
+            ])),
+            hlc: self.next_hlc(), clocks: None,
+        };
+        check_op_size(&op)?;
+        self.write_ops(vec![op])?;
+        Ok(true)
+    }
+
     /// Atomically replace a sheet's decisions. Oversized batches fail intact.
     pub fn set_artifact_decisions(
         &mut self,

@@ -1139,6 +1139,12 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_artifact_answers(id, answers, now))?)
     }
 
+    /// Atomically replace plan answers without truncating the batch.
+    pub fn set_artifact_answers_exact(&self, id: &str, answers: &[mast_proto::ArtifactQuestionAnswer]) -> Result<bool, EngineError> {
+        let now = Utc::now().timestamp_millis();
+        Ok(self.mutate(|doc| doc.set_artifact_answers_exact(id, answers, now))?)
+    }
+
     /// Atomically replace the decisions recorded on a decision sheet.
     pub fn set_artifact_decisions(
         &self,

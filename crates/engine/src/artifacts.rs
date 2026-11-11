@@ -1549,6 +1549,44 @@ impl ArtifactsService {
         })
     }
 
+    /// Record a validated batch of plan answers in one registry operation.
+    pub fn answer_questions(
+        &self,
+        params: &mast_proto::artifacts::ArtifactAnswerQuestionsParams,
+        by: WorkOutlineActor,
+    ) -> Outcome<mast_proto::artifacts::ArtifactAnswerQuestionsReply> {
+        use mast_proto::artifacts::{ArtifactQuestionAnswer, PlanQuestionStatus, ArtifactAnswerQuestionsReply};
+        use std::collections::HashSet;
+        let _gate = lock(&self.inner.gate);
+        let artifact = self.workspace().artifact(&params.artifact_id)
+            .ok_or_else(|| ArtifactError::not_found("artifact not found"))?;
+        if artifact.archived_at.is_some() || artifact.current_revision != params.revision {
+            return Err(ArtifactError::invalid("plan revision changed; review the current plan"));
+        }
+        if params.answers.is_empty() { return Err(ArtifactError::invalid("answer batch is empty")); }
+        let questions = self.plan_questions(&artifact);
+        let mut ids = HashSet::new();
+        let mut sent = Vec::new();
+        let at = now_ms();
+        for draft in &params.answers {
+            let id = draft.question_id.trim().to_ascii_uppercase();
+            if !ids.insert(id.clone()) || !questions.iter().any(|question| question.id == id && question.status == PlanQuestionStatus::Open) {
+                return Err(ArtifactError::invalid(format!("question {id:?} is not open or is repeated")));
+            }
+            let answer = clean_answer(&draft.answer);
+            if answer.is_empty() { return Err(ArtifactError::invalid("answer must not be empty")); }
+            sent.push(ArtifactQuestionAnswer { id, answer, at, revision: params.revision, by: by.clone() });
+        }
+        let mut answers = artifact.answers.clone();
+        answers.retain(|answer| !ids.contains(&answer.id.to_ascii_uppercase()));
+        answers.extend(sent.iter().cloned());
+        if answers.len() > mast_proto::artifacts::MAX_ANSWERS { return Err(ArtifactError::invalid("too many recorded answers")); }
+        let saved = self.workspace().set_artifact_answers_exact(&artifact.id, &answers)
+            .map_err(|error| ArtifactError::invalid(format!("could not save answers: {error}")))?;
+        if !saved { return Err(ArtifactError::not_found("artifact no longer exists")); }
+        Ok(ArtifactAnswerQuestionsReply { artifact_id: artifact.id, answers: sent })
+    }
+
     /// Validate and commit a complete batch in one registry operation.
     pub fn submit_sheet_decisions(
         &self,

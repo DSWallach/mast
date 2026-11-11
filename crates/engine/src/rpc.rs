@@ -3317,6 +3317,16 @@ impl RpcService for EngineRpc {
                 })
                 .await
             }
+            methods::ARTIFACT_ANSWER_QUESTIONS => {
+                let p: mast_proto::artifacts::ArtifactAnswerQuestionsParams = parse_params(params)?;
+                let by = self.work_outline.local_user();
+                let sync = crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
+                self.artifact_reply(move |service| {
+                    let reply = service.answer_questions(&p, by)?;
+                    sync.reconcile(&p.artifact_id);
+                    Ok(reply)
+                }).await
+            }
             methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => {
                 let p: mast_proto::decision_sheet::SubmitSheetDecisionsParams =
                     parse_params(params)?;

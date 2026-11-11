@@ -2523,3 +2523,18 @@ async fn sheet_has_one_required_action_that_tracks_open_rows() {
     rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-4", "outcome":"rejected"}]})).await.unwrap();
     assert!(open().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_answers_are_recorded_as_one_batch() {
+    let rig = rig().await;
+    let id = publish_plan(&rig, PLAN_V1, "v1").await;
+    let invalid = json!({"artifactId":id,"revision":1,"answers":[{"questionId":"Q-1","answer":"yes"},{"questionId":"Q-99","answer":"no"}]});
+    assert!(rig.client.call(methods::ARTIFACT_ANSWER_QUESTIONS, invalid).await.is_err());
+    assert!(artifact(&rig, &id).answers.is_empty());
+    let valid = json!({"artifactId":id,"revision":1,"answers":[{"questionId":"Q-1","answer":"yes"},{"questionId":"Q-2","answer":"UTC"}]});
+    let result = rig.client.call(methods::ARTIFACT_ANSWER_QUESTIONS, valid).await.unwrap();
+    assert_eq!(result["answers"].as_array().unwrap().len(), 2);
+    let answers = artifact(&rig, &id).answers;
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].at, answers[1].at);
+}
