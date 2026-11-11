@@ -1076,6 +1076,11 @@ impl SessionsEngine {
             request.resume = resume;
             resume_injected = request.resume.is_some();
         }
+        let shown_prompt = request.prompt.clone();
+        if request.resume.is_none() && request.instructions.is_none() {
+            self.inner
+                .prepare_side_chat_start(chat_id, harness.as_ref(), &mut request);
+        }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
         let run_id = new_id();
@@ -1144,7 +1149,7 @@ impl SessionsEngine {
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        self.inner.note_message(chat_id, &request.prompt);
+        self.inner.note_message(chat_id, &shown_prompt);
 
         // Name the chat NOW, off the first prompt — not after the first
         // exchange completes ("called New session for a long time for no
@@ -1152,7 +1157,7 @@ impl SessionsEngine {
         // the Done-time call below stays as the retry for a failed
         // generation).
         if let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+            titles.maybe_generate(chat_id, harness_id, &shown_prompt, &request.cwd);
         }
 
         tokio::spawn(drive_run(
@@ -2153,6 +2158,44 @@ impl Inner {
                 },
             ]),
         ))
+    }
+
+    /// A side chat's first run, which has no session of its own yet: fork
+    /// the main chat's native session when the harness can, else prepend the
+    /// main chat's recent transcript to the prompt (the doc keeps the
+    /// question alone).
+    fn prepare_side_chat_start(&self, chat_id: &str, harness: &dyn Harness, request: &mut RunRequest) {
+        let Some(main_id) = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.side_of)
+        else {
+            return;
+        };
+        if self.stored_harness_session(chat_id).is_some_and(|(id, _)| !id.is_empty()) {
+            return;
+        }
+        let same_harness = self
+            .workspace()
+            .and_then(|ws| ws.chat(&main_id).ok().flatten())
+            .and_then(|main| main.config)
+            .is_none_or(|config| config.harness == harness.id());
+        if harness.supports_session_fork()
+            && same_harness
+            && let Some((session_id, cwd)) = self.stored_harness_session(&main_id)
+            && !session_id.is_empty()
+            && (cwd.is_empty() || cwd == request.cwd)
+        {
+            request.fork_from = Some(session_id);
+            return;
+        }
+        let entries = self
+            .doc_host()
+            .and_then(|host| host.open(&main_id).ok())
+            .and_then(|handle| handle.doc().read_entries().ok())
+            .unwrap_or_default();
+        let transcript = mast_doc::side_chat::transcript_tail(&entries);
+        request.prompt = mast_proto::side_chat::context_seed(&transcript, &request.prompt);
     }
 
     /// The chat's stored native session `(id, cwd)` from the same sources

@@ -722,6 +722,9 @@ pub struct ChatDocHandle {
     /// the turn and starting its own the chat reads Idle, and an idle chat with
     /// a queue is exactly what the flush drains.
     drain_lock: tokio::sync::Mutex<()>,
+    /// Serializes "Absorb into main chat" on a side chat, so one marker is
+    /// read and advanced per absorb.
+    pub(crate) absorb_lock: tokio::sync::Mutex<()>,
     /// An explicit user interrupt freezes automatic queue delivery. The next
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
@@ -1064,7 +1067,7 @@ impl DocHost {
 
     /// The sessions engine, once wired. `None` before assembly or after
     /// `shutdown_workers` — callers treat both as "executor unavailable".
-    fn sessions(&self) -> Option<SessionsEngine> {
+    pub(crate) fn sessions(&self) -> Option<SessionsEngine> {
         lock(&self.inner.sessions).clone()
     }
 
@@ -1704,6 +1707,7 @@ impl DocHost {
             queue_tx,
             rejected_tx,
             drain_lock: tokio::sync::Mutex::new(()),
+            absorb_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
@@ -3110,6 +3114,13 @@ impl DocHost {
         message_id: &str,
     ) -> Result<String, EngineError> {
         self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))
+    }
+
+    /// Queue context for `chat_id`'s next turn without interrupting or
+    /// pulling back anything already queued or running. Drains at once
+    /// when the chat is idle.
+    pub(crate) fn queue_context_message(&self, chat_id: &str, text: &str) -> Result<String, EngineError> {
+        self.queue_message_inner(chat_id, text, Vec::new(), true, false, None)
     }
 
     fn queue_message_inner(

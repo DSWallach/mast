@@ -1648,6 +1648,56 @@ impl WorkspaceHost {
         Ok(())
     }
 
+    /// Create `chat_id` as a side chat of `main_id`: same host, Space, cwd,
+    /// checkout and config, linked by `sideOf` (never `parentChatId`).
+    /// Idempotent by id.
+    pub fn create_side_chat(&self, chat_id: &str, main_id: &str) -> Result<Chat, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.chat(chat_id))? {
+            return Ok(existing);
+        }
+        let main = self
+            .read(|doc| doc.chat(main_id))?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {main_id}")))?;
+        if main.is_side_chat() {
+            return Err(EngineError::Other("a side chat can't open its own side chat".into()));
+        }
+        let side = Chat {
+            id: chat_id.to_string(),
+            device_id: main.device_id.clone(),
+            title: Some(mast_proto::side_chat::SIDE_CHAT_TITLE.into()),
+            archived: false,
+            cwd: main.cwd.clone(),
+            branch: main.branch.clone(),
+            checkout_id: main.checkout_id.clone(),
+            source_context: None,
+            config: main.config.clone(),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            actual_model: None,
+            space_id: main.space_id.clone(),
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: None,
+            side_of: Some(main.id.clone()),
+            side_absorbed_through: None,
+            linked_pr_url: None,
+            linked_pr_source: None,
+            linked_ticket_id: None,
+            linked_ticket_source: None,
+        };
+        self.mutate(|doc| doc.upsert_chat(&side))?;
+        Ok(side)
+    }
+
+    /// Record how far a side chat has been absorbed into its main chat.
+    pub fn set_chat_side_absorbed_through(&self, chat_id: &str, message_id: &str) -> Result<(), EngineError> {
+        self.mutate(|doc| doc.set_chat_side_absorbed_through(chat_id, message_id))?;
+        Ok(())
+    }
+
     // ── spaces (Mutate surface + owner stamps) ──────────────────────────────
 
     /// Create a space (any device). Idempotent by id; a live duplicate of the
