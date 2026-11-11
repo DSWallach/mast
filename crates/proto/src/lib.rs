@@ -11,6 +11,8 @@ pub mod diff_review;
 pub mod decision_sheet;
 pub mod decision_sheet_render;
 pub mod entities;
+mod outline_sidebar;
+pub use outline_sidebar::{OUTLINE_SIDEBAR_SECTION_PREFIX, outline_sidebar_sections};
 pub mod env;
 pub mod friction;
 pub mod linear;

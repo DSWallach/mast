@@ -656,6 +656,7 @@ pub struct UiSettings {
     /// session title.
     pub sidebar_show_project_label: bool,
     pub sidebar_compact: bool,
+    pub sidebar_outline_groups: bool,
     pub team_tab_visibility: TeamTabVisibility,
     pub compact_single_chat: bool,
     pub sidebar_show_project_icon: bool,
@@ -836,6 +837,7 @@ impl Default for UiSettings {
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
             sidebar_compact: true,
+            sidebar_outline_groups: false,
             team_tab_visibility: TeamTabVisibility::Auto,
             compact_single_chat: true,
             sidebar_show_project_icon: true,
@@ -2953,6 +2955,7 @@ mod tests {
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
             sidebar_compact: true,
+            sidebar_outline_groups: true,
             team_tab_visibility: TeamTabVisibility::Auto,
             compact_single_chat: true,
             sidebar_show_project_icon: false,
@@ -3173,10 +3176,12 @@ mod tests {
     fn sidebar_display_defaults_and_preferences_round_trip() {
         let settings: UiSettings = serde_json::from_str("{}").unwrap();
         assert!(settings.sidebar_compact);
+        assert!(!settings.sidebar_outline_groups);
         assert!(settings.sidebar_show_project_icon);
         assert!(settings.sidebar_show_project_label);
         let customized = UiSettings {
             sidebar_compact: false,
+            sidebar_outline_groups: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_organization: SidebarOrganization::ByProject,

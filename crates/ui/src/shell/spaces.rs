@@ -3092,6 +3092,19 @@ impl Shell {
             self.cancel_sidebar_session_transfer(cx);
             return;
         }
+        let sections = self.active_sidebar_sections(cx);
+        let managed_source = sections.iter().any(|section| {
+            section.id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX)
+                && section.session_ids.contains(&payload.chat_id)
+        });
+        let managed_target = matches!(&target, SidebarSessionDrop::Section(id)
+            if id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX));
+        if managed_target || (managed_source && !matches!(target, SidebarSessionDrop::Pinned(_))) {
+            self.sidebar_notice = Some("Move grouped sessions in Work Outline.".into());
+            self.cancel_sidebar_session_transfer(cx);
+            cx.notify();
+            return;
+        }
         let saved = self.raw_sidebar_pins(cx);
         let next = sidebar_session_drop_pins(
             &saved,
