@@ -147,6 +147,15 @@ impl ArtifactTab {
                 self.comments.focused = Some(id);
                 cx.notify();
             }
+            FrameMessage::QuestionUndo(id) => {
+                if self.artifact(cx).is_some_and(|artifact| self.can_comment(&artifact)) { self.undo_question_draft(id, cx); }
+            }
+            FrameMessage::SheetStage { id, outcome, note } => {
+                self.stage_sheet_decision(id, outcome, note, cx);
+            }
+            FrameMessage::SheetUndo(id) => self.undo_sheet_decision(Some(id), cx),
+            FrameMessage::SheetDiscard => self.undo_sheet_decision(None, cx),
+            FrameMessage::SheetSend => self.send_sheet_decisions(cx),
             FrameMessage::Answer { id, text } => {
                 // Only the current revision's questions take answers (the
                 // Markdown cards do the same).
@@ -154,10 +163,91 @@ impl ArtifactTab {
                     .artifact(cx)
                     .is_some_and(|artifact| self.can_comment(&artifact))
                 {
-                    self.submit_answer(id, text, cx)
+                    self.stage_question_answer(id, text, cx)
                 }
             }
         }
+    }
+
+    fn current_sheet(&self, cx: &gpui::App) -> Option<(ArtifactView, mast_proto::decision_sheet::DecisionSheet)> {
+        let artifact = self.artifact(cx)?;
+        if artifact.kind != mast_proto::ArtifactKind::DecisionSheet
+            || self.shown_or_current_revision(&artifact) != artifact.current_revision
+            || self.mode != super::Mode::Rendered || self.loading {
+            return None;
+        }
+        let sheet = mast_proto::decision_sheet::DecisionSheet::parse(&self.shown_text()?).ok()?;
+        Some((artifact, sheet))
+    }
+
+    fn stage_sheet_decision(&mut self, id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, cx: &mut Context<Self>) {
+        use mast_proto::decision_sheet::{SheetDecisionDraft, SheetDecisionDrafts};
+        let Some((artifact, sheet)) = self.current_sheet(cx) else { return; };
+        if !sheet.decision_rows().iter().any(|row| row.id == id && row.status.state == "open")
+            || artifact.decisions.iter().any(|saved| saved.row_id == id && saved.revision == artifact.current_revision) { return; }
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            let draft = settings.artifact_decision_drafts.entry(artifact.id).or_insert_with(|| SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() });
+            if draft.revision != artifact.current_revision { *draft = SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() }; }
+            draft.decisions.retain(|decision| decision.row_id != id);
+            draft.decisions.push(SheetDecisionDraft { row_id: id, outcome, note: Some(note) });
+        });
+    }
+
+    fn undo_sheet_decision(&mut self, row_id: Option<String>, cx: &mut Context<Self>) {
+        let Some((artifact, _)) = self.current_sheet(cx) else { return; };
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            if let Some(id) = row_id {
+                if let Some(draft) = settings.artifact_decision_drafts.get_mut(&artifact.id) {
+                    draft.decisions.retain(|decision| decision.row_id != id);
+                    if draft.decisions.is_empty() { settings.artifact_decision_drafts.remove(&artifact.id); }
+                }
+            } else { settings.artifact_decision_drafts.remove(&artifact.id); }
+        });
+    }
+
+    fn send_sheet_decisions(&mut self, cx: &mut Context<Self>) {
+        use mast_proto::decision_sheet::{SubmitSheetDecisionsParams, decision_batch_message};
+        let Some((artifact, _)) = self.current_sheet(cx) else { return; };
+        if self.comments.busy { return; }
+        let draft = crate::settings::current(cx).artifact_decision_drafts.get(&artifact.id).cloned();
+        let Some(draft) = draft.filter(|d| d.revision == artifact.current_revision && !d.decisions.is_empty()) else { return; };
+        let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
+        let Some(chat) = chat else {
+            self.notice = Some("The origin chat is unavailable. Decisions remain staged.".into());
+            if let Some(web) = &mut self.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastSheetEnableSend": true})), cx); }
+            cx.notify();
+            return;
+        };
+        self.comments.busy = true;
+        let call = self.state.read(cx).artifact_actions().submit_sheet_decisions(SubmitSheetDecisionsParams {
+            artifact_id: artifact.id.clone(), revision: draft.revision, decisions: draft.decisions,
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let reply = call.await;
+            this.update(cx, |this, cx| {
+                this.comments.busy = false;
+                match reply {
+                    Err(error) => {
+                        this.notice = Some(format!("Couldn't save decisions: {}", error.text()));
+                        if let Some(web) = &mut this.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastSheetEnableSend": true})), cx); }
+                    }
+                    Ok(reply) => {
+                        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| { settings.artifact_decision_drafts.remove(&artifact.id); });
+                        if let Some(web) = &mut this.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastSheetSent": reply.decisions})), cx); }
+                        {
+                            let message = decision_batch_message(&artifact.title, &reply.decisions);
+                            let delivery = crate::work_outline::required_actions_view::deliver_user_message(this.state.clone(), chat, message, crate::work_outline::actions::new_operation_id(), cx);
+                            let task = cx.spawn(async move |this, cx| {
+                                if let Err(error) = delivery.await { this.update(cx, |this, cx| { this.notice = Some(format!("Decisions saved, but the chat wasn't told: {error}")); cx.notify(); }).ok(); }
+                            });
+                            this.comments.tasks.push(task);
+                        }
+                    }
+                }
+                cx.notify();
+            }).ok();
+        });
+        self.comments.tasks.push(task);
     }
 
     // ------------------------------------------------------------------

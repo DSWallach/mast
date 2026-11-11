@@ -808,6 +808,12 @@ pub struct UiSettings {
     /// revision), for the "Updated since you last viewed" marker.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub artifact_last_viewed: HashMap<String, u32>,
+    /// Decision sheet drafts, keyed by artifact id and kept only on this device.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub artifact_decision_drafts: HashMap<String, mast_proto::decision_sheet::SheetDecisionDrafts>,
+    /// Staged plan answers, keyed by artifact id and revision.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub artifact_question_drafts: HashMap<String, (u32, HashMap<String, String>)>,
     /// Side-by-side layout per options artifact (artifact id to an encoded
     /// `SideLayout`). Unknown values are ignored on read.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -844,6 +850,8 @@ impl Default for UiSettings {
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             artifact_compare_modes: HashMap::new(),
             artifact_last_viewed: HashMap::new(),
+            artifact_decision_drafts: HashMap::new(),
+            artifact_question_drafts: HashMap::new(),
             artifact_side_layouts: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
@@ -3056,6 +3064,13 @@ mod tests {
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             artifact_compare_modes: HashMap::from([("mermaid".to_string(), "source".to_string())]),
             artifact_last_viewed: HashMap::from([("a1".to_string(), 3)]),
+            artifact_decision_drafts: HashMap::from([("a1".into(), mast_proto::decision_sheet::SheetDecisionDrafts {
+                revision: 3,
+                decisions: vec![mast_proto::decision_sheet::SheetDecisionDraft {
+                    row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, note: Some("keep".into()),
+                }],
+            })]),
+            artifact_question_drafts: HashMap::from([("a2".into(), (3, HashMap::from([("Q-1".into(), "UTC".into())])))]),
             artifact_side_layouts: HashMap::new(),
             legacy_accent_color: None,
         };

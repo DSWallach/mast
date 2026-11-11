@@ -2469,3 +2469,76 @@ async fn decision_sheet_publish_validates_before_recording_revisions() {
     assert_eq!(second["artifactId"], id);
     assert_eq!(second["revision"], 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
+    let rig = rig().await;
+    let path = rig.worktree.join("sheet.json");
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    std::fs::write(&path, source).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": "sheet-decisions"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let call = |revision, second: &str| json!({"artifactId": id, "revision": revision, "decisions": [
+        {"rowId":"D-2", "outcome":"decided"}, {"rowId":second, "outcome":"rejected", "note":"too slow"}
+    ]});
+    assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(1, "missing")).await.is_err());
+    assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(2, "D-4")).await.is_err());
+    assert!(artifact(&rig, id).decisions.is_empty());
+    let reply = rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, call(1, "D-4")).await.unwrap();
+    assert_eq!(reply["decisions"].as_array().unwrap().len(), 2);
+    let saved = artifact(&rig, id).decisions;
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0].revision, 1);
+    assert_eq!(saved[0].at, saved[1].at);
+    assert_eq!(saved[1].note.as_deref(), Some("too slow"));
+    let result = tool(&rig, &rig.token, "artifact_get_decisions", json!({"artifactId": id})).await.unwrap();
+    assert_eq!(result["decisions"].as_array().unwrap().len(), 2);
+    assert_eq!(result["orphanedRowIds"], json!([]));
+    assert!(tool(&rig, &rig.other_token, "artifact_get_decisions", json!({"artifactId": id})).await.is_err());
+    let mut revised: Value = serde_json::from_str(source).unwrap();
+    revised["flows"].as_array_mut().unwrap().pop();
+    std::fs::write(&path, revised.to_string()).unwrap();
+    let republished = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "revision", "idempotencyKey": "sheet-decisions-revision"})).await;
+    assert_eq!(republished["orphanedRowIds"], json!(["D-4"]));
+    assert_eq!(artifact(&rig, id).decisions.len(), 2);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId":id, "revision":2, "decisions":[{"rowId":"D-2", "outcome":"rejected"}]})).await.unwrap();
+    let decisions = artifact(&rig, id).decisions;
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions.iter().find(|d| d.row_id == "D-2").unwrap().revision, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_has_one_required_action_that_tracks_open_rows() {
+    let rig = rig().await;
+    let path = rig.worktree.join("sheet.json");
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    std::fs::write(&path, source).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "test", "idempotencyKey": "sheet-action"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
+    let open = || {
+        mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()).snapshot(SPACE)
+            .user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).map(|r| r.text).collect::<Vec<_>>()
+    };
+    sync.reconcile(id);
+    assert_eq!(open(), ["Decide 2 open rows in Sheet"]);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-2", "outcome":"decided"}]})).await.unwrap();
+    assert_eq!(open(), ["Decide 1 open rows in Sheet"]);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-4", "outcome":"rejected"}]})).await.unwrap();
+    assert!(open().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_answers_are_recorded_as_one_batch() {
+    let rig = rig().await;
+    let id = publish_plan(&rig, PLAN_V1, "v1").await;
+    let invalid = json!({"artifactId":id,"revision":1,"answers":[{"questionId":"Q-1","answer":"yes"},{"questionId":"Q-99","answer":"no"}]});
+    assert!(rig.client.call(methods::ARTIFACT_ANSWER_QUESTIONS, invalid).await.is_err());
+    assert!(artifact(&rig, &id).answers.is_empty());
+    let valid = json!({"artifactId":id,"revision":1,"answers":[{"questionId":"Q-1","answer":"yes"},{"questionId":"Q-2","answer":"UTC"}]});
+    let result = rig.client.call(methods::ARTIFACT_ANSWER_QUESTIONS, valid).await.unwrap();
+    assert_eq!(result["answers"].as_array().unwrap().len(), 2);
+    let answers = artifact(&rig, &id).answers;
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].at, answers[1].at);
+}
