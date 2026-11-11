@@ -2490,7 +2490,7 @@ impl AgentToolsService {
     pub fn prepare_orchestrator_successor(
         &self,
         params: &AgentToolCallParams,
-    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String), AgentToolError> {
+    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String, Option<mast_proto::HarnessId>, Option<String>, Option<mast_proto::ReasoningLevel>), AgentToolError> {
         let context = self.context(&params.token)?;
         let operation_id = context.operation_id(&params.arguments)?;
         let summary = params.arguments.get("summary").and_then(Value::as_str)
@@ -2503,6 +2503,14 @@ impl AgentToolsService {
             return Err(AgentToolError::invalid("an archived chat cannot hand off orchestration"));
         }
         let source = context.grant.chat_id.clone();
+        #[derive(serde::Deserialize)]
+        struct Selection {
+            harness: Option<mast_proto::HarnessId>,
+            model: Option<String>,
+            reasoning: Option<mast_proto::ReasoningLevel>,
+        }
+        let selection: Selection = serde_json::from_value(params.arguments.clone())
+            .map_err(|error| AgentToolError::invalid(format!("invalid hand-off selection: {error}")))?;
         Ok((mast_proto::CreateChatForWorkItemParams {
             work_item_id,
             initial_prompt: mast_proto::WorkItemPrompt { text: summary.to_owned(), attachments: Vec::new() },
@@ -2513,7 +2521,7 @@ impl AgentToolsService {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
-        }, source))
+        }, source, selection.harness, selection.model, selection.reasoning))
     }
 }
 
