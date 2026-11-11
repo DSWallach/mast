@@ -920,6 +920,7 @@ pub mod agent_tools {
         pub const REVIEW_GET: &str = "review_get";
         /// The pinned plan of the Chat's work item (or of the Chat).
         pub const ARTIFACT_GET_PLAN: &str = "artifact_get_plan";
+        pub const ARTIFACT_GET_DECISIONS: &str = "artifact_get_decisions";
         /// Render an artifact offscreen in the headed app and return a
         /// screenshot plus errors and warnings.
         pub const ARTIFACT_RENDER_CHECK: &str = "artifact_render_check";
@@ -935,9 +936,10 @@ pub mod agent_tools {
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.
-        pub const ARTIFACTS: [&str; 5] = [
+        pub const ARTIFACTS: [&str; 6] = [
             ARTIFACT_PUBLISH,
             ARTIFACT_GET_PLAN,
+            ARTIFACT_GET_DECISIONS,
             ARTIFACT_RENDER_CHECK,
             REVIEW_PUBLISH,
             REVIEW_GET,

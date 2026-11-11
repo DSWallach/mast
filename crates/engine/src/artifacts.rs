@@ -2562,6 +2562,29 @@ impl ArtifactsService {
         }))
     }
 
+    /// Read a decision sheet's sent decisions within the caller's scope.
+    pub fn agent_get_decisions(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
+        let id = arguments.get("artifactId").and_then(Value::as_str)
+            .ok_or_else(|| ArtifactError::invalid("artifactId is required"))?;
+        let artifact = self.workspace().artifact(id)
+            .ok_or_else(|| ArtifactError::not_found("artifact not found"))?;
+        let in_scope = artifact.space_id == caller.space_id && match (&caller.work_item_id, artifact.plan_scope()) {
+            (Some(item), Some(PlanScope::WorkItem(theirs))) => item == theirs,
+            (None, Some(PlanScope::Chat(chat))) => chat == caller.chat_id,
+            _ => false,
+        };
+        if !in_scope || artifact.kind != ArtifactKind::DecisionSheet || artifact.archived_at.is_some() {
+            return Err(ArtifactError::not_found("decision sheet not found"));
+        }
+        let bytes = self.current_bytes(&artifact)?;
+        let source = std::str::from_utf8(&bytes).map_err(|_| ArtifactError::invalid("sheet is not UTF-8"))?;
+        let sheet = mast_proto::decision_sheet::DecisionSheet::parse(source).map_err(ArtifactError::invalid)?;
+        let (_, orphans) = mast_proto::decision_sheet::partition_decisions(&sheet, &artifact.decisions);
+        let orphan_ids: Vec<&str> = orphans.iter().map(|d| d.row_id.as_str()).collect();
+        Ok(json!({"artifactId": artifact.id, "title": artifact.title, "revision": artifact.current_revision,
+            "decisions": artifact.decisions, "orphanedRowIds": orphan_ids}))
+    }
+
     /// Options artifacts in the caller's scope with a pick:
     /// `[{artifactId, title, optionId, label, note?, at, revision}]`.
     fn picked_options(&self, caller: &AgentCaller) -> Vec<Value> {

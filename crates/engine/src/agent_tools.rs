@@ -1093,6 +1093,10 @@ impl AgentToolsService {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_get_plan(&caller)?)
             }
+            tools::ARTIFACT_GET_DECISIONS => {
+                let (service, caller) = self.artifact_call(context)?;
+                Ok(service.agent_get_decisions(&caller, arguments)?)
+            }
             tools::ARTIFACT_RENDER_CHECK => {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_render_check(&caller, arguments)?)

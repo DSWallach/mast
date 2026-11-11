@@ -2491,4 +2491,8 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
     assert_eq!(saved[0].revision, 1);
     assert_eq!(saved[0].at, saved[1].at);
     assert_eq!(saved[1].note.as_deref(), Some("too slow"));
+    let result = tool(&rig, &rig.token, "artifact_get_decisions", json!({"artifactId": id})).await.unwrap();
+    assert_eq!(result["decisions"].as_array().unwrap().len(), 2);
+    assert_eq!(result["orphanedRowIds"], json!([]));
+    assert!(tool(&rig, &rig.other_token, "artifact_get_decisions", json!({"artifactId": id})).await.is_err());
 }
