@@ -1484,6 +1484,15 @@ impl AppState {
         Ok(())
     }
 
+    /// `chat_id`'s running subagents, read from its spawn chips. Only the
+    /// selected chat's transcript is loaded; any other chat lists none.
+    pub(crate) fn running_subagents(&self, chat_id: &str) -> Vec<crate::transcript::RunningSubagent> {
+        if self.selected_chat.as_deref() != Some(chat_id) {
+            return Vec::new();
+        }
+        crate::transcript::running_subagents(chat_id, &self.transcript)
+    }
+
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
@@ -2133,6 +2142,12 @@ impl AppState {
             subagents ^= sh.finish();
         }
         subagents.hash(&mut h);
+        // The Item tab lists the selected chat's running subagents.
+        if let Some(chat_id) = &self.selected_chat {
+            for running in self.running_subagents(chat_id) {
+                (running.doc_id, running.title).hash(&mut h);
+            }
+        }
         h.finish()
     }
 
@@ -5145,6 +5160,29 @@ mod tests {
         for (name, moved) in changed {
             assert!(moved, "{name} must change the shell fingerprint");
         }
+    }
+
+    #[test]
+    fn shell_fingerprint_follows_running_subagents() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        state.chats = vec![chat("a", 0, Some(10))];
+        state.selected_chat = Some("a".into());
+        let turn = |status: &str| -> SessionMessageEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": "turn", "role": "assistant", "createdAt": 0, "deviceId": "d",
+                "parts": [{"id": "s1", "kind": "tool", "resolved": true,
+                    "call": {"kind": "unknown", "name": "Agent: audit"},
+                    "subagentRef": "a--sub--s1", "subagentStatus": status}],
+            }))
+            .unwrap()
+        };
+        state.apply_transcript(vec![turn("running")]);
+        let running = state.shell_fingerprint(now);
+        assert_eq!(state.running_subagents("a").len(), 1);
+        assert!(state.running_subagents("b").is_empty(), "only the selected chat");
+        state.apply_transcript(vec![turn("done")]);
+        assert_ne!(state.shell_fingerprint(now), running, "the Item tab drops the row");
     }
 
     #[test]
