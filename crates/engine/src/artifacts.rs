@@ -2498,12 +2498,20 @@ impl ArtifactsService {
                 reply.revision,
             )?;
         }
+        let orphaned_row_ids = self.workspace().artifact(&reply.artifact_id).and_then(|artifact| {
+            if artifact.kind != ArtifactKind::DecisionSheet { return None; }
+            let bytes = self.current_bytes(&artifact).ok()?;
+            let sheet = mast_proto::decision_sheet::DecisionSheet::parse(std::str::from_utf8(&bytes).ok()?).ok()?;
+            let (_, orphans) = mast_proto::decision_sheet::partition_decisions(&sheet, &artifact.decisions);
+            Some(orphans.into_iter().map(|decision| decision.row_id.clone()).collect::<Vec<_>>())
+        }).unwrap_or_default();
         Ok(json!({
             "artifactId": reply.artifact_id,
             "revision": reply.revision,
             "url": reply.url,
             "storedPath": reply.stored_path,
             "changed": reply.changed,
+            "orphanedRowIds": orphaned_row_ids,
             "note": "Link it in your message as [title](mast-artifact:<artifactId>). For visual \
                      kinds, run artifact_render_check before calling it done.",
         }))

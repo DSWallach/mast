@@ -2495,6 +2495,12 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
     assert_eq!(result["decisions"].as_array().unwrap().len(), 2);
     assert_eq!(result["orphanedRowIds"], json!([]));
     assert!(tool(&rig, &rig.other_token, "artifact_get_decisions", json!({"artifactId": id})).await.is_err());
+    let mut revised: Value = serde_json::from_str(source).unwrap();
+    revised["flows"].as_array_mut().unwrap().pop();
+    std::fs::write(&path, revised.to_string()).unwrap();
+    let republished = publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "revision", "idempotencyKey": "sheet-decisions-revision"})).await;
+    assert_eq!(republished["orphanedRowIds"], json!(["D-4"]));
+    assert_eq!(artifact(&rig, id).decisions.len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
