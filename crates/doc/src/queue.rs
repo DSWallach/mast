@@ -377,6 +377,15 @@ impl SessionDoc {
         item: &QueuedMessage,
         instructions: Option<&mast_proto::InstructionRevisionPin>,
     ) -> Result<(), DocError> {
+        self.push_queued_with_instructions_using(item, instructions, || Ok(()))
+    }
+
+    fn push_queued_with_instructions_using(
+        &self,
+        item: &QueuedMessage,
+        instructions: Option<&mast_proto::InstructionRevisionPin>,
+        mut after_write: impl FnMut() -> Result<(), DocError>,
+    ) -> Result<(), DocError> {
         let _queue = self
             .queue_mutation
             .lock()
@@ -387,29 +396,42 @@ impl SessionDoc {
         if item.text.trim().is_empty() {
             return Err(DocError::Schema("queued message text required".into()));
         }
-        // Build the row before inserting it so a field error cannot leave a
-        // partially written row behind for the retry.
-        let append = || -> Result<(), DocError> {
-            let map = loro::LoroMap::new();
-            write_queued_map(&map, item)?;
-            if let Some(pin) = instructions {
-                map.insert(
-                    QUEUED_INSTRUCTIONS_KEY,
-                    crate::schema::loro_value_from_json(&serde_json::to_value(pin)?),
-                )?;
+        use loro::ContainerTrait;
+
+        let queue = self.doc().get_movable_list("queue");
+        let mut append = || -> Result<(), (DocError, bool)> {
+            // Insert an empty container first: once this succeeds its identity
+            // lets us remove exactly this row if writing a field fails.
+            let map = queue.push_container(loro::LoroMap::new())
+                .map_err(|error| (error.into(), true))?;
+            let result = (|| -> Result<(), DocError> {
+                write_queued_map(&map, item)?;
+                if let Some(pin) = instructions {
+                    map.insert(
+                        QUEUED_INSTRUCTIONS_KEY,
+                        crate::schema::loro_value_from_json(&serde_json::to_value(pin)?),
+                    )?;
+                }
+                after_write()?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let id = map.id();
+                let index = (0..queue.len()).find(|&index| {
+                    matches!(queue.get(index), Some(loro::ValueOrContainer::Container(loro::Container::Map(row))) if row.id() == id)
+                });
+                if let Some(index) = index {
+                    queue.delete(index, 1).map_err(|cleanup| (cleanup.into(), false))?;
+                }
+                return Err((error, true));
             }
-            self.doc().get_movable_list("queue").push_container(map)?;
             Ok(())
         };
-        let queue = self.doc().get_movable_list("queue");
-        let before = queue.len();
-        if let Err(error) = append() {
-            // Insertion can fail after Loro has inserted a container. Do not
-            // retry an ambiguous partial write as that could duplicate a row.
-            if queue.len() != before {
+        if let Err((error, retry_safe)) = append() {
+            if !retry_safe {
                 return Err(error);
             }
-            append()?;
+            append().map_err(|(error, _)| error)?;
         }
         self.doc().commit();
         Ok(())
@@ -613,6 +635,33 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_append_removes_partial_row_and_retries_once() {
+        let doc = super::SessionDoc::init("chat").unwrap();
+        let item = super::QueuedMessage::new("q1", "keep me", "dev");
+        let mut attempts = 0;
+        let result = doc.push_queued_with_instructions_using(&item, None, || {
+            attempts += 1;
+            Err(super::DocError::Schema("injected append failure".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 2);
+        assert!(doc.read_queue().unwrap().is_empty());
+
+        attempts = 0;
+        doc.push_queued_with_instructions_using(&item, None, || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(super::DocError::Schema("injected append failure".into()))
+            } else {
+                Ok(())
+            }
+        }).unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(doc.read_queue().unwrap().len(), 1);
+        assert_eq!(doc.read_queue().unwrap()[0].text, "keep me");
+    }
+
     #[test]
     fn malformed_queue_row_is_not_silently_discarded() {
         let doc = super::SessionDoc::init("chat").unwrap();
