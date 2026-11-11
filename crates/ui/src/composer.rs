@@ -9323,6 +9323,60 @@ mod tests {
     }
 
     #[gpui::test]
+    fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound))
+                .with_test_capability(capabilities::MESSAGE_QUEUE_V1);
+            state.set_test_engine(engine);
+            state.selected_chat = Some("c".into());
+            state.chats.push(mast_proto::Chat {
+                id: "c".into(), device_id: "local".into(), title: None, archived: false,
+                cwd: None, branch: None, checkout_id: None, source_context: None, config: None,
+                last_message_preview: None, last_message_at: None, created_at: chrono::Utc::now(),
+                harness_session_id: None, harness_session_cwd: None, actual_model: None,
+                parent_chat_id: None, space_id: None, last_seen_at: None, room_gen: None,
+                linked_pr_url: None, linked_pr_source: None, linked_ticket_id: None,
+                linked_ticket_source: None,
+            });
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer.current_key = "c".into();
+            composer.input.update(cx, |input, cx| input.set_text("keep this message", cx));
+            composer.send("keep this message".into(), true, cx);
+        });
+        let mut queue_request = None;
+        for _ in 0..100 {
+            cx.run_until_parked();
+            runtime.block_on(tokio::task::yield_now());
+            while let Ok(frame) = requests.try_recv() {
+                let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                if frame["method"] == methods::QUEUE_MESSAGE {
+                    queue_request = Some(frame["id"].clone());
+                    break;
+                }
+            }
+            if queue_request.is_some() { break; }
+        }
+        let id = queue_request.expect("queue request");
+        replies.try_send(serde_json::json!({"id": id, "err": "append failed"}).to_string()).unwrap();
+        for _ in 0..100 {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+            if composer.read_with(cx, |composer, _| composer.failure.is_some()) { break; }
+        }
+        composer.read_with(cx, |composer, cx| {
+            assert!(composer.failure.as_deref().is_some_and(|error| error.contains("append failed")));
+            assert_eq!(composer.input.read(cx).text(), "keep this message");
+        });
+    }
+
+    #[gpui::test]
     fn failed_queue_send_restores_text_without_losing_new_drafts(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| AppState::new());
         let composer = cx.new(|cx| Composer::new(state, cx));
