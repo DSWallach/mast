@@ -133,13 +133,16 @@ pub fn absorb_batch(
             .flat_map(|m| m.parts.iter().copied())
             .collect();
         let answer = final_answer(&parts);
+        // Only an answered exchange moves the marker: a turn with no answer
+        // yet (an error later retried under the same question, or text that
+        // arrives in a continuation) stays absorbable.
         if !answer.is_empty() {
             exchanges.push(SideExchange {
                 question: clip(&texts(&question.parts), ABSORB_TEXT_MAX_BYTES),
                 answer: clip(&answer, ABSORB_TEXT_MAX_BYTES),
             });
+            through = Some(replies.last().unwrap_or(question).id.to_owned());
         }
-        through = Some(replies.last().unwrap_or(question).id.to_owned());
         at = replies_end;
     }
     (!exchanges.is_empty()).then(|| AbsorbBatch {
@@ -314,6 +317,38 @@ mod tests {
         assert_eq!(batch.exchanges.len(), 1);
         assert_eq!(batch.exchanges[0].answer, "Part one.\n\nPart two.");
         assert_eq!(batch.through, "a1");
+    }
+
+    #[test]
+    fn an_answerless_turn_never_moves_the_marker_past_itself() {
+        let failed = entry(
+            "a2",
+            MessageRole::Assistant,
+            vec![MessagePart::Error { id: "e".into(), message: "overloaded".into() }],
+            Some(MessageStatus::Complete),
+        );
+        let answered = || vec![user("u1", "First?"), reply("a1", vec![text("t", "One.")], MessageStatus::Complete)];
+
+        // A failed turn, later retried under the same question.
+        let mut retried = answered();
+        retried.extend([user("u2", "Second?"), failed]);
+        let first = absorb_batch(&retried, None).unwrap();
+        assert_eq!(first.through, "a1");
+        retried.push(reply("a2-retry", vec![text("t", "Two.")], MessageStatus::Complete));
+        let later = absorb_batch(&retried, Some(&first.through)).unwrap();
+        assert_eq!(later.exchanges[0].answer, "Two.");
+        assert_eq!(later.through, "a2-retry");
+
+        // A tool-only turn whose text arrives in a continuation.
+        let mut continued = answered();
+        continued.extend([user("u3", "Third?"), reply("a3", vec![tool("x")], MessageStatus::Complete)]);
+        assert_eq!(absorb_batch(&continued, None).unwrap().through, "a1");
+        let mut tail = reply("a3c", vec![text("t", "Three.")], MessageStatus::Complete);
+        tail.continuation_of = Some("a3".into());
+        continued.push(tail);
+        let later = absorb_batch(&continued, Some("a1")).unwrap();
+        assert_eq!(later.exchanges[0].answer, "Three.");
+        assert_eq!(later.through, "a3");
     }
 
     #[test]
