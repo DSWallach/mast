@@ -2098,6 +2098,7 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
+        state.update(cx, |state, cx| state.set_sidebar_outline_sections(settings.sidebar_outline_groups, cx));
         state.update(cx, |state, cx| {
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
         });
@@ -4982,6 +4983,13 @@ impl Shell {
                     self.appearance_settings_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                            AppearanceSettingsEvent::SidebarOutlineGroupsChanged(value) => {
+                                this.settings.sidebar_outline_groups = value;
+                                this.state.update(cx, |state, cx| state.set_sidebar_outline_sections(value, cx));
+                                this.sidebar_prev_order.clear();
+                                this.schedule_save(cx);
+                                cx.notify();
+                            }
                             AppearanceSettingsEvent::CompactSingleChatChanged(value) => {
                                 this.settings.compact_single_chat = value;
                                 if let Some(overview) = &this.overview_page {

@@ -774,6 +774,7 @@ pub struct AppState {
     /// Spaces the Outline presentation declared visible; the reconciler
     /// watches exactly these (intersected with live Spaces).
     work_outline_visible: Vec<String>,
+    sidebar_outline_sections: bool,
     /// Captured at attach time so the cx-less `set_work_outline_visible` and
     /// `work_outline_actions` can schedule work on the app.
     work_outline_runtime: Option<WorkOutlineRuntime>,
@@ -894,6 +895,7 @@ impl AppState {
             work_outline_tasks: HashMap::new(),
             admin: Default::default(),
             work_outline_visible: Vec::new(),
+            sidebar_outline_sections: false,
             work_outline_runtime: None,
             artifacts: crate::artifacts::ArtifactStore::new(),
             artifact_tasks: HashMap::new(),
@@ -2127,6 +2129,13 @@ impl AppState {
         h.finish()
     }
 
+    pub(crate) fn set_sidebar_outline_sections(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.sidebar_outline_sections != enabled {
+            self.sidebar_outline_sections = enabled;
+            self.reconcile_work_outline_watches(cx);
+        }
+    }
+
     /// Current Work Outline load state for one Space.
     pub(crate) fn work_outline(&self, space_id: &str) -> crate::work_outline::WorkOutlineLoad {
         self.work_outlines.load(space_id)
@@ -2753,6 +2762,7 @@ impl AppState {
             .binary_search_by(|id| id.as_str().cmp(space_id))
             .is_ok()
             || self.selected_chat_space_id() == Some(space_id)
+            || (self.sidebar_outline_sections && self.spaces.iter().any(|space| space.id == space_id))
     }
 
     /// The selected Chat's Space, when it has one.
@@ -2772,6 +2782,7 @@ impl AppState {
             .iter()
             .map(String::as_str)
             .chain(self.selected_chat_space_id())
+            .chain(self.spaces.iter().filter(|_| self.sidebar_outline_sections).map(|space| space.id.as_str()))
             .filter(|id| self.spaces.iter().any(|space| space.id == *id))
             .map(str::to_owned)
             .collect()
@@ -5662,6 +5673,20 @@ mod tests {
         ));
         // Not visible: ignored.
         assert!(!state.apply_work_outline_failure("other", "unknown method: x"));
+    }
+
+    #[test]
+    fn sidebar_outline_sections_watch_live_spaces_without_overview() {
+        let mut state = AppState::new();
+        state.spaces = vec![space("s1", "dev", "/a", 1), space("s2", "dev", "/b", 2)];
+        assert!(state.desired_work_outline_spaces().is_empty());
+        state.sidebar_outline_sections = true;
+        assert_eq!(state.desired_work_outline_spaces().len(), 2);
+        assert!(state.apply_work_outline_frame("s2", outline_snapshot("s2", 1, "Sidebar group")));
+        assert!(!state.apply_work_outline_frame("missing", outline_snapshot("missing", 1, "Missing")));
+        state.sidebar_outline_sections = false;
+        assert!(state.desired_work_outline_spaces().is_empty());
+        assert!(!state.apply_work_outline_frame("s2", outline_snapshot("s2", 2, "Late frame")));
     }
 
     #[test]
