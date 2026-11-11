@@ -181,6 +181,39 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
     assert_eq!(result.tasks.len(), 1);
     assert!(!result.tasks[0].draft.enabled);
     assert!(result.runs.is_empty());
+    let original_task = result.tasks[0].clone();
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Delete {
+            id: original_task.id.clone(),
+            expected_revision: original_task.revision,
+            operation_id: "delete-import".into(),
+        })
+        .await
+        .unwrap();
+    let reimport = ScheduledTasksRequest::Import {
+        candidate: preview.candidates[0].clone(),
+        operation_id: "reimport-deleted-task".into(),
+    };
+    let restored = core
+        .scheduled_tasks
+        .request(reimport.clone())
+        .await
+        .unwrap();
+    assert_eq!(restored.tasks.len(), 1);
+    assert_eq!(restored.tasks[0].id, original_task.id);
+    assert_eq!(restored.tasks[0].revision, original_task.revision + 2);
+    assert!(!restored.tasks[0].draft.enabled);
+    assert!(!restored.tasks[0].draft.config.auto_approve);
+    core.scheduled_tasks.request(reimport).await.unwrap();
+    assert!(
+        core.scheduled_tasks
+            .request(ScheduledTasksRequest::Import {
+                candidate: preview.candidates[0].clone(),
+                operation_id: "duplicate-active-import".into(),
+            })
+            .await
+            .is_err()
+    );
     assert_eq!(std::fs::read(registry).unwrap(), original);
     core.shutdown().await;
 }

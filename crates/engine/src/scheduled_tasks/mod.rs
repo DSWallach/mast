@@ -227,24 +227,28 @@ impl ScheduledTasks {
                 self.validate(&draft)?;
                 let id =
                     import::task_id(self.0.store.scope(), &response.device_id, &candidate.source);
-                if self.0.store.tasks()?.iter().any(|t| t.id == id) {
+                let previous = self.0.store.tasks()?.into_iter().find(|t| t.id == id);
+                if previous.as_ref().is_some_and(|t| !t.deleted) {
                     return Err(fail(
                         "This Claude task is already imported; edit it in Mast",
                     ));
                 }
+                let expected_revision = previous.as_ref().map_or(0, |t| t.revision);
                 let t = ScheduledTask {
                     id,
-                    revision: 1,
+                    revision: expected_revision + 1,
                     device_id: response.device_id.clone(),
                     draft,
-                    created_at: now,
+                    created_at: previous.as_ref().map_or(now, |t| t.created_at),
                     updated_at: now,
                     next_due: None,
                     deleted: false,
                     import_source: Some(candidate.source),
                     source_handoff_at: None,
                 };
-                self.0.store.save(t, 0, &operation_id, &input)?;
+                self.0
+                    .store
+                    .save(t, expected_revision, &operation_id, &input)?;
             }
         }
         response.tasks = self

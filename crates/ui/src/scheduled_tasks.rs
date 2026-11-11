@@ -1,11 +1,14 @@
 //! Native scheduled-task management. All mutations go through the owning engine.
 use crate::{composer::ComposerInput, popover, state::AppState, theme::Theme};
+use futures::StreamExt as _;
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, Render, SharedString, Subscription, Task, Window,
     div, prelude::*, px,
 };
+use mast_engine::registry::HarnessDescriptor;
 use mast_proto::*;
 use mast_rpc::methods;
+use std::collections::HashMap;
 
 pub enum TaskPageEvent {
     OpenChat(String),
@@ -29,6 +32,13 @@ pub struct ScheduledTasksPage {
     target: Option<String>,
     connection: Option<crate::state::EngineHandle>,
     models: Vec<Model>,
+    harnesses: Vec<HarnessDescriptor>,
+    catalogs: HashMap<HarnessId, Vec<Model>>,
+    catalog_harness: HarnessId,
+    catalog_task: Option<Task<()>>,
+    catalog_generation: u64,
+    catalog_loading: bool,
+    catalog_error: Option<String>,
     editor: Option<TaskEditor>,
     history: Option<String>,
     error: Option<String>,
@@ -54,14 +64,20 @@ impl ScheduledTasksPage {
             };
             if changed {
                 this.task = None;
+                this.catalog_task = None;
+                this.catalog_generation += 1;
+                this.catalog_loading = false;
+                this.catalog_error = None;
                 this.busy = false;
                 this.snapshot = Default::default();
                 this.editor = None;
                 this.history = None;
                 this.models.clear();
+                this.catalogs.clear();
+                this.harnesses.clear();
                 this.target = state.read(cx).effective_device_id();
                 this.connection = next;
-                this.load(cx);
+                this.refresh(cx);
             }
             cx.notify();
         });
@@ -71,6 +87,13 @@ impl ScheduledTasksPage {
             target,
             connection,
             models: vec![],
+            harnesses: vec![],
+            catalogs: HashMap::new(),
+            catalog_harness: HarnessId::ClaudeCode,
+            catalog_task: None,
+            catalog_generation: 0,
+            catalog_loading: false,
+            catalog_error: None,
             editor: None,
             history: None,
             error: None,
@@ -82,7 +105,7 @@ impl ScheduledTasksPage {
             poll: None,
             _observe: observe,
         };
-        page.load(cx);
+        page.refresh(cx);
         page.poll = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -114,11 +137,13 @@ impl ScheduledTasksPage {
                 self.target = Some(device);
                 self.snapshot = Default::default();
                 self.models.clear();
+                self.catalogs.clear();
+                self.harnesses.clear();
             }
         }
         self.history = Some(id);
         self.editor = None;
-        self.load(cx);
+        self.refresh(cx);
         cx.notify();
     }
     pub(crate) fn set_active(&mut self, active: bool) {
@@ -126,6 +151,10 @@ impl ScheduledTasksPage {
     }
     fn load(&mut self, cx: &mut Context<Self>) {
         self.call(ScheduledTasksRequest::List, cx);
+    }
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.load(cx);
+        self.load_catalog(cx);
     }
     fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
         if self.busy {
@@ -196,41 +225,142 @@ impl ScheduledTasksPage {
                 }
                 cx.notify();
             });
-            // The catalog is account/host scoped and uses the same RPC as the composer.
+        }));
+        cx.notify();
+    }
+    fn load_catalog(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.catalog_generation += 1;
+        let generation = self.catalog_generation;
+        let target = self.target.clone();
+        self.catalog_loading = true;
+        self.catalog_error = None;
+        self.catalog_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call_as::<Vec<Model>>(
-                    methods::LIST_MODELS,
-                    serde_json::json!({"harness":HarnessId::ClaudeCode,"targetDeviceId":target}),
+                .call_as::<Vec<HarnessDescriptor>>(
+                    methods::LIST_HARNESSES,
+                    serde_json::json!({"targetDeviceId":target}),
                 )
                 .await;
-            let _ = this.update(cx, |p, cx| {
-                if p.target != target {
+            let offered = match result {
+                Ok(list) => crate::pickers::offered_harnesses(&list),
+                Err(error) => {
+                    let _ = this.update(cx, |p, cx| {
+                        if p.catalog_generation == generation {
+                            p.catalog_loading = false;
+                            p.catalog_error = Some(format!("Could not load agents: {error}"));
+                            cx.notify();
+                        }
+                    });
                     return;
                 }
-                if p.state
-                    .read(cx)
-                    .engine()
-                    .is_some_and(|current| current.same_connection(&engine))
-                {
-                    match result {
-                        Ok(models) => {
-                            p.models =
-                                crate::pickers::normalize_model_rows(HarnessId::ClaudeCode, models)
-                        }
-                        Err(error) => {
-                            if p.error.is_none() {
-                                p.error =
-                                    Some(format!("Could not load the model catalog: {error}"));
-                            }
+            };
+            let targets = this
+                .update(cx, |p, cx| {
+                    if p.catalog_generation != generation
+                        || p.target != target
+                        || !p
+                            .state
+                            .read(cx)
+                            .engine()
+                            .is_some_and(|e| e.same_connection(&engine))
+                    {
+                        return Vec::new();
+                    }
+                    p.harnesses = offered;
+                    if p.editor.is_none() {
+                        let session_harness = p
+                            .state
+                            .read(cx)
+                            .selected_chat_row()
+                            .filter(|c| Some(&c.device_id) == p.target.as_ref())
+                            .and_then(|c| c.config.as_ref())
+                            .map(|c| c.harness);
+                        p.catalog_harness = session_harness
+                            .filter(|h| p.harnesses.iter().any(|d| d.id == *h))
+                            .or_else(|| p.harnesses.first().map(|d| d.id))
+                            .unwrap_or(p.catalog_harness);
+                        p.models = if p.harnesses.is_empty() {
+                            Vec::new()
+                        } else {
+                            p.catalogs
+                                .get(&p.catalog_harness)
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+                    }
+                    let mut ids: Vec<_> = p.harnesses.iter().map(|d| d.id).collect();
+                    if let Some(e) = &p.editor {
+                        if !ids.contains(&e.draft.config.harness) {
+                            ids.push(e.draft.config.harness);
                         }
                     }
+                    if ids.is_empty() {
+                        p.catalog_error = Some(
+                            "Enable an installed agent in Settings → Agents to choose its models."
+                                .into(),
+                        );
+                    }
+                    cx.notify();
+                    ids
+                })
+                .unwrap_or_default();
+            let mut probes = futures::stream::FuturesUnordered::new();
+            for harness in targets {
+                let engine = engine.clone();
+                let target = target.clone();
+                probes.push(async move {
+                    let result = engine
+                        .client()
+                        .call_as::<Vec<Model>>(
+                            methods::LIST_MODELS,
+                            serde_json::json!({"harness":harness,"targetDeviceId":target}),
+                        )
+                        .await;
+                    (harness, result)
+                });
+            }
+            while let Some((harness, result)) = probes.next().await {
+                let _ = this.update(cx, |p, cx| {
+                    if p.catalog_generation != generation
+                        || p.target != target
+                        || !p
+                            .state
+                            .read(cx)
+                            .engine()
+                            .is_some_and(|e| e.same_connection(&engine))
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(models) => {
+                            let models = crate::pickers::normalize_model_rows(harness, models);
+                            p.catalogs.insert(harness, models.clone());
+                            if p.catalog_harness == harness {
+                                p.models = models;
+                            }
+                        }
+                        Err(error) => {
+                            p.catalog_error =
+                                Some(format!("Could not load {harness:?} models: {error}"))
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+            let _ = this.update(cx, |p, cx| {
+                if p.catalog_generation == generation {
+                    p.catalog_loading = false;
+                    cx.notify();
                 }
-                cx.notify();
             });
         }));
         cx.notify();
     }
+
     fn edit(&mut self, task: Option<ScheduledTask>, cx: &mut Context<Self>) {
         let (id, revision, draft) = if let Some(t) = task {
             (t.id, t.revision, t.draft)
@@ -251,7 +381,7 @@ impl ScheduledTasksPage {
                     cwd,
                     space_id: space.map(|s| s.id.clone()),
                     config: ChatConfig {
-                        harness: HarnessId::ClaudeCode,
+                        harness: self.catalog_harness,
                         model: self.models.first().map(|m| m.id.clone()),
                         reasoning: None,
                         model_options: Default::default(),
@@ -268,9 +398,24 @@ impl ScheduledTasksPage {
                 },
             )
         };
+        if self.catalog_harness != draft.config.harness {
+            self.catalog_harness = draft.config.harness;
+            self.models = self
+                .catalogs
+                .get(&self.catalog_harness)
+                .cloned()
+                .unwrap_or_default();
+        }
         let mut subscriptions = vec![];
         let mut input = |label: &str, text: String, cx: &mut Context<Self>| {
-            let e = cx.new(|cx| ComposerInput::new(label, cx));
+            let e = cx.new(|cx| {
+                let input = ComposerInput::new(label, cx).with_text_metrics(13.0, 20.0);
+                if label == "Instructions" {
+                    input.with_auto_grow()
+                } else {
+                    input.with_single_line()
+                }
+            });
             e.update(cx, |i, cx| i.set_text(text, cx));
             subscriptions.push(cx.subscribe(&e, |_: &mut Self, _, _, cx| cx.notify()));
             e
@@ -364,6 +509,20 @@ impl ScheduledTasksPage {
         }
         if let Some(e) = self.editor.as_mut() {
             match key {
+                "harness" => {
+                    let Ok(harness) = serde_json::from_value::<HarnessId>(serde_json::json!(value))
+                    else {
+                        return;
+                    };
+                    if e.draft.config.harness != harness {
+                        self.catalog_harness = harness;
+                        self.models = self.catalogs.get(&harness).cloned().unwrap_or_default();
+                        e.draft.config.harness = harness;
+                        e.draft.config.model = self.models.first().map(|m| m.id.clone());
+                        e.draft.config.reasoning = None;
+                        e.draft.config.model_options.clear();
+                    }
+                }
                 "space" => {
                     e.draft.space_id = (!value.is_empty()).then_some(value.clone());
                     if let Some(space) = self.state.read(cx).spaces.iter().find(|s| s.id == value) {
@@ -429,10 +588,13 @@ impl ScheduledTasksPage {
     }
 }
 
-fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>, height: f32) -> AnyElement {
+fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>) -> AnyElement {
     div()
         .flex()
         .flex_col()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
         .gap(px(6.0))
         .child(
             div()
@@ -440,10 +602,7 @@ fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>, height: f32) 
                 .text_color(theme.text_muted)
                 .child(SharedString::from(label.to_owned())),
         )
-        .child(popover::dialog_field(
-            theme,
-            div().h(px(height)).child(input).into_any_element(),
-        ))
+        .child(popover::dialog_field(theme, input.into_any_element()))
         .into_any_element()
 }
 impl Render for ScheduledTasksPage {
@@ -456,6 +615,8 @@ impl Render for ScheduledTasksPage {
             .p(px(24.0))
             .max_w(px(1050.0))
             .w_full()
+            .text_size(crate::typography::ui_rems(13.0))
+            .font_family(theme.font_sans.clone())
             .text_color(theme.text);
         let title = if self.editor.is_some() {
             "Edit scheduled task"
@@ -479,7 +640,7 @@ impl Render for ScheduledTasksPage {
                         .child(
                             popover::btn_ghost(&theme, "Refresh", "tasks-refresh")
                                 .id("tasks-refresh")
-                                .on_click(cx.listener(|p, _, _, cx| p.load(cx))),
+                                .on_click(cx.listener(|p, _, _, cx| p.refresh(cx))),
                         )
                         .child(
                             popover::btn_primary(&theme, "New task")
@@ -520,7 +681,9 @@ impl Render for ScheduledTasksPage {
                             p.history = None;
                             p.snapshot = Default::default();
                             p.models.clear();
-                            p.load(cx)
+                            p.catalogs.clear();
+                            p.harnesses.clear();
+                            p.refresh(cx)
                         }
                     })),
             );
@@ -540,14 +703,24 @@ impl Render for ScheduledTasksPage {
                     .child(SharedString::from(msg.clone())),
             );
         }
+        if let Some(error) = &self.catalog_error {
+            content = content.child(div().text_color(theme.danger).child(error.clone()));
+        }
+        if self.catalog_loading {
+            content = content.child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child("Loading available agents and models…"),
+            );
+        }
         if self.busy {
             content = content.child(div().text_color(theme.text_muted).child("Loading…"));
         }
         if let Some(e) = &self.editor {
             let _ = &e.subscriptions;
             content = content
-                .child(field(&theme, "Task name", e.name.clone(), 24.0))
-                .child(field(&theme, "Working directory", e.cwd.clone(), 24.0));
+                .child(field(&theme, "Task name", e.name.clone()))
+                .child(field(&theme, "Working directory", e.cwd.clone()));
             let config = e.draft.config.clone();
             let model = self
                 .models
@@ -588,31 +761,60 @@ impl Render for ScheduledTasksPage {
                 .and_then(|id| self.state.read(cx).spaces.iter().find(|s| s.id == id))
                 .map(|s| s.name.clone().unwrap_or_else(|| s.path.clone()))
                 .unwrap_or("No Space".into());
+            let harness_label = self
+                .harnesses
+                .iter()
+                .find(|h| h.id == config.harness)
+                .map(|h| h.name.clone())
+                .unwrap_or_else(|| format!("{:?}", config.harness));
             for (key, label, value) in [
+                ("harness", "Agent", harness_label.as_str()),
                 ("space", "Space", space_label.as_str()),
                 ("model", "Model", model_label.as_str()),
                 ("thinking", "Thinking level", thinking_label.as_str()),
                 ("contextWindow", "Context window", context_label),
             ] {
                 selects = selects.child(
-                    div().flex().flex_col().gap(px(4.0)).child(label).child(
-                        popover::btn_ghost(&theme, value, format!("task-select-{key}"))
-                            .id(SharedString::from(format!("task-select-{key}")))
-                            .debug_selector(move || format!("task-select-{key}").into())
-                            .on_click(cx.listener(move |p, _, _, cx| {
-                                p.choices = if p.choices == Some(key) {
-                                    None
-                                } else {
-                                    Some(key)
-                                };
-                                cx.notify();
-                            })),
-                    ),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .max_w_full()
+                        .gap(px(4.0))
+                        .child(label)
+                        .child(
+                            popover::btn_ghost(&theme, value, format!("task-select-{key}"))
+                                .max_w_full()
+                                .id(SharedString::from(format!("task-select-{key}")))
+                                .debug_selector(move || format!("task-select-{key}").into())
+                                .on_click(cx.listener(move |p, _, _, cx| {
+                                    p.choices = if p.choices == Some(key) {
+                                        None
+                                    } else {
+                                        Some(key)
+                                    };
+                                    cx.notify();
+                                })),
+                        ),
                 );
             }
             content = content.child(selects);
             if let Some(key) = self.choices {
                 let choices: Vec<(String, String)> = match key {
+                    "harness" => self
+                        .harnesses
+                        .iter()
+                        .map(|h| {
+                            (
+                                serde_json::to_value(h.id)
+                                    .unwrap()
+                                    .as_str()
+                                    .unwrap()
+                                    .to_owned(),
+                                h.name.clone(),
+                            )
+                        })
+                        .collect(),
                     "space" => std::iter::once((String::new(), "No Space".into()))
                         .chain(
                             self.state
@@ -713,25 +915,22 @@ impl Render for ScheduledTasksPage {
             }
             content = content.child(presets);
             content = content
-                .child(field(&theme, "Instructions", e.prompt.clone(), 120.0))
+                .child(field(&theme, "Instructions", e.prompt.clone()))
                 .child(field(
                     &theme,
                     "Cron · minute hour day month weekday",
                     e.cron.clone(),
-                    24.0,
                 ))
-                .child(field(&theme, "Timezone", e.timezone.clone(), 24.0))
+                .child(field(&theme, "Timezone", e.timezone.clone()))
                 .child(field(
                     &theme,
                     "One-time date (optional, replaces cron)",
                     e.once.clone(),
-                    24.0,
                 ))
                 .child(field(
                     &theme,
                     "Run latest missed edition within this many minutes (0 = skip)",
                     e.grace.clone(),
-                    24.0,
                 ));
             if self
                 .snapshot
@@ -1237,11 +1436,103 @@ mod tests {
             );
             assert!(p.editor_draft(cx).unwrap().config.reasoning.is_none());
 
+            p.catalogs.insert(HarnessId::ClaudeCode, p.models.clone());
+            let other = Model {
+                id: "session-model".into(),
+                label: "Session model".into(),
+                description: None,
+                reasoning_levels: vec![ReasoningLevel::High],
+                options: vec![],
+            };
+            p.catalogs.insert(HarnessId::Codex, vec![other]);
+            p.choice("harness", "codex".into(), cx);
+            p.choice("thinking", "high".into(), cx);
+            let draft = p.editor_draft(cx).unwrap();
+            assert_eq!(draft.config.harness, HarnessId::Codex);
+            assert_eq!(draft.config.model.as_deref(), Some("session-model"));
+            assert_eq!(draft.config.reasoning, Some(ReasoningLevel::High));
+            assert!(draft.config.model_options.is_empty());
+            assert_eq!(draft.prompt, "Keep these instructions");
+            p.choice("harness", "claude-code".into(), cx);
+            assert_eq!(
+                p.editor_draft(cx).unwrap().config.model.as_deref(),
+                Some("capable")
+            );
+            assert!(p.editor_draft(cx).unwrap().config.reasoning.is_none());
+
             p.choices = Some("contextWindow");
             cx.notify();
         });
         cx.simulate_resize(gpui::size(px(800.0), px(900.0)));
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn editor_long_fields_stay_single_line_and_instructions_grow(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state, cx);
+            p.edit(None, cx);
+            let e = p.editor.as_ref().unwrap();
+            e.cwd.update(cx, |i, cx| {
+                i.set_text(format!("/work/{}", "very-long-directory/".repeat(80)), cx)
+            });
+            e.prompt.update(cx, |i, cx| {
+                i.set_text("Read the current procedure.\n".repeat(100), cx)
+            });
+            p
+        });
+        cx.simulate_resize(gpui::size(px(640.0), px(900.0)));
+        cx.run_until_parked();
+        page.read_with(cx, |p, cx| {
+            let e = p.editor.as_ref().unwrap();
+            assert_eq!(e.cwd.read(cx).measured_content_height(), 20.0);
+            assert!(e.prompt.read(cx).measured_content_height() > 100.0);
+            assert!(e.cwd.read(cx).measured_width().unwrap() < 640.0);
+        });
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires macOS Metal and access to macOS services"]
+    fn scheduled_task_editor_snapshot() -> anyhow::Result<()> {
+        struct Fixture(Entity<ScheduledTasksPage>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .bg(Theme::of(cx).surface)
+                    .child(self.0.clone())
+            }
+        }
+        for (name, appearance) in [
+            ("dark", crate::theme::Appearance::Dark),
+            ("light", crate::theme::Appearance::Light),
+        ] {
+            crate::snapshot::render_to_png(
+                &format!("scheduled-task-editor-{name}"),
+                gpui::size(px(850.0), px(1100.0)),
+                crate::ui_style::UiStyleId::Default,
+                appearance,
+                |_, cx| {
+                    let _ = crate::typography::register_fonts(cx);
+                    let state = cx.new(|_| AppState::new());
+                    let page = cx.new(|cx| {
+                        let mut p = ScheduledTasksPage::new(state, cx);
+                        p.edit(None, cx);
+                        let e = p.editor.as_ref().unwrap();
+                        e.name.update(cx, |i,cx|i.set_text("Morning engineering briefing",cx));
+                        e.cwd.update(cx, |i,cx|i.set_text("/Users/david/Work/mast/.worktrees/scheduled-tasks/very-long-working-directory-for-the-daily-briefing",cx));
+                        e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n".repeat(8),cx));
+                        p.error = None;
+                        p
+                    });
+                    cx.new(|_| Fixture(page))
+                },
+            )?;
+        }
+        Ok(())
     }
     #[gpui::test]
     fn history_from_a_session_targets_its_host_without_retargeting_task_rows(
