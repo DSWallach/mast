@@ -340,6 +340,13 @@ impl EngineCore {
         );
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        // Before recovery, so a side chat interrupted by the restart is
+        // retired instead of revived.
+        match doc_host.archive_orphaned_side_chats() {
+            0 => {}
+            archived => tracing::info!(archived, "archived side chats left without a pane"),
+        }
+        doc_host.spawn_side_chat_reaper();
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),

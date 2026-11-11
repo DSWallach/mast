@@ -1663,11 +1663,11 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// LWW write of a side chat's absorbed-through marker.
+    /// LWW write of a side chat's absorbed-through marker (`None` clears it).
     pub fn set_chat_side_absorbed_through(
         &mut self,
         chat_id: &str,
-        message_id: &str,
+        message_id: Option<&str>,
     ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
@@ -1676,7 +1676,7 @@ impl RegistryDoc {
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("sideAbsorbedThrough", json!(message_id))]),
+            fields([("sideAbsorbedThrough", opt_str(message_id))]),
         );
         Ok(true)
     }

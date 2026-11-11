@@ -1649,7 +1649,8 @@ impl WorkspaceHost {
     }
 
     /// Create `chat_id` as a side chat of `main_id`: same host, Space, cwd,
-    /// checkout and config, linked by `sideOf` (never `parentChatId`).
+    /// checkout and model, read-only, linked by `sideOf` (never
+    /// `parentChatId`).
     /// Idempotent by id.
     pub fn create_side_chat(&self, chat_id: &str, main_id: &str) -> Result<Chat, EngineError> {
         if let Some(existing) = self.read(|doc| doc.chat(chat_id))? {
@@ -1670,7 +1671,13 @@ impl WorkspaceHost {
             branch: main.branch.clone(),
             checkout_id: main.checkout_id.clone(),
             source_context: None,
-            config: main.config.clone(),
+            // Read-only with approvals off: nobody answers a side chat's
+            // prompts (dispatch re-applies this on every run).
+            config: main.config.clone().map(|mut config| {
+                config.sandbox = mast_proto::SandboxLevel::ReadOnly;
+                config.auto_approve = true;
+                config
+            }),
             last_message_preview: None,
             last_message_at: None,
             created_at: Utc::now(),
@@ -1693,7 +1700,7 @@ impl WorkspaceHost {
     }
 
     /// Record how far a side chat has been absorbed into its main chat.
-    pub fn set_chat_side_absorbed_through(&self, chat_id: &str, message_id: &str) -> Result<(), EngineError> {
+    pub fn set_chat_side_absorbed_through(&self, chat_id: &str, message_id: Option<&str>) -> Result<(), EngineError> {
         self.mutate(|doc| doc.set_chat_side_absorbed_through(chat_id, message_id))?;
         Ok(())
     }
