@@ -1622,9 +1622,14 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
 
 - **Worktrees:** `<home>/Projects/agent-mode-tools/.worktrees/zeron/<branch>`, branched from
   the integration head. Seed the build cache with
-  `cp -c -R target/debug/{deps,build,.fingerprint}` (APFS clones), add a `.workspace-root` file.
+  `cp -c -R target/debug/{deps,build,.fingerprint}` (APFS clones), add a `.workspace-root` file,
+  and write `.cargo/config.toml` with `[build]\nincremental = false` (untracked; `.cargo/` is in
+  info/exclude). Incremental caches were roughly 20 GB per worktree.
   Merge with `--no-ff` into `work-outline-implementation`. **Delete each worktree's `target/` after
-  merging**; keep at least 100 GB free.
+  merging**; keep at least 100 GB free. **At most 2 building workers at once.**
+  Since 7c53f6b54, dev builds use line tables only and no dependency debug info.
+  If disk still nears 100 GB, clear `target/debug/incremental` and `target/installed` in the main
+  checkout; both rebuild.
 - **Subagents:** one narrow task per agent with clear file ownership; read files in ≤200-line
   slices (they stall on huge files like `overview.rs` / `shell.rs`); commit early and often.
 - **Tests:** release runs use `caffeinate -i scripts/run_release_tests.sh [BASE_REF]` (nextest
