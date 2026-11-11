@@ -2849,7 +2849,10 @@ impl RpcService for EngineRpc {
                     Some(id) => self.doc_host.queue_message_with_id(&p.chat_id, &id, &p.text, p.attachments, p.hold_for_turn_end).await,
                     None => self.doc_host.queue_message_with_behavior(&p.chat_id, &p.text, p.attachments, p.hold_for_turn_end),
                 }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(|e| {
+                        tracing::warn!(chat = %p.chat_id, error = %e, "queue message failed");
+                        RpcError::Failed(e.to_string())
+                    })?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::UPDATE_QUEUED_MESSAGE => {
