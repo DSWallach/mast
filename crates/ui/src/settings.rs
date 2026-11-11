@@ -3061,7 +3061,7 @@ mod tests {
                     row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, note: Some("keep".into()),
                 }],
             })]),
-            artifact_question_drafts: HashMap::new(),
+            artifact_question_drafts: HashMap::from([("a2".into(), (3, HashMap::from([("Q-1".into(), "UTC".into())])))]),
             artifact_side_layouts: HashMap::new(),
             legacy_accent_color: None,
         };

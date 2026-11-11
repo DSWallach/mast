@@ -186,6 +186,10 @@ fn answering_records_the_answer_and_tells_the_publishing_chat(cx: &mut TestAppCo
     assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
     tab.update(vcx, |tab, cx| tab.stage_question_answer("Q-1".into(), "By MPN".into(), cx));
     settle(vcx);
+    tab.update(vcx, |tab, cx| tab.undo_question_draft("Q-1".into(), cx));
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_question_drafts[&id(1)].1.len(), 1));
+    tab.update(vcx, |tab, cx| tab.stage_question_answer("Q-1".into(), "By MPN".into(), cx));
+    settle(vcx);
     assert!(has(vcx, "question-batch-send"));
     tab.update(vcx, |tab, cx| tab.send_question_batch(cx));
     settle(vcx);
@@ -226,7 +230,7 @@ fn clicking_the_open_answer_input_keeps_focus_and_typing_lands(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn answering_still_records_when_the_chat_is_archived(cx: &mut TestAppContext) {
+fn answering_stays_staged_when_the_chat_is_archived(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     let (tab, calls, vcx) = open(cx, plan(Vec::new()), vec![chat("chat-api", true)], None);
     tab.update_in(vcx, |tab, window, cx| {
@@ -239,10 +243,8 @@ fn answering_still_records_when_the_chat_is_archived(cx: &mut TestAppContext) {
     settle(vcx);
     tab.update(vcx, |tab, cx| tab.send_question_batch(cx));
     settle(vcx);
-    assert_eq!(
-        method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS).len(),
-        1
-    );
+    assert!(method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS).is_empty());
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_question_drafts[&id(1)].1.len(), 1));
     assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
     assert!(tab.read_with(vcx, |tab, _| {
         tab.notice().unwrap_or("").contains("unavailable")

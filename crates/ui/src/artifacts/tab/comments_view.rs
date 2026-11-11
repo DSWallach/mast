@@ -211,6 +211,13 @@ impl ArtifactTab {
         if self.comments.busy { return; }
         let draft = crate::settings::current(cx).artifact_decision_drafts.get(&artifact.id).cloned();
         let Some(draft) = draft.filter(|d| d.revision == artifact.current_revision && !d.decisions.is_empty()) else { return; };
+        let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
+        let Some(chat) = chat else {
+            self.notice = Some("The origin chat is unavailable. Decisions remain staged.".into());
+            if let Some(web) = &mut self.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastSheetEnableSend": true})), cx); }
+            cx.notify();
+            return;
+        };
         self.comments.busy = true;
         let call = self.state.read(cx).artifact_actions().submit_sheet_decisions(SubmitSheetDecisionsParams {
             artifact_id: artifact.id.clone(), revision: draft.revision, decisions: draft.decisions,
@@ -227,15 +234,14 @@ impl ArtifactTab {
                     Ok(reply) => {
                         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| { settings.artifact_decision_drafts.remove(&artifact.id); });
                         if let Some(web) = &mut this.web { web.run_script(&crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastSheetSent": reply.decisions})), cx); }
-                        let chat = artifact.chat_id.clone().filter(|id| this.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
-                        if let Some(chat) = chat {
+                        {
                             let message = decision_batch_message(&artifact.title, &reply.decisions);
                             let delivery = crate::work_outline::required_actions_view::deliver_user_message(this.state.clone(), chat, message, crate::work_outline::actions::new_operation_id(), cx);
                             let task = cx.spawn(async move |this, cx| {
                                 if let Err(error) = delivery.await { this.update(cx, |this, cx| { this.notice = Some(format!("Decisions saved, but the chat wasn't told: {error}")); cx.notify(); }).ok(); }
                             });
                             this.comments.tasks.push(task);
-                        } else { this.notice = Some("Decisions saved, but the origin chat is unavailable.".into()); }
+                        }
                     }
                 }
                 cx.notify();

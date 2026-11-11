@@ -329,6 +329,7 @@ impl ArtifactTab {
 
     /// Stage an answer on this device. No engine call or chat message occurs.
     pub(crate) fn stage_question_answer(&mut self, id: String, answer: String, cx: &mut Context<Self>) {
+        if self.questions.busy { return; }
         let id = id.to_ascii_uppercase();
         let answer = answer.trim().chars().take(mast_proto::artifacts::MAX_ANSWER_CHARS).collect::<String>();
         let Some(artifact) = self.artifact(cx) else { return; };
@@ -345,6 +346,7 @@ impl ArtifactTab {
     }
 
     pub(crate) fn undo_question_draft(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.questions.busy { return; }
         let artifact_id = self.artifact_id.clone();
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             if let Some((_, drafts)) = settings.artifact_question_drafts.get_mut(&artifact_id) {
@@ -357,6 +359,7 @@ impl ArtifactTab {
     }
 
     pub(crate) fn discard_question_drafts(&mut self, cx: &mut Context<Self>) {
+        if self.questions.busy { return; }
         let id = self.artifact_id.clone();
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| { settings.artifact_question_drafts.remove(&id); });
         self.questions.synced = None;
@@ -367,6 +370,12 @@ impl ArtifactTab {
         let Some(artifact) = self.artifact(cx) else { return; };
         let drafts = self.question_drafts(&artifact, cx);
         if drafts.is_empty() || self.questions.busy { return; }
+        let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
+        let Some(chat) = chat else {
+            self.notice = Some("The origin chat is unavailable. Answers remain staged.".into());
+            cx.notify();
+            return;
+        };
         let mut answers: Vec<_> = drafts.iter().map(|(id, answer)| mast_proto::artifacts::PlanQuestionDraft { question_id: id.clone(), answer: answer.clone() }).collect();
         answers.sort_by(|a, b| a.question_id.cmp(&b.question_id));
         let message = format!("Answers for {}: {}", artifact.title, answers.iter().map(|a| format!("{}: {}", a.question_id, a.answer)).collect::<Vec<_>>().join("; "));
@@ -381,12 +390,11 @@ impl ArtifactTab {
                     Ok(reply) => {
                         for answer in &reply.answers { this.questions.local.insert(answer.id.clone(), answer.answer.clone()); }
                         this.discard_question_drafts(cx);
-                        let chat = artifact.chat_id.clone().filter(|chat| this.state.read(cx).chats.iter().any(|row| row.id == *chat && !row.archived));
-                        if let Some(chat) = chat {
+                        {
                             let delivery = crate::work_outline::required_actions_view::deliver_user_message(this.state.clone(), chat, message, crate::work_outline::actions::new_operation_id(), cx);
                             let task = cx.spawn(async move |this, cx| { if let Err(error) = delivery.await { this.update(cx, |this, cx| { this.notice = Some(format!("Answers saved, but the chat wasn't told: {error}")); cx.notify(); }).ok(); } });
                             this.questions.tasks.push(task);
-                        } else { this.notice = Some("Answers saved, but the publishing chat is unavailable.".into()); }
+                        }
                     }
                 }
                 cx.notify();
