@@ -3067,7 +3067,7 @@ mod tests {
             artifact_decision_drafts: HashMap::from([("a1".into(), mast_proto::decision_sheet::SheetDecisionDrafts {
                 revision: 3,
                 decisions: vec![mast_proto::decision_sheet::SheetDecisionDraft {
-                    row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, note: Some("keep".into()),
+                    row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, override_recommendation: false, note: Some("keep".into()),
                 }],
             })]),
             artifact_question_drafts: HashMap::from([("a2".into(), (3, HashMap::from([("Q-1".into(), "UTC".into())])))]),

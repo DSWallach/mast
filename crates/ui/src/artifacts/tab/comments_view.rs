@@ -155,8 +155,8 @@ impl ArtifactTab {
             FrameMessage::QuestionUndo(id) => {
                 if self.artifact(cx).is_some_and(|artifact| self.can_comment(&artifact)) { self.undo_question_draft(id, cx); }
             }
-            FrameMessage::SheetStage { id, outcome, note } => {
-                self.stage_sheet_decision(id, outcome, note, cx);
+            FrameMessage::SheetStage { id, outcome, note, override_recommendation } => {
+                self.stage_sheet_decision(id, outcome, note, override_recommendation, cx);
             }
             FrameMessage::SheetUndo(id) => self.undo_sheet_decision(Some(id), cx),
             FrameMessage::SheetDiscard => self.undo_sheet_decision(None, cx),
@@ -195,7 +195,7 @@ impl ArtifactTab {
         cx.notify();
     }
 
-    fn stage_sheet_decision(&mut self, id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, cx: &mut Context<Self>) {
+    fn stage_sheet_decision(&mut self, id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, override_recommendation: bool, cx: &mut Context<Self>) {
         use mast_proto::decision_sheet::{SheetDecisionDraft, SheetDecisionDrafts};
         let (artifact, sheet) = match self.current_sheet(cx) {
             Ok(sheet) => sheet,
@@ -203,6 +203,10 @@ impl ArtifactTab {
         };
         let reason = if !sheet.decision_rows().iter().any(|row| row.id == id && row.status.state == "open") {
             Some("This row is missing or no longer open.")
+        } else if outcome == mast_proto::decision_sheet::DecisionOutcome::Rejected && !sheet.decision_rows().iter().any(|row| row.id == id && row.optional) {
+            Some("This row cannot be omitted.")
+        } else if override_recommendation && (outcome != mast_proto::decision_sheet::DecisionOutcome::Decided || note.trim().is_empty()) {
+            Some("Your answer is required.")
         } else if artifact.decisions.iter().any(|saved| saved.row_id == id && saved.revision == artifact.current_revision) {
             Some("This row has already been sent.")
         } else { None };
@@ -211,7 +215,7 @@ impl ArtifactTab {
             let draft = settings.artifact_decision_drafts.entry(artifact.id).or_insert_with(|| SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() });
             if draft.revision != artifact.current_revision { *draft = SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() }; }
             draft.decisions.retain(|decision| decision.row_id != id);
-            draft.decisions.push(SheetDecisionDraft { row_id: id.clone(), outcome, note: Some(note) });
+            draft.decisions.push(SheetDecisionDraft { row_id: id.clone(), outcome, override_recommendation, note: Some(note) });
         });
     }
 

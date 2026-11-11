@@ -1634,6 +1634,12 @@ impl ArtifactsService {
                     decision.row_id
                 )));
             }
+            if decision.outcome == mast_proto::decision_sheet::DecisionOutcome::Rejected && !row.optional {
+                return Err(ArtifactError::invalid("row is not optional"));
+            }
+            if decision.override_recommendation && (decision.outcome != mast_proto::decision_sheet::DecisionOutcome::Decided || decision.note.as_deref().is_none_or(|s| s.trim().is_empty())) {
+                return Err(ArtifactError::invalid("an override requires an answer"));
+            }
             if decision
                 .note
                 .as_ref()
@@ -1651,6 +1657,7 @@ impl ArtifactsService {
             .map(|draft| SheetDecision {
                 row_id: draft.row_id.clone(),
                 outcome: draft.outcome,
+                override_recommendation: draft.override_recommendation,
                 note: draft
                     .note
                     .as_deref()
@@ -2628,7 +2635,7 @@ impl ArtifactsService {
         let (_, orphans) = mast_proto::decision_sheet::partition_decisions(&sheet, &artifact.decisions);
         let orphan_ids: Vec<&str> = orphans.iter().map(|d| d.row_id.as_str()).collect();
         Ok(json!({"artifactId": artifact.id, "title": artifact.title, "revision": artifact.current_revision,
-            "decisions": artifact.decisions, "orphanedRowIds": orphan_ids}))
+            "decisions": artifact.decisions.iter().map(|d| { let mut value = serde_json::to_value(d).unwrap(); value["answer"] = if d.override_recommendation { json!(d.note) } else { Value::Null }; value }).collect::<Vec<_>>(), "orphanedRowIds": orphan_ids}))
     }
 
     /// Options artifacts in the caller's scope with a pick:

@@ -37,7 +37,7 @@ const SCRIPT: &str = r#"(() => {
   const initial = window.__mastSheetState || {};
   const drafts = new Map((initial.drafts || []).map(d => [d.rowId,d]));
   const sent = new Map((initial.sent || []).map(d => [d.rowId,d]));
-  const changing = new Set(), noteOpen = new Set(), errors = new Map();
+  const changing = new Set(), noteOpen = new Set(), answering = new Set(), errors = new Map();
   const notes = new Map((initial.drafts || []).map(d => [d.rowId,d.note || '']));
   const post = o => { try { parent.postMessage({mastMsg:o}, '*'); } catch (_) {} };
   const bar = document.createElement('div'); bar.className = 'mk-sheet-bar';
@@ -55,7 +55,7 @@ const SCRIPT: &str = r#"(() => {
     controls.insertBefore(change, controls.querySelector('[data-sheet-undo]')); controls.appendChild(toggle);
   });
   const update = () => {
-    bar.hidden = drafts.size === 0; label.textContent = `${drafts.size} answers ready`;
+    bar.hidden = drafts.size === 0; label.textContent = `${drafts.size} answers ready`; send.disabled = errors.size > 0;
     document.querySelectorAll('[data-sheet-row]').forEach(row => {
       const id = row.getAttribute('data-sheet-row'); const controls = row.querySelector('.mk-sheet-actions');
       if (!controls) return;
@@ -65,16 +65,19 @@ const SCRIPT: &str = r#"(() => {
       if (chip) {
         const result = saved || draft;
         chip.className = result ? `mk-chip mk-sheet-staged ${result.outcome === 'decided' ? 'mk-sheet-accepted' : 'mk-sheet-rejected'}` : 'mk-chip mk-open';
-        chip.textContent = result ? `${result.outcome === 'decided' ? 'Accepted' : 'Rejected'}${draft && !saved ? ' · not sent' : ''}` : 'Open';
+        chip.textContent = result ? `${result.outcome === 'rejected' ? "Won't do" : result.overrideRecommendation ? 'Answered' : 'Accepted'}${draft && !saved ? ' · not sent' : ''}` : 'Open';
       }
       controls.querySelector('[data-sheet-accept]').hidden = !!draft && !editing;
-      controls.querySelector('[data-sheet-reject]').hidden = !!draft && !editing;
+      const reject = controls.querySelector('[data-sheet-reject]'); if (reject) reject.hidden = !!draft && !editing;
+      controls.querySelector('[data-sheet-answer]').hidden = !!draft && !editing;
+      controls.querySelector('[data-sheet-answer]').textContent = answering.has(id) ? 'Stage answer' : 'Answer differently';
       controls.querySelector('[data-sheet-change]').hidden = !draft || editing;
       controls.querySelector('[data-sheet-undo]').hidden = !draft;
       const status = controls.querySelector('[data-sheet-status]');
       status.textContent = errors.has(id) ? `Not staged: ${errors.get(id)}` : ''; status.hidden = !errors.has(id);
       const note = row.querySelector('.mk-sheet-note'); const input = note.querySelector('input');
       note.hidden = !!saved || !noteOpen.has(id);
+      note.firstChild.textContent = answering.has(id) ? 'Your answer' : 'Note';
       if (document.activeElement !== input) input.value = notes.get(id) || '';
     });
   };
@@ -82,15 +85,16 @@ const SCRIPT: &str = r#"(() => {
     const id = row.getAttribute('data-sheet-row'), controls = row.querySelector('.mk-sheet-actions');
     if (!controls || sent.has(id)) return;
     const input = row.querySelector('.mk-sheet-note input');
-    const stage = outcome => { errors.delete(id); const note=input.value; notes.set(id,note); drafts.set(id,{rowId:id,outcome,note}); changing.delete(id); post({t:'sheet-stage',id,outcome,note}); update(); };
+    const stage = (outcome, overrideRecommendation=false) => { errors.delete(id); const note=input.value; if (overrideRecommendation && !note.trim()) { errors.set(id,'Your answer is required.'); update(); input.focus(); return; } notes.set(id,note); drafts.set(id,{rowId:id,outcome,note,overrideRecommendation}); answering.delete(id); changing.delete(id); post({t:'sheet-stage',id,outcome,note,overrideRecommendation}); update(); };
     controls.querySelector('[data-sheet-accept]').onclick = () => stage('decided');
-    controls.querySelector('[data-sheet-reject]').onclick = () => stage('rejected');
+    const reject = controls.querySelector('[data-sheet-reject]'); if (reject) reject.onclick = () => stage('rejected');
+    controls.querySelector('[data-sheet-answer]').onclick = () => { if (answering.has(id)) stage('decided',true); else { answering.add(id); noteOpen.add(id); update(); input.focus(); } };
     controls.querySelector('[data-sheet-change]').onclick = () => { changing.add(id); update(); };
-    controls.querySelector('[data-sheet-undo]').onclick = () => { drafts.delete(id); notes.delete(id); noteOpen.delete(id); changing.delete(id); input.value=''; post({t:'sheet-undo',id}); update(); };
+    controls.querySelector('[data-sheet-undo]').onclick = () => { drafts.delete(id); notes.delete(id); noteOpen.delete(id); changing.delete(id); answering.delete(id); errors.delete(id); input.value=''; post({t:'sheet-undo',id}); update(); };
     controls.querySelector('[data-sheet-note-toggle]').onclick = () => { if (noteOpen.has(id)) noteOpen.delete(id); else noteOpen.add(id); update(); if (noteOpen.has(id)) input.focus(); };
-    input.oninput = () => { notes.set(id,input.value); const draft = drafts.get(id); if (draft) { draft.note=input.value; post({t:'sheet-stage',id,outcome:draft.outcome,note:input.value}); } };
+    input.oninput = () => { notes.set(id,input.value); const draft = drafts.get(id); if (draft && !changing.has(id) && !answering.has(id)) { if (draft.overrideRecommendation && !input.value.trim()) { errors.set(id,'Your answer is required.'); } else { errors.delete(id); draft.note=input.value; post({t:'sheet-stage',id,outcome:draft.outcome,note:input.value,overrideRecommendation:!!draft.overrideRecommendation}); } update(); } };
   });
-  discard.onclick = () => { drafts.clear(); notes.clear(); noteOpen.clear(); changing.clear(); post({t:'sheet-discard'}); update(); };
+  discard.onclick = () => { drafts.clear(); notes.clear(); noteOpen.clear(); changing.clear(); answering.clear(); errors.clear(); post({t:'sheet-discard'}); update(); };
   const setBusy = busy => { send.disabled=busy; discard.disabled=busy; document.querySelectorAll('.mk-sheet-actions button,.mk-sheet-note input').forEach(node => node.disabled=busy); };
   send.onclick = () => { setBusy(true); post({t:'sheet-send'}); };
   window.addEventListener('message', e => { if (!e.data) return; if (e.data.mastSheetStageRejected) { const {id,reason} = e.data.mastSheetStageRejected; drafts.delete(id); errors.set(id,reason); setBusy(false); update(); } if (e.data.mastSheetEnableSend) setBusy(false); if (e.data.mastSheetSent) { e.data.mastSheetSent.forEach(d => {sent.set(d.rowId,d); drafts.delete(d.rowId);}); setBusy(false); update(); } });

@@ -19,7 +19,7 @@ const PAGE: &str = "<h2 id=\"intake\">Receiving intake</h2>\
 <p>Parts arrive at the dock.</p>\
 <div data-mast-question=\"Q-1\" data-status=\"open\">Merge by MPN?</div>";
 
-const SHEET: &str = r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+const SHEET: &str = r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","optional":true,"status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
 
 fn chat(id: &str) -> mast_proto::Chat {
     serde_json::from_value(json!({
@@ -434,13 +434,13 @@ fn sheet_drafts_stage_undo_and_send_once(cx: &mut TestAppContext) {
     vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions.len(), 2));
     frame(&tab, vcx, json!({"t":"sheet-undo","id":"D-2"}));
     vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions.len(), 1));
-    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":""}));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":"Use UTC","overrideRecommendation":true}));
     frame(&tab, vcx, json!({"t":"sheet-send"}));
     assert_eq!(method_calls(&calls, methods::ARTIFACT_SUBMIT_SHEET_DECISIONS).len(), 1);
     let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
     assert_eq!(sent.len(), 1);
     let message = sent[0].to_string();
-    assert!(message.contains("D-2 accepted"));
+    assert!(message.contains("D-2 answered: Use UTC"));
     assert!(message.contains("D-4 rejected (too slow)"));
     vcx.update(|_, cx| assert!(!crate::settings::current(cx).artifact_decision_drafts.contains_key(&id(1))));
 }

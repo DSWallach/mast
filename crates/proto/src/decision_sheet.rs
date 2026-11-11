@@ -33,6 +33,8 @@ pub struct Status {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Model {
+    #[serde(default)]
+    pub optional: bool,
     pub id: String,
     pub name: String,
     pub status: Status,
@@ -56,6 +58,8 @@ pub struct Field {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
+    #[serde(default)]
+    pub optional: bool,
     pub id: String,
     pub name: String,
     pub request: Vec<DiffLine>,
@@ -92,6 +96,8 @@ pub struct Rules {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleRow {
+    #[serde(default)]
+    pub optional: bool,
     pub id: String,
     pub state: String,
     #[serde(default)]
@@ -104,6 +110,8 @@ pub struct RuleRow {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Validation {
+    #[serde(default)]
+    pub optional: bool,
     pub id: String,
     pub rule: String,
     pub enforced: Vec<String>,
@@ -115,6 +123,8 @@ pub struct Validation {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Permission {
+    #[serde(default)]
+    pub optional: bool,
     pub id: String,
     pub subject: String,
     pub access: BTreeMap<String, String>,
@@ -125,6 +135,8 @@ pub struct Permission {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Flow {
+    #[serde(default)]
+    pub optional: bool,
     pub id: String,
     pub title: String,
     pub steps: Vec<Step>,
@@ -155,6 +167,8 @@ pub struct ParallelStep {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiState {
+    #[serde(default)]
+    pub optional: bool,
     pub id: String,
     pub label: String,
     pub image: Option<String>,
@@ -176,6 +190,8 @@ pub struct OutOfScope {
 pub struct SheetDecision {
     pub row_id: String,
     pub outcome: DecisionOutcome,
+    #[serde(default)]
+    pub override_recommendation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// Epoch milliseconds at which the batch was sent.
@@ -196,6 +212,8 @@ pub enum DecisionOutcome {
 pub struct SheetDecisionDraft {
     pub row_id: String,
     pub outcome: DecisionOutcome,
+    #[serde(default)]
+    pub override_recommendation: bool,
     #[serde(default)]
     pub note: Option<String>,
 }
@@ -243,6 +261,9 @@ pub fn decision_batch_message(title: &str, decisions: &[SheetDecision]) -> Strin
     let entries = decisions
         .iter()
         .map(|decision| {
+            if decision.override_recommendation {
+                return format!("{} answered: {}", decision.row_id, decision.note.as_deref().unwrap_or("").trim());
+            }
             let outcome = match decision.outcome {
                 DecisionOutcome::Decided => "accepted",
                 DecisionOutcome::Rejected => "rejected",
@@ -269,6 +290,7 @@ pub struct DecisionRow<'a> {
     pub status: &'a Status,
     pub recommendation: Option<&'a str>,
     pub question: Option<&'a str>,
+    pub optional: bool,
 }
 
 impl DecisionSheet {
@@ -325,6 +347,7 @@ impl DecisionSheet {
                     status: &$row.status,
                     recommendation: $row.recommendation.as_deref(),
                     question: $row.question.as_deref(),
+                    optional: $row.optional,
                 });
             };
         }
@@ -463,6 +486,25 @@ impl DecisionSheet {
 mod tests {
     use super::*;
     #[test]
+    fn answer_override_is_distinct_from_an_acceptance_note() {
+        let decision = SheetDecision { row_id: "D-3".into(), outcome: DecisionOutcome::Decided,
+            override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 1 };
+        assert_eq!(decision_batch_message("T", &[decision]), "Decisions for T: D-3 answered: Use UTC");
+    }
+
+    #[test]
+    fn optional_rows_default_to_required() {
+        let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"a","title":"A","status":{"state":"open"},"steps":[]},{"id":"b","title":"B","optional":true,"status":{"state":"open"},"steps":[]}]}"#;
+        let sheet = DecisionSheet::parse(source).unwrap();
+        let rows = sheet.decision_rows();
+        assert!(!rows[0].optional);
+        assert!(rows[1].optional);
+        let html = crate::decision_sheet_render::render(&sheet);
+        assert_eq!(html.matches("data-sheet-reject").count(), 1);
+        assert_eq!(html.matches("data-sheet-answer").count(), 2);
+    }
+
+    #[test]
     fn decisions_survive_republication_and_report_missing_rows() {
         let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
         let sheet = DecisionSheet::parse(source).unwrap();
@@ -470,6 +512,7 @@ mod tests {
             SheetDecision {
                 row_id: "D-2".into(),
                 outcome: DecisionOutcome::Decided,
+                override_recommendation: false,
                 note: None,
                 at: 20,
                 revision: 1,
@@ -477,6 +520,7 @@ mod tests {
             SheetDecision {
                 row_id: "D-4".into(),
                 outcome: DecisionOutcome::Rejected,
+                override_recommendation: false,
                 note: Some("too slow".into()),
                 at: 20,
                 revision: 1,
