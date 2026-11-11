@@ -462,23 +462,29 @@ impl NativePage {
                 &monitor_extra_keys.borrow(),
             );
             tracing::debug!(target: "focus", %combo, ?route, "web view key");
-            if route != KeyRoute::Page {
+            if route == KeyRoute::AppUnlessPageField {
                 // Decided asynchronously: take the key now, probe the page,
-                // then either forward it to GPUI or hand it back to the page.
+                // then either forward it to GPUI or hand it back to the page
+                // (Esc also returns focus to the app, as a bare Esc does).
                 let kept = unsafe { Retained::retain(event.as_ptr()) };
                 let Some(kept) = kept else {
                     return event.as_ptr();
                 };
                 let tx = monitor_tx.clone();
+                let parent = monitor_parent.clone();
                 let replayed = monitor_replayed.clone();
+                let is_escape = combo == "escape";
                 let completion =
                     block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
                         let editable = error.is_null()
                             && unsafe { value.as_ref() }
                                 .and_then(|value| value.downcast_ref::<NSString>())
                                 .is_some_and(|value| value.to_string() == "1");
-                        if dispatch_after_focus_probe(editable) && tx.try_send(NativeEvent::Key(keystroke.clone())).is_ok() {
+                        if !editable && tx.try_send(NativeEvent::Key(keystroke.clone())).is_ok() {
                             return;
+                        }
+                        if editable && is_escape {
+                            focus_view(&parent);
                         }
                         replayed.set(kept.timestamp());
                         NSApplication::sharedApplication(mtm).postEvent_atStart(&kept, true);
@@ -732,11 +738,16 @@ enum KeyRoute {
     /// Forwarded to GPUI: a fixed browser combo, an app shortcut, or an
     /// owner-requested extra key with a Cmd/Ctrl modifier.
     App,
-    /// An owner-requested extra key without Cmd/Ctrl (⌥↑/⌥↓, Esc with the
-    /// find bar open): GPUI gets it unless a text field in the page has
-    /// focus, where those keys belong to the field.
+    /// A shortcut or owner-requested extra key a text field also uses: any
+    /// key without Cmd/Ctrl (⌥↑/⌥↓, Esc with the find bar open, single-key
+    /// shortcuts like `e`) and the editing combos ⌘A/⌘C/⌘V/⌘X/⌘Z. GPUI gets
+    /// it unless a text field in the page has focus, where it belongs to the
+    /// field.
     AppUnlessPageField,
 }
+
+/// Cmd combos a focused text field needs for itself.
+const FIELD_EDIT_KEYS: &[&str] = &["cmd-a", "cmd-c", "cmd-v", "cmd-x", "cmd-z", "cmd-shift-z"];
 
 fn key_route(
     combo: &str,
@@ -745,10 +756,12 @@ fn key_route(
     extra: &[String],
 ) -> KeyRoute {
     let matches = |s: &String| gpui::Keystroke::parse(s).is_ok_and(|s| s == *keystroke);
-    if BROWSER_KEYS.contains(&combo) || shortcuts.iter().any(matches) {
+    if BROWSER_KEYS.contains(&combo) {
         KeyRoute::App
-    } else if extra.iter().any(matches) {
-        if combo.starts_with("cmd-") || combo.contains("-cmd-") || combo.starts_with("ctrl-") {
+    } else if shortcuts.iter().any(matches) || extra.iter().any(matches) {
+        let command =
+            combo.starts_with("cmd-") || combo.contains("-cmd-") || combo.starts_with("ctrl-");
+        if command && !FIELD_EDIT_KEYS.contains(&combo) {
             KeyRoute::App
         } else {
             KeyRoute::AppUnlessPageField
@@ -767,10 +780,6 @@ fn is_forwarded_key(
     extra: &[String],
 ) -> bool {
     key_route(combo, keystroke, shortcuts, extra) != KeyRoute::Page
-}
-
-fn dispatch_after_focus_probe(editable: bool) -> bool {
-    !editable
 }
 
 /// Whether the focused element of the page (looking through same-origin
@@ -1225,16 +1234,26 @@ mod forwarded_key_tests {
     }
 
     #[test]
-    fn artifact_edit_focus_keeps_shortcuts_and_editing_keys_in_page() {
-        use super::dispatch_after_focus_probe;
-        let extra: Vec<String> = ["e", "n", "p", "t", "v", "backspace", "cmd-a", "cmd-c", "cmd-v"]
-            .iter().map(|s| s.to_string()).collect();
-        for combo in &extra {
+    fn single_key_shortcuts_and_edit_combos_defer_to_a_focused_page_field() {
+        let shortcuts: Vec<String> =
+            ["e", "n", "p", "t", "v", "backspace", "cmd-a", "cmd-c", "cmd-v", "cmd-shift-p"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        for combo in ["e", "n", "p", "t", "v", "backspace", "cmd-a", "cmd-c", "cmd-v"] {
             let key = gpui::Keystroke::parse(combo).unwrap();
-            assert_ne!(key_route(combo, &key, &[], &extra), KeyRoute::Page);
-            assert!(!dispatch_after_focus_probe(true), "{combo} must stay in the page");
-            assert!(dispatch_after_focus_probe(false));
+            assert_eq!(
+                key_route(combo, &key, &shortcuts, &[]),
+                KeyRoute::AppUnlessPageField,
+                "{combo}"
+            );
         }
+        // App commands still reach Mast while a field has focus.
+        for combo in ["cmd-shift-p", "cmd-w", "cmd-k"] {
+            let key = gpui::Keystroke::parse(combo).unwrap();
+            assert_eq!(key_route(combo, &key, &shortcuts, &[]), KeyRoute::App, "{combo}");
+        }
+        // The cross-origin artifact frame reports its own edit focus.
         assert!(super::EDITABLE_FOCUS_SCRIPT.contains("window.__mastEditFocus === true"));
     }
 
