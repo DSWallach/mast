@@ -83,8 +83,8 @@ pub fn render(sheet: &DecisionSheet) -> String {
             for row in rows.iter().filter(|r| r.status.state == state) {
                 write!(
                     out,
-                    "<div class=\"mk-decision\"><div><strong>{}</strong>",
-                    esc(row.question.unwrap_or(row.title))
+                    "<div class=\"mk-decision\" data-sheet-row=\"{}\"><div><strong>{}</strong>",
+                    esc(row.id), esc(row.question.unwrap_or(row.title))
                 )
                 .unwrap();
                 if let Some(recommendation) = row.recommendation {
@@ -94,6 +94,9 @@ pub fn render(sheet: &DecisionSheet) -> String {
                         esc(recommendation)
                     )
                     .unwrap();
+                }
+                if state == "open" {
+                    out.push_str("<div class=\"mk-sheet-actions\" hidden><button type=\"button\" data-sheet-accept>Accept</button><button type=\"button\" data-sheet-reject>Reject</button><button type=\"button\" data-sheet-undo>Undo</button><label>💬 <input data-sheet-note maxlength=\"600\" placeholder=\"Note\"></label><span data-sheet-status></span></div>");
                 }
                 write!(out, "</div>{}</div>", status(row.status)).unwrap();
             }

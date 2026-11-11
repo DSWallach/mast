@@ -200,6 +200,14 @@ pub struct SheetDecisionDraft {
     pub note: Option<String>,
 }
 
+/// Device-local decisions staged against a particular revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetDecisionDrafts {
+    pub revision: u32,
+    pub decisions: Vec<SheetDecisionDraft>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitSheetDecisionsParams {
