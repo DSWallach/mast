@@ -751,6 +751,7 @@ pub(crate) mod tests {
                 sandbox: SandboxLevel::WorkspaceWrite,
                 auto_approve: false,
                 resume: None,
+                fork_from: None,
                 attachments: Vec::new(),
                 worktree: None,
                 instructions: None,

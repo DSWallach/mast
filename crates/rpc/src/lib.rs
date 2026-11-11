@@ -234,6 +234,11 @@ pub mod methods {
     pub const CREATE_CHAT_FOR_WORK_ITEM: &str = "CreateChatForWorkItem";
     /// Stage a coordinator successor and transfer its active workers.
     pub const HAND_OFF_ORCHESTRATOR: &str = "HandOffOrchestrator";
+    /// Send a side chat's not-yet-absorbed exchanges to its main chat as
+    /// context: a Run when the main chat is idle, else a held queue row.
+    /// `{ chatId }` (the side chat) → `mast_proto::AbsorbSideChatReply`.
+    /// Forwardable to the host (`side-chat-v1`).
+    pub const ABSORB_SIDE_CHAT: &str = "AbsorbSideChat";
     /// Queue the next Turn of a work-item Chat (`mast_proto::
     /// ContinueChatForWorkItemParams` → `mast_proto::
     /// ContinueChatForWorkItemReply`): message and command ids derive from

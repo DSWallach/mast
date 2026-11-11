@@ -363,6 +363,14 @@ pub struct Chat {
     /// human started; a dangling id (parent deleted) is tolerated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// The main chat this side chat was opened from ("Ask on the side").
+    /// Deliberately not `parent_chat_id`: a side chat is never a worker, so
+    /// it stays out of the sidebar, Team and orchestration plumbing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_of: Option<String>,
+    /// Id of the last side-chat message already absorbed into the main chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_absorbed_through: Option<String>,
     /// Durable PR link — layered over the branch-based `gh pr view` guess in
     /// `pr_ticket_cache.rs`: when set, PR detail resolves against THIS url
     /// instead of the branch. `None` (with `linked_pr_source` also `None`)
@@ -392,6 +400,11 @@ impl Chat {
     /// True when this chat syncs over the chat2 dumb relay.
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2
+    }
+
+    /// True for a chat opened with "Ask on the side".
+    pub fn is_side_chat(&self) -> bool {
+        self.side_of.is_some()
     }
 }
 
@@ -1510,6 +1523,8 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,
             linked_ticket_id: None,
@@ -1558,6 +1573,20 @@ mod tests {
             serde_json::from_value::<Chat>(value).unwrap().actual_model,
             None
         );
+    }
+
+    #[test]
+    fn side_chat_fields_are_optional_on_the_wire() {
+        let mut chat = bare_chat(None, None);
+        let plain = serde_json::to_value(&chat).unwrap();
+        assert!(plain.get("sideOf").is_none());
+        assert!(!serde_json::from_value::<Chat>(plain).unwrap().is_side_chat());
+        chat.side_of = Some("main".into());
+        chat.side_absorbed_through = Some("m1".into());
+        let value = serde_json::to_value(&chat).unwrap();
+        assert_eq!(value["sideOf"], "main");
+        assert_eq!(value["sideAbsorbedThrough"], "m1");
+        assert!(serde_json::from_value::<Chat>(value).unwrap().is_side_chat());
     }
 
     #[test]

@@ -149,6 +149,7 @@ fn row_matches(row: &TypeChatRow, query: &str) -> bool {
 /// `review_launcher`. `links` is `None` until its link status has loaded.
 fn chat_visible(chat: &Chat, links: Option<&ChatLinkStatus>, show_archived: bool) -> bool {
     chat.parent_chat_id.is_none()
+        && !chat.is_side_chat()
         && (show_archived || !chat.archived)
         && links.is_some_and(|status| launcher_link(status).is_some())
 }
@@ -532,7 +533,10 @@ impl ChatTypeView {
         for chat in chats {
             // Whether a chat is a launcher review chat is only known from its
             // link status, so fetch it for every chat the toggle could list.
-            if chat.parent_chat_id.is_some() || (chat.archived && !self.show_archived) {
+            if chat.parent_chat_id.is_some()
+                || chat.is_side_chat()
+                || (chat.archived && !self.show_archived)
+            {
                 continue;
             }
             self.ensure_links(chat.id.clone(), cx);
@@ -1028,6 +1032,8 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,
             linked_ticket_id: None,

@@ -79,6 +79,15 @@ pub fn populated_walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>
 
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    chat_fixture_with(data_dir, |_, _| {}, cx)
+}
+
+/// [`chat_fixture`] with extra state applied before the shell is built.
+fn chat_fixture_with(
+    data_dir: PathBuf,
+    edit: impl FnOnce(&mut crate::state::AppState, &mut gpui::Context<crate::state::AppState>),
+    cx: &mut App,
+) -> Entity<crate::shell::Shell> {
     let codex = std::env::var("MAST_PREVIEW_HARNESS").is_ok_and(|value| value == "codex");
     let (harness, model) = if codex { ("codex", "gpt-6-astra") } else { ("claude-code", "Claude Opus 5.5 — Extended reasoning") };
     let state = cx.new(|_| {
@@ -115,6 +124,7 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
                 {"id":"failure","role":"assistant","parts":[{"id":"error","kind":"error","message":"The service is overloaded. Please try again."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
             ])).unwrap() }, cx).unwrap();
         }
+        edit(state, cx);
     });
     let boot = crate::EngineBootConfig {
         data_dir,
@@ -201,6 +211,14 @@ pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
 pub fn team_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let shell = chat_fixture(data_dir, cx);
     shell.update(cx, |shell, cx| shell.fixture_snapshot_team(cx));
+    shell
+}
+
+/// Offline chat shell with a side chat open in the right pane, an absorbed
+/// exchange in the main transcript, and the chat menu open.
+pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture_with(data_dir, crate::shell::fixture_side_chat_state, cx);
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_side_chat(cx));
     shell
 }
 

@@ -1329,6 +1329,11 @@ impl RegistryDoc {
                 chat.room_gen.map(|g| json!(g)).unwrap_or(Value::Null),
             ),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+            ("sideOf", opt_str(chat.side_of.as_deref())),
+            (
+                "sideAbsorbedThrough",
+                opt_str(chat.side_absorbed_through.as_deref()),
+            ),
             ("linkedPrUrl", opt_str(chat.linked_pr_url.as_deref())),
             ("linkedPrSource", opt_source(chat.linked_pr_source)),
             ("linkedTicketId", opt_str(chat.linked_ticket_id.as_deref())),
@@ -1673,6 +1678,24 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// LWW write of a side chat's absorbed-through marker (`None` clears it).
+    pub fn set_chat_side_absorbed_through(
+        &mut self,
+        chat_id: &str,
+        message_id: Option<&str>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("sideAbsorbedThrough", opt_str(message_id))]),
+        );
+        Ok(true)
+    }
+
     /// LWW write of the durable PR link slot (`linkedPrUrl`/`linkedPrSource`)
     /// — mechanism only, no precedence logic. The caller
     /// (`WorkspaceHost::set_chat_link`, `crates/engine/src/workspace_host.rs`)
@@ -2010,6 +2033,7 @@ impl RegistryDoc {
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
                     ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
+                    ("sideOf", opt_str(chat.side_of.as_deref())),
                 ]),
             );
         }

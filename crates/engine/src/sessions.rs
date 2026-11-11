@@ -178,6 +178,9 @@ struct Inner {
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
+    /// Side chats whose fork of the main session failed: their first run
+    /// is seeded with the main transcript instead.
+    side_fork_failed: Mutex<std::collections::HashSet<String>>,
     /// Error entries already claimed by a retry, including dispatches in flight.
     retry_claims: Mutex<std::collections::HashSet<(String, String)>>,
     dispatch_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -246,6 +249,31 @@ pub struct SessionsEngine {
     inner: Arc<Inner>,
 }
 
+/// A side chat reads, never writes, and never waits on a person: read-only
+/// sandbox with approvals off, on every run whatever its config says.
+pub(crate) fn confine_side_chat(request: &mut RunRequest) {
+    request.sandbox = mast_proto::SandboxLevel::ReadOnly;
+    request.auto_approve = true;
+}
+
+/// Answers for a side chat's questions: "No" where that is an option (an
+/// approval), otherwise nothing.
+fn side_chat_declines(questions: &[UserInputQuestion]) -> Vec<UserInputAnswer> {
+    questions
+        .iter()
+        .map(|question| UserInputAnswer {
+            question_id: question.id.clone(),
+            labels: question
+                .options
+                .iter()
+                .find(|option| option.eq_ignore_ascii_case("no"))
+                .cloned()
+                .into_iter()
+                .collect(),
+        })
+        .collect()
+}
+
 /// The model a harness actually reported in `SessionStarted`. Claude Code's
 /// `system`/`init` names the model it ran; Codex/ACP/OpenCode just echo the
 /// request's model back, which says nothing about what ran, so they are not
@@ -312,6 +340,7 @@ impl SessionsEngine {
                 auto_capture_friction: AtomicBool::new(true),
                 friction_approvals: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
+                side_fork_failed: Mutex::new(std::collections::HashSet::new()),
                 retry_claims: Mutex::new(std::collections::HashSet::new()),
                 dispatch_locks: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
@@ -616,6 +645,9 @@ impl SessionsEngine {
             .cloned()
             .map(|mut request| {
                 request.instructions = None;
+                // A fork happens once, on a side chat's first run; any re-run
+                // resumes (or decides afresh) instead.
+                request.fork_from = None;
                 request
             })
     }
@@ -895,6 +927,18 @@ impl SessionsEngine {
         // A bound Chat's cwd is its validated execution root (the dispatch
         // chokepoint overwrote it); it is never remapped.
         request.cwd = self.inner.resolve_dispatch_cwd(chat_id, &request.cwd)?;
+        // Engine-owned: only a side chat's first run sets it, below.
+        request.fork_from = None;
+        let side_chat = match self.inner.side_chat_row(chat_id) {
+            Some(chat) if chat.archived => {
+                return Err(EngineError::Other("this side chat was closed".into()));
+            }
+            Some(_) => {
+                confine_side_chat(&mut request);
+                true
+            }
+            None => false,
+        };
         // Work Outline instructions (acceptance 9-10): an engine-built
         // follow-up carries none of its own, so it takes the revision its
         // Turn is pinned to (sidecar by message id, else the live Execution
@@ -1076,6 +1120,11 @@ impl SessionsEngine {
             request.resume = resume;
             resume_injected = request.resume.is_some();
         }
+        let shown_prompt = request.prompt.clone();
+        if request.resume.is_none() && request.instructions.is_none() {
+            self.inner
+                .prepare_side_chat_start(chat_id, harness.as_ref(), &mut request);
+        }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
         let run_id = new_id();
@@ -1094,6 +1143,11 @@ impl SessionsEngine {
             let chat_id = chat_id.to_owned();
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
+                // Nobody answers a side chat: decline at once, never park.
+                if side_chat {
+                    let _ = tx.send(side_chat_declines(&questions));
+                    return rx;
+                }
                 let request_id = new_id();
                 lock(&pending).insert(request_id.clone(), (questions.clone(), tx));
                 if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
@@ -1144,7 +1198,7 @@ impl SessionsEngine {
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        self.inner.note_message(chat_id, &request.prompt);
+        self.inner.note_message(chat_id, &shown_prompt);
 
         // Name the chat NOW, off the first prompt — not after the first
         // exchange completes ("called New session for a long time for no
@@ -1152,7 +1206,7 @@ impl SessionsEngine {
         // the Done-time call below stays as the retry for a failed
         // generation).
         if let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+            titles.maybe_generate(chat_id, harness_id, &shown_prompt, &request.cwd);
         }
 
         tokio::spawn(drive_run(
@@ -1461,7 +1515,7 @@ impl SessionsEngine {
                     prompt: String::new(), harness: None, model: None, reasoning: None,
                     model_options: Default::default(), cwd,
                     sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
-                    attachments: Vec::new(), resume: None, worktree: None, instructions: None,
+                    attachments: Vec::new(), resume: None, fork_from: None, worktree: None, instructions: None,
                 })
             })?;
         request.prompt = prompt.to_owned();
@@ -2153,6 +2207,57 @@ impl Inner {
                 },
             ]),
         ))
+    }
+
+    fn side_chat_row(&self, chat_id: &str) -> Option<mast_proto::Chat> {
+        self.workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .filter(|chat| chat.is_side_chat())
+    }
+
+    /// A side chat's first run, which has no session of its own yet: fork
+    /// the main chat's native session when the harness can, else prepend the
+    /// main chat's recent transcript to the prompt (the doc keeps the
+    /// question alone).
+    fn prepare_side_chat_start(&self, chat_id: &str, harness: &dyn Harness, request: &mut RunRequest) {
+        request.fork_from = None;
+        let Some(main_id) = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.side_of)
+        else {
+            return;
+        };
+        if self.stored_harness_session(chat_id).is_some_and(|(id, _)| !id.is_empty()) {
+            return;
+        }
+        let same_harness = self
+            .workspace()
+            .and_then(|ws| ws.chat(&main_id).ok().flatten())
+            .and_then(|main| main.config)
+            .is_none_or(|config| config.harness == harness.id());
+        // A main chat mid-turn (or waiting on a question) can end its native
+        // session on a tool call with no result yet; seed instead.
+        let main_busy = lock(&self.statuses).get(&main_id).is_some_and(is_active);
+        let fork_failed = lock(&self.side_fork_failed).contains(chat_id);
+        if harness.supports_session_fork()
+            && same_harness
+            && !main_busy
+            && !fork_failed
+            && let Some((session_id, cwd)) = self.stored_harness_session(&main_id)
+            && !session_id.is_empty()
+            && (cwd.is_empty() || cwd == request.cwd)
+        {
+            request.fork_from = Some(session_id);
+            return;
+        }
+        let entries = self
+            .doc_host()
+            .and_then(|host| host.open(&main_id).ok())
+            .and_then(|handle| handle.doc().read_entries().ok())
+            .unwrap_or_default();
+        let transcript = mast_doc::side_chat::transcript_tail(&entries);
+        request.prompt = mast_proto::side_chat::context_seed(&transcript, &request.prompt);
     }
 
     /// The chat's stored native session `(id, cwd)` from the same sources
@@ -3545,6 +3650,37 @@ async fn drive_run(
             return;
         }
 
+        // A side chat's forked first run that errored before any answer: the
+        // fork itself is suspect. Drop the forked session and retry once,
+        // seeded with the main transcript instead.
+        if !interrupted
+            && retry_request.as_ref().is_some_and(|retry| retry.fork_from.is_some())
+            && !resume_state.startup_retry
+            && matches!(&event, AgentEvent::Done { status: DoneStatus::Errored, .. })
+            && folded.iter().all(|part| matches!(part, MessagePart::Error { .. }))
+            && let Some(mut retry) = retry_request.take()
+        {
+            tracing::warn!(chat = %chat_id, "forking the main session failed; seeding the side chat instead");
+            lock(&inner.side_fork_failed).insert(chat_id.clone());
+            lock(&inner.harness_sessions).remove(&chat_id);
+            if let Some(ws) = inner.workspace() {
+                ws.set_chat_harness_session(&chat_id, "", "");
+            }
+            retry.prompt = user_prompt.clone();
+            retry.fork_from = None;
+            inner.remove_run(&chat_id, &run_id);
+            let engine = SessionsEngine { inner: inner.clone() };
+            let chat = chat_id.clone();
+            let message_id = resume_state.user_message_id.clone();
+            tokio::spawn(async move {
+                if let Err(err) = engine.dispatch_with(&chat, harness_id, retry, Some(message_id), true).await {
+                    tracing::error!(chat = %chat, error = %err, "seeded side chat retry failed");
+                    engine.inner.set_status(&chat, SessionStatus::Errored, false);
+                }
+            });
+            return;
+        }
+
         // Startup-crash retry: a run that dies before ever starting (errored
         // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
         // failed to come up — not that the injected resume id was bad. Since
@@ -4269,6 +4405,7 @@ mod tests {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
             resume: None,
+            fork_from: None,
             attachments: Vec::new(),
             worktree: None,
             instructions: None,

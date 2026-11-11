@@ -7474,6 +7474,7 @@ impl Composer {
                         // pickers row; new-chat draft on first send).
                         auto_approve: resolved.auto_approve,
                         resume: None,
+                        fork_from: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,
                         instructions: None,
@@ -9482,6 +9483,8 @@ mod tests {
                 harness_session_id: None, harness_session_cwd: None, actual_model: None,
                 scheduled_task: None,
                 parent_chat_id: None, space_id: None, last_seen_at: None, room_gen: None,
+                side_of: None,
+                side_absorbed_through: None,
                 linked_pr_url: None, linked_pr_source: None, linked_ticket_id: None,
                 linked_ticket_source: None,
             });

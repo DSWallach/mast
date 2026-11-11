@@ -1563,6 +1563,8 @@ impl Tools {
                 actual_model: None,
                 scheduled_task: None,
                 parent_chat_id: parent_chat_id.clone(),
+                side_of: None,
+                side_absorbed_through: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
@@ -2260,6 +2262,7 @@ fn run_request(chat: &Chat, space: Option<&Space>, harness: HarnessId, text: Str
         // The chat's own approval mode (default Ask).
         auto_approve: config.as_ref().is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments: Vec::new(),
         worktree: None,
         instructions: None,

@@ -1227,6 +1227,7 @@ fn prompt_request(prompt: &WorkItemPrompt, config: Option<&ChatConfig>, cwd: &st
             .unwrap_or(SandboxLevel::WorkspaceWrite),
         auto_approve: config.is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments: prompt.attachments.clone(),
         worktree: None,
         instructions: None,

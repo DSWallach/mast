@@ -228,6 +228,8 @@ mod status_light_tests {
                 actual_model: None,
                 scheduled_task: None,
                 parent_chat_id: None,
+                side_of: None,
+                side_absorbed_through: None,
                 space_id: None,
                 last_seen_at: None,
                 room_gen: None,

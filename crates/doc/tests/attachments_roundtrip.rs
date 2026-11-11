@@ -18,6 +18,7 @@ fn run_request_attachments_survive_command_round_trip() {
         attachments: vec!["/tmp/a.png".into()],
         worktree: None,
         resume: None,
+        fork_from: None,
         instructions: None,
     };
     doc.queue_command(&SessionCommandEntry {

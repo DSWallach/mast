@@ -1735,10 +1735,11 @@ impl AppState {
     /// another chat (`parent_chat_id`, the Mast MCP's orchestration link)
     /// are the parent's workers, not sessions the user started: they stay
     /// reachable by id/deep link but never take a sidebar row or jump slot.
+    /// Side chats live only in their main chat's right pane.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
-            .filter(|c| !c.archived && c.parent_chat_id.is_none())
+            .filter(|c| !c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
     }
 
     pub(crate) fn restore_composer_target(
@@ -1895,7 +1896,7 @@ impl AppState {
         let mut rows: Vec<(ChatIndicator, &Chat)> = self
             .chats
             .iter()
-            .filter(|c| c.parent_chat_id.is_none())
+            .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
                 // Project-less sessions are first-class rows.
@@ -4738,6 +4739,8 @@ mod tests {
             actual_model: None,
             scheduled_task: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -6250,6 +6253,33 @@ mod tests {
         assert_eq!(rows, ["parent"]);
         // The child row itself is still addressable (deep links, tabs).
         assert!(state.chats.iter().any(|c| c.id == "child"));
+    }
+
+    #[test]
+    fn side_chats_never_take_a_sidebar_row() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut side = chat("side", 0, Some(3));
+        side.side_of = Some("main".into());
+        let mut archived_side = chat("old-side", 1, Some(2));
+        archived_side.side_of = Some("main".into());
+        archived_side.archived = true;
+        state.apply_chats(vec![side, archived_side, chat("main", 2, Some(1))]);
+        let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
+        assert_eq!(visible, ["main"]);
+        let rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .into_iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(rows, ["main"]);
+        let with_archived: Vec<&str> = state
+            .overview_chats_with_archived(now, true)
+            .into_iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(with_archived, ["main"]);
+        assert!(crate::settings::archived::archived_chats(&state.chats).is_empty());
     }
 
     #[test]

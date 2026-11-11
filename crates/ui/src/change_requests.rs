@@ -415,6 +415,8 @@ mod tests {
             actual_model: None,
             scheduled_task: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: Some("space".into()),
             last_seen_at: None,
             room_gen: None,

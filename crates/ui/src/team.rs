@@ -447,6 +447,33 @@ mod tests {
     }
 
     #[test]
+    fn a_side_chat_is_never_a_worker() {
+        let chat = |id: &str| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "d", "title": id, "archived": false, "cwd": "/w",
+                "branch": null, "checkoutId": null, "config": null, "lastMessagePreview": null,
+                "lastMessageAt": null, "createdAt": "2026-01-01T00:00:00Z", "spaceId": "s",
+            }))
+            .unwrap()
+        };
+        let mut side = chat("side");
+        side.side_of = Some("main".into());
+        let mut worker = chat("worker");
+        worker.parent_chat_id = Some("main".into());
+        let chats = vec![chat("main"), side, worker];
+        let facts = team(&TeamInput {
+            chat_id: "main",
+            chats: &chats,
+            indicators: &HashMap::new(),
+            snapshot: None,
+            links: &HashMap::new(),
+            now: Utc::now(),
+        });
+        let ids: Vec<&str> = facts.workers.iter().map(|w| w.chat_id.as_str()).collect();
+        assert_eq!(ids, ["worker"]);
+    }
+
+    #[test]
     fn the_roll_up_counts_and_skips_zero_parts() {
         use WorkerState::*;
         let team = facts_of(&[
