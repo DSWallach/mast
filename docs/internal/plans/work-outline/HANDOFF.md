@@ -1078,6 +1078,37 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-11 late; coordinator 844aab58 handing off)
+
+- **Installed: release 77** (fast-tracked; targeted tests only). It has the decision sheet Send fix (be62a4719), row
+  ids, batched decisions, the queue silent-drop fix, the usage-only menu bar, and smaller dev builds (7c53f6b54).
+  The next normal release must run the full suite.
+- **Running, URGENT (Mikey is blocked):** Terra chat 921177a0, branch `sheet-note-keys`, item e6f833a5.
+  - Fixes the decision-sheet note field dropping e/n/p/t/v (Mast shortcuts swallow keys while a web input is
+    focused).
+  - Replaces Reject with **Accept / Answer differently / Don't do this**. "Don't do this" shows only on
+    `optional: true` rows.
+  - When it pushes: review, merge, then fast release 78 with the pattern in /tmp/release77-run.sh (targeted tests +
+    installed build, detached via python setsid), install, and tell Mikey to restart.
+- **Paused:** Terra chat 2bbe25e5 (workflow-pack export/import, branch `workflow-pack`). Tell it to resume cargo
+  after release 78.
+- **Next queued:**
+  - Approach questions with 2–3 selectable options (7db226ae)
+  - Global pinned-chat tabs strip in the main titlebar, across Spaces (Mikey picked A, global; design
+    mast-artifact:6b34d7fb; not started)
+  - Freeze watchdog (17c9d278), render-probe bug (bb6e6f10), perf follow-ups (2694931e)
+  - Phase 0 go/no-go (9516dd7c) was due 11-12.
+- **Process rules from today:**
+  - At most 2 building workers.
+  - New worktrees get `.cargo/config.toml` with incremental off.
+  - Workers never delete anything; the coordinator frees disk (main `target/debug/incremental` and
+    `target/installed` are safe).
+  - Releases run detached.
+  - Mikey reviews visuals, so look at worker screenshots before merging.
+- **Skills** (one copy each in ~/.agents/skills): project-planner now has scope vs approach questions, an
+  `optional` flag, no boilerplate questions, batched decisions via artifact_get_decisions, and ids in chat.
+  talk-to-me has the LLM-tics table.
+
 ## In flight (snapshot 2026-11-10 17:30; coordinator 844aab58, near its weekly limit)
 
 - **Installed: release 77** (fast-tracked: decision sheet Send fix be62a4719 + row ids; targeted tests only — run a full release suite with the next release).
