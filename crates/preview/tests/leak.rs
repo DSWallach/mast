@@ -182,6 +182,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         Arc::new(Backend(host_catalog.clone())),
         stop.clone(),
     );
+    a.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
     a.set_ice_servers(Vec::new()).unwrap();
     let viewer_catalog =
         Catalog::open(temp.path().join("b.json"), "b".into(), "Laptop".into()).unwrap();
@@ -189,6 +190,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         .set_remote("a", host_catalog.local_services())
         .unwrap();
     let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(NoLocal), stop.clone());
+    b.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
     b.set_ice_servers(Vec::new()).unwrap();
     let peer_b = b.clone();
     tokio::spawn(async move {

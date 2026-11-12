@@ -56,6 +56,7 @@ struct Inner {
     changed: Arc<Notify>,
     stop: CancellationToken,
     ice_servers: Vec<RTCIceServer>,
+    udp_addrs: Vec<std::net::SocketAddr>,
 }
 const PAIR_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone)]
@@ -76,6 +77,7 @@ impl Peers {
                 output,
                 changed: Arc::new(Notify::new()),
                 stop,
+                udp_addrs: vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))],
                 ice_servers: vec![RTCIceServer {
                     urls: vec![
                         "stun:stun.l.google.com:19302".into(),
@@ -99,6 +101,15 @@ impl Peers {
                 ..Default::default()
             }]
         };
+        Ok(())
+    }
+    /// Bind explicit local interfaces instead of discovering interfaces from
+    /// the wildcard default. Loopback addresses keep same-host tests independent
+    /// of LAN reachability. Configure before sharing the handle.
+    pub fn set_udp_addrs(&mut self, addresses: Vec<std::net::SocketAddr>) -> anyhow::Result<()> {
+        anyhow::ensure!(!addresses.is_empty(), "preview peers need a UDP bind address");
+        let inner = Arc::get_mut(&mut self.0).context("preview peers already shared")?;
+        inner.udp_addrs = addresses;
         Ok(())
     }
     async fn send(&self, to: &str, signal: Signal) -> anyhow::Result<()> {
@@ -126,7 +137,7 @@ impl Peers {
                         .build(),
                 )
                 .with_handler(handler.clone())
-                .with_udp_addrs(vec!["0.0.0.0:0"])
+                .with_udp_addrs(self.0.udp_addrs.clone())
                 .with_data_channel_send_buffer_limit(256 * 1024)
                 .with_sctp_receive_buffer_size(512 * 1024)
                 .build()
@@ -499,6 +510,8 @@ mod tests {
         let stop = CancellationToken::new();
         let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
         let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        a.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
         let servers = vec![RTCIceServer {
             urls: vec![format!("stun:{}", blackhole.local_addr().unwrap())],
             ..Default::default()
@@ -552,6 +565,8 @@ mod tests {
         let stop = CancellationToken::new();
         let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
         let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        a.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
         a.set_ice_servers(Vec::new()).unwrap();
         b.set_ice_servers(Vec::new()).unwrap();
         let peer_b = b.clone();
@@ -594,6 +609,8 @@ mod tests {
         let stop = CancellationToken::new();
         let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
         let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        a.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".parse().unwrap()]).unwrap();
         Arc::get_mut(&mut a.0).unwrap().ice_servers.clear();
         Arc::get_mut(&mut b.0).unwrap().ice_servers.clear();
         let peer_b = b.clone();

@@ -31,6 +31,12 @@ use crate::motion;
 use crate::theme::{Theme, hairline, ink};
 use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
+pub(crate) fn session_link_chip<T: gpui::Styled>(chip: T, theme: &Theme) -> T {
+    chip.rounded(px(4.0))
+        .border_1()
+        .border_color(theme.border_strong)
+}
+
 mod conversation_parts;
 pub use conversation_parts::{
     ConversationComposerBody, agent_message_theme, conversation_add_harness_key,

@@ -706,16 +706,7 @@ fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>) -> AnyElement
 impl Render for ScheduledTasksPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let mut content = div()
-            .flex()
-            .flex_col()
-            .gap(px(16.0))
-            .p(px(24.0))
-            .max_w(px(1050.0))
-            .w_full()
-            .text_size(crate::typography::ui_rems(13.0))
-            .font_family(theme.font_sans.clone())
-            .text_color(theme.text);
+        let mut content = crate::components::shell_parts::scheduled_tasks_page(&theme);
         let title = if self.editor.is_some() {
             "Edit scheduled task"
         } else if self.requested_task.is_some() {

@@ -164,9 +164,7 @@ impl Element for LinkRanges {
                         .h(rect.size.height)
                         .cursor_pointer()
                         .when(target.is_session(), |chip| {
-                            chip.rounded(px(4.))
-                                .border_1()
-                                .border_color(theme.border_strong)
+                            crate::components::session_link_chip(chip, &theme)
                         })
                         .role(Role::Link)
                         .aria_label(target.label.clone())

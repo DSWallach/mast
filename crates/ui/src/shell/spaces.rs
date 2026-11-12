@@ -4521,7 +4521,10 @@ impl Shell {
             .pb(px(4.0))
             .child(trigger)
             .child(overview_trigger)
-            .child(div().id("scheduled-tasks-navigation").size(px(29.0)).flex().items_center().justify_center().rounded(px(8.0)).cursor_pointer().aria_label("Scheduled tasks").hover(|el| el.bg(theme.glass_hover())).on_click(cx.listener(|this, _, _, cx| this.open_scheduled_tasks(None, cx))).child(icon(icons::CLOCK_CIRCLE).size(px(15.0)).text_color(theme.text_muted)))
+            .child(
+                crate::components::shell_parts::scheduled_tasks_navigation(theme)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_scheduled_tasks(None, cx))),
+            )
             .child(view_trigger)
             .into_any_element()
     }
@@ -5497,23 +5500,15 @@ impl Shell {
                     .as_ref()
                     .is_some_and(|(device, _)| device == &device_id)
             };
-            let menu = div()
-                .id(SharedString::from(format!(
-                    "sidebar-group-menu-{collapse_key}"
-                )))
+            let menu = crate::components::shell_parts::sidebar_group_menu(
+                SharedString::from(format!("sidebar-group-menu-{collapse_key}")),
+                theme,
+                menu_open,
+            )
                 .debug_selector({
                     let key = collapse_key.clone();
                     move || format!("sidebar-group-menu-{key}")
                 })
-                .size(px(20.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(4.0))
-                .opacity(if menu_open { 1.0 } else { 0.0 })
-                .group_hover("automatic-sidebar-group", |style| style.opacity(1.0))
-                .hover(|style| style.bg(theme.glass_hover()))
                 .on_click(
                     cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                         this.section_menu = None;
