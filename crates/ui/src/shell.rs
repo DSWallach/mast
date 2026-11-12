@@ -14451,6 +14451,10 @@ mod exit_regressions {
                 state.selected_chat = Some("source".into());
                 state.chats.push(mast_proto::Chat {
                     id: "destination".into(),
+                    scheduled_task_info: None,
+                    scheduled_task: None,
+                    side_of: None,
+                    side_absorbed_through: None,
                     device_id: "here".into(),
                     title: None,
                     archived: false,
