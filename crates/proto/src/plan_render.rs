@@ -150,14 +150,14 @@ pub fn render(p: &Plan) -> String {
         }
         o.push_str("</ul><h4>Acceptance</h4><ul>");
         for a in &t.acceptance {
-            let _ = write!(o, "<li>{}</li>", esc(a));
+            let _ = write!(o, "<li>{}</li>", inline(a));
         }
         o.push_str("</ul><h4>Out of scope</h4><ul>");
         for x in &t.out_of_scope {
             let _ = write!(
                 o,
                 "<li>{} <span class=\"pl-lives\">{}</span></li>",
-                esc(&x.text),
+                inline(&x.text),
                 esc(&x.lives_in)
             );
         }
@@ -212,6 +212,9 @@ pub fn render(p: &Plan) -> String {
                 esc(&d.label),
                 esc(&d.state)
             );
+        }
+        if t.depends_on.is_empty() && t.external.as_deref().unwrap_or(&[]).is_empty() {
+            o.push_str("—");
         }
         let _ = write!(
             o,
@@ -329,6 +332,20 @@ pub fn render(p: &Plan) -> String {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ticket_lists_render_inline_markdown_and_empty_dependencies() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/artifact-kit/plan-example.json"))
+                .unwrap();
+        value["tickets"][0]["acceptance"][0] = serde_json::json!("Use `delivery_days`.");
+        value["tickets"][0]["outOfScope"] =
+            serde_json::json!([{ "text": "Skip `export`.", "livesIn": "later" }]);
+        let plan = super::Plan::parse(&value.to_string()).unwrap();
+        let html = super::render(&plan);
+        assert!(html.contains("Use <code class=\"mk-mono\">delivery_days</code>."));
+        assert!(html.contains("Skip <code class=\"mk-mono\">export</code>."));
+        assert!(html.contains("<b>Depends on</b><span>—</span>"));
+    }
     #[test]
     #[ignore]
     fn render_file() {
