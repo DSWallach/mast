@@ -28,6 +28,13 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 84: visual audit fixes** (2026-11-12, aa47417fe; full suite from 07ecc9648: nextest 2534/2535, only the
+  known `preview::leak remote_preview_churn` hang; UI 2625/0): decision sheet flow lanes wrap/scroll with attached
+  connectors; row controls (Accept primary, others secondary, monochrome note button, "Your answer" placeholder);
+  Horizon light status dots per state; walkthrough content width; distinct Appearance style tiles; `handoff`
+  ui-preview screen; `artifact_render_check` renders decision-sheet/plan/options JSON by path (optional `kind`).
+  Backup: `~/zeron-dev-app-backups/mast-release-83`.
+
 - **Release 83: artifact export** (2026-11-12, 6379a3c2c; targeted: mast-proto 282, mast-ui artifacts 239): an Export
   menu in the artifact tab header: standalone HTML (kit CSS inlined, Mermaid from the shared CDN, decision sheets
   read-only), A4 PDF via offscreen WebKit print (not testable headless; Mikey to try a long plan), Copy as markdown
@@ -1122,9 +1129,8 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 83** (export; targeted tests on top of full-suite release 79). The next normal release must run
-  the full suite.
-- **Visual audit** 2026-11-12 (mast-artifact:d3e9de4d rev 3): 7 bug fixes approved (item 07afc975). Style colours of
+- **Installed: release 84** (full suite).
+- **Visual audit** 2026-11-12 (mast-artifact:d3e9de4d rev 3): 7 bug fixes shipped in release 84. Style colours of
   Horizon/Industrial are deliberate, not findings; the Cofactr palette is for branding only. Pinned tabs A revised
   (mast-artifact:18746fbb, request eb86590b) awaits Mikey's three decisions.
 - **Plans are structured now:** the kit plan published as kind `plan` renders clean in the app (test artifact
