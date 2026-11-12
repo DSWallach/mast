@@ -1118,8 +1118,11 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
 - **Installed: release 82** (plan kind; targeted tests on top of full-suite release 79).
-- **Next:** after Mikey restarts on release 82, publish a real plan as kind `plan`, render-check it, then switch
-  the project-planner skill to emit plan JSON (item df948c36). Workflow pack (2bbe25e5) still in progress.
+- **Plans are structured now:** the kit plan published as kind `plan` renders clean in the app (test artifact
+  5381891f on the Mast Dev item). The project-planner skill (~/.agents/skills, backup
+  ~/zeron-dev-app-backups/skills-2026-11-11-project-planner-v2) now publishes plan JSON per
+  docs/artifact-kit/plan-schema.md and copies each ticket's generated Linear body. Follow-up: the overlap
+  heuristic flags wrapped inline `code` chips (noise). Workflow pack (2bbe25e5) still in progress.
 - **PR #1 approved** on GitHub at c6bf195c1 (Mikey: approve if good) with two non-blocking follow-ups; not merged.
 - **PR #1 (David Wallach, idle CPU + input latency):** reviewed (item 953b96ee, Required Action 08002e19):
   merge after three fixes (nested-submodule diff filter, scheduled-run backfill marker, @-completion freshness on
