@@ -486,6 +486,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "artifactId": { "type": "string", "description": "A published artifact of your work item." },
                     "path": { "type": "string", "description": "Or an unpublished file you wrote." },
+                    "kind": { "type": "string", "description": "Optional artifact kind override for a path." },
                     "viewports": {
                         "type": "array",
                         "description": "Viewports to render. Default: [{width: 800, height: 800, label: \"narrow\"}, {width: 1440, height: 900, label: \"wide\"}].",
