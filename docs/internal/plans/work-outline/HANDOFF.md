@@ -28,6 +28,12 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 85: PR #1 (David Wallach) idle CPU + input latency** (2026-11-12, 52ab0bcbb; tests for touched crates
+  from 638cf1008: nextest 1327/1328, only the known Tailscale-only `peer::actual_webrtc_pair_streams…`; UI 2630/0):
+  search index re-walks on repair or rate-limited picker open, idle indexes retire; diff sync ignores foreign git-dir
+  churn but tracks (nested) submodule refs; preview scan backs off to 10 s; sidebar culls far-off rows; composer and
+  pickers redraw less. Backup: `~/zeron-dev-app-backups/mast-release-84`.
+
 - **Release 84: visual audit fixes** (2026-11-12, aa47417fe; full suite from 07ecc9648: nextest 2534/2535, only the
   known `preview::leak remote_preview_churn` hang; UI 2625/0): decision sheet flow lanes wrap/scroll with attached
   connectors; row controls (Accept primary, others secondary, monochrome note button, "Your answer" placeholder);
@@ -1129,7 +1135,9 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 84** (full suite).
+- **Installed: release 85** (PR #1; touched-crate tests on top of full-suite release 84).
+- **Auditing:** orchestrator friction in the Cofactr kit redesign chats + phase 0 go/no-go (item 62aa8fe0, Sonnet chat
+  c8dce614; read-only snapshot under ~/mast-metrics/snapshots/2026-11-12-friction).
 - **Visual audit** 2026-11-12 (mast-artifact:d3e9de4d rev 3): 7 bug fixes shipped in release 84. Style colours of
   Horizon/Industrial are deliberate, not findings; the Cofactr palette is for branding only. Pinned tabs A revised
   (mast-artifact:18746fbb, request eb86590b) awaits Mikey's three decisions.
