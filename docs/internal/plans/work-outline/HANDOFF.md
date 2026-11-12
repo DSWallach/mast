@@ -28,6 +28,11 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 83: artifact export** (2026-11-12, 6379a3c2c; targeted: mast-proto 282, mast-ui artifacts 239): an Export
+  menu in the artifact tab header: standalone HTML (kit CSS inlined, Mermaid from the shared CDN, decision sheets
+  read-only), A4 PDF via offscreen WebKit print (not testable headless; Mikey to try a long plan), Copy as markdown
+  for plans, decision sheets and markdown. Backup: `~/zeron-dev-app-backups/mast-release-82`.
+
 - **Release 82: structured plan artifacts** (2026-11-11, 2ecae0d4b; targeted: mast-proto 279, mast-engine
   artifacts 43 + agent_tools 62, mast-mcp 55, mast-ui artifacts 235):
   - New artifact kind `plan` (.json): crates/proto/src/plan.rs (types, strict parse, the 8 rules in
@@ -1117,7 +1122,11 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 82** (plan kind; targeted tests on top of full-suite release 79).
+- **Installed: release 83** (export; targeted tests on top of full-suite release 79). The next normal release must run
+  the full suite.
+- **Visual audit** 2026-11-12 (mast-artifact:d3e9de4d rev 3): 7 bug fixes approved (item 07afc975). Style colours of
+  Horizon/Industrial are deliberate, not findings; the Cofactr palette is for branding only. Pinned tabs A revised
+  (mast-artifact:18746fbb, request eb86590b) awaits Mikey's three decisions.
 - **Plans are structured now:** the kit plan published as kind `plan` renders clean in the app (test artifact
   5381891f on the Mast Dev item). The project-planner skill (~/.agents/skills, backup
   ~/zeron-dev-app-backups/skills-2026-11-11-project-planner-v2) now publishes plan JSON per
