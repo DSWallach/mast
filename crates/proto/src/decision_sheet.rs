@@ -293,6 +293,32 @@ pub struct DecisionRow<'a> {
     pub optional: bool,
 }
 
+/// Render the sheet and its recorded answers for sharing as Markdown.
+pub fn markdown(sheet: &DecisionSheet, decisions: &[SheetDecision]) -> String {
+    use std::fmt::Write;
+    let mut out = format!("# {}\n", sheet.title);
+    for row in sheet.decision_rows() {
+        let decision = decisions.iter().rev().find(|d| d.row_id == row.id);
+        let state = decision
+            .map(|d| match d.outcome {
+                DecisionOutcome::Decided => "decided",
+                DecisionOutcome::Rejected => "rejected",
+            })
+            .unwrap_or(&row.status.state);
+        let _ = write!(out, "\n## {}: {}\n\nStatus: {}\n", row.id, row.title, state);
+        if let Some(question) = row.question {
+            let _ = writeln!(out, "\nDecision: {question}");
+        }
+        if let Some(recommendation) = row.recommendation {
+            let _ = writeln!(out, "\nRecommendation: {recommendation}");
+        }
+        if let Some(note) = decision.and_then(|d| d.note.as_deref()) {
+            let _ = writeln!(out, "\nAnswer: {note}");
+        }
+    }
+    out
+}
+
 impl DecisionSheet {
     /// Apply sent decisions for presentation without changing the published JSON.
     pub fn apply_decisions(&mut self, decisions: &[SheetDecision]) {
@@ -540,6 +566,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn markdown_shows_recorded_answers() {
+        let sheet = DecisionSheet::parse(include_str!("../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
+        let row_id = sheet.decision_rows()[0].id.to_owned();
+        let decision = SheetDecision { row_id, outcome: DecisionOutcome::Decided, override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 2 };
+        let text = markdown(&sheet, &[decision]);
+        assert!(text.contains("Status: decided"));
+        assert!(text.contains("Answer: Use UTC"));
+    }
+
+    #[test]
+    fn markdown_includes_each_decision_row() {
+        let sheet = DecisionSheet::parse(include_str!("../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
+        let output = markdown(&sheet, &[]);
+        assert_eq!(output, include_str!("snapshots/decision-sheet-markdown.md"));
+        for row in sheet.decision_rows() {
+            assert!(output.contains(&format!("## {}: {}", row.id, row.title)));
+            assert!(output.contains(&format!("Status: {}", row.status.state)));
+        }
+    }
     #[test]
     fn decision_rows_match_summary_order_and_exclude_children() {
         let source = r#"{"kind":"decision-sheet","title":"T","models":[{"id":"model","name":"Model","status":{"state":"open"},"recommendation":null,"question":null,"fields":[{"id":"field","name":"Field","marker":"","type":"text","null":false,"default":null,"constraint":null}]}],"flows":[{"id":"flow","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[{"id":"step","kind":"ui","label":"Open","params":[]}]}]}"#;
