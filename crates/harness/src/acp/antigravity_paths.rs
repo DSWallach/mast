@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::HarnessError;
 
-pub(super) fn home() -> Result<PathBuf, HarnessError> {
+pub(crate) fn home() -> Result<PathBuf, HarnessError> {
     let cwd = std::env::current_dir()?;
     // sign-in starts in home; anchor every launch there so project cwd changes
     // cannot switch the settings and credentials used after authentication.

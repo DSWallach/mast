@@ -246,6 +246,23 @@ fn usage_accounts_list_default_then_managed_per_harness_and_skip_unused_saved_lo
     assert!(usage_accounts(None, None).is_empty());
 }
 
+#[test]
+fn usage_accounts_includes_antigravity_with_meters() {
+    let global = AgentAccountsSnapshot {
+        accounts: vec![
+            slot("agy", HarnessId::Antigravity, true, vec![window("Session", 0.42, 100), window("Week", 0.81, 2000)]),
+        ],
+        warnings: vec![],
+    };
+    let accounts = usage_accounts(Some(&global), None);
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].name, "Default \u{b7} Antigravity");
+    let labels: Vec<&str> = accounts[0].windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["5h", "wk"]);
+    assert!((accounts[0].windows[0].fraction - 0.42).abs() < 1e-5);
+    assert!((accounts[0].windows[1].fraction - 0.81).abs() < 1e-5);
+}
+
 // --- menu sections and order ----------------------------------------------------
 
 #[test]
