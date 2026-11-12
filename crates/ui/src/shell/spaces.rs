@@ -382,6 +382,104 @@ mod pinned_session_tests {
         })
     }
 
+    #[gpui::test]
+    fn automatic_group_menus_do_not_toggle_disclosures(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        struct GroupHost(Entity<Shell>);
+        impl Render for GroupHost {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    let rows = shell.render_active_rows(&Theme::default(), cx);
+                    div()
+                        .w(px(280.0))
+                        .h(px(600.0))
+                        .flex()
+                        .flex_col()
+                        .children(rows.rows.into_iter().map(|(_, _, row)| row))
+                        .children(shell.render_space_overlays(
+                            gpui::size(px(800.0), px(600.0)),
+                            window,
+                            cx,
+                        ))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        let shell = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        shell.update(cx, |shell, cx| {
+            shell.settings.space_filter = None;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.devices = vec![serde_json::from_value(serde_json::json!({
+                    "id": "local", "name": "Laptop", "platform": "macos", "lastSeenAt": null,
+                })).unwrap()];
+                state.spaces = vec![serde_json::from_value(serde_json::json!({
+                    "id": "project", "deviceId": "local", "path": "/project", "createdAt": Utc::now(),
+                })).unwrap()];
+                state.chats = vec![pin_test_chat("chat")];
+            });
+        });
+        let (_, cx) = cx.add_window_view(|_, _| GroupHost(shell.clone()));
+        for (organization, project, key, selector) in [
+            (
+                SidebarOrganization::ByProject,
+                true,
+                "project:project",
+                "sidebar-group-menu-project:project",
+            ),
+            (
+                SidebarOrganization::ByDevice,
+                true,
+                "device:local",
+                "sidebar-group-menu-device:local",
+            ),
+            (
+                SidebarOrganization::ByProject,
+                false,
+                "project:home:local",
+                "sidebar-group-menu-project:home:local",
+            ),
+        ] {
+            for collapsed in [false, true] {
+                shell.update(cx, |shell, cx| {
+                    shell.space_menu = popover::Popup::default();
+                    shell.device_group_menu = None;
+                    shell.settings.sidebar_organization = organization;
+                    shell.state.update(cx, |state, _| {
+                        state.chats[0].space_id = project.then(|| "project".into());
+                    });
+                    shell.sidebar_collapsed_groups.clear();
+                    if collapsed {
+                        shell.sidebar_collapsed_groups.insert(key.into());
+                    }
+                    cx.notify();
+                });
+                let button = cx.debug_bounds(selector).unwrap().center();
+                cx.simulate_mouse_move(button, None, gpui::Modifiers::default());
+                cx.simulate_mouse_down(button, MouseButton::Left, gpui::Modifiers::default());
+                cx.simulate_mouse_up(button, MouseButton::Left, gpui::Modifiers::default());
+                shell.read_with(cx, |shell, _| {
+                    assert_eq!(shell.sidebar_collapsed_groups.contains(key), collapsed);
+                    if key == "project:project" {
+                        assert_eq!(
+                            shell.space_menu.get().map(|(id, _)| id.as_str()),
+                            Some("project")
+                        );
+                        assert!(shell.device_group_menu.is_none());
+                    } else {
+                        assert_eq!(
+                            shell.device_group_menu.as_ref().map(|(id, _)| id.as_str()),
+                            Some("local")
+                        );
+                        assert!(!shell.space_menu.is_open());
+                    }
+                });
+            }
+        }
+    }
+
     fn remote_pin_state(state: &mut super::AppState, synced: bool, initialized: bool) {
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Synced);
         state.auth = Some(mast_proto::AuthState::SignedIn {
@@ -5288,22 +5386,81 @@ impl Shell {
             let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
             let toggle_key = collapse_key.clone();
             let toggle_motion_key = motion_key.clone();
-            let header = sidebar_disclosure_header(theme, visible_label, chevron)
-                .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
-                    this.begin_sidebar_disclosure_motion(
-                        &toggle_motion_key,
-                        if was_open { body_height } else { 0.0 },
-                        if was_open { 0.0 } else { body_height },
-                    );
-                    if was_open {
-                        this.sidebar_collapsed_groups.insert(toggle_key.clone());
-                    } else {
-                        this.sidebar_collapsed_groups.remove(&toggle_key);
-                    }
-                    cx.notify();
-                }));
+            // Home groups are scoped to a device; other project groups refer to
+            // a registered space and share its existing management menu.
+            let project_id = (self.settings.sidebar_organization == SidebarOrganization::ByProject)
+                .then(|| self.state.read(cx).space_row(&key).map(|_| key.clone()))
+                .flatten();
+            let device_id = key.strip_prefix("home:").unwrap_or(&key).to_owned();
+            let menu_open = if let Some(id) = &project_id {
+                self.space_menu.get().is_some_and(|(space, _)| space == id)
+            } else {
+                self.device_group_menu
+                    .as_ref()
+                    .is_some_and(|(device, _)| device == &device_id)
+            };
+            let menu = div()
+                .id(SharedString::from(format!(
+                    "sidebar-group-menu-{collapse_key}"
+                )))
+                .debug_selector({
+                    let key = collapse_key.clone();
+                    move || format!("sidebar-group-menu-{key}")
+                })
+                .size(px(20.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .opacity(if menu_open { 1.0 } else { 0.0 })
+                .group_hover("automatic-sidebar-group", |style| style.opacity(1.0))
+                .hover(|style| style.bg(theme.glass_hover()))
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        this.section_menu = None;
+                        this.close_sidebar_view_menu(cx);
+                        if let Some(id) = &project_id {
+                            this.device_group_menu = None;
+                            this.space_menu.open((id.clone(), event.position()));
+                        } else {
+                            this.close_space_menu(cx);
+                            this.device_group_menu = Some((device_id.clone(), event.position()));
+                            window.focus(&this.device_group_menu_focus, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    icon(icons::MORE_HORIZONTAL)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                );
+            let controls = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(menu)
+                .child(chevron);
+            let header =
+                sidebar_disclosure_header(theme, visible_label, controls.into_any_element())
+                    .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+                    .group("automatic-sidebar-group")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
+                        this.begin_sidebar_disclosure_motion(
+                            &toggle_motion_key,
+                            if was_open { body_height } else { 0.0 },
+                            if was_open { 0.0 } else { body_height },
+                        );
+                        if was_open {
+                            this.sidebar_collapsed_groups.insert(toggle_key.clone());
+                        } else {
+                            this.sidebar_collapsed_groups.remove(&toggle_key);
+                        }
+                        cx.notify();
+                    }));
             let body = self.render_sidebar_disclosure_body(
                 &motion_key,
                 !collapsed,
@@ -7225,6 +7382,25 @@ impl Shell {
         cx.notify();
     }
 
+    fn edit_sidebar_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.device_group_menu = None;
+        let Some(name) = self
+            .state
+            .read(cx)
+            .device_name(&device_id)
+            .map(str::to_owned)
+        else {
+            cx.notify();
+            return;
+        };
+        self.open_settings(SettingsSection::Devices, cx);
+        let state = self.state.clone();
+        let page = self
+            .devices_page
+            .get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
+        page.update(cx, |page, cx| page.open_rename(device_id, name, cx));
+    }
+
     /// Space context menu + rename dialog + delete confirm (appended to the
     /// shell's overlay list).
     pub(super) fn render_space_overlays(
@@ -7235,6 +7411,42 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
+
+        if let Some((device_id, position)) = self.device_group_menu.clone() {
+            let rename_id = device_id.clone();
+            let menu = popover::popover_card(&theme)
+                .w(px(180.0))
+                .track_focus(&self.device_group_menu_focus)
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                    match event.keystroke.key.as_str() {
+                        "escape" => this.device_group_menu = None,
+                        "enter" => this.edit_sidebar_device(device_id.clone(), cx),
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.device_group_menu = None;
+                    cx.notify();
+                }))
+                .child(
+                    popover::menu_row(&theme, false, "device-group-rename")
+                        .id("device-group-rename")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit_sidebar_device(rename_id.clone(), cx);
+                            cx.stop_propagation();
+                        }))
+                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
+                        .child("Rename device…"),
+                );
+            overlays.push(popover::menu_at(
+                "device-group-menu",
+                position,
+                menu.into_any_element(),
+                None,
+            ));
+        }
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {
             let closing = self.space_menu.closing_since();

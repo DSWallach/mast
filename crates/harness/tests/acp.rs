@@ -769,8 +769,16 @@ fn antigravity_descriptor_surface_matches_registry_expectations() {
     assert_eq!(antigravity.id(), HarnessId::Antigravity);
     assert_eq!(antigravity.display_name(), "Antigravity");
     assert!(antigravity.supports_steering());
+    assert!(antigravity.supports_agent_tools());
     assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
-    assert!(antigravity.reasoning_levels().is_empty());
+    assert_eq!(
+        antigravity.reasoning_levels(),
+        &[
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1893,7 +1901,9 @@ async fn pi_without_steering_extension_dispatches_idle_steer_immediately() {
 fn antigravity_detection_and_missing_server_never_install() {
     use std::os::unix::fs::PermissionsExt;
     for scenario in [
-        "cli-only",
+        "agy",
+        "agy-override",
+        "missing",
         "partial",
         "server",
         "par",
@@ -1905,15 +1915,20 @@ fn antigravity_detection_and_missing_server_never_install() {
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let name = match scenario {
-            "server" => "agy_acp_server",
-            "par" => "agy_acp_server.par",
-            "exe" => "agy_acp_server.exe",
-            "override" => "custom-server",
-            _ => "agy",
+            "server" => Some("agy_acp_server"),
+            "par" => Some("agy_acp_server.par"),
+            "exe" => Some("agy_acp_server.exe"),
+            "agy-override" => Some("custom-agy"),
+            "override" => Some("custom-server"),
+            "agy" => Some("agy"),
+            _ => None,
         };
-        let exe = bin.join(name);
-        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = name.map(|n| {
+            let exe = bin.join(n);
+            std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            exe
+        });
         let adapters = dir.path().join("adapters");
         if scenario == "partial" {
             let partial = adapters.join("antigravity-acp/1.1.1");
@@ -1928,12 +1943,17 @@ fn antigravity_detection_and_missing_server_never_install() {
             .env("SHELL", "/nonexistent-shell")
             .env("MAST_ADAPTERS_DIR", &adapters)
             .env("MAST_TEST_DETECTION", scenario)
-            .env_remove("ANTIGRAVITY_ACP_EXECUTABLE");
+            .env_remove("AGY_EXECUTABLE")
+            .env_remove("ANTIGRAVITY_ACP_EXECUTABLE")
+            .env_remove("GEMINI_HOME");
+        if scenario == "agy-override" {
+            child.env("AGY_EXECUTABLE", exe.as_ref().unwrap());
+        }
         if scenario == "override" {
-            child.env("ANTIGRAVITY_ACP_EXECUTABLE", &exe);
+            child.env("ANTIGRAVITY_ACP_EXECUTABLE", exe.as_ref().unwrap());
         }
         if scenario == "invalid-override" {
-            child.env("ANTIGRAVITY_ACP_EXECUTABLE", bin.join("missing"));
+            child.env("AGY_EXECUTABLE", bin.join("missing"));
         }
         let output = child.output().unwrap();
         assert!(
@@ -1952,10 +1972,16 @@ async fn antigravity_detection_subprocess() {
         return;
     };
     let harness = AcpHarness::antigravity();
-    let installed = matches!(scenario.as_str(), "server" | "par" | "exe" | "override");
+    let installed = matches!(
+        scenario.as_str(),
+        "agy" | "agy-override" | "server" | "par" | "exe" | "override"
+    );
     assert_eq!(harness.installed(), installed);
     if installed {
-        assert!(harness.resolve_program(false).await.is_ok());
+        let (_prog, args) = harness.resolve_program(false).await.expect("resolves");
+        if matches!(scenario.as_str(), "agy" | "agy-override") {
+            assert_eq!(args, vec!["acp", "--dangerously-skip-permissions"]);
+        }
         return;
     }
     for block in [false, true] {

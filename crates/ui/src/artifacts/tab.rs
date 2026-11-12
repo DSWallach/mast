@@ -30,6 +30,7 @@ use mast_proto::{
 pub(crate) mod comments_view;
 pub(crate) mod compare_view;
 pub(crate) mod find_view;
+mod export_view;
 pub(crate) mod options_view;
 pub(crate) mod plan_view;
 pub(crate) mod questions_view;
@@ -300,6 +301,9 @@ pub(crate) struct ArtifactTab {
     loading: bool,
     mode: Mode,
     picker: Option<Picker>,
+    export_open: crate::popover::Popup<()>,
+    export_saved: Option<std::path::PathBuf>,
+    _export: Option<Task<()>>,
     notice: Option<String>,
     busy: bool,
     web: Option<Box<dyn ArtifactWebHost>>,
@@ -454,6 +458,9 @@ impl ArtifactTab {
             loading: false,
             mode: Mode::Rendered,
             picker: None,
+            export_open: Default::default(),
+            export_saved: None,
+            _export: None,
             notice: None,
             busy: false,
             web: None,
@@ -1136,6 +1143,7 @@ impl ArtifactTab {
             .child(div().flex_1())
             .children(self.render_comments_toolbar(artifact, theme, cx))
             .children(self.render_zoom_control(theme, cx))
+            .children(self.render_export_button(artifact, theme, cx))
             .child(
                 button(
                     "artifact-standalone",
@@ -1625,6 +1633,10 @@ impl gpui::Render for ArtifactTab {
                 .text_color(theme.text_muted)
                 .debug_selector(|| "artifact-notice".into())
                 .child(div().flex_1().min_w_0().child(SharedString::from(notice)))
+                .children(self.export_saved.clone().map(|path| {
+                    div().id("artifact-export-reveal").cursor_pointer().child("Reveal in Finder")
+                        .on_click(cx.listener(move |_, _, _, cx| cx.reveal_path(&path)))
+                }))
                 .child(
                     div()
                         .id("artifact-notice-dismiss")
@@ -1632,6 +1644,7 @@ impl gpui::Render for ArtifactTab {
                         .child(icons::icon(icons::CLOSE).size(px(10.0)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.notice = None;
+                            this.export_saved = None;
                             cx.notify();
                         })),
                 )
