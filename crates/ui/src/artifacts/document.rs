@@ -507,7 +507,38 @@ const PROBE_TEMPLATE: &str = r##"(() => {
     return rgb(getComputedStyle(document.documentElement).backgroundColor) ||
       (matchMedia("(prefers-color-scheme: dark)").matches ? { r: 0, g: 0, b: 0, a: 1 } : { r: 255, g: 255, b: 255, a: 1 });
   };
+  // Keep both the serialized report and the native sibling comparisons bounded.
+  const maxMetrics = 1000;
+  const pixelWidth = (style) => {
+    const values = [style.width, style.minWidth].map((value) => {
+      const match = String(value || "").trim().match(/^(\d+(?:\.\d+)?)px$/i);
+      return match ? Math.round(Number(match[1])) : 0;
+    });
+    return Math.max(...values);
+  };
+  const widthRules = () => {
+    const found = [];
+    const visit = (rules) => {
+      for (const rule of rules) {
+        if (rule.selectorText && rule.style) {
+          const width = pixelWidth(rule.style);
+          if (width) found.push([rule.selectorText, width]);
+        } else if (rule.cssRules && (!rule.conditionText ||
+          (rule.media && matchMedia(rule.conditionText).matches) ||
+          (!rule.media && window.CSS && CSS.supports(rule.conditionText)))) {
+          visit(rule.cssRules);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) {
+      try { if (!sheet.disabled && (!sheet.media || !sheet.media.mediaText || matchMedia(sheet.media.mediaText).matches)) visit(sheet.cssRules); } catch (_) {}
+    }
+    return found;
+  };
   const report = () => {
+    const metrics = [];
+    let contentHeight = 0;
+    try {
     document.querySelectorAll("pre.mermaid, div.mermaid").forEach((el) => {
       const failed = el.getAttribute("data-mast-error");
       if (failed) push(errors, "Mermaid: " + failed);
@@ -527,17 +558,48 @@ const PROBE_TEMPLATE: &str = r##"(() => {
     let outside = 0, lowContrast = 0;
     const examples = [], contrastExamples = [];
     const all = body ? body.querySelectorAll("*") : [];
+    const indexes = new Map();
+    const rules = widthRules();
     for (let i = 0; i < all.length && i < 4000; i++) {
       const el = all[i];
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
+      const style = getComputedStyle(el);
+      if (style.visibility === "hidden" || style.visibility === "collapse" || Number(style.opacity) === 0) continue;
+      if (metrics.length < maxMetrics) {
+        const parentEl = el.parentElement;
+        const parentStyle = parentEl ? getComputedStyle(parentEl) : null;
+        const ownText = (el.innerText || "").replace(/\s+/g, " ").trim();
+        const own = Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
+        const leaf = own && Array.from(el.children).every((child) => getComputedStyle(child).display.startsWith("inline"));
+        const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) || 16) * 1.2;
+        let fixed = pixelWidth(el.style);
+        for (const [selector, width] of rules) {
+          try { if (el.matches(selector)) fixed = Math.max(fixed, width); } catch (_) {}
+        }
+        const index = metrics.length;
+        indexes.set(el, index);
+        metrics.push({
+          sel: (describe(el) + (el.id ? "" : ":nth-child(" + (Array.prototype.indexOf.call(parentEl ? parentEl.children : [], el) + 1) + ")")).slice(0, 200),
+          text: ownText.slice(0, 200),
+          x: Math.round(r.left + window.scrollX), y: Math.round(r.top + window.scrollY),
+          w: Math.round(r.width), h: Math.round(r.height),
+          sw: el.scrollWidth, sh: el.scrollHeight, cw: el.clientWidth, ch: el.clientHeight,
+          clips: /^(hidden|clip)$/.test(style.overflowX) || /^(hidden|clip)$/.test(style.overflowY) || style.textOverflow === "ellipsis",
+          pos: style.position,
+          parent: parentEl === body ? -1 : (indexes.has(parentEl) ? indexes.get(parentEl) : -2),
+          pcw: parentEl ? parentEl.clientWidth : 0,
+          pscroll: !!parentStyle && /^(auto|scroll|overlay)$/.test(parentStyle.overflowX),
+          leaf, lines: leaf ? Math.max(1, Math.round(r.height / lineHeight)) : 0,
+          words: leaf && ownText ? ownText.split(/\s+/).length : 0, fixed
+        });
+      }
       if (r.right > window.innerWidth + 1 || r.left < -1) {
         outside++;
         if (examples.length < 3) examples.push(describe(el));
       }
       const own = Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
       if (own && lowContrast < 50) {
-        const style = getComputedStyle(el);
         const fg = rgb(style.color);
         if (fg && fg.a > 0.5 && style.visibility !== "hidden" && Number(style.opacity) > 0.3) {
           const bg = background(el);
@@ -549,14 +611,24 @@ const PROBE_TEMPLATE: &str = r##"(() => {
     }
     if (outside) push(warnings, outside + " element(s) extend outside the viewport horizontally (" + examples.join(", ") + ")");
     if (lowContrast) push(warnings, lowContrast + " text element(s) have contrast below 3:1 (" + contrastExamples.join(", ") + ")");
-    const contentHeight = Math.ceil(Math.max(
+    contentHeight = Math.ceil(Math.max(
       document.documentElement ? document.documentElement.scrollHeight : 0,
       document.body ? document.body.scrollHeight : 0));
+    } catch (error) {
+      // Reserve space for this diagnostic even if the page filled the error list.
+      if (errors.length >= 40) errors.pop();
+      push(errors, "Render probe failed: " + (error && error.message ? error.message : String(error)));
+    }
     try { parent.postMessage({ mastRenderProbe: { errors, warnings, metrics, contentHeight } }, "*"); } catch (_) {}
   };
   const waitMermaid = (deadline) => {
-    const pending = Array.from(document.querySelectorAll("pre.mermaid, div.mermaid")).some((el) =>
-      !el.querySelector("svg") && !el.getAttribute("data-mast-error") && !el.getAttribute("data-processed"));
+    let pending = false;
+    try {
+      pending = Array.from(document.querySelectorAll("pre.mermaid, div.mermaid")).some((el) =>
+        !el.querySelector("svg") && !el.getAttribute("data-mast-error") && !el.getAttribute("data-processed"));
+    } catch (error) {
+      push(errors, "Render probe failed: " + (error && error.message ? error.message : String(error)));
+    }
     if (pending && Date.now() < deadline) { setTimeout(() => waitMermaid(deadline), 100); return; }
     report();
   };
@@ -578,4 +650,74 @@ pub(crate) struct ProbeReport {
     /// The frame document's full scroll height in CSS pixels.
     #[serde(default, rename = "contentHeight")]
     pub(crate) content_height: Option<u32>,
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::PROBE_TEMPLATE;
+
+    #[test]
+    fn probe_payload_names_are_declared() {
+        let payload = PROBE_TEMPLATE
+            .split("mastRenderProbe: {")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .expect("probe payload");
+        let declarations = PROBE_TEMPLATE.split("parent.postMessage").next().unwrap();
+        for name in payload.split(',').map(str::trim) {
+            assert!(
+                declarations.contains(&format!("const {name} "))
+                    || declarations.contains(&format!("let {name} "))
+                    || (name == "warnings"
+                        && declarations.contains("const errors = [], warnings = []")),
+                "payload name {name} must be declared before posting"
+            );
+        }
+        assert_eq!(payload.split(',').count(), 4);
+    }
+
+    #[test]
+    fn probe_reports_metrics_and_report_errors_in_node_when_available() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut node = match Command::new("node").stdin(Stdio::piped()).spawn() {
+            Ok(node) => node,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("start node: {error}"),
+        };
+        let harness = r#"
+const vm = require('vm');
+const script = PROBE;
+function run(fail) {
+  let result;
+  const style = { visibility:'visible', opacity:'1', display:'block', lineHeight:'20px', fontSize:'16px',
+    color:'rgb(0, 0, 0)', backgroundColor:'rgb(255, 255, 255)', overflowX:'visible', overflowY:'visible', position:'static' };
+  const body = { innerText:'hi', scrollHeight:20, clientWidth:300, children:[], querySelectorAll: s => s === '*' ? [el] : [] };
+  const el = { tagName:'P', id:'', classList:[], style:{}, parentElement:body, children:[], childNodes:[{nodeType:3,textContent:'hi'}],
+    innerText:'hi', scrollWidth:100, scrollHeight:20, clientWidth:100, clientHeight:20,
+    getBoundingClientRect:() => { if (fail) throw Error('fixture failure'); return {left:0,top:0,right:100,width:100,height:20}; }, matches:() => false };
+  body.children.push(el);
+  const root = {scrollWidth:300, clientWidth:300, scrollHeight:20};
+  const document = {readyState:'complete', body, documentElement:root, scrollingElement:root, styleSheets:[], addEventListener(){}, querySelectorAll:() => []};
+  const window = {innerWidth:300, scrollX:0, scrollY:0, addEventListener(){}};
+  const context = {window, document, parent:{postMessage: x => result = x.mastRenderProbe}, console,
+    getComputedStyle:() => style, matchMedia:() => ({matches:false}), setTimeout: f => f(), Date};
+  vm.runInNewContext(script, context);
+  return result;
+}
+const ok = run(false);
+if (!ok || ok.errors.length || ok.metrics.length !== 1 || ok.metrics[0].text !== 'hi' || ok.metrics[0].parent !== -1) throw Error('normal report failed');
+const broken = run(true);
+if (!broken || !broken.errors.some(e => e.includes('Render probe failed: fixture failure'))) throw Error('failure report missing');
+"#;
+        let script = super::probe_script();
+        let input = harness.replace("PROBE", &serde_json::to_string(&script).unwrap());
+        node.stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        assert!(node.wait().unwrap().success());
+    }
 }
