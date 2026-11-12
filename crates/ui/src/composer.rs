@@ -7833,7 +7833,7 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -7928,6 +7928,11 @@ impl Composer {
             .flex_col()
             .child(
                 div()
+                    .id(("wizard-body", page))
+                    // Keep the footer inside the window even for large inputs
+                    // or many options; the body can scroll independently.
+                    .max_h(window.viewport_size().height * 0.6)
+                    .overflow_y_scroll()
                     .px(px(16.0))
                     .pt(px(16.0))
                     .flex()
@@ -7966,6 +7971,12 @@ impl Composer {
                     )
                     .child(
                         div()
+                            .id(("wizard-question", page))
+                            // A long command gets its own viewport so the
+                            // approval choices stay close at hand.
+                            .max_h(window.viewport_size().height * 0.25)
+                            .flex_shrink_0()
+                            .overflow_y_scroll()
                             .mt(px(6.0))
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
@@ -8375,7 +8386,7 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let wizard = self.render_wizard(window, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 

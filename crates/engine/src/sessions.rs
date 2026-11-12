@@ -1288,6 +1288,13 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Whether this request still belongs to the live run, including requests
+    /// from subagents that are not the latest status-row question.
+    pub(crate) fn has_pending_input(&self, chat_id: &str, request_id: &str) -> bool {
+        let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
+        pending.is_some_and(|pending| lock(&pending).contains_key(request_id))
+    }
+
     /// Resolve a pending `request_input` question set. Returns `false` when no such
     /// request is pending (unknown id, or the run already settled).
     pub fn respond_input(
