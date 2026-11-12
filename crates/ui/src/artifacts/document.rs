@@ -47,7 +47,7 @@ pub(crate) fn web_document(
     let frame_scripts = if probe {
         format!(
             "{LINK_FRAME_SCRIPT}{FIND_FRAME_SCRIPT}{QUESTION_FRAME_SCRIPT}{}",
-            probe_script()
+            probe_script(theme)
         )
     } else {
         // Only the app's own view gets the comment + answer bridge; render
@@ -447,8 +447,22 @@ pub(crate) const READ_PROBE_SCRIPT: &str =
 /// the layout heuristics ([`super::layout_heuristics`]). Posts
 /// `{mastRenderProbe: {errors, warnings, metrics}}` to the parent once the
 /// page has loaded and settled.
-pub(crate) fn probe_script() -> String {
+pub(crate) fn probe_script(theme: &FragmentTheme) -> String {
+    let background = theme
+        .vars
+        .iter()
+        .find(|(name, _)| *name == "--background")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or(if theme.dark {
+            "rgb(0 0 0)"
+        } else {
+            "rgb(255 255 255)"
+        });
     PROBE_TEMPLATE
+        .replace(
+            "__THEME_BACKGROUND__",
+            &serde_json::to_string(background).expect("theme background"),
+        )
         .replace("__SETTLE_MS__", &SETTLE_MS.to_string())
         .replace("__MERMAID_WAIT_MS__", &MERMAID_WAIT_MS.to_string())
 }
@@ -504,8 +518,7 @@ const PROBE_TEMPLATE: &str = r##"(() => {
       const c = rgb(getComputedStyle(node).backgroundColor);
       if (c && c.a > 0.5) return c;
     }
-    return rgb(getComputedStyle(document.documentElement).backgroundColor) ||
-      (matchMedia("(prefers-color-scheme: dark)").matches ? { r: 0, g: 0, b: 0, a: 1 } : { r: 255, g: 255, b: 255, a: 1 });
+    return rgb(__THEME_BACKGROUND__) || { r: 255, g: 255, b: 255, a: 1 };
   };
   // Keep both the serialized report and the native sibling comparisons bounded.
   const maxMetrics = 1000;
@@ -577,6 +590,9 @@ const PROBE_TEMPLATE: &str = r##"(() => {
         for (const [selector, width] of rules) {
           try { if (el.matches(selector)) fixed = Math.max(fixed, width); } catch (_) {}
         }
+        const cell = el.closest("td, th");
+        const table = cell && cell.closest("table");
+        const tableFits = !!(table && table.parentElement && table.scrollWidth <= table.parentElement.clientWidth + 1);
         const index = metrics.length;
         indexes.set(el, index);
         metrics.push({
@@ -590,7 +606,7 @@ const PROBE_TEMPLATE: &str = r##"(() => {
           parent: parentEl === body ? -1 : (indexes.has(parentEl) ? indexes.get(parentEl) : -2),
           pcw: parentEl ? parentEl.clientWidth : 0,
           pscroll: !!parentStyle && /^(auto|scroll|overlay)$/.test(parentStyle.overflowX),
-          leaf, lines: leaf ? Math.max(1, Math.round(r.height / lineHeight)) : 0,
+          tableFits, leaf, lines: leaf ? Math.max(1, Math.round(r.height / lineHeight)) : 0,
           words: leaf && ownText ? ownText.split(/\s+/).length : 0, fixed
         });
       }
@@ -692,26 +708,31 @@ const script = PROBE;
 function run(fail) {
   let result;
   const style = { visibility:'visible', opacity:'1', display:'block', lineHeight:'20px', fontSize:'16px',
-    color:'rgb(0, 0, 0)', backgroundColor:'rgb(255, 255, 255)', overflowX:'visible', overflowY:'visible', position:'static' };
+    color:'rgb(0, 0, 0)', backgroundColor:'rgba(0, 0, 0, 0)', overflowX:'visible', overflowY:'visible', position:'static' };
   const body = { innerText:'hi', scrollHeight:20, clientWidth:300, children:[], querySelectorAll: s => s === '*' ? [el] : [] };
   const el = { tagName:'P', id:'', classList:[], style:{}, parentElement:body, children:[], childNodes:[{nodeType:3,textContent:'hi'}],
     innerText:'hi', scrollWidth:100, scrollHeight:20, clientWidth:100, clientHeight:20,
-    getBoundingClientRect:() => { if (fail) throw Error('fixture failure'); return {left:0,top:0,right:100,width:100,height:20}; }, matches:() => false };
+    getBoundingClientRect:() => { if (fail) throw Error('fixture failure'); return {left:0,top:0,right:100,width:100,height:20}; }, matches:() => false, closest:() => null };
   body.children.push(el);
   const root = {scrollWidth:300, clientWidth:300, scrollHeight:20};
   const document = {readyState:'complete', body, documentElement:root, scrollingElement:root, styleSheets:[], addEventListener(){}, querySelectorAll:() => []};
   const window = {innerWidth:300, scrollX:0, scrollY:0, addEventListener(){}};
   const context = {window, document, parent:{postMessage: x => result = x.mastRenderProbe}, console,
-    getComputedStyle:() => style, matchMedia:() => ({matches:false}), setTimeout: f => f(), Date};
+    getComputedStyle:() => style, matchMedia:() => ({matches:true}), setTimeout: f => f(), Date};
   vm.runInNewContext(script, context);
   return result;
 }
 const ok = run(false);
-if (!ok || ok.errors.length || ok.metrics.length !== 1 || ok.metrics[0].text !== 'hi' || ok.metrics[0].parent !== -1) throw Error('normal report failed');
+if (!ok || ok.errors.length || ok.warnings.length || ok.metrics.length !== 1 || ok.metrics[0].text !== 'hi' || ok.metrics[0].parent !== -1) throw Error('normal report failed');
 const broken = run(true);
 if (!broken || !broken.errors.some(e => e.includes('Render probe failed: fixture failure'))) throw Error('failure report missing');
 "#;
-        let script = super::probe_script();
+        let script = super::probe_script(&crate::browser::fragment::FragmentTheme {
+            dark: false,
+            vars: vec![("--background", "rgb(255 255 255)".into())],
+            font_sans: String::new(),
+            font_mono: String::new(),
+        });
         let input = harness.replace("PROBE", &serde_json::to_string(&script).unwrap());
         node.stdin
             .take()
