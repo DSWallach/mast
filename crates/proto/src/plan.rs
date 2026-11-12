@@ -278,8 +278,8 @@ pub fn linear_body(t: &Ticket) -> String {
     if t.out_of_scope.is_empty() {
         s.push_str("- —\n");
     }
-    s.push_str("\n## Contract\n");
     if let Some(c) = &t.contract {
+        s.push_str("\n## Contract\n");
         let _ = writeln!(s, "{} ({})", c.r#ref, c.role);
     }
     s.push_str("\n## Where\n");
@@ -329,6 +329,14 @@ mod tests {
             body,
             "# Order history improvement 1 with a descriptive title\n\n## Goal\nImprove order history step 1.\n\n## Behavior\n- Show the agreed behavior. [event-order]\n\n## Acceptance\n- The behavior works.\n\n## Out of scope\n- —\n\n## Contract\nevents (produces)\n\n## Where\n- app/orders/views.py:120\n\n## Depends on\n—\n\n## Size\nM: 100–200 lines"
         );
+    }
+    #[test]
+    fn linear_body_omits_absent_contract_and_marks_no_dependencies() {
+        let p = parse(&fixture()).unwrap();
+        let ticket = &p.tickets.unwrap()[4];
+        let body = linear_body(ticket);
+        assert!(!body.contains("## Contract"));
+        assert!(body.contains("## Depends on\n—\n"));
     }
     #[test]
     fn rules_reject_invalid_values() {
