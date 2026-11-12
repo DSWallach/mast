@@ -104,13 +104,16 @@ pub(crate) fn export_document(kind: WebKind, source: &str, title: &str, pdf: boo
     let dark = FragmentTheme::from_theme(&crate::theme::Theme::dark());
     let mut style = fragment::base_stylesheet(&light, false);
     if !pdf {
-        style.push_str("\n@media (prefers-color-scheme: dark) { :root { color-scheme: dark;\n");
+        let mut dark_vars = String::from("color-scheme: dark;\n");
         for (name, value) in &dark.vars {
-            style.push_str(&format!("{name}: {value};\n"));
+            dark_vars.push_str(&format!("{name}: {value};\n"));
         }
-        style.push_str("} }\n");
+        style.push_str(&format!("\n@media (prefers-color-scheme: dark) {{ :root:not([data-theme]) {{ {dark_vars} }} }}\n:root[data-theme=dark] {{ {dark_vars} }}\n"));
     }
     style.push_str("html, body { background: var(--background); } body { padding: 24px !important; } .mk-sheet-actions { display: none !important; }\n");
+    if kind == WebKind::DecisionSheet {
+        style.push_str(".mk-grid, .mk-screenshots { grid-template-columns: minmax(0, 1fr); } .mk-table { table-layout: fixed; } .mk-table th, .mk-table td { white-space: normal; min-width: 0; overflow-wrap: anywhere; } .mk-table th:first-child, .mk-table td:first-child { width: 72px; } .mk-row-id, .mk-mono, .mk-step-chip, .mk-step-params { white-space: normal; overflow-wrap: anywhere; word-break: normal; } .mk-screenshot-placeholder { min-height: 0; padding: 10px; }\n");
+    }
     if pdf {
         style.push_str("@page { size: A4; margin: 15mm; } @media print { body { padding: 0 !important; } .pl-rail { display: none !important; } }\n");
     }
