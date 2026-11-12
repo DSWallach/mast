@@ -427,6 +427,18 @@ struct PublishArgs {
     idempotency_key: Option<String>,
 }
 
+fn render_path_kind(path: &Path, bytes: &[u8]) -> ArtifactKind {
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+        if let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
+            .and_then(|value| value.get("kind").and_then(Value::as_str).and_then(ArtifactKind::parse))
+            .filter(|kind| matches!(kind, ArtifactKind::DecisionSheet | ArtifactKind::Plan | ArtifactKind::Options))
+        {
+            return kind;
+        }
+    }
+    ArtifactKind::from_path(&path.to_string_lossy())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RenderCheckArgs {
@@ -2760,7 +2772,7 @@ impl ArtifactsService {
                     .kind
                     .as_deref()
                     .and_then(ArtifactKind::parse)
-                    .unwrap_or_else(|| ArtifactKind::from_path(&path.to_string_lossy()));
+                    .unwrap_or_else(|| render_path_kind(&path, &bytes));
                 request.title = default_title_for(&path);
                 request.kind = kind;
                 request.path = path.to_string_lossy().into_owned();
@@ -3126,6 +3138,15 @@ mod tests {
             drop(stream);
             assert_eq!(broker.subscriber_count(), 0);
         });
+    }
+
+    #[test]
+    fn render_path_detects_structured_json_kind() {
+        for (kind, expected) in [("decision-sheet", ArtifactKind::DecisionSheet), ("plan", ArtifactKind::Plan), ("options", ArtifactKind::Options)] {
+            let content = format!(r#"{{"kind":"{kind}"}}"#);
+            assert_eq!(render_path_kind(Path::new("example.json"), content.as_bytes()), expected);
+        }
+        assert_eq!(render_path_kind(Path::new("example.json"), b"{}"), ArtifactKind::Markdown);
     }
 
     #[test]
