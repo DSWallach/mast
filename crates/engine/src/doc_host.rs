@@ -5247,6 +5247,29 @@ impl DocHost {
                 request_id,
                 answers,
             } => {
+                // Approval protocols accept option labels only. A custom reply is
+                // a new instruction, not a malformed verdict. Interrupt first so
+                // the pending operation cannot run ahead of the user's correction.
+                let open_questions = handle.doc.read_entries()?.iter().rev().find_map(|entry| {
+                    entry.parts.iter().find_map(|part| match part {
+                        MessagePart::Input { request_id: id, questions, resolved: false, .. }
+                            if id == request_id => Some(questions.clone()),
+                        _ => None,
+                    })
+                });
+                let current_request = !sessions.turn_in_flight(chat_id)
+                    || sessions.has_pending_input(chat_id, request_id);
+                if current_request
+                    && let Some(prompt) = open_questions.as_deref()
+                        .and_then(|questions| approval_reply_prompt(questions, answers))
+                {
+                    self.interrupt_and_pause_queue(sessions, handle).await?;
+                    handle.doc.resolve_input(request_id)?;
+                    return self.deliver_prompt(
+                        sessions, handle, &entry.id, &prompt,
+                        Some(format!("{}-reply", entry.id)), entry.issued_at,
+                    ).await;
+                }
                 if sessions.respond_input(chat_id, request_id, answers.clone())? {
                     return Ok((SessionCommandStatus::Applied, None));
                 }
@@ -6157,6 +6180,23 @@ impl DocHost {
     }
 }
 
+/// Extract a custom instruction only from a single provider approval. Ordinary
+/// choice questions keep their existing answer validation.
+fn approval_reply_prompt(questions: &[UserInputQuestion], answers: &[UserInputAnswer]) -> Option<String> {
+    let [question] = questions else { return None; };
+    let [answer] = answers else { return None; };
+    let [label] = answer.labels.as_slice() else { return None; };
+    let header = question.header.trim_end_matches(" (subagent)");
+    let approval = question.command_approval.is_some()
+        || matches!(header, "Approve command" | "Approve permissions" | "Approve file change" | "Permission");
+    if !approval || label.trim().is_empty()
+        || question.options.iter().any(|option| option.eq_ignore_ascii_case(label.trim()))
+    {
+        return None;
+    }
+    Some(label.trim().to_owned())
+}
+
 /// The resumed-turn prompt for answers to a question whose run died: each
 /// answer paired with its question text so the reattached conversation reads
 /// naturally. Pure.
@@ -6195,6 +6235,30 @@ fn encode_part_segment(part_id: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod approval_reply_tests {
+    use super::*;
+
+    #[test]
+    fn custom_reply_overrides_approval_but_preserves_choice_validation() {
+        let mut question = UserInputQuestion {
+            id: "q".into(), header: "Approve command (subagent)".into(),
+            question: "Run it?".into(), options: vec!["Yes".into(), "No".into()],
+            multi_select: false, allow_custom: false, command_approval: None,
+        };
+        let answer = |label: &str| vec![UserInputAnswer {
+            question_id: "q".into(), labels: vec![label.into()],
+        }];
+        for label in ["Yes", "no", "", "  "] {
+            assert_eq!(approval_reply_prompt(&[question.clone()], &answer(label)), None);
+        }
+        assert_eq!(approval_reply_prompt(&[question.clone()], &answer("  Try another approach  ")),
+            Some("Try another approach".into()));
+        question.header = "Pick".into();
+        assert_eq!(approval_reply_prompt(&[question], &answer("Try another approach")), None);
+    }
 }
 
 #[cfg(test)]
