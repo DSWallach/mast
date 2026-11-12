@@ -9076,7 +9076,8 @@ impl Shell {
             return;
         }
         if event.keystroke.key == "escape" && self.work_outline_modal_open() {
-            if !self.dismiss_work_outline_modal_skills(cx) {
+            let picker_closed = self.hand_off_pickers().is_some_and(|pickers| pickers.update(cx, |pickers, cx| pickers.close_open_popover(cx)));
+            if !picker_closed && !self.dismiss_work_outline_modal_skills(cx) {
                 self.cancel_work_outline_modal(window, cx);
             }
             cx.stop_propagation();
@@ -11954,6 +11955,13 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
+            .on_action(cx.listener(|this, action: &crate::selection_chip::AddToSession, window, cx| {
+                if !matches!(this.route, Route::Chat | Route::Overview) {
+                    this.route = Route::Chat;
+                }
+                this.composer.update(cx, |composer, cx| composer.add_selected_text(&action.0, window, cx));
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)
@@ -12025,6 +12033,7 @@ impl Render for Shell {
                 // Start Chat's model menu advertises the same slots.
                 let pickers = this
                     .start_chat_pickers()
+                    .or_else(|| this.hand_off_pickers())
                     .filter(|pickers| pickers.read(cx).is_open())
                     .unwrap_or_else(|| this.composer.read(cx).pickers().clone());
                 let handled = pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
@@ -12102,7 +12111,7 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 // Inside Start Chat the shortcut opens the dialog's picker.
-                if let Some(pickers) = this.start_chat_pickers() {
+                if let Some(pickers) = this.start_chat_pickers().or_else(|| this.hand_off_pickers()) {
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                     return;
                 }

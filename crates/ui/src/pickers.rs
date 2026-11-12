@@ -647,6 +647,7 @@ pub struct Pickers {
     /// `Some` for a launcher instance (see [`NewChatLauncher`]); `None` for
     /// the composer's own pickers.
     launcher: Option<NewChatLauncher>,
+    hand_off: bool,
     /// Keyboard focus of the launcher's model chip and approval chip (the
     /// launcher's dialog walks prompt → model → approval with Tab).
     model_chip_focus: FocusHandle,
@@ -833,6 +834,20 @@ impl Pickers {
         this
     }
 
+    pub(crate) fn seed_hand_off(&mut self, config: Option<&ChatConfig>, cx: &mut Context<Self>) {
+        self.hand_off = true;
+        let Some(config) = config else { return };
+        self.config.harness = Some(config.harness);
+        self.config.model = config.model.clone();
+        self.config.reasoning = config.reasoning;
+        self.defaults.harness = Some(config.harness);
+        if let Some(model) = &config.model {
+            self.defaults.remember_model(config.harness, model.clone(), model.clone());
+        }
+        self.ensure_models(config.harness, false, cx);
+        cx.notify();
+    }
+
     fn build(
         state: Entity<AppState>,
         launcher: Option<NewChatLauncher>,
@@ -982,6 +997,7 @@ impl Pickers {
         Self {
             state,
             launcher,
+            hand_off: false,
             model_chip_focus: cx.focus_handle(),
             approval_chip_focus: cx.focus_handle(),
             space_owner,
@@ -6202,7 +6218,7 @@ impl Render for Pickers {
             .min_w_0()
             .gap(px(4.0))
             .child(model_chip)
-            .child(self.render_approval_chip(&theme, cx))
+            .when(!self.hand_off, |row| row.child(self.render_approval_chip(&theme, cx)))
     }
 }
 
@@ -8288,6 +8304,10 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) {
         self.pick_reasoning(level, cx);
+    }
+
+    pub(crate) fn pick_model_for_tests(&mut self, model: &str, cx: &mut Context<Self>) {
+        self.pick_model(model.to_owned(), cx);
     }
 }
 

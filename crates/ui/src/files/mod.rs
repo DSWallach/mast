@@ -156,6 +156,7 @@ impl FilesPresentation {
 impl EventEmitter<FilesEvent> for FilesSurface {}
 
 struct EditorContextMenu {
+    selected_text: String,
     editor: Entity<editor::FileEditorState>,
     position: Point<Pixels>,
     availability: editor::EditorMenuAvailability,
@@ -535,7 +536,9 @@ impl FilesSurface {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let selected_text = editor.read(cx).selected_value().to_string();
         self.editor_context_menu.open(EditorContextMenu {
+            selected_text,
             editor,
             position,
             availability,
@@ -592,6 +595,7 @@ impl FilesSurface {
         let editor = menu.editor.clone();
         let position = menu.position;
         let availability = menu.availability;
+        let selected_text = menu.selected_text.clone();
         let closing = self.editor_context_menu.closing_since();
 
         let card = crate::popover::popover_card(theme)
@@ -626,6 +630,16 @@ impl FilesSurface {
                 editor::EditorContextAction::Paste,
                 cx,
             ))
+            .child(
+                crate::popover::menu_row(theme, false, "files-editor-context-add-to-session")
+                    .id("files-editor-context-add-to-session")
+                    .when(!availability.copy, |row| row.opacity(0.38).cursor_default())
+                    .when(availability.copy, |row| row.on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_editor_context_menu(cx);
+                        window.dispatch_action(Box::new(crate::selection_chip::AddToSession(selected_text.clone())), cx);
+                    })))
+                    .child("Add to session"),
+            )
             .child(crate::popover::menu_separator(&theme))
             .child(Self::editor_context_menu_row(
                 theme,

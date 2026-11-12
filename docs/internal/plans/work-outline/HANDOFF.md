@@ -28,6 +28,14 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 79: hand off to another provider/model** (2026-11-11, 07ecc9648; full suite):
+  - Hand off to new chat (dialog, `HandOffOrchestrator` RPC, `hand_off_orchestrator` MCP) takes optional
+    `harness`, `model`, `reasoning`. The dialog reuses the new-chat picker, preset to the source chat. A different
+    harness starts from its default model; sandbox and Ask/Auto carry over; models are checked against the
+    harness catalog (`hand_off_config` in crates/engine/src/rpc.rs).
+  - Tests (`run_release_tests.sh bd9f573d6`, covering fast-tracked 77/78): nextest 2469/2471 (the two known
+    WebRTC preview tests; crate unchanged), UI 2618/0. Backup: `~/zeron-dev-app-backups/mast-release-78`.
+
 - **Release 78: decision-sheet keys + row outcomes** (2026-11-11, 14ef72b3f; fast-tracked, targeted tests only):
   - Artifact frames report edit focus (`mastEditFocus`), so a focused note/answer field gets bare-key shortcuts
     (e/n/p/t/v) and ⌘A/C/V/X/Z. Cmd/Ctrl app shortcuts and browser keys still go to Mast; Esc in a field returns
@@ -1090,7 +1098,10 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 78** (fast-tracked; targeted tests only). The next normal release must run the full suite.
+- **Installed: release 79** (full suite).
+- **PR #1 (David Wallach, idle CPU + input latency):** reviewed (item 953b96ee, Required Action 08002e19):
+  merge after three fixes (nested-submodule diff filter, scheduled-run backfill marker, @-completion freshness on
+  over-budget checkouts). Waiting on Mikey: David fixes vs we fix. Review checkout `.worktrees/zeron/mast-pr-1`.
 - **main is kept current (Mikey, 2026-11-11):** after each integration push the coordinator fast-forwards `main` in
   both repos (`git push origin origin/work-outline-implementation:refs/heads/main`; parent `zeron-work-outline`).
   Fast-forward only. Workers never touch main.

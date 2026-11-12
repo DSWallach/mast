@@ -683,14 +683,14 @@ pub fn conversation_tool_detail_frame() -> Div {
     div().w_full().min_w_0().flex().flex_col().overflow_hidden()
 }
 
-pub fn conversation_tool_output_line(theme: &Theme, height: f32, text: SharedString) -> Div {
+pub fn conversation_tool_output_line(theme: &Theme, height: f32, key: String, text: SharedString) -> Div {
     div()
         .h(px(height))
         .flex_none()
         .flex()
         .items_center()
         .text_color(theme.text_faint)
-        .child(text)
+        .child(crate::markdown::render::transcript_text(key, text, theme))
 }
 
 pub fn conversation_thought_line(height: f32) -> Div {

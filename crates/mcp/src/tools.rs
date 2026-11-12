@@ -140,9 +140,12 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "hand_off_orchestrator",
-            description: "Start a successor on this work item with your harness, model and sandbox, and hand it your active workers and pending wakes. Supply a summary and a stable idempotency key. The first message includes the workers and their open Required Actions. Your chat remains active.",
+            description: "Start a successor on this work item with your sandbox; harness and model default to yours. Hand it your active workers and pending wakes. Supply a summary and a stable idempotency key. The first message includes the workers and their open Required Actions. Your chat remains active.",
             input_schema: json!({"type":"object", "properties": {
                 "summary": {"type":"string", "description":"Context and next steps for the successor."},
+                "harness": {"type":"string", "description":"Successor harness id (see list_harnesses)."},
+                "model": {"type":"string", "description":"Successor model id (see list_models for the chosen harness)."},
+                "reasoning": {"type":"string", "description":"Reasoning level supported by the chosen model."},
                 "idempotencyKey": {"type":"string", "description":"Stable key for this hand-off; reuse on retry."}
             }, "required":["summary", "idempotencyKey"]}),
         },
