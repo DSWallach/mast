@@ -10,5 +10,6 @@
 - [Plans and artifacts](plans-and-artifacts.md)
 - [GitHub and Linear](github-and-linear.md)
 - [Accounts](accounts.md)
+- [Scheduled tasks](scheduled-tasks.md)
 - [Keyboard](keyboard.md)
 - [Updating](updating-to-mast.md)

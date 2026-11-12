@@ -1740,7 +1740,7 @@ impl Render for TerminalPanel {
         // replace the internal bar.
         let tab_bar: Option<gpui::AnyElement> =
             (!self.embedded).then(|| self.render_tab_bar(&chat, cx).into_any_element());
-        div()
+        let content = div()
             .size_full()
             .flex()
             .flex_col()
@@ -1789,7 +1789,39 @@ impl Render for TerminalPanel {
                     .child(TerminalElement::new(cx.entity(), focused))
                     .children(scrollbar),
             )
-            .into_any_element()
+            .into_any_element();
+        let copy = cx.entity();
+        let paste = cx.entity();
+        let selected_text = self
+            .with_active_emulator(cx, |emu| emu.selection_text())
+            .flatten();
+        let has_selection = selected_text.is_some();
+        crate::text_menu::TextMenu::new(
+            "terminal-text-menu",
+            content,
+            vec![
+                crate::text_menu::Entry::new("Copy", has_selection, move |_, cx| {
+                    copy.update(cx, |panel, cx| {
+                        panel.copy_selection(cx);
+                    });
+                }),
+                crate::text_menu::Entry::add_to_session(has_selection, move || selected_text.clone()),
+                crate::text_menu::Entry::new(
+                    "Paste",
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .is_some(),
+                    move |window, cx| {
+                        paste.update(cx, |panel, cx| {
+                            window.focus(&panel.focus_handle, cx);
+                            panel.paste_clipboard(cx);
+                        });
+                    },
+                ),
+            ],
+        )
+        .fill()
+        .into_any_element()
     }
 }
 

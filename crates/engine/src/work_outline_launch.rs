@@ -56,6 +56,64 @@ use crate::execution_scope::{
 use crate::sessions::SessionsEngine;
 use crate::workspace_host::WorkspaceHost;
 
+/// Shared deterministic launch identities, including standalone scheduled chats.
+pub(crate) fn scheduled_id(operation: &str, role: &str) -> String {
+    derive_id(operation, role)
+}
+
+/// Standalone variant of the normal durable launch path. Intent and immutable
+/// inputs are persisted by the scheduler before this is called. Each step is
+/// idempotent, including the first message and command across a crash/retry.
+pub(crate) fn launch_scheduled_chat(
+    workspace: &WorkspaceHost,
+    host: &DocHost,
+    run: &mast_proto::ScheduledRun,
+) -> Result<(), EngineError> {
+    let chat_id = run
+        .chat_id
+        .as_deref()
+        .ok_or_else(|| EngineError::Other("Missing scheduled chat identity".into()))?;
+    let draft = &run.snapshot;
+    workspace.create_chat(
+        chat_id,
+        draft.space_id.as_deref(),
+        Some(workspace.device_id()),
+        Some(draft.config.clone()),
+        Some(draft.cwd.clone()),
+    )?;
+    workspace.set_chat_scheduled_task_info(
+        chat_id,
+        &mast_proto::ScheduledChat {
+            task_id: run.task_id.clone(),
+            task_name: draft.name.clone(),
+            session_created_at: Some(run.created_at),
+            run_id: run.id.clone(),
+        },
+    )?;
+    if workspace.chat(chat_id)?.is_some_and(|c| c.title.is_none()) {
+        workspace.rename_chat(chat_id, &draft.name)?;
+    }
+    let message_id = scheduled_id(&run.id, "message");
+    let command_id = scheduled_id(&run.id, "command");
+    let request = prompt_request(
+        &WorkItemPrompt {
+            text: draft.prompt.clone(),
+            attachments: vec![],
+        },
+        Some(&draft.config),
+        &draft.cwd,
+    );
+    host.queue_command_with_id(
+        chat_id,
+        &command_id,
+        SessionCommandPayload::Run {
+            request,
+            message_id,
+        },
+    )?;
+    Ok(())
+}
+
 /// Ledger key: this device accepted `operationId` for a launch.
 fn ledger_launch_key(operation_id: &str) -> String {
     format!(
@@ -1227,6 +1285,7 @@ fn prompt_request(prompt: &WorkItemPrompt, config: Option<&ChatConfig>, cwd: &st
             .unwrap_or(SandboxLevel::WorkspaceWrite),
         auto_approve: config.is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments: prompt.attachments.clone(),
         worktree: None,
         instructions: None,

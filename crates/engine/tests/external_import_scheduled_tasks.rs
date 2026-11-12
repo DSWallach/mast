@@ -54,11 +54,9 @@ async fn scheduled_runs_are_tagged_at_import_and_by_backfill() {
         std::env::set_var("HOME", fake_home.path());
     }
     let data_dir = tempfile::tempdir().expect("data dir");
-    let core = assemble(EngineProfile::development(
-        data_dir.path(),
-        "dev-org",
-        "dev-user",
-    ));
+    let profile = EngineProfile::development(data_dir.path(), "dev-org", "dev-user");
+    let old_markers = profile.store_root().join("scheduled_task_markers");
+    let core = assemble(profile);
     let transcripts = tempfile::tempdir().expect("transcripts dir");
     let chat = |id: &str| core.workspace.chat(id).expect("read").expect("chat exists");
 
@@ -76,6 +74,10 @@ async fn scheduled_runs_are_tagged_at_import_and_by_backfill() {
         .expect("import titled");
     let imported = chat("chat-titled");
     assert_eq!(imported.scheduled_task.as_deref(), Some("github-summary"));
+    assert_eq!(
+        imported.scheduled_task_info.as_ref().unwrap().task_name,
+        "github-summary"
+    );
     assert_eq!(imported.title.as_deref(), Some("GitHub priority briefing"));
 
     let untitled = transcripts.path().join("untitled.jsonl");
@@ -96,6 +98,13 @@ async fn scheduled_runs_are_tagged_at_import_and_by_backfill() {
         Some("daily-summary"),
         "the task prompt is never used as a title"
     );
+    // A rolling-branch import already has its legacy tag and scan marker.
+    // It must still gain structured provenance when this feature is installed.
+    let mut legacy_tagged = imported;
+    legacy_tagged.scheduled_task_info = None;
+    core.workspace.import_chat_row(&legacy_tagged).unwrap();
+    std::fs::create_dir_all(&old_markers).unwrap();
+    std::fs::write(old_markers.join("chat-untitled"), b"").unwrap();
 
     let mention = transcripts.path().join("mention.jsonl");
     write_transcript(
@@ -143,13 +152,25 @@ async fn scheduled_runs_are_tagged_at_import_and_by_backfill() {
         .external_import
         .repair_scheduled_tasks()
         .expect("backfill");
-    assert_eq!(repaired, 1, "only the legacy chat needed tagging");
+    assert_eq!(
+        repaired, 2,
+        "both pre-feature imports need structured provenance"
+    );
+    assert!(chat("chat-untitled").scheduled_task_info.is_some());
+    assert_eq!(
+        chat("chat-untitled").title.as_deref(),
+        Some("daily-summary")
+    );
     let backfilled = chat("chat-legacy");
     assert_eq!(
         backfilled.scheduled_task.as_deref(),
         Some("codespace-manager")
     );
     assert_eq!(backfilled.title.as_deref(), Some("Codespace manager"));
+    assert_eq!(
+        backfilled.scheduled_task_info.as_ref().unwrap().task_name,
+        "codespace-manager"
+    );
     assert!(chat("chat-mention").scheduled_task.is_none());
 
     assert_eq!(

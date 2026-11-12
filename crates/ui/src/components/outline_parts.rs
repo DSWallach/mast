@@ -1362,7 +1362,7 @@ pub fn outline_section_message(text: String, color: gpui::Hsla, theme: &Theme) -
             11.0 + super::layout_type_adjustment(theme),
         ))
         .text_color(color)
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 /// Blueprint list section.
@@ -1382,7 +1382,7 @@ pub fn outline_blueprint_explanation(text: &'static str, theme: &Theme) -> Div {
             10.5 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .child(text)
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 /// Blueprint list row.
@@ -1480,7 +1480,7 @@ pub fn outline_secondary_text(text: String, theme: &Theme) -> Div {
             10.5 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 /// Horizontal group of details actions.
@@ -1561,7 +1561,7 @@ pub fn outline_detail_row_text(text: String, theme: &Theme) -> Div {
             11.5 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 /// Small action with a bounded label in an item detail row.
@@ -1723,7 +1723,7 @@ pub fn outline_effective_text(text: String, theme: &Theme) -> Div {
             12.0 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text)
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 /// One line in an execution configuration summary.
@@ -1733,7 +1733,7 @@ pub fn outline_execution_line(text: String, size: f32, color: gpui::Hsla, theme:
             size + super::layout_type_adjustment(theme),
         ))
         .text_color(color)
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 /// Repository binding row in an execution summary.
@@ -2604,7 +2604,7 @@ pub fn outline_instruction_text(
             el.max_h(crate::typography::ui_rems(height))
                 .overflow_hidden()
         })
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 pub fn outline_instruction_fold(index: usize, expanded: bool, theme: &Theme) -> Stateful<Div> {
     div()
@@ -3151,7 +3151,7 @@ pub fn outline_detail_text(text: String, size: f32, color: gpui::Hsla, theme: &T
             size + super::layout_type_adjustment(theme),
         ))
         .text_color(color)
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 /// Metadata row above an effective instruction.

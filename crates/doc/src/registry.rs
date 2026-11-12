@@ -1329,10 +1329,16 @@ impl RegistryDoc {
                 chat.room_gen.map(|g| json!(g)).unwrap_or(Value::Null),
             ),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+            ("sideOf", opt_str(chat.side_of.as_deref())),
+            (
+                "sideAbsorbedThrough",
+                opt_str(chat.side_absorbed_through.as_deref()),
+            ),
             ("linkedPrUrl", opt_str(chat.linked_pr_url.as_deref())),
             ("linkedPrSource", opt_source(chat.linked_pr_source)),
             ("linkedTicketId", opt_str(chat.linked_ticket_id.as_deref())),
             ("linkedTicketSource", opt_source(chat.linked_ticket_source)),
+            ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task_info)?),
             ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
@@ -1645,6 +1651,26 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    pub fn set_chat_scheduled_task_info(
+        &mut self,
+        chat_id: &str,
+        task: &mast_proto::ScheduledChat,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([
+                ("scheduledTaskInfo", serde_json::to_value(task)?),
+                ("scheduledTask", json!(task.task_name)),
+            ]),
+        );
+        Ok(true)
+    }
+
     /// Engine-owned: the model the harness reported for the latest run.
     pub fn set_chat_actual_model(&mut self, chat_id: &str, model: &str) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
@@ -1669,6 +1695,24 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("scheduledTask", json!(task))]),
+        );
+        Ok(true)
+    }
+
+    /// LWW write of a side chat's absorbed-through marker (`None` clears it).
+    pub fn set_chat_side_absorbed_through(
+        &mut self,
+        chat_id: &str,
+        message_id: Option<&str>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("sideAbsorbedThrough", opt_str(message_id))]),
         );
         Ok(true)
     }
@@ -2009,7 +2053,9 @@ impl RegistryDoc {
                     ("spaceId", opt_str(chat.space_id.as_deref())),
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+                    ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task_info)?),
                     ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
+                    ("sideOf", opt_str(chat.side_of.as_deref())),
                 ]),
             );
         }

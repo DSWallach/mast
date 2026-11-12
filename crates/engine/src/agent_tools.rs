@@ -163,6 +163,7 @@ impl AgentGrant {
             space_id: self.space_id.clone(),
             device_id: self.device_id.clone(),
             admin_space_id: None,
+            reads_all_chats: false,
         }
     }
 }
@@ -183,6 +184,8 @@ pub struct AgentTokens {
     grants: Mutex<HashMap<TokenKey, AgentGrant>>,
     /// User-granted admin chats (device-local; RPC-written only).
     admin: crate::admin::AdminGrants,
+    /// The user-designated personal assistant chat (device-local; RPC-written only).
+    personal_assistant: crate::personal_assistant::PersonalAssistantStore,
 }
 
 impl AgentTokens {
@@ -193,6 +196,10 @@ impl AgentTokens {
     /// The admin grant store (shared by every RPC surface of this engine).
     pub fn admin(&self) -> &crate::admin::AdminGrants {
         &self.admin
+    }
+
+    pub fn personal_assistant(&self) -> &crate::personal_assistant::PersonalAssistantStore {
+        &self.personal_assistant
     }
 
     /// Mint a token for one Run. Valid until the returned lease drops or
@@ -971,6 +978,14 @@ impl AgentToolsService {
         let context = self.context(token)?;
         let mut origin = context.grant.origin();
         origin.admin_space_id = context.admin_space.clone();
+        // Read again for its scheduled task: a later run of the assistant's
+        // task is the assistant too.
+        origin.reads_all_chats = self
+            .workspace
+            .chat(&context.grant.chat_id)
+            .ok()
+            .flatten()
+            .is_some_and(|chat| self.tokens.personal_assistant().is_assistant(&chat));
         Ok(origin)
     }
 
@@ -2490,7 +2505,7 @@ impl AgentToolsService {
     pub fn prepare_orchestrator_successor(
         &self,
         params: &AgentToolCallParams,
-    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String), AgentToolError> {
+    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String, Option<mast_proto::HarnessId>, Option<String>, Option<mast_proto::ReasoningLevel>), AgentToolError> {
         let context = self.context(&params.token)?;
         let operation_id = context.operation_id(&params.arguments)?;
         let summary = params.arguments.get("summary").and_then(Value::as_str)
@@ -2503,6 +2518,14 @@ impl AgentToolsService {
             return Err(AgentToolError::invalid("an archived chat cannot hand off orchestration"));
         }
         let source = context.grant.chat_id.clone();
+        #[derive(serde::Deserialize)]
+        struct Selection {
+            harness: Option<mast_proto::HarnessId>,
+            model: Option<String>,
+            reasoning: Option<mast_proto::ReasoningLevel>,
+        }
+        let selection: Selection = serde_json::from_value(params.arguments.clone())
+            .map_err(|error| AgentToolError::invalid(format!("invalid hand-off selection: {error}")))?;
         Ok((mast_proto::CreateChatForWorkItemParams {
             work_item_id,
             initial_prompt: mast_proto::WorkItemPrompt { text: summary.to_owned(), attachments: Vec::new() },
@@ -2513,7 +2536,7 @@ impl AgentToolsService {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
-        }, source))
+        }, source, selection.harness, selection.model, selection.reasoning))
     }
 }
 
@@ -2669,6 +2692,7 @@ fn child_run_request(
             .unwrap_or(SandboxLevel::WorkspaceWrite),
         auto_approve: config.is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments,
         worktree: None,
         instructions: None,

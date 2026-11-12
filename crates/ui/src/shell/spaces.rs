@@ -4325,6 +4325,7 @@ impl Shell {
             .pb(px(4.0))
             .child(trigger)
             .child(overview_trigger)
+            .child(div().id("scheduled-tasks-navigation").size(px(29.0)).flex().items_center().justify_center().rounded(px(8.0)).cursor_pointer().aria_label("Scheduled tasks").hover(|el| el.bg(theme.glass_hover())).on_click(cx.listener(|this, _, _, cx| this.open_scheduled_tasks(None, cx))).child(icon(icons::CLOCK_CIRCLE).size(px(15.0)).text_color(theme.text_muted)))
             .child(view_trigger)
             .into_any_element()
     }
@@ -5548,6 +5549,76 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The personal assistant's own section, above the space filter: it stays
+    /// put whatever the filter, sort or grouping. A scheduled-task assistant
+    /// shows and opens its latest run, and stays lit on any of its runs.
+    pub(super) fn render_personal_assistant_section(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let now = Utc::now();
+        let (row, selected) = {
+            let state = self.state.read(cx);
+            let chat = state.personal_assistant.current(&state.chats)?.clone();
+            let selected = state
+                .selected_chat_row()
+                .is_some_and(|selected| state.personal_assistant.covers(selected));
+            (
+                self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
+                selected,
+            )
+        };
+        let chat = row.chat;
+        let harness = self
+            .settings
+            .sidebar_show_harness
+            .then(|| chat.config.as_ref().map(|c| c.harness))
+            .flatten();
+        let element = self.render_chat_row(
+            chat.id.clone(),
+            transcript::single_line(&chat.title.clone().unwrap_or_else(|| "New session".into()))
+                .into(),
+            format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+            row.folder.into(),
+            row.branch.map(SharedString::from),
+            row.change_request,
+            harness,
+            row.status,
+            selected,
+            chat.archived,
+            false,
+            None,
+            None,
+            None,
+            theme,
+            cx,
+        );
+        Some(
+            div()
+                .id("sidebar-personal-assistant")
+                .debug_selector(|| "sidebar-personal-assistant".into())
+                .flex_none()
+                .flex()
+                .flex_col()
+                .px(px(Theme::SPACE_SM))
+                .pt(px(8.0))
+                .child(
+                    div()
+                        .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .px(px(Theme::SPACE_SM))
+                        .child(crate::components::shell_parts::sidebar_section_label(
+                            theme,
+                            crate::personal_assistant::SECTION_LABEL.into(),
+                        )),
+                )
+                .child(element)
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_sessions_section(
         &mut self,
         content: AnyElement,
@@ -5644,7 +5715,8 @@ impl Shell {
                 .iter()
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
-                .filter(|c| c.archived && c.parent_chat_id.is_none())
+                .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
+                .filter(|c| !state.personal_assistant.covers(c))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,
@@ -7359,7 +7431,10 @@ mod tests {
             harness_session_cwd: None,
             actual_model: None,
             scheduled_task: None,
+            scheduled_task_info: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

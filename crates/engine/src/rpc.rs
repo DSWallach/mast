@@ -123,6 +123,48 @@ struct SetHarnessEnabledParams {
     enabled: bool,
 }
 
+async fn hand_off_config(
+    registry: &HarnessRegistry,
+    data_dir: &std::path::Path,
+    source: Option<mast_proto::ChatConfig>,
+    fallback: HarnessId,
+    harness: Option<HarnessId>,
+    model: Option<String>,
+    reasoning: Option<mast_proto::ReasoningLevel>,
+) -> Result<Option<mast_proto::ChatConfig>, RpcError> {
+    if harness.is_none() && model.is_none() && reasoning.is_none() { return Ok(source); }
+    let mut config = source.unwrap_or(mast_proto::ChatConfig {
+        harness: fallback, model: None, reasoning: None, model_options: Default::default(),
+        sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
+    });
+    let target = harness.unwrap_or(config.harness);
+    let descriptor = registry.descriptors().into_iter().find(|d| d.id == target)
+        .ok_or_else(|| RpcError::Failed(format!("harness {target:?} is not available (see list_harnesses)")))?;
+    if !descriptor.installed || !crate::registry::descriptor_enabled(&descriptor) && target != HarnessId::Mock {
+        return Err(RpcError::Failed(format!("harness {target:?} is not available (see list_harnesses)")));
+    }
+    let resolved = registry.resolve(target).map_err(|e| RpcError::Failed(e.to_string()))?;
+    let models = crate::model_catalogs::list(data_dir, resolved, false).await.unwrap_or_default();
+    if let Some(ref requested) = model {
+        if !models.is_empty() && !models.iter().any(|m| m.id == *requested) {
+            return Err(RpcError::Failed(format!("model {requested:?} is not offered by {target:?} (see list_models)")));
+        }
+    }
+    if target != config.harness {
+        config.harness = target;
+        let default = models.iter().find(|m| target.default_model() == Some(m.id.as_str())).or_else(|| models.first());
+        config.model = default.map(|m| m.id.clone()).or_else(|| target.default_model().map(str::to_owned));
+        config.reasoning = default.and_then(|m| {
+            let levels = &m.reasoning_levels;
+            [mast_proto::ReasoningLevel::High, mast_proto::ReasoningLevel::Medium].into_iter().find(|l| levels.contains(l)).or_else(|| levels.first().copied())
+        });
+        config.model_options.clear();
+    }
+    if let Some(model) = model { config.model = Some(model); }
+    if let Some(reasoning) = reasoning { config.reasoning = Some(reasoning); }
+    Ok(Some(config))
+}
+
 async fn update_harness_enabled(
     registry: &HarnessRegistry,
     harness: HarnessId,
@@ -672,6 +714,11 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// "Ask on the side": the main chat this one is a side chat of. The
+        /// host copies Space, cwd, checkout, config and account pin from it
+        /// and ignores the other placement fields.
+        #[serde(default)]
+        side_of: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -765,6 +812,7 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     project_actions: ProjectActionsStore,
+    scheduled_tasks: Option<crate::scheduled_tasks::ScheduledTasks>,
     previews: Option<mast_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
@@ -929,6 +977,7 @@ impl EngineRpc {
             workspace_files,
             terminals,
             project_actions,
+            scheduled_tasks: None,
             previews: None,
             change_requests,
             diff_sync,
@@ -960,6 +1009,11 @@ impl EngineRpc {
 
     /// Share the engine's artifact service (render broker, watcher cache)
     /// with this RPC surface and its agent tools.
+    pub fn with_scheduled_tasks(mut self, service: crate::scheduled_tasks::ScheduledTasks) -> Self {
+        self.scheduled_tasks = Some(service);
+        self
+    }
+
     pub fn with_artifacts(mut self, artifacts: crate::artifacts::ArtifactsService) -> Self {
         self.agent_tools.set_artifacts(artifacts.clone());
         self.artifacts = artifacts;
@@ -1919,7 +1973,22 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                side_of,
             } => {
+                if let Some(main_id) = side_of.filter(|id| !id.trim().is_empty()) {
+                    let side = self
+                        .workspace
+                        .create_side_chat(&chat_id, &main_id)
+                        .map_err(failed)?;
+                    if let (Some(accounts), Some(config)) = (&self.managed_accounts, &side.config)
+                        && let Some(pin) = accounts.chat_pin(&main_id, config.harness)
+                        && let Err(err) = accounts.pin_chat(&chat_id, config.harness, &pin)
+                    {
+                        tracing::warn!(chat = %chat_id, main = %main_id, error = %err,
+                            "side chat account pin failed");
+                    }
+                    return Ok(());
+                }
                 let parent_chat_id = parent_chat_id.filter(|p| !p.trim().is_empty());
                 // A child of a bound Chat in the same Space starts in the
                 // parent's execution root by default (acceptance 19), so it
@@ -2165,6 +2234,8 @@ fn forwardable(method: &str) -> bool {
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
             | methods::QUEUE_MESSAGE
+            // Reads the side chat and queues into its main chat on their host.
+            | methods::ABSORB_SIDE_CHAT
             | methods::UPDATE_QUEUED_MESSAGE
             | methods::BEGIN_QUEUED_MESSAGE_EDIT
             | methods::RENEW_QUEUED_MESSAGE_EDIT
@@ -2199,6 +2270,7 @@ fn forwardable(method: &str) -> bool {
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
             // Project Actions live in the owning engine's private profile store.
+            | methods::SCHEDULED_TASKS
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
@@ -2735,6 +2807,31 @@ impl RpcService for EngineRpc {
             methods::LIST_ADMIN_GRANTS => {
                 RpcReply::value(&self.agent_tools.tokens().admin().list())
             }
+            methods::GET_PERSONAL_ASSISTANT => RpcReply::value(&mast_proto::PersonalAssistantReply {
+                assistant: self.agent_tools.tokens().personal_assistant().get(),
+            }),
+            methods::SET_PERSONAL_ASSISTANT => {
+                // User action only: no agent tool reaches this method.
+                let p: ChatParams = parse_params(params)?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
+                if chat.space_id.as_deref().is_none_or(str::is_empty) {
+                    return Err(RpcError::Failed(
+                        "only chats in a Space can be the personal assistant".into(),
+                    ));
+                }
+                RpcReply::value(&mast_proto::PersonalAssistantReply {
+                    assistant: Some(self.agent_tools.tokens().personal_assistant().set(&chat)),
+                })
+            }
+            methods::CLEAR_PERSONAL_ASSISTANT => {
+                self.agent_tools.tokens().personal_assistant().clear();
+                RpcReply::value(&mast_proto::PersonalAssistantReply::default())
+            }
             methods::ADMIN_AUDIT_LIST => {
                 let p: mast_proto::AdminAuditListParams = parse_params(params)?;
                 RpcReply::value(
@@ -2854,6 +2951,15 @@ impl RpcService for EngineRpc {
                         RpcError::Failed(e.to_string())
                     })?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::ABSORB_SIDE_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                let reply = self
+                    .doc_host
+                    .absorb_side_chat(&p.chat_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
             }
             methods::UPDATE_QUEUED_MESSAGE => {
                 let p: QueuedMessageParams = parse_params(params)?;
@@ -3505,11 +3611,13 @@ impl RpcService for EngineRpc {
                         }
                     } else if p.tool == mast_proto::agent_tools::tools::HAND_OFF_ORCHESTRATOR {
                         match tokio::task::spawn_blocking(move || service.prepare_orchestrator_successor(&p)).await {
-                            Ok(Ok((launch, source))) => self.launch
-                                .create_orchestrator_successor(&launch, &self.orchestrator_wakes, &source)
+                            Ok(Ok((mut launch, source, harness, model, reasoning))) => {
+                                launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning).await?;
+                                self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &source)
                                 .await
                                 .map_err(|e| RpcError::Failed(e.to_wire_message()))
-                                .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string()))),
+                                .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string())))
+                            },
                             Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
                             Err(e) => Err(RpcError::Failed(e.to_string())),
                         }
@@ -3550,10 +3658,11 @@ impl RpcService for EngineRpc {
                     .ok_or_else(|| RpcError::Failed("Chat has no Space".into()))?;
                 let item = self.workspace.chat_assigned_work_item(&p.chat_id, space_id)
                     .ok_or_else(|| RpcError::Failed("Chat has no work item".into()))?;
+                let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
                     initial_prompt: mast_proto::WorkItemPrompt { text: p.summary, attachments: Vec::new() },
-                    config: source.config,
+                    config,
                     execution_override: None,
                     worktree_choice: None,
                     operation_id: p.operation_id,
@@ -5181,6 +5290,12 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
+            methods::SCHEDULED_TASKS => {
+                let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;
+                let service = self.scheduled_tasks.as_ref().ok_or_else(|| RpcError::Failed("Scheduled tasks unavailable".into()))?;
+                let result = service.request(request).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&result)
+            }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
@@ -5566,6 +5681,26 @@ impl RpcService for EngineRpc {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn hand_off_config_preserves_and_validates_selection() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
+        let mut options = serde_json::Map::new();
+        options.insert("old".into(), serde_json::json!(true));
+        let source = mast_proto::ChatConfig { harness: HarnessId::Codex, model: Some("old-model".into()), reasoning: Some(mast_proto::ReasoningLevel::High), model_options: options, sandbox: mast_proto::SandboxLevel::ReadOnly, auto_approve: true };
+        let unchanged = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, None, None, None).await.unwrap();
+        assert_eq!(unchanged, Some(source.clone()));
+        let changed = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, Some(HarnessId::Mock), Some("mock-1".into()), Some(mast_proto::ReasoningLevel::Medium)).await.unwrap().unwrap();
+        assert_eq!(changed.harness, HarnessId::Mock);
+        assert_eq!(changed.model.as_deref(), Some("mock-1"));
+        assert_eq!(changed.reasoning, Some(mast_proto::ReasoningLevel::Medium));
+        assert!(changed.model_options.is_empty());
+        assert_eq!(changed.sandbox, source.sandbox);
+        assert!(changed.auto_approve);
+        assert!(hand_off_config(&registry, dir.path(), Some(source), HarnessId::Codex, Some(HarnessId::Mock), Some("unknown".into()), None).await.is_err());
+    }
     use super::*;
 
     /// Wire-contract pin: `SET_CHAT_LINK`'s request shape
@@ -5612,6 +5747,13 @@ mod tests {
     /// neither method is in `forwardable`'s allow-list, so both default to
     /// IPC-only. A silent future addition to that list would relay-forward a
     /// method whose doc comment explicitly promises otherwise.
+    #[test]
+    fn personal_assistant_methods_are_ipc_only() {
+        assert!(!forwardable(methods::GET_PERSONAL_ASSISTANT));
+        assert!(!forwardable(methods::SET_PERSONAL_ASSISTANT));
+        assert!(!forwardable(methods::CLEAR_PERSONAL_ASSISTANT));
+    }
+
     #[test]
     fn chat_link_methods_are_ipc_only() {
         assert!(!forwardable(methods::CHAT_LINK_STATUS));

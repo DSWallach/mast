@@ -278,6 +278,9 @@ impl ExternalSessionImporter {
             }),
             Some(cwd.clone()),
         )?;
+        if let Some(task) = scheduled_metadata(&parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy()) {
+            self.workspace.set_chat_scheduled_task_info(chat_id, &task)?;
+        }
         // Priority chain ported from `agent-mode-tools/session_canvas_server.py`
         // (its own multi-source name resolution): a human-chosen agent-mode
         // task name beats the transcript's own `ai-title`, which beats a
@@ -769,7 +772,7 @@ impl ExternalSessionImporter {
         let registry = load_agent_mode_task_names();
         let mut repaired = 0;
         for chat in self.workspace.read_chats()? {
-            if chat.scheduled_task.is_some() || self.scheduled_task_marker_path(&chat.id).is_file()
+            if chat.scheduled_task_info.is_some() || self.scheduled_task_marker_path(&chat.id).is_file()
             {
                 continue;
             }
@@ -785,7 +788,11 @@ impl ExternalSessionImporter {
                 && let Ok(parsed) = parse_transcript(path, &self.device_id)
                 && let Some(task) = &parsed.scheduled_task
             {
-                self.workspace.set_chat_scheduled_task(&chat.id, task)?;
+                if let Some(info) = scheduled_metadata(&parsed, &cursor.external_session_id, &self.device_id, &self.store.root().to_string_lossy()) {
+                    self.workspace.set_chat_scheduled_task_info(&chat.id, &info)?;
+                } else {
+                    self.workspace.set_chat_scheduled_task(&chat.id, task)?;
+                }
                 let stale_title = chat
                     .title
                     .as_deref()
@@ -805,7 +812,7 @@ impl ExternalSessionImporter {
     }
 
     fn scheduled_task_markers_dir(&self) -> PathBuf {
-        self.store.root().join("scheduled_task_markers")
+        self.store.root().join("scheduled-task-scan-v2")
     }
 
     fn scheduled_task_marker_path(&self, chat_id: &str) -> PathBuf {
@@ -1404,6 +1411,34 @@ fn mine_links_from_entries(entries: &[(usize, SessionMessageEntry)]) -> MinedLin
         }
     }
     mined
+}
+
+fn scheduled_metadata(
+    parsed: &ParsedTranscript,
+    session_id: &str,
+    device: &str,
+    scope: &str,
+) -> Option<mast_proto::ScheduledChat> {
+    let text = parsed.first_user_message.as_deref()?;
+    // A task wrapper must start a line; discussing a tag in prose is not a run.
+    let tag = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("<scheduled-task name=\""))?
+        .trim();
+    let name = tag
+        .strip_prefix("<scheduled-task name=\"")?
+        .split('"')
+        .next()?;
+    let file = tag.split("file=\"").nth(1)?.split('"').next()?;
+    if name.is_empty() || file.is_empty() {
+        return None;
+    }
+    Some(mast_proto::ScheduledChat {
+        task_id: crate::scheduled_tasks::import::imported_identity(file, name, device, session_id, scope),
+        task_name: name.to_owned(),
+        run_id: session_id.to_owned(),
+        session_created_at: parsed.entries.first().map(|(_, e)| e.created_at),
+    })
 }
 
 struct ParsedTranscript {

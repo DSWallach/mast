@@ -189,7 +189,7 @@ pub(crate) fn panel_notice(theme: &Theme, text: String, error: bool) -> gpui::Di
         } else {
             theme.text_muted
         })
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 pub(crate) fn settings_status(
@@ -571,7 +571,7 @@ pub(crate) fn quiet_message(
                 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_faint)
-        .child(text.into())
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 pub(crate) fn settings_detail(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
@@ -581,7 +581,7 @@ pub(crate) fn settings_detail(theme: &Theme, text: impl Into<SharedString>) -> g
                 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .child(text.into())
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 pub(crate) fn settings_error(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {

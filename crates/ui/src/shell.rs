@@ -90,6 +90,9 @@ mod project_icon;
 mod required_actions_ui;
 mod menu_bar_ui;
 mod running_ui;
+mod side_chat_ui;
+#[cfg(feature = "snapshot")]
+pub(crate) use side_chat_ui::fixture_side_chat_state;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
@@ -622,6 +625,7 @@ pub enum Route {
     Settings(SettingsSection),
     /// Multi-chat overview (ticket 002): every chat at once, not one at a time.
     Overview,
+    ScheduledTasks,
     /// The PR page: dashboards plus the chats launched to review PRs.
     PrReviewChats,
     Review,
@@ -659,6 +663,9 @@ pub enum RightSurface {
     /// A planning artifact (`mast-artifact:` links) — keys
     /// `Shell::artifact_tabs`.
     Artifact(u64),
+    /// A side chat ("Ask on the side") with its own composer — keys
+    /// `Shell::side_chats`. Closing it archives the side chat.
+    SideChat(u64),
     /// The sticky "Item" tab: what the chat is for (work item, instructions,
     /// where it runs, model, account, open asks). Always first in the strip,
     /// never stored in `right_tabs`, never closed.
@@ -743,6 +750,7 @@ pub enum NavEntry {
     Chat(String),
     Settings(SettingsSection),
     Overview,
+    ScheduledTasks,
     PrReviewChats,
 }
 
@@ -1576,7 +1584,7 @@ impl Render for SidebarPane {
             match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
                 // Overview keeps the normal chat sidebar.
-                Route::Chat | Route::Overview | Route::PrReviewChats | Route::Review => {
+                Route::Chat | Route::Overview | Route::ScheduledTasks | Route::PrReviewChats | Route::Review => {
                     shell.render_chat_sidebar(&theme, cx)
                 }
             }
@@ -1667,6 +1675,9 @@ pub struct Shell {
     subagent_seq: u64,
     /// Planning artifact tabs (`shell/artifacts_ui.rs`).
     pub(crate) artifact_tabs: artifacts_ui::ArtifactTabs,
+    /// "Ask on the side" panes (`shell/side_chat_ui.rs`).
+    side_chats: side_chat_ui::SideChatTabs,
+    side_chats_task: Option<Task<()>>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -1686,6 +1697,8 @@ pub struct Shell {
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
     overview_page: Option<Entity<crate::overview::Overview>>,
+    scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
+    scheduled_tasks_events: Option<Subscription>,
     pr_review_chats_page: Option<Entity<crate::chat_type_view::ChatTypeView>>,
     /// `StartPrReview` operation ids (one per PR + action + agent).
     pr_review_ops: crate::pr_review_launch::PrReviewOperations,
@@ -2140,6 +2153,7 @@ impl Shell {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Overview => NavEntry::Overview,
+            Route::ScheduledTasks => NavEntry::ScheduledTasks,
             Route::PrReviewChats => NavEntry::PrReviewChats,
             Route::Review => NavEntry::Chat(String::new()),
         });
@@ -2193,6 +2207,8 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             artifact_tabs: Default::default(),
+            side_chats: Default::default(),
+            side_chats_task: None,
             subagent_seq: 0,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
@@ -2206,6 +2222,8 @@ impl Shell {
             nav,
             devices_page: None,
             overview_page: None,
+            scheduled_tasks_page: None,
+            scheduled_tasks_events: None,
             pr_review_chats_page: None,
             review_hosts: Default::default(),
             pr_review_ops: Default::default(),
@@ -2487,6 +2505,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.reconcile_side_chats(cx);
         self.sync_status_light(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
@@ -3019,6 +3038,9 @@ impl Shell {
                 RightSurface::Artifact(id) => self
                     .artifact_tab_title(*id, cx)
                     .map(|title| (*surface, title, false, None)),
+                RightSurface::SideChat(id) => self
+                    .side_chat_pane(*id)
+                    .map(|_| (*surface, "Side chat".into(), false, None)),
                 RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
                     let browser = browser.read(cx);
                     (
@@ -3052,6 +3074,7 @@ impl Shell {
             | RightSurface::Terminal(_)
             | RightSurface::Subagent(_)
             | RightSurface::Artifact(_)
+            | RightSurface::SideChat(_)
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -3152,7 +3175,10 @@ impl Shell {
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
-            RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Artifact(_) => {}
+            RightSurface::Subagent(_)
+            | RightSurface::Browser(_)
+            | RightSurface::Artifact(_)
+            | RightSurface::SideChat(_) => {}
             RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.sync_explorer_selection(cx);
@@ -3911,6 +3937,11 @@ impl Shell {
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
+        self.handle_transcript_event(event, cx);
+    }
+
+    /// Also run directly by the Item tab's running-subagent rows.
+    fn handle_transcript_event(&mut self, event: &TranscriptEvent, cx: &mut Context<Self>) {
         match event {
             TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::SignInAgain(chat_id) => self.sign_in_for_chat(chat_id.clone(), cx),
@@ -4156,6 +4187,7 @@ impl Shell {
                 }
             }
             RightSurface::Artifact(id) => self.close_artifact_tab(id, cx),
+            RightSurface::SideChat(id) => self.drop_side_chat(id, cx),
             RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.panels.update(&key, |p| {
@@ -4802,11 +4834,45 @@ impl Shell {
     /// web link) opens in the right pane, which only exists on the chat
     /// route — go there first so it isn't opened somewhere nobody can see.
     fn leave_overview_for_chat(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.route, Route::Overview) {
+        if matches!(self.route, Route::Overview | Route::ScheduledTasks) {
             self.route = Route::Chat;
             self.nav.push(NavEntry::Chat(self.active_chat.clone()));
             cx.notify();
         }
+    }
+
+    pub(super) fn ensure_scheduled_tasks_page(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::scheduled_tasks::ScheduledTasksPage> {
+        if let Some(page) = &self.scheduled_tasks_page {
+            return page.clone();
+        }
+        let state = self.state.clone();
+        let page = cx.new(|cx| crate::scheduled_tasks::ScheduledTasksPage::new(state, cx));
+        self.scheduled_tasks_events = Some(cx.subscribe(&page, |shell, _, event, cx| {
+            let crate::scheduled_tasks::TaskPageEvent::OpenChat(id) = event;
+            shell.route = Route::Chat;
+            shell
+                .state
+                .update(cx, |s, cx| s.select_chat(Some(id.clone()), cx));
+            cx.notify();
+        }));
+        self.scheduled_tasks_page = Some(page.clone());
+        page
+    }
+
+    pub(super) fn open_scheduled_tasks(&mut self, history: Option<String>, cx: &mut Context<Self>) {
+        self.route = Route::ScheduledTasks;
+        self.nav.push(NavEntry::ScheduledTasks);
+        let page = self.ensure_scheduled_tasks_page(cx);
+        if let Some(id) = history {
+            let device=self.state.read(cx).selected_chat_row().filter(|c|c.scheduled_task_info.as_ref().is_some_and(|t|t.task_id==id)).map(|c|c.device_id.clone());
+            page.update(cx, |p, cx| p.show_task(id, device, cx));
+        } else {
+            page.update(cx, |p, cx| p.show_tasks(cx));
+        }
+        cx.notify();
     }
 
     pub(crate) fn open_overview(&mut self, cx: &mut Context<Self>) {
@@ -4944,6 +5010,7 @@ impl Shell {
             NavEntry::Settings(section) => {
                 self.route = Route::Settings(section);
             }
+            NavEntry::ScheduledTasks => { self.route = Route::ScheduledTasks; }
             NavEntry::Overview => {
                 self.route = Route::Overview;
             }
@@ -5754,6 +5821,7 @@ impl Shell {
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        self.drop_side_chats_of(&chat_id, cx);
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
                 if let RightSurface::Browser(id) = surface {
@@ -6503,7 +6571,7 @@ impl Shell {
     fn render_title_bar(&mut self, viewport_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
             Route::Chat | Route::Review => self.render_session_title_bar(viewport_height, cx),
-            Route::Settings(_) => {
+            Route::Settings(_) | Route::ScheduledTasks => {
                 let inner = div()
                     .size_full()
                     .flex()
@@ -8055,6 +8123,7 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
+        let assistant_section = self.render_personal_assistant_section(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
@@ -8224,6 +8293,7 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
+            .children(assistant_section)
             .child(filter_row)
             .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
@@ -9008,7 +9078,8 @@ impl Shell {
             return;
         }
         if event.keystroke.key == "escape" && self.work_outline_modal_open() {
-            if !self.dismiss_work_outline_modal_skills(cx) {
+            let picker_closed = self.hand_off_pickers().is_some_and(|pickers| pickers.update(cx, |pickers, cx| pickers.close_open_popover(cx)));
+            if !picker_closed && !self.dismiss_work_outline_modal_skills(cx) {
                 self.cancel_work_outline_modal(window, cx);
             }
             cx.stop_propagation();
@@ -9114,6 +9185,8 @@ impl Shell {
             let admin_id = chat_id.clone();
             let revoke_id = chat_id.clone();
             let hand_off_id = chat_id.clone();
+            let ask_side_id = chat_id.clone();
+            let can_ask_side = self.can_ask_on_side(&chat_id, cx);
             let branch_review_id = chat_id.clone();
             let branch_review_available = self.branch_review_targets.contains_key(&chat_id);
             let branch_review_exists = self.branch_review_targets.get(&chat_id)
@@ -9121,6 +9194,8 @@ impl Shell {
             let has_workers = self.has_hand_off_workers(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
+            let assistant_id = chat_id.clone();
+            let is_assistant = self.state.read(cx).is_personal_assistant(&chat_id);
             let closeable = menu_state.closeable;
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
@@ -9150,6 +9225,17 @@ impl Shell {
                             }))
                             .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Hand off to new chat…")),
+                    ))
+                    .when(can_ask_side, |menu| menu.child(
+                        popover::menu_row(&theme, false, format!("chat-menu-ask-side-{chat_id}"))
+                            .id("chat-menu-ask-side")
+                            .debug_selector(|| "chat-menu-ask-side".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.ask_on_side(ask_side_id.clone(), cx);
+                            }))
+                            .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from("Ask on the side…")),
                     ))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
@@ -9244,6 +9330,34 @@ impl Shell {
                                 .child(SharedString::from(crate::admin::REVOKE_LABEL)),
                             )
                         })
+                    })
+                    .when(admin_space || is_assistant, |menu| {
+                        menu.child(
+                            popover::menu_row(&theme, false, format!("chat-menu-assistant-{chat_id}"))
+                                .id("chat-menu-assistant")
+                                .debug_selector(|| "chat-menu-assistant".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    let chat_id = assistant_id.clone();
+                                    this.state.update(cx, |state, cx| {
+                                        if is_assistant {
+                                            state.clear_personal_assistant(cx);
+                                        } else {
+                                            state.set_personal_assistant(&chat_id, cx);
+                                        }
+                                    });
+                                }))
+                                .child(
+                                    icon(icons::BOT)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from(if is_assistant {
+                                    crate::personal_assistant::CLEAR_LABEL
+                                } else {
+                                    crate::personal_assistant::SET_LABEL
+                                })),
+                        )
                     })
                     .when(closeable, |menu| {
                         menu.child(
@@ -9640,6 +9754,10 @@ impl Shell {
         transcript_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(page)=&self.scheduled_tasks_page {
+            let active=self.route==Route::ScheduledTasks;
+            page.update(cx,|p,_|p.set_active(active));
+        }
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
@@ -9658,6 +9776,11 @@ impl Shell {
                 .flex_col()
                 .child(div().flex_1().min_h_0().child(outlet))
                 .into_any_element();
+        }
+
+        if self.route == Route::ScheduledTasks {
+            let outlet = self.ensure_scheduled_tasks_page(cx);
+            return div().flex_1().min_w_0().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(outlet).into_any_element();
         }
 
         // Overview route: same shape as Settings (an outlet under the
@@ -10384,6 +10507,11 @@ impl Shell {
                     .artifact_tab(id)
                     .map(|tab| tab.into_any_element())
                     .unwrap_or_else(|| self.render_surface_picker(cx)),
+                RightSurface::SideChat(id) => self
+                    .side_chat_pane(id)
+                    .cloned()
+                    .map(|pane| pane.into_any_element())
+                    .unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Terminal(tab) => {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
@@ -10737,6 +10865,7 @@ impl Shell {
                     .unwrap_or(icons::LIST),
                 RightSurface::Review => icons::DOCUMENT,
                 RightSurface::Subagent(_) => icons::BOT,
+                RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Artifact(id) => self
                     .artifact_tab(id)
                     .and_then(|tab| tab.read(cx).artifact(cx))
@@ -10769,6 +10898,7 @@ impl Shell {
                         .last()
                         .is_some_and(|e| e.status == Some(mast_doc::MessageStatus::Streaming))
                 }),
+                RightSurface::SideChat(id) => self.side_chat_running(id, cx),
                 _ => false,
             };
             // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
@@ -11827,6 +11957,13 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
+            .on_action(cx.listener(|this, action: &crate::selection_chip::AddToSession, window, cx| {
+                if !matches!(this.route, Route::Chat | Route::Overview) {
+                    this.route = Route::Chat;
+                }
+                this.composer.update(cx, |composer, cx| composer.add_selected_text(&action.0, window, cx));
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)
@@ -11898,6 +12035,7 @@ impl Render for Shell {
                 // Start Chat's model menu advertises the same slots.
                 let pickers = this
                     .start_chat_pickers()
+                    .or_else(|| this.hand_off_pickers())
                     .filter(|pickers| pickers.read(cx).is_open())
                     .unwrap_or_else(|| this.composer.read(cx).pickers().clone());
                 let handled = pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
@@ -11975,7 +12113,7 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 // Inside Start Chat the shortcut opens the dialog's picker.
-                if let Some(pickers) = this.start_chat_pickers() {
+                if let Some(pickers) = this.start_chat_pickers().or_else(|| this.hand_off_pickers()) {
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                     return;
                 }
@@ -14409,7 +14547,10 @@ mod exit_regressions {
                         harness_session_cwd: None,
                         actual_model: None,
                         scheduled_task: None,
+                        scheduled_task_info: None,
                         parent_chat_id: None,
+                        side_of: None,
+                        side_absorbed_through: None,
                         space_id: None,
                         last_seen_at: None,
                         room_gen: None,
@@ -15488,7 +15629,10 @@ mod titlebar_lamp_layout {
                             harness_session_cwd: None,
                             actual_model: None,
                             scheduled_task: None,
+                            scheduled_task_info: None,
                             parent_chat_id: None,
+                            side_of: None,
+                            side_absorbed_through: None,
                             space_id: None,
                             last_seen_at: None,
                             room_gen: None,

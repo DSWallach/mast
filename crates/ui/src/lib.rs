@@ -71,6 +71,7 @@ pub mod overview_grouping;
 pub mod overview_positions;
 #[cfg(test)]
 mod perf;
+pub(crate) mod personal_assistant;
 #[cfg(feature = "startup-bench")]
 mod startup_measurement;
 pub mod pickers;
@@ -79,6 +80,7 @@ pub(crate) mod pr_page;
 pub(crate) mod pr_review_launch;
 pub(crate) mod branch_review_launch;
 pub mod project_actions;
+pub mod scheduled_tasks;
 pub mod queue;
 pub mod rail;
 mod review_chats;
@@ -98,6 +100,8 @@ mod status_style;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
+mod text_menu;
+mod selection_chip;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;

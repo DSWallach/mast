@@ -82,6 +82,16 @@ pub mod methods {
     /// Live admin grants on this device. No params; replies `AdminGrant[]`.
     /// IPC-only.
     pub const LIST_ADMIN_GRANTS: &str = "ListAdminGrants";
+    /// This device's personal assistant chat. No params; replies
+    /// `PersonalAssistantReply`. IPC-only.
+    pub const GET_PERSONAL_ASSISTANT: &str = "GetPersonalAssistant";
+    /// Make a chat this device's personal assistant (replacing any other).
+    /// Params `{chatId}`; replies `PersonalAssistantReply`. IPC-only, user
+    /// action: no agent tool reaches it.
+    pub const SET_PERSONAL_ASSISTANT: &str = "SetPersonalAssistant";
+    /// Clear the personal assistant. No params; replies
+    /// `PersonalAssistantReply`. IPC-only.
+    pub const CLEAR_PERSONAL_ASSISTANT: &str = "ClearPersonalAssistant";
     /// Admin audit turns, newest last. Params `AdminAuditListParams`; replies
     /// `AdminAuditTurn[]`. IPC-only.
     pub const ADMIN_AUDIT_LIST: &str = "AdminAuditList";
@@ -234,6 +244,11 @@ pub mod methods {
     pub const CREATE_CHAT_FOR_WORK_ITEM: &str = "CreateChatForWorkItem";
     /// Stage a coordinator successor and transfer its active workers.
     pub const HAND_OFF_ORCHESTRATOR: &str = "HandOffOrchestrator";
+    /// Send a side chat's not-yet-absorbed exchanges to its main chat as
+    /// context: a Run when the main chat is idle, else a held queue row.
+    /// `{ chatId }` (the side chat) → `mast_proto::AbsorbSideChatReply`.
+    /// Forwardable to the host (`side-chat-v1`).
+    pub const ABSORB_SIDE_CHAT: &str = "AbsorbSideChat";
     /// Queue the next Turn of a work-item Chat (`mast_proto::
     /// ContinueChatForWorkItemParams` → `mast_proto::
     /// ContinueChatForWorkItemReply`): message and command ids derive from
@@ -559,6 +574,7 @@ pub mod methods {
     /// Errors say why. IPC-only: device-local filesystem + git state.
     pub const CLOSE_CHAT_WORKTREE: &str = "CloseChatWorktree";
     // Project Actions are private state on the device that owns the project.
+    pub const SCHEDULED_TASKS: &str = "ScheduledTasks";
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
