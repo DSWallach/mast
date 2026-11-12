@@ -1737,6 +1737,8 @@ pub struct Shell {
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
+    device_group_menu: Option<(String, Point<Pixels>)>,
+    device_group_menu_focus: FocusHandle,
     /// Per-project agent account picker / add-account sign-in.
     account_flow: Option<Entity<crate::managed_accounts::AccountFlow>>,
     account_flow_sub: Option<Subscription>,
@@ -2236,6 +2238,8 @@ impl Shell {
             closeout_seq: 0,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
+            device_group_menu: None,
+            device_group_menu_focus: cx.focus_handle(),
             account_flow: None,
             account_flow_sub: None,
             sidebar_section_migration: None,
@@ -5693,6 +5697,8 @@ impl Shell {
             || self.workspace_search.is_some()
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
+            || self.device_group_menu.is_some()
+            || self.space_menu.is_open()
             || self.running.open
             || self.add_space.is_some()
             || self.work_outline_modal_open()
@@ -8912,6 +8918,10 @@ impl Shell {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
+        if self.device_group_menu.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if self.closeout_dialog.is_some() {
             self.close_chat_closeout(cx);
             return true;
