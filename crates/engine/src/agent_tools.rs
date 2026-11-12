@@ -163,7 +163,7 @@ impl AgentGrant {
             space_id: self.space_id.clone(),
             device_id: self.device_id.clone(),
             admin_space_id: None,
-            reads_all_chats: false,
+            personal_assistant: false,
         }
     }
 }
@@ -712,6 +712,9 @@ struct CallContext<'a> {
     /// The Space this chat administers right now (a live user grant on this
     /// call), else `None`.
     admin_space: Option<String>,
+    /// The chat is the user's personal assistant on this call: its chat
+    /// tools reach every Space.
+    personal_assistant: bool,
     /// The chat's title, for attribution.
     chat_title: String,
 }
@@ -978,14 +981,7 @@ impl AgentToolsService {
         let context = self.context(token)?;
         let mut origin = context.grant.origin();
         origin.admin_space_id = context.admin_space.clone();
-        // Read again for its scheduled task: a later run of the assistant's
-        // task is the assistant too.
-        origin.reads_all_chats = self
-            .workspace
-            .chat(&context.grant.chat_id)
-            .ok()
-            .flatten()
-            .is_some_and(|chat| self.tokens.personal_assistant().is_assistant(&chat));
+        origin.personal_assistant = context.personal_assistant;
         Ok(origin)
     }
 
@@ -1008,10 +1004,13 @@ impl AgentToolsService {
             .live(&grant.chat_id)
             .filter(|g| g.space_id == grant.space_id)
             .map(|g| g.space_id);
+        // A later run of the assistant's scheduled task is the assistant too.
+        let personal_assistant = self.tokens.personal_assistant().is_assistant(&chat);
         Ok(CallContext {
             grant,
             workspace: &self.workspace,
             admin_space,
+            personal_assistant,
             chat_title: chat.title.clone().unwrap_or_default(),
         })
     }

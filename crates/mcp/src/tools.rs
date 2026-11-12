@@ -24,9 +24,10 @@
 //! - `list_projects` / `list_devices` list only the token's Space / device;
 //!   `list_harnesses` / `list_models` (this device's capabilities) and
 //!   `whoami` are unscoped.
-//! - the personal assistant chat (`reads_all_chats`, user-designated) widens
-//!   `list_chats`, `get_chat`, `read_chat`, `list_projects` and
-//!   `list_devices` to the whole workspace; every other reach is unchanged.
+//! - the personal assistant chat (`personal_assistant`, user-designated)
+//!   reaches every chat of every Space with all the chat tools above, lists
+//!   every Space and device, and creates chats in any Space or on any device
+//!   (its sandbox and Auto still cap the new chat's).
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -148,7 +149,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
+            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto). The personal assistant chat may create in any Space (`project`), or without one on any `device`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -183,7 +184,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
+            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`. The personal assistant chat can message any chat in any Space.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -202,19 +203,19 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat.",
+            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat. The personal assistant chat can wait on any chat.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
         },
         ToolDef {
             name: "interrupt_chat",
-            description: "Stop the chat's running turn.",
+            description: "Stop the running turn of a chat you created (the personal assistant chat: any chat).",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
             name: "respond_to_input",
-            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput.",
+            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput. Reaches chats you created (the personal assistant chat: any chat).",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
                 "answers": {
@@ -232,7 +233,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "archive_chat",
-            description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches direct children, project workers, and for an admin chat, other chats in its Space. Direct children and admin targets do not require force. Other project workers that are not archivable require force=true and a short reason (logged). The user can undo.",
+            description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches direct children, project workers, and for an admin chat, other chats in its Space. Direct children and admin targets do not require force. Other project workers that are not archivable require force=true and a short reason (logged). The personal assistant chat reaches any chat in any Space without force. The user can undo.",
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true },
                 "force": { "type": "boolean", "default": false, "description": "For a non-child project worker without admin access, archive although archivable is false; needs reason." },
@@ -992,7 +993,7 @@ impl Tools {
             "originDeviceId": origin.map(|o| o.device_id.clone()),
             "runId": origin.map(|o| o.run_id.clone()),
             "adminSpaceId": origin.and_then(|o| o.admin_space_id.clone()),
-            "readsAllChats": origin.is_some_and(|o| o.reads_all_chats),
+            "personalAssistant": origin.is_some_and(|o| o.personal_assistant),
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
             "workOutlineTools": if origin.is_some() {
@@ -1012,8 +1013,9 @@ impl Tools {
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
                  need an idempotency key. Admin chats (user-granted, per Space, expiring) \
                  also reach every chat and item of their Space; see adminSpaceId. The \
-                 personal assistant chat (user-designated; see readsAllChats) can \
-                 list_chats, get_chat and read_chat every chat in every Space, read-only."
+                 personal assistant chat (user-designated; see personalAssistant) reaches \
+                 every chat in every Space with every chat tool, and create_chat works \
+                 in any Space or on any device, still never wider than this chat's sandbox."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
@@ -1023,7 +1025,7 @@ impl Tools {
     async fn list_devices(&self, origin: Option<&AgentOrigin>) -> anyhow::Result<Value> {
         let (mut devices, local) =
             tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
-        if let Some(origin) = origin.filter(|o| !o.reads_all_chats) {
+        if let Some(origin) = origin.filter(|o| !o.personal_assistant) {
             devices.retain(|d| d.id == origin.device_id);
         }
         Ok(json!({
@@ -1040,7 +1042,7 @@ impl Tools {
 
     async fn list_projects(&self, origin: Option<&AgentOrigin>) -> anyhow::Result<Value> {
         let (mut spaces, devices) = tokio::try_join!(self.zeron.spaces(), self.zeron.devices())?;
-        if let Some(origin) = origin.filter(|o| !o.reads_all_chats) {
+        if let Some(origin) = origin.filter(|o| !o.personal_assistant) {
             spaces.retain(|s| s.id == origin.space_id);
         }
         let device_name = |id: &str| devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
@@ -1095,7 +1097,7 @@ impl Tools {
             self.zeron.spaces(),
             self.zeron.sessions()
         )?;
-        if let Some(origin) = origin.filter(|o| !o.reads_all_chats) {
+        if let Some(origin) = origin.filter(|o| !o.personal_assistant) {
             let scope = if args.workers {
                 self.archive_info(&[]).await.unwrap_or_default()
             } else {
@@ -1274,6 +1276,24 @@ impl Tools {
         };
 
         let (space, device_id) = match (origin, args.project.as_deref()) {
+            // The personal assistant: any Space (on that Space's device), or
+            // no Space on any device.
+            (Some(origin), Some(project)) if origin.personal_assistant => {
+                let space = self.zeron.resolve_space(project).await?;
+                if let Some(device) = args.device.as_deref()
+                    && self.zeron.resolve_device_id(Some(device)).await? != space.device_id
+                {
+                    anyhow::bail!(
+                        "that Space is on another device; omit device or name the Space's own"
+                    );
+                }
+                let device_id = space.device_id.clone();
+                (Some(space), device_id)
+            }
+            (Some(origin), None) if origin.personal_assistant && args.device.is_some() => (
+                None,
+                self.zeron.resolve_device_id(args.device.as_deref()).await?,
+            ),
             // Agent mode: the token's Space on the token's device, only.
             (Some(origin), project) => {
                 let space = self
@@ -1337,7 +1357,9 @@ impl Tools {
         // its own item and nesting under it. Only when it could start for an
         // item anyway (a prompt, no cwd or branch).
         if work_item_id.is_none()
-            && origin.is_some()
+            && let Some(origin) = origin
+            // Only in the caller's own Space: its destination is there.
+            && space.as_ref().is_some_and(|s| s.id == origin.space_id)
             && cwd.is_none()
             && args.branch.as_deref().is_none_or(|b| b.trim().is_empty())
             && let Some(key) = agent_key.as_deref()
@@ -1927,10 +1949,14 @@ impl Tools {
         // Admin chats reach their whole Space for everything but interrupt/respond.
         let admin_ok = reach != Reach::Child;
         let all = self.zeron.chats().await?;
-        // The personal assistant reads every chat, but its sends, waits and
-        // archives keep the ordinary reach.
-        if origin.reads_all_chats && matches!(reach, Reach::SelfOrChild | Reach::ReadScope) {
-            return resolve_chat_in(&all, key);
+        // The personal assistant reaches every chat of every Space (itself
+        // only where the reach allows it).
+        if origin.personal_assistant {
+            let chats: Vec<Chat> = all
+                .into_iter()
+                .filter(|c| allow_self || c.id != origin.chat_id)
+                .collect();
+            return resolve_chat_in(&chats, key);
         }
         let parent = (reach == Reach::SelfChildOrParent)
             .then(|| {
@@ -2008,7 +2034,9 @@ impl Tools {
             }
             _ => short(origin_id).to_owned(),
         };
-        let admin = if origin.is_some_and(|o| o.admin_space_id.is_some()) {
+        let admin = if origin.is_some_and(|o| o.personal_assistant) {
+            " (the user's personal assistant chat; this is not the user's own message)"
+        } else if origin.is_some_and(|o| o.admin_space_id.is_some()) {
             " (an admin chat, granted by Mikey; this is not Mikey's own message)"
         } else {
             ""
@@ -2175,14 +2203,14 @@ impl Tools {
     }
 }
 
-/// Which chats an agent-mode call may target.
+/// Which chats an agent-mode call may target. The personal assistant
+/// reaches every chat for each of these (see `reach_chat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reach {
     /// Only chats the caller created (`parentChatId` = the caller).
     Child,
     /// Those, or the caller itself (`get_chat`, the `list_chats` parent
-    /// filter). An admin chat also reaches every chat of its Space, and the
-    /// personal assistant every chat, so keep this variant read-only.
+    /// filter). An admin chat also reaches every chat of its Space.
     SelfOrChild,
     /// Those, the caller itself, or the caller's parent chat (`send_message`).
     SelfChildOrParent,
@@ -2455,7 +2483,7 @@ mod tests {
                         origin["adminSpaceId"] = json!("space-1");
                     }
                     if params["token"] == ASSISTANT_TOKEN {
-                        origin["readsAllChats"] = json!(true);
+                        origin["personalAssistant"] = json!(true);
                     }
                     RpcReply::Value(origin)
                 }
@@ -3104,29 +3132,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_personal_assistant_reads_every_space_and_writes_nowhere_new() {
+    async fn the_personal_assistant_reaches_and_changes_chats_in_every_space() {
         let world = Arc::new(World::default());
         world.created.lock().unwrap().push(json!({
             "id": "chat-nova-3", "deviceId": "dev-other", "title": "Nova",
             "archived": false, "spaceId": "space-2", "createdAt": "2026-09-03T00:00:00Z"
         }));
         let assistant = tools(world.clone(), Some(ASSISTANT_TOKEN));
+        let plain = tools(world.clone(), Some(BETA_TOKEN));
         for chat in ["chat-alpha-1", "chat-nova-3"] {
-            for name in ["get_chat", "read_chat"] {
-                assistant.call(name, json!({ "chat": chat })).await.unwrap();
-            }
             for (name, extra) in [
+                ("get_chat", json!({})),
+                ("read_chat", json!({})),
                 ("send_message", json!({ "text": "hi" })),
                 ("wait_for_turn", json!({ "timeout_secs": 1 })),
-                ("archive_chat", json!({})),
                 ("interrupt_chat", json!({})),
+                ("archive_chat", json!({})),
             ] {
                 let mut args = extra;
                 args["chat"] = json!(chat);
-                assert!(assistant.call(name, args).await.is_err(), "{name} {chat}");
+                assert!(assistant.call(name, args.clone()).await.is_ok(), "assistant {name} {chat}");
+                assert!(plain.call(name, args).await.is_err(), "plain {name} {chat}");
             }
         }
-        assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
+        // Itself only where any chat may reach itself.
+        assert!(assistant.call("interrupt_chat", json!({ "chat": "chat-beta-2" })).await.is_err());
+        let sent = world.writes_of(methods::QUEUE_COMMAND);
+        assert!(
+            sent.iter().any(|w| w.to_string().contains("personal assistant chat")),
+            "{sent:?}"
+        );
+        // Another Space, on that Space's device; the sandbox cap still holds.
+        let created = assistant
+            .call(
+                "create_chat",
+                json!({ "project": "nova", "idempotency_key": "pa-1", "title": "Nova helper" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["project"]["id"], "space-2");
+        let wider = assistant
+            .call(
+                "create_chat",
+                json!({ "project": "nova", "idempotency_key": "pa-2", "sandbox": "danger-full-access" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(wider.contains("more permissive"), "{wider}");
+        assert!(
+            plain
+                .call("create_chat", json!({ "project": "nova", "idempotency_key": "b-1" }))
+                .await
+                .unwrap_err()
+                .contains("own Space")
+        );
         let listed = assistant.call("list_chats", json!({})).await.unwrap();
         let ids: Vec<&str> = listed["chats"]
             .as_array()
@@ -3138,7 +3197,7 @@ mod tests {
         let projects = assistant.call("list_projects", json!({})).await.unwrap();
         assert_eq!(projects["projects"].as_array().unwrap().len(), 2);
         let me = assistant.call("whoami", json!({})).await.unwrap();
-        assert_eq!(me["readsAllChats"], json!(true));
+        assert_eq!(me["personalAssistant"], json!(true));
     }
 
     #[tokio::test]
