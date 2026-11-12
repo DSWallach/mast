@@ -140,6 +140,11 @@ pub struct RunRequest {
     pub auto_approve: bool,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
+    /// Harness-native session to copy into a NEW session (a side chat's
+    /// first run). Engine-owned; ignored when `resume` is set and by
+    /// harnesses without session forking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_from: Option<String>,
     /// Absolute paths of image attachments already staged on the run device
     /// (composer uploads: UploadChunk/UploadCommit → durable path). The same
     /// paths also ride the prompt text as `Attached images (local files …)`
@@ -982,6 +987,10 @@ pub mod agent_tools {
         /// checked at every authenticate), else absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub admin_space_id: Option<String>,
+        /// This chat is the device's personal assistant: it may read (never
+        /// write to) every chat in every Space. Checked at every authenticate.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub reads_all_chats: bool,
     }
 
     /// Params of [`TOOL_CALL_METHOD`].

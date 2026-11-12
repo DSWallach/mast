@@ -1635,15 +1635,77 @@ impl WorkspaceHost {
                 harness_session_cwd: None,
                 actual_model: None,
                 scheduled_task: None,
+                scheduled_task_info: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                side_of: None,
+                side_absorbed_through: None,
                 linked_pr_url: None,
                 linked_pr_source: None,
                 linked_ticket_id: None,
                 linked_ticket_source: None,
             })
         })?;
+        Ok(())
+    }
+
+    /// Create `chat_id` as a side chat of `main_id`: same host, Space, cwd,
+    /// checkout and model, read-only, linked by `sideOf` (never
+    /// `parentChatId`).
+    /// Idempotent by id.
+    pub fn create_side_chat(&self, chat_id: &str, main_id: &str) -> Result<Chat, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.chat(chat_id))? {
+            return Ok(existing);
+        }
+        let main = self
+            .read(|doc| doc.chat(main_id))?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {main_id}")))?;
+        if main.is_side_chat() {
+            return Err(EngineError::Other("a side chat can't open its own side chat".into()));
+        }
+        let side = Chat {
+            id: chat_id.to_string(),
+            device_id: main.device_id.clone(),
+            title: Some(mast_proto::side_chat::SIDE_CHAT_TITLE.into()),
+            archived: false,
+            cwd: main.cwd.clone(),
+            branch: main.branch.clone(),
+            checkout_id: main.checkout_id.clone(),
+            source_context: None,
+            // Read-only with approvals off: nobody answers a side chat's
+            // prompts (dispatch re-applies this on every run).
+            config: main.config.clone().map(|mut config| {
+                config.sandbox = mast_proto::SandboxLevel::ReadOnly;
+                config.auto_approve = true;
+                config
+            }),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            actual_model: None,
+            space_id: main.space_id.clone(),
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: None,
+            side_of: Some(main.id.clone()),
+            side_absorbed_through: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
+            linked_pr_url: None,
+            linked_pr_source: None,
+            linked_ticket_id: None,
+            linked_ticket_source: None,
+        };
+        self.mutate(|doc| doc.upsert_chat(&side))?;
+        Ok(side)
+    }
+
+    /// Record how far a side chat has been absorbed into its main chat.
+    pub fn set_chat_side_absorbed_through(&self, chat_id: &str, message_id: Option<&str>) -> Result<(), EngineError> {
+        self.mutate(|doc| doc.set_chat_side_absorbed_through(chat_id, message_id))?;
         Ok(())
     }
 
@@ -1807,6 +1869,15 @@ impl WorkspaceHost {
             if let Some(hook) = hook { hook(chat_id).map_err(EngineError::Other)?; }
         }
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    /// Stamp stable run provenance and the compatible legacy task name together.
+    pub fn set_chat_scheduled_task_info(
+        &self,
+        chat_id: &str,
+        task: &mast_proto::ScheduledChat,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_scheduled_task_info(chat_id, task))?)
     }
 
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the

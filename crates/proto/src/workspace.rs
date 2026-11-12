@@ -50,6 +50,10 @@ pub mod capabilities {
     /// `ArtifactPromote`, `ArtifactPin`, render-check routing), and gives
     /// agents the `artifact_*` tools.
     pub const ARTIFACTS_V1: &str = crate::artifacts::ARTIFACTS_CAPABILITY_V1;
+    /// The host creates side chats (`createChat` with `sideOf`), forks or
+    /// seeds their first run from the main chat, and serves
+    /// `AbsorbSideChat`.
+    pub const SIDE_CHAT_V1: &str = "side-chat-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -76,6 +80,7 @@ pub mod capabilities {
         LINEAR_V1,
         PR_REVIEW_SYNC_V1,
         ARTIFACTS_V1,
+        SIDE_CHAT_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -194,7 +199,8 @@ mod tests {
                     "pr-review-launch-v1",
                     "linear-v1",
                     "pr-review-sync-v1",
-                    "artifacts-v1"
+                    "artifacts-v1",
+                    "side-chat-v1"
                 ],
             })
         );

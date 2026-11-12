@@ -52,6 +52,7 @@ async fn main() {
         auto_approve: !answer_yes,
         attachments: Vec::new(),
         resume: None,
+        fork_from: None,
         worktree: None,
         instructions: None,
     };

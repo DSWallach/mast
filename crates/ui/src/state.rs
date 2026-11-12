@@ -777,6 +777,8 @@ pub struct AppState {
     work_outline_tasks: HashMap<String, Task<()>>,
     /// Live admin grants and the admin audit cache (`crate::admin`).
     pub(crate) admin: crate::admin::AdminState,
+    /// This device's personal assistant chat (`crate::personal_assistant`).
+    pub(crate) personal_assistant: crate::personal_assistant::PersonalAssistantState,
     /// Spaces the Outline presentation declared visible; the reconciler
     /// watches exactly these (intersected with live Spaces).
     work_outline_visible: Vec<String>,
@@ -900,6 +902,7 @@ impl AppState {
             action_log: Default::default(),
             work_outline_tasks: HashMap::new(),
             admin: Default::default(),
+            personal_assistant: Default::default(),
             work_outline_visible: Vec::new(),
             sidebar_outline_sections: false,
             work_outline_runtime: None,
@@ -1484,6 +1487,15 @@ impl AppState {
         Ok(())
     }
 
+    /// `chat_id`'s running subagents, read from its spawn chips. Only the
+    /// selected chat's transcript is loaded; any other chat lists none.
+    pub(crate) fn running_subagents(&self, chat_id: &str) -> Vec<crate::transcript::RunningSubagent> {
+        if self.selected_chat.as_deref() != Some(chat_id) {
+            return Vec::new();
+        }
+        crate::transcript::running_subagents(chat_id, &self.transcript)
+    }
+
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
@@ -1735,10 +1747,11 @@ impl AppState {
     /// another chat (`parent_chat_id`, the Mast MCP's orchestration link)
     /// are the parent's workers, not sessions the user started: they stay
     /// reachable by id/deep link but never take a sidebar row or jump slot.
+    /// Side chats live only in their main chat's right pane.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
-            .filter(|c| !c.archived && c.parent_chat_id.is_none())
+            .filter(|c| !c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
     }
 
     pub(crate) fn restore_composer_target(
@@ -1892,10 +1905,12 @@ impl AppState {
         now: DateTime<Utc>,
         include_archived: bool,
     ) -> Vec<(ChatIndicator, &Chat)> {
+        let latest = mast_proto::latest_task_chat_ids(&self.chats);
         let mut rows: Vec<(ChatIndicator, &Chat)> = self
             .chats
             .iter()
-            .filter(|c| c.parent_chat_id.is_none())
+            .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
+            .filter(|c| c.scheduled_task_info.is_none() || latest.contains(c.id.as_str()))
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
                 // Project-less sessions are first-class rows.
@@ -1909,7 +1924,8 @@ impl AppState {
     }
 
     /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
-    /// narrowed to the current project filter. The jump shortcuts and their
+    /// narrowed to the current project filter, without the personal assistant
+    /// (it has its own section above the filter). The jump shortcuts and their
     /// hints both count positions here, so neither can drift from the rows on
     /// screen.
     pub fn sidebar_chats(
@@ -1919,6 +1935,7 @@ impl AppState {
     ) -> Vec<(ChatIndicator, &Chat)> {
         self.overview_chats(now)
             .into_iter()
+            .filter(|(_, chat)| !self.personal_assistant.covers(chat))
             .filter(|(_, chat)| match space_filter {
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,
@@ -2018,13 +2035,14 @@ impl AppState {
             chat.last_seen_at.hash(&mut h);
             chat.room_gen.hash(&mut h);
             chat.parent_chat_id.hash(&mut h);
+            chat.scheduled_task.hash(&mut h);
             chat.linked_pr_url.hash(&mut h);
             chat.linked_pr_source.map(|s| discriminant(&s)).hash(&mut h);
             chat.linked_ticket_id.hash(&mut h);
             chat.linked_ticket_source
                 .map(|s| discriminant(&s))
                 .hash(&mut h);
-            chat.scheduled_task.hash(&mut h);
+            chat.scheduled_task_info.hash(&mut h);
             discriminant(&self.display_status_for(chat, now)).hash(&mut h);
         }
         self.spaces.len().hash(&mut h);
@@ -2132,6 +2150,12 @@ impl AppState {
             subagents ^= sh.finish();
         }
         subagents.hash(&mut h);
+        // The Item tab lists the selected chat's running subagents.
+        if let Some(chat_id) = &self.selected_chat {
+            for running in self.running_subagents(chat_id) {
+                (running.doc_id, running.title).hash(&mut h);
+            }
+        }
         h.finish()
     }
 
@@ -4737,7 +4761,10 @@ mod tests {
             harness_session_cwd: None,
             actual_model: None,
             scheduled_task: None,
+            scheduled_task_info: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -5142,6 +5169,29 @@ mod tests {
         for (name, moved) in changed {
             assert!(moved, "{name} must change the shell fingerprint");
         }
+    }
+
+    #[test]
+    fn shell_fingerprint_follows_running_subagents() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        state.chats = vec![chat("a", 0, Some(10))];
+        state.selected_chat = Some("a".into());
+        let turn = |status: &str| -> SessionMessageEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": "turn", "role": "assistant", "createdAt": 0, "deviceId": "d",
+                "parts": [{"id": "s1", "kind": "tool", "resolved": true,
+                    "call": {"kind": "unknown", "name": "Agent: audit"},
+                    "subagentRef": "a--sub--s1", "subagentStatus": status}],
+            }))
+            .unwrap()
+        };
+        state.apply_transcript(vec![turn("running")]);
+        let running = state.shell_fingerprint(now);
+        assert_eq!(state.running_subagents("a").len(), 1);
+        assert!(state.running_subagents("b").is_empty(), "only the selected chat");
+        state.apply_transcript(vec![turn("done")]);
+        assert_ne!(state.shell_fingerprint(now), running, "the Item tab drops the row");
     }
 
     #[test]
@@ -6253,6 +6303,33 @@ mod tests {
     }
 
     #[test]
+    fn side_chats_never_take_a_sidebar_row() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut side = chat("side", 0, Some(3));
+        side.side_of = Some("main".into());
+        let mut archived_side = chat("old-side", 1, Some(2));
+        archived_side.side_of = Some("main".into());
+        archived_side.archived = true;
+        state.apply_chats(vec![side, archived_side, chat("main", 2, Some(1))]);
+        let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
+        assert_eq!(visible, ["main"]);
+        let rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .into_iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(rows, ["main"]);
+        let with_archived: Vec<&str> = state
+            .overview_chats_with_archived(now, true)
+            .into_iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(with_archived, ["main"]);
+        assert!(crate::settings::archived::archived_chats(&state.chats).is_empty());
+    }
+
+    #[test]
     fn jump_slots_count_the_rows_the_sidebar_draws() {
         let now = Utc::now();
         let mut state = AppState::new();
@@ -6285,6 +6362,54 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(filtered, ["b"]);
+    }
+
+    #[test]
+    fn the_personal_assistant_leaves_the_sidebar_lists() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        state.apply_chats(vec![chat("pa", 0, Some(2)), chat("b", 1, Some(1))]);
+        state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
+            assistant: Some(mast_proto::PersonalAssistant::for_chat(&state.chats[0], 0)),
+        });
+        let rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(rows, ["b"]);
+        assert!(state.overview_chats(now).iter().any(|(_, c)| c.id == "pa"));
+    }
+
+    #[test]
+    fn a_scheduled_task_assistant_opens_its_latest_run() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let run = |id: &str, ix: i64, created: i64| {
+            let mut c = chat(id, ix, Some(ix));
+            c.scheduled_task_info = Some(mast_proto::ScheduledChat {
+                task_id: "briefing".into(),
+                task_name: "Briefing".into(),
+                run_id: id.into(),
+                session_created_at: Some(created),
+            });
+            c
+        };
+        state.apply_chats(vec![run("old", 0, 1), run("new", 1, 2), chat("b", 2, Some(0))]);
+        state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
+            assistant: Some(mast_proto::PersonalAssistant::for_chat(&state.chats[0], 0)),
+        });
+        assert_eq!(
+            state.personal_assistant.current(&state.chats).map(|c| c.id.as_str()),
+            Some("new")
+        );
+        assert!(state.is_personal_assistant("new"));
+        let rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(rows, ["b"]);
     }
 
     #[test]

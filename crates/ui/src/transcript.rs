@@ -3274,7 +3274,7 @@ impl Render for BlobFetchErrorTooltip {
 }
 
 /// Shell-facing events (the transcript itself hosts no surfaces).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEvent {
     OpenChat(String),
     SignInAgain(String),
@@ -7144,24 +7144,16 @@ impl Transcript {
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
-                if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
-                    let chat_id = self.chat_id.clone().unwrap_or_default();
-                    let title = subagent_tab_title(&tool.call);
-                    let frozen = matches!(
-                        tool.subagent_status,
-                        Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
-                    );
+                if let Some(open) = subagent_open_event(
+                    self.chat_id.as_deref().unwrap_or_default(),
+                    &tool.call,
+                    tool.subagent_ref.as_deref(),
+                    tool.subagent_status,
+                ) {
                     return subagent_chip(
                         tool,
                         SharedString::from(format!("{row_id}#s{ix}")),
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenSubagent {
-                                chat_id: chat_id.clone(),
-                                doc_id: doc_id.to_string(),
-                                title: title.to_string(),
-                                frozen,
-                            });
-                        }),
+                        cx.listener(move |_, _, _, cx| cx.emit(open.clone())),
                         collapses,
                         theme,
                         cx.entity_id(),
@@ -7483,6 +7475,8 @@ fn user_bubble_text(
     let layout = styled.layout().clone();
     let wash = theme.code_wash;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
+    let menu_key = sel_key.clone();
+    let menu_text = text.clone();
     let sel_theme = theme.clone();
     let underlay = canvas(
         |_, _, _| (),
@@ -7523,11 +7517,12 @@ fn user_bubble_text(
     )
     .absolute()
     .size_full();
-    div()
+    let child = div()
         .relative()
         .child(underlay)
         .child(styled)
-        .into_any_element()
+        .into_any_element();
+    crate::text_menu::read_only(SharedString::from(menu_key.to_string()), menu_text, child).into_any_element()
 }
 
 fn visualization_card(
@@ -7814,8 +7809,8 @@ fn detail_body(
                 .py(px(6.0))
                 .font_family(theme.font_mono.clone())
                 .text_size(px(TOOL_TEXT_SIZE))
-                .children(lines.iter().map(|line| {
-                    crate::components::conversation_tool_output_line(theme, OUTPUT_LINE_HEIGHT, line.clone())
+                .children(lines.iter().enumerate().map(|(index, line)| {
+                    crate::components::conversation_tool_output_line(theme, OUTPUT_LINE_HEIGHT, format!("{scroll_id}:output:{index}"), line.clone())
                 }))
                 .when(*truncated_by > 0, |block| {
                     block.child(crate::components::conversation_tool_more_lines(theme, *truncated_by, OUTPUT_LINE_HEIGHT, TOOL_TEXT_SIZE))
@@ -8170,6 +8165,66 @@ fn subagent_tab_title(call: &ToolCall) -> SharedString {
         }
     }
     "Subagent".into()
+}
+
+/// What clicking a spawn chip emits; `None` unless an agent call is bound to
+/// its doc. The Item tab's running list emits the same event.
+pub(crate) fn subagent_open_event(
+    chat_id: &str,
+    call: &ToolCall,
+    subagent_ref: Option<&str>,
+    status: Option<SubagentStatus>,
+) -> Option<TranscriptEvent> {
+    let doc_id = subagent_ref.filter(|_| is_agent_call(call))?;
+    Some(TranscriptEvent::OpenSubagent {
+        chat_id: chat_id.to_owned(),
+        doc_id: doc_id.to_owned(),
+        title: subagent_tab_title(call).to_string(),
+        frozen: matches!(status, Some(SubagentStatus::Done | SubagentStatus::Failed)),
+    })
+}
+
+/// A spawn chip whose subagent is still running.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RunningSubagent {
+    pub doc_id: String,
+    pub title: String,
+    pub open: TranscriptEvent,
+}
+
+/// The running subagents among `entries`' spawn chips, in transcript order.
+pub(crate) fn running_subagents(
+    chat_id: &str,
+    entries: &[SessionMessageEntry],
+) -> Vec<RunningSubagent> {
+    let mut running: Vec<RunningSubagent> = Vec::new();
+    for part in entries.iter().flat_map(|entry| &entry.parts) {
+        let MessagePart::Tool {
+            call,
+            subagent_ref,
+            subagent_status: status @ Some(SubagentStatus::Running),
+            ..
+        } = part
+        else {
+            continue;
+        };
+        let Some(open) = subagent_open_event(chat_id, call, subagent_ref.as_deref(), *status)
+        else {
+            continue;
+        };
+        let TranscriptEvent::OpenSubagent { doc_id, title, .. } = &open else {
+            continue;
+        };
+        if running.iter().any(|known| known.doc_id == *doc_id) {
+            continue;
+        }
+        running.push(RunningSubagent {
+            doc_id: doc_id.clone(),
+            title: title.clone(),
+            open,
+        });
+    }
+    running
 }
 
 /// Clip one newly appended task row to its committed height. Fade and lift are
@@ -11126,6 +11181,91 @@ mod tests {
         assert!(tool_group_collapses(tools));
         assert!(tools.iter().all(|t| !is_agent_tool(t)));
         assert!(tools.iter().all(|t| !is_spawn_link(t)));
+    }
+
+    fn set_subagent(part: &mut MessagePart, status: Option<SubagentStatus>, doc: Option<&str>) {
+        if let MessagePart::Tool {
+            subagent_ref,
+            subagent_status,
+            ..
+        } = part
+        {
+            *subagent_status = status;
+            *subagent_ref = doc.map(str::to_owned);
+        }
+    }
+
+    #[test]
+    fn running_subagents_follow_their_spawn_chips() {
+        let mut failed = agent_part("s3", "Verify the commit cadence");
+        set_subagent(&mut failed, Some(SubagentStatus::Failed), Some("chat--sub--s3"));
+        let mut done = agent_part("s2", "Audit the fold path");
+        set_subagent(&mut done, Some(SubagentStatus::Done), Some("chat--sub--s2"));
+        let mut unbound = agent_part("s4", "Not stamped yet");
+        set_subagent(&mut unbound, Some(SubagentStatus::Running), None);
+        let mut stray = tool_part("b", "git clone …");
+        set_subagent(&mut stray, Some(SubagentStatus::Running), Some("chat--sub--b"));
+        let mut entries = vec![
+            assistant(
+                "m1",
+                MessageStatus::Complete,
+                vec![agent_part("s1", "Map URL import ingest path"), done, stray],
+            ),
+            assistant(
+                "m2",
+                MessageStatus::Streaming,
+                vec![failed, unbound, agent_part("s5", "Check the theme")],
+            ),
+        ];
+        let running = running_subagents("chat", &entries);
+        let listed: Vec<(&str, &str)> = running
+            .iter()
+            .map(|r| (r.doc_id.as_str(), r.title.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("chat--sub--s1", "Map URL import ingest path"),
+                ("chat--sub--s5", "Check the theme"),
+            ]
+        );
+
+        // Finishing or failing drops the row.
+        set_subagent(&mut entries[0].parts[0], Some(SubagentStatus::Done), Some("chat--sub--s1"));
+        set_subagent(&mut entries[1].parts[2], Some(SubagentStatus::Failed), Some("chat--sub--s5"));
+        assert!(running_subagents("chat", &entries).is_empty());
+    }
+
+    #[test]
+    fn a_running_subagent_opens_what_its_chip_opens() {
+        let entry = assistant(
+            "m-agent",
+            MessageStatus::Streaming,
+            vec![agent_part("s1", "Map URL import ingest path")],
+        );
+        let rows = rows_for_entry(&entry, true, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("agent group expected")
+        };
+        let chip = &tools[0];
+        let chip_event = subagent_open_event(
+            "chat",
+            &chip.call,
+            chip.subagent_ref.as_deref(),
+            chip.subagent_status,
+        );
+        let running = running_subagents("chat", std::slice::from_ref(&entry));
+        assert_eq!(running.len(), 1);
+        assert_eq!(Some(running[0].open.clone()), chip_event);
+        assert_eq!(
+            running[0].open,
+            TranscriptEvent::OpenSubagent {
+                chat_id: "chat".into(),
+                doc_id: "chat--sub--s1".into(),
+                title: "Map URL import ingest path".into(),
+                frozen: false,
+            }
+        );
     }
 
     #[test]
