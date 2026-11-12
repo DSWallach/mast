@@ -19,6 +19,34 @@ pub(crate) fn scheduled_tasks_page(theme: &Theme) -> Div {
         .text_color(theme.text)
 }
 
+pub(crate) fn scheduled_tasks_navigation(theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id("scheduled-tasks-navigation")
+        .size(px(29.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .aria_label("Scheduled tasks")
+        .hover(|el| el.bg(theme.glass_hover()))
+        .child(icon(crate::icons::CLOCK_CIRCLE).size(px(15.0)).text_color(theme.text_muted))
+}
+
+pub(crate) fn sidebar_group_menu(id: SharedString, theme: &Theme, open: bool) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(20.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .opacity(if open { 1.0 } else { 0.0 })
+        .group_hover("automatic-sidebar-group", |style| style.opacity(1.0))
+        .hover(|style| style.bg(theme.glass_hover()))
+}
+
 pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
     div()
         .h(px(if theme.ui_style.design_roles.sidebar_border.unwrap_or_else(|| !super::is_horizon(theme)) {
