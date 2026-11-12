@@ -28,6 +28,15 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 82: structured plan artifacts** (2026-11-11, 2ecae0d4b; targeted: mast-proto 279, mast-engine
+  artifacts 43 + agent_tools 62, mast-mcp 55, mast-ui artifacts 235):
+  - New artifact kind `plan` (.json): crates/proto/src/plan.rs (types, strict parse, the 8 rules in
+    docs/artifact-kit/plan-schema.md incl. linked-sheet row checks, `linear_body`) and plan_render.rs (summary chips,
+    build-order strip, ticket cards beside their Linear body, citation chips, collapsed evidence). Example:
+    docs/artifact-kit/plan-example.json (synthetic; the real kit plan stays private). `artifact_get_plan` returns the
+    JSON for plan-kind artifacts; markdown plans unchanged.
+  - Backup: `~/zeron-dev-app-backups/mast-release-81`.
+
 - **Release 81: render check false positives** (2026-11-11, f5a2c6f98; fast-tracked, mast-ui artifacts 234/0): the
   contrast check falls back to the rendered theme's `--background`, not the OS dark-mode query; `narrowTextColumn`
   skips empty text, `pre` and cells of tables that fit. Backup: `~/zeron-dev-app-backups/mast-release-80`.
@@ -1108,10 +1117,9 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 81** (render check fixes; fast-tracked on top of full-suite release 79).
-- **Building:** structured `plan` artifact kind (item df948c36, Terra chat 01fcc1c7, branch `plan-kind` in
-  `.worktrees/zeron/plan-kind`; inputs in /tmp/plan-kind-inputs; design mast-artifact:6ca2067c). After install,
-  update the project-planner skill to emit it. Workflow pack (2bbe25e5) still in progress.
+- **Installed: release 82** (plan kind; targeted tests on top of full-suite release 79).
+- **Next:** after Mikey restarts on release 82, publish a real plan as kind `plan`, render-check it, then switch
+  the project-planner skill to emit plan JSON (item df948c36). Workflow pack (2bbe25e5) still in progress.
 - **PR #1 approved** on GitHub at c6bf195c1 (Mikey: approve if good) with two non-blocking follow-ups; not merged.
 - **PR #1 (David Wallach, idle CPU + input latency):** reviewed (item 953b96ee, Required Action 08002e19):
   merge after three fixes (nested-submodule diff filter, scheduled-run backfill marker, @-completion freshness on
