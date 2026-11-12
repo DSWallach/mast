@@ -2635,6 +2635,7 @@ impl SubtreeWalk<'_> {
             };
             let mut value = json!({
                 "id": chat.id,
+                "url": mast_proto::session_link::session_link(&chat.id),
                 "title": chat.title,
                 "status": status,
                 "awaitingInput": session.as_ref().and_then(|s| s.awaiting_input.as_ref()),

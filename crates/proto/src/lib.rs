@@ -23,6 +23,7 @@ pub mod pr_review;
 pub mod pr_review_sync;
 pub mod preview;
 pub mod review_sidecar;
+pub mod session_link;
 pub mod sidebar_pins;
 pub mod view;
 pub mod visualize;

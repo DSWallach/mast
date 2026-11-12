@@ -3259,6 +3259,54 @@ impl Shell {
         {
             return LinkOutcome::Rejected;
         }
+        // Session references always stay in Mast, independent of web-link settings.
+        if activation.target.is_session() {
+            if !matches!(
+                activation.action,
+                LinkAction::Primary | LinkAction::Internal
+            ) {
+                return LinkOutcome::Rejected;
+            }
+            let chat_id = if let Some(id) =
+                mast_proto::session_link::parse_session_link(&activation.target.original)
+            {
+                id
+            } else {
+                let Ok(link) =
+                    crate::links::parse_mast_conversation_link(&activation.target.original)
+                else {
+                    return LinkOutcome::Rejected;
+                };
+                let state = self.state.read(cx);
+                if crate::links::workspace_locator(
+                    state.workspace_scope,
+                    state.auth.as_ref(),
+                    state.local_device_id.as_deref(),
+                )
+                .as_deref()
+                    != Some(link.workspace.as_str())
+                {
+                    self.sidebar_notice =
+                        Some("This conversation link belongs to another workspace".into());
+                    cx.notify();
+                    return LinkOutcome::Rejected;
+                }
+                link.chat_id
+            };
+            if !self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id)
+            {
+                self.sidebar_notice = Some("The linked conversation was not found".into());
+                cx.notify();
+                return LinkOutcome::Rejected;
+            }
+            self.open_chat(chat_id, cx);
+            return LinkOutcome::Internal;
+        }
         if activation.target.navigation.is_err() {
             if crate::artifacts::model::link_target(&activation.target.original).is_some() {
                 if activation.action == LinkAction::Copy {
@@ -14199,6 +14247,90 @@ mod exit_regressions {
                 assert!(shell.state.read(cx).no_project);
             })
             .unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn session_chips_open_chats_and_reject_invalid_targets(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: mast_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window.update(cx, |shell, window, cx| {
+            shell.active_chat = "source".into();
+            shell.state.update(cx, |state, _| {
+                state.selected_chat = Some("source".into());
+                state.chats.push(mast_proto::Chat {
+                    id: "destination".into(),
+                    device_id: "here".into(),
+                    title: None,
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: None,
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: Utc::now(),
+                    harness_session_id: None,
+                    harness_session_cwd: None,
+                    actual_model: None,
+                    parent_chat_id: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                    linked_pr_url: None,
+                    linked_pr_source: None,
+                    linked_ticket_id: None,
+                    linked_ticket_source: None,
+                });
+            });
+            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings.open_web_links_in_mast = false;
+            });
+            let mut activation = LinkActivation {
+                target: LinkTarget::new("Session", "mast://chat/destination"),
+                action: LinkAction::Primary,
+                source_session: Some("stale".into()),
+            };
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.source_session = Some("source".into());
+            activation.action = LinkAction::External;
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.action = LinkAction::Primary;
+            activation.target = LinkTarget::new("Missing", "mast://chat/missing");
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.target = LinkTarget::new("Other workspace",
+                "mast://open/chat/destination?workspace=other");
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.target = LinkTarget::new("Session", "mast://chat/destination");
+            let browsers = shell.browsers.len();
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Internal);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("destination"));
+            assert!(matches!(shell.route, Route::Chat));
+            assert_eq!(shell.browsers.len(), browsers);
+        }).unwrap();
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

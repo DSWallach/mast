@@ -163,6 +163,11 @@ impl Element for LinkRanges {
                         .w(rect.size.width)
                         .h(rect.size.height)
                         .cursor_pointer()
+                        .when(target.is_session(), |chip| {
+                            chip.rounded(px(4.))
+                                .border_1()
+                                .border_color(theme.border_strong)
+                        })
                         .role(Role::Link)
                         .aria_label(target.label.clone())
                         .when(part == 0, |el| el.track_focus(&focus))
@@ -341,7 +346,9 @@ impl Element for LinkRanges {
                     let target = state.targets[index].clone();
                     let ui = self.ui.clone();
                     let menu = state.menu.clone();
-                    let enabled = action == LinkAction::Copy || target.navigation.is_ok();
+                    let enabled = action == LinkAction::Copy
+                        || (target.is_session() && action == LinkAction::Internal)
+                        || target.navigation.is_ok();
                     card = card.child(
                         popover::menu_row(
                             &theme,
