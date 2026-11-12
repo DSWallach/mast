@@ -31,7 +31,7 @@ Improve order history step 1.
 - The behavior works.
 
 ## Out of scope
-- —
+—
 
 ## Contract
 events (produces)
@@ -59,7 +59,7 @@ Improve order history step 2.
 - The behavior works.
 
 ## Out of scope
-- —
+—
 
 ## Contract
 events (consumes)
@@ -87,7 +87,7 @@ Improve order history step 3.
 - The behavior works.
 
 ## Out of scope
-- —
+—
 
 ## Where
 - app/orders/views.py:120
@@ -112,7 +112,7 @@ Improve order history step 4.
 - The behavior works.
 
 ## Out of scope
-- —
+—
 
 ## Where
 - app/orders/views.py:120
@@ -137,7 +137,7 @@ Improve order history step 5.
 - The behavior works.
 
 ## Out of scope
-- —
+—
 
 ## Where
 - app/orders/views.py:120
@@ -162,7 +162,7 @@ Improve order history step 6.
 - The behavior works.
 
 ## Out of scope
-- —
+—
 
 ## Where
 - app/orders/views.py:120
@@ -187,7 +187,7 @@ Improve order history step 7.
 - The behavior works.
 
 ## Out of scope
-- —
+—
 
 ## Where
 - app/orders/views.py:120

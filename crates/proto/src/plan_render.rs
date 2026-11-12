@@ -152,16 +152,21 @@ pub fn render(p: &Plan) -> String {
         for a in &t.acceptance {
             let _ = write!(o, "<li>{}</li>", inline(a));
         }
-        o.push_str("</ul><h4>Out of scope</h4><ul>");
-        for x in &t.out_of_scope {
-            let _ = write!(
-                o,
-                "<li>{} <span class=\"pl-lives\">{}</span></li>",
-                inline(&x.text),
-                esc(&x.lives_in)
-            );
+        o.push_str("</ul><h4>Out of scope</h4>");
+        if t.out_of_scope.is_empty() {
+            o.push_str("<p>—</p>");
+        } else {
+            o.push_str("<ul>");
+            for x in &t.out_of_scope {
+                let _ = write!(
+                    o,
+                    "<li>{} <span class=\"pl-lives\">{}</span></li>",
+                    inline(&x.text),
+                    esc(&x.lives_in)
+                );
+            }
+            o.push_str("</ul>");
         }
-        o.push_str("</ul>");
         if let Some(c) = &t.contract {
             let _ = write!(
                 o,
@@ -345,6 +350,8 @@ mod tests {
         assert!(html.contains("Use <code class=\"mk-mono\">delivery_days</code>."));
         assert!(html.contains("Skip <code class=\"mk-mono\">export</code>."));
         assert!(html.contains("<b>Depends on</b><span>—</span>"));
+        assert!(html.contains("<h4>Out of scope</h4><p>—</p>"));
+        assert!(!html.contains("<h4>Out of scope</h4><ul></ul>"));
     }
     #[test]
     #[ignore]

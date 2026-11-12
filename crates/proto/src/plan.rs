@@ -276,7 +276,7 @@ pub fn linear_body(t: &Ticket) -> String {
         let _ = writeln!(s, "- {} — {}", o.text, o.lives_in);
     }
     if t.out_of_scope.is_empty() {
-        s.push_str("- —\n");
+        s.push_str("—\n");
     }
     if let Some(c) = &t.contract {
         s.push_str("\n## Contract\n");
@@ -410,7 +410,7 @@ mod tests {
         let body = linear_body(&p.tickets.unwrap()[0]);
         assert_eq!(
             body,
-            "# Order history improvement 1 with a descriptive title\n\n## Goal\nImprove order history step 1.\n\n## Behavior\n- Show the agreed behavior. [event-order]\n\n## Acceptance\n- The behavior works.\n\n## Out of scope\n- —\n\n## Contract\nevents (produces)\n\n## Where\n- app/orders/views.py:120\n\n## Depends on\n—\n\n## Size\nM: 100–200 lines"
+            "# Order history improvement 1 with a descriptive title\n\n## Goal\nImprove order history step 1.\n\n## Behavior\n- Show the agreed behavior. [event-order]\n\n## Acceptance\n- The behavior works.\n\n## Out of scope\n—\n\n## Contract\nevents (produces)\n\n## Where\n- app/orders/views.py:120\n\n## Depends on\n—\n\n## Size\nM: 100–200 lines"
         );
     }
     #[test]
