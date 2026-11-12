@@ -1935,7 +1935,7 @@ impl AppState {
     ) -> Vec<(ChatIndicator, &Chat)> {
         self.overview_chats(now)
             .into_iter()
-            .filter(|(_, chat)| !self.personal_assistant.is(&chat.id))
+            .filter(|(_, chat)| !self.personal_assistant.covers(chat))
             .filter(|(_, chat)| match space_filter {
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,
@@ -6370,10 +6370,7 @@ mod tests {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("pa", 0, Some(2)), chat("b", 1, Some(1))]);
         state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
-            assistant: Some(mast_proto::PersonalAssistant {
-                chat_id: "pa".into(),
-                designated_at_ms: 0,
-            }),
+            assistant: Some(mast_proto::PersonalAssistant::for_chat(&state.chats[0], 0)),
         });
         let rows: Vec<&str> = state
             .sidebar_chats(now, None)
@@ -6382,6 +6379,37 @@ mod tests {
             .collect();
         assert_eq!(rows, ["b"]);
         assert!(state.overview_chats(now).iter().any(|(_, c)| c.id == "pa"));
+    }
+
+    #[test]
+    fn a_scheduled_task_assistant_opens_its_latest_run() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let run = |id: &str, ix: i64, created: i64| {
+            let mut c = chat(id, ix, Some(ix));
+            c.scheduled_task_info = Some(mast_proto::ScheduledChat {
+                task_id: "briefing".into(),
+                task_name: "Briefing".into(),
+                run_id: id.into(),
+                session_created_at: Some(created),
+            });
+            c
+        };
+        state.apply_chats(vec![run("old", 0, 1), run("new", 1, 2), chat("b", 2, Some(0))]);
+        state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
+            assistant: Some(mast_proto::PersonalAssistant::for_chat(&state.chats[0], 0)),
+        });
+        assert_eq!(
+            state.personal_assistant.current(&state.chats).map(|c| c.id.as_str()),
+            Some("new")
+        );
+        assert!(state.is_personal_assistant("new"));
+        let rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(rows, ["b"]);
     }
 
     #[test]

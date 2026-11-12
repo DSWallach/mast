@@ -9193,7 +9193,7 @@ impl Shell {
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
             let assistant_id = chat_id.clone();
-            let is_assistant = self.state.read(cx).personal_assistant.is(&chat_id);
+            let is_assistant = self.state.read(cx).is_personal_assistant(&chat_id);
             let closeable = menu_state.closeable;
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))

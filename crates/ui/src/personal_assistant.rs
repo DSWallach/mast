@@ -1,12 +1,13 @@
 //! The personal assistant chat, UI side: which chat it is (the engine owns
 //! the designation, `mast_proto::personal_assistant`) and the RPC calls.
 //! The sidebar draws it in its own section above the space filter and
-//! leaves it out of the session lists.
+//! leaves it out of the session lists. A scheduled-task assistant is drawn
+//! as its task's latest run.
 
 use std::time::{Duration, Instant};
 
 use gpui::Context;
-use mast_proto::PersonalAssistantReply;
+use mast_proto::{Chat, PersonalAssistant, PersonalAssistantReply};
 use mast_rpc::methods;
 
 use crate::state::AppState;
@@ -20,23 +21,28 @@ pub(crate) const SECTION_LABEL: &str = "Personal assistant";
 
 #[derive(Debug, Default)]
 pub(crate) struct PersonalAssistantState {
-    chat_id: Option<String>,
+    assistant: Option<PersonalAssistant>,
     loaded: bool,
     read_at: Option<Instant>,
     in_flight: bool,
 }
 
 impl PersonalAssistantState {
-    pub(crate) fn is(&self, chat_id: &str) -> bool {
-        self.chat_id.as_deref() == Some(chat_id)
+    /// The picked chat, or any run of its scheduled task.
+    pub(crate) fn covers(&self, chat: &Chat) -> bool {
+        self.assistant.as_ref().is_some_and(|a| a.covers(chat))
     }
 
-    /// Apply an engine reply; `true` when the chat changed.
+    /// The chat the sidebar shows and opens (a task's latest run).
+    pub(crate) fn current<'a>(&self, chats: &'a [Chat]) -> Option<&'a Chat> {
+        self.assistant.as_ref()?.current(chats)
+    }
+
+    /// Apply an engine reply; `true` when the designation changed.
     pub(crate) fn apply(&mut self, reply: PersonalAssistantReply) -> bool {
         self.loaded = true;
-        let chat_id = reply.assistant.map(|a| a.chat_id);
-        let changed = chat_id != self.chat_id;
-        self.chat_id = chat_id;
+        let changed = reply.assistant != self.assistant;
+        self.assistant = reply.assistant;
         changed
     }
 
@@ -48,6 +54,13 @@ impl PersonalAssistantState {
 }
 
 impl AppState {
+    pub(crate) fn is_personal_assistant(&self, chat_id: &str) -> bool {
+        self.chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .is_some_and(|c| self.personal_assistant.covers(c))
+    }
+
     /// The 1 s heartbeat: read the designation until the first read lands.
     pub(crate) fn personal_assistant_tick(&mut self, cx: &mut Context<Self>) {
         if self.personal_assistant.load_due(Instant::now()) {
@@ -66,8 +79,13 @@ impl AppState {
     /// Make `chat_id` the personal assistant (replacing any other). The row
     /// moves at once; the reply is the truth.
     pub(crate) fn set_personal_assistant(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        self.personal_assistant.chat_id = Some(chat_id.to_owned());
-        cx.notify();
+        if let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) {
+            self.personal_assistant.assistant = Some(PersonalAssistant::for_chat(
+                chat,
+                chrono::Utc::now().timestamp_millis(),
+            ));
+            cx.notify();
+        }
         self.call_personal_assistant(
             methods::SET_PERSONAL_ASSISTANT,
             serde_json::json!({ "chatId": chat_id }),
@@ -76,7 +94,7 @@ impl AppState {
     }
 
     pub(crate) fn clear_personal_assistant(&mut self, cx: &mut Context<Self>) {
-        self.personal_assistant.chat_id = None;
+        self.personal_assistant.assistant = None;
         cx.notify();
         self.call_personal_assistant(
             methods::CLEAR_PERSONAL_ASSISTANT,
@@ -125,14 +143,18 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mast_proto::PersonalAssistant;
+
+    fn chat(id: &str) -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "d1", "archived": false, "spaceId": "s1",
+            "createdAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
 
     fn reply(chat_id: Option<&str>) -> PersonalAssistantReply {
         PersonalAssistantReply {
-            assistant: chat_id.map(|id| PersonalAssistant {
-                chat_id: id.to_owned(),
-                designated_at_ms: 1,
-            }),
+            assistant: chat_id.map(|id| PersonalAssistant::for_chat(&chat(id), 1)),
         }
     }
 
@@ -143,9 +165,9 @@ mod tests {
         assert!(!state.apply(reply(None)));
         assert!(!state.load_due(Instant::now()));
         assert!(state.apply(reply(Some("c1"))));
-        assert!(state.is("c1"));
+        assert!(state.covers(&chat("c1")));
         assert!(!state.apply(reply(Some("c1"))));
         assert!(state.apply(reply(None)));
-        assert!(!state.is("c1"));
+        assert!(!state.covers(&chat("c1")));
     }
 }

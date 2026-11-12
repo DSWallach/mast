@@ -978,10 +978,14 @@ impl AgentToolsService {
         let context = self.context(token)?;
         let mut origin = context.grant.origin();
         origin.admin_space_id = context.admin_space.clone();
+        // Read again for its scheduled task: a later run of the assistant's
+        // task is the assistant too.
         origin.reads_all_chats = self
-            .tokens
-            .personal_assistant()
-            .is_assistant(&context.grant.chat_id);
+            .workspace
+            .chat(&context.grant.chat_id)
+            .ok()
+            .flatten()
+            .is_some_and(|chat| self.tokens.personal_assistant().is_assistant(&chat));
         Ok(origin)
     }
 
