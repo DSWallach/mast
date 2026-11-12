@@ -2243,6 +2243,23 @@ impl ArtifactsService {
             .and_then(|c| c.cwd)
             .filter(|c| !c.is_empty())
             .unwrap_or_else(|| space.path.clone());
+        // Binding a diff checkout deliberately leaves chat.cwd unchanged.
+        // Review validation must use the checkout selected by that binding.
+        if let Some(row) = self
+            .workspace()
+            .chat_diff_targets(&caller.chat_id)
+            .map_err(|e| ArtifactError::io(e.to_string()))?
+        {
+            if let Some(selected) = row.selected.as_deref()
+                && row.targets.iter().any(|target| target.path == selected)
+            {
+                cwd = selected.to_owned();
+            } else if let Some(selected) = row.selected_ref.as_deref()
+                && let Some(target) = row.ref_targets.iter().find(|target| target.id == selected)
+            {
+                cwd = target.path.clone();
+            }
+        }
         let mut target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()

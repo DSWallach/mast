@@ -237,3 +237,22 @@ Rules for both sources:
   API. The query is separate from the issue query, parsed leniently, and a
   failure is logged (`linear: issue attachments could not be read`, target
   `linear`) without stopping the title sync.
+
+## Publishing a local review
+
+Call `review_publish` with `{prUrl, headSha, review}`, or `{target, review}`.
+For the URL form, `review.pr` includes `repo`, `number`, `headSha`, and
+`baseSha`; a top-level `baseSha` does not replace `review.pr.baseSha`.
+A PR target is `{kind: "pr", repo, number, baseSha, headSha}`. The review
+payload uses `schema: "mast.review/v1"`.
+
+Publication validates the committed diff in the chat's selected bound checkout
+(including a submodule worktree), falling back to the chat working directory.
+A branch target can explicitly supply `checkoutPath`. Publication does not
+switch branches, fetch commits, or post to GitHub. Git validation errors include
+the working directory and arguments, including any unresolved revision.
+
+The response includes `artifactId`, `revision`, `url`, `storedPath`, and `changed`.
+Link the returned `url` as `[Review](mast-artifact:<artifactId>)`. An absolute
+Markdown file link under the selected checkout opens its source in the file
+viewer; a saved `.review.json` file alone is not a published review artifact.
