@@ -567,9 +567,20 @@ mod tests {
     }
 
     #[test]
+    fn markdown_shows_recorded_answers() {
+        let sheet = DecisionSheet::parse(include_str!("../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
+        let row_id = sheet.decision_rows()[0].id.to_owned();
+        let decision = SheetDecision { row_id, outcome: DecisionOutcome::Decided, override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 2 };
+        let text = markdown(&sheet, &[decision]);
+        assert!(text.contains("Status: decided"));
+        assert!(text.contains("Answer: Use UTC"));
+    }
+
+    #[test]
     fn markdown_includes_each_decision_row() {
         let sheet = DecisionSheet::parse(include_str!("../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
         let output = markdown(&sheet, &[]);
+        assert_eq!(output, include_str!("snapshots/decision-sheet-markdown.md"));
         for row in sheet.decision_rows() {
             assert!(output.contains(&format!("## {}: {}", row.id, row.title)));
             assert!(output.contains(&format!("Status: {}", row.status.state)));

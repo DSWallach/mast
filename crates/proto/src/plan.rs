@@ -397,6 +397,7 @@ mod tests {
     fn markdown_includes_plan_and_ticket_details() {
         let plan = parse(&fixture()).unwrap();
         let output = markdown(&plan);
+        assert_eq!(output, include_str!("snapshots/plan-markdown.md"));
         assert!(output.contains(&format!("# {}", plan.title)));
         assert!(output.contains("## Build order"));
         for ticket in plan.tickets.as_deref().unwrap_or(&[]) {
