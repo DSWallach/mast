@@ -733,7 +733,11 @@ fn first_sentence(text: &str) -> String {
 /// root-started server running as the invoking user.
 const ANTIGRAVITY_LINUX_ARGS: &[&str] = &["--uid="];
 
-fn agy_install_paths() -> Vec<PathBuf> {
+pub fn antigravity_home() -> Result<PathBuf, HarnessError> {
+    antigravity_paths::home()
+}
+
+pub(crate) fn agy_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = crate::executable::home_dir() {
         dirs.push(home.join(".local").join("bin").join("agy"));
