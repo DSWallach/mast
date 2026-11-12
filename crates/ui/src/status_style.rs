@@ -121,7 +121,7 @@ pub(crate) fn indicator_for_theme(status: Status, theme: &crate::theme::Theme) -
 }
 
 pub(crate) fn dot_color(status: Status, theme: &crate::theme::Theme) -> gpui::Hsla {
-    if theme.ui_style.id == crate::ui_style::UiStyleId::Horizon {
+    if crate::components::is_horizon(theme) {
         match status {
             Status::Working => theme.accent,
             Status::Waiting => theme.warning,
