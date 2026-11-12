@@ -771,3 +771,15 @@ mod test_isolation;
 
 mod model_rows;
 pub use model_rows::normalize_model_rows;
+
+pub use acp::antigravity_home;
+
+/// Path to the `agy` CLI binary, if installed.
+pub fn antigravity_cli_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("AGY_EXECUTABLE").map(std::path::PathBuf::from) {
+        if executable::validate_native_override(&p).is_ok() {
+            return Some(p);
+        }
+    }
+    executable::find_on_paths("agy", acp::agy_install_paths())
+}
