@@ -472,3 +472,163 @@ async fn identical_claude_sources_in_different_profiles_get_distinct_task_ids() 
     }
     assert_ne!(ids[0], ids[1]);
 }
+
+/// Two deterministic adapters exercise provider changes without contacting a CLI.
+struct ProviderFixture(HarnessId);
+#[async_trait::async_trait]
+impl mast_harness::Harness for ProviderFixture {
+    fn id(&self) -> HarnessId {
+        self.0
+    }
+    fn display_name(&self) -> &str {
+        "Provider fixture"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, mast_harness::HarnessError> {
+        Ok(vec![Model {
+            id: "fixture-model".into(),
+            label: "Fixture model".into(),
+            description: None,
+            reasoning_levels: vec![ReasoningLevel::Medium],
+            options: vec![],
+        }])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        _: mast_harness::RunControls,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<AgentEvent, mast_harness::HarnessError>>,
+        mast_harness::HarnessError,
+    > {
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(AgentEvent::SessionStarted {
+                harness: self.0,
+                model: "fixture-model".into(),
+                tools: vec![],
+                cwd: request.cwd,
+                session_id: format!("fixture-{:?}", self.0),
+                assistant_message_id: "reply".into(),
+            }),
+            Ok(AgentEvent::TextDelta {
+                text: "Completed fixture task".into(),
+            }),
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            }),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn an_existing_task_can_switch_from_claude_to_codex_without_rewriting_past_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = mast_engine::HarnessRegistry::new();
+    registry.register(Arc::new(ProviderFixture(HarnessId::ClaudeCode)));
+    registry.register(Arc::new(ProviderFixture(HarnessId::Codex)));
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(registry),
+        HarnessId::ClaudeCode,
+        None,
+    )
+    .unwrap();
+    let mut definition = draft(dir.path());
+    definition.config.harness = HarnessId::ClaudeCode;
+    definition.config.model = Some("fixture-model".into());
+    for (revision, provider) in [(0, HarnessId::ClaudeCode), (1, HarnessId::Codex)] {
+        definition.config.harness = provider;
+        core.scheduled_tasks
+            .request(ScheduledTasksRequest::Save {
+                id: "switch-provider".into(),
+                expected_revision: revision,
+                draft: definition.clone(),
+                operation_id: format!("save-provider-{revision}"),
+            })
+            .await
+            .unwrap();
+        let result = core
+            .scheduled_tasks
+            .request(ScheduledTasksRequest::RunNow {
+                id: "switch-provider".into(),
+                operation_id: format!("run-provider-{revision}"),
+            })
+            .await
+            .unwrap();
+        let run_id = result
+            .runs
+            .iter()
+            .find(|r| r.task_revision == revision + 1)
+            .unwrap()
+            .id
+            .clone();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            core.scheduled_tasks
+                .tick(chrono::Utc::now().timestamp_millis())
+                .await
+                .unwrap();
+            let snapshot = core
+                .scheduled_tasks
+                .request(ScheduledTasksRequest::List)
+                .await
+                .unwrap();
+            let run = snapshot.runs.iter().find(|r| r.id == run_id).unwrap();
+            if run.state == ScheduledRunState::Completed {
+                assert_eq!(run.snapshot.config.harness, provider);
+                let chat = core
+                    .workspace
+                    .chat(run.chat_id.as_ref().unwrap())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(chat.config.unwrap().harness, provider);
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "provider run did not complete: {run:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+    let history = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::History {
+            id: "switch-provider".into(),
+            before: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.runs.len(), 2);
+    let old = history.runs.iter().find(|r| r.task_revision == 1).unwrap();
+    assert_eq!(old.snapshot.config.harness, HarnessId::ClaudeCode);
+    let old_chat = core
+        .workspace
+        .chat(old.chat_id.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(old_chat.config.unwrap().harness, HarnessId::ClaudeCode);
+    assert_eq!(
+        history
+            .runs
+            .iter()
+            .find(|r| r.task_revision == 2)
+            .unwrap()
+            .snapshot
+            .config
+            .harness,
+        HarnessId::Codex
+    );
+    core.shutdown().await;
+}

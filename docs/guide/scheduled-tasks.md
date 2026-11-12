@@ -11,10 +11,13 @@ working directory on the execution device. A new task starts paused. A selected
 Space supplies the initial directory and account behavior; otherwise the task
 creates project-less sessions on the chosen device.
 
-Choose a **Model**, **Thinking level**, and **Context window** from that host's
-model catalog. Available thinking and context choices depend on the model.
+Choose an **Agent** from the same enabled, installed agents offered in your
+sessions, then choose its **Model**, **Thinking level**, and **Context window**.
+Available thinking and context choices depend on the model.
 Changing models preserves compatible choices and clears unsupported ones.
 Each run captures its configuration, so editing a task changes future editions.
+You can change the model or switch agents, including Claude Code to Codex, after
+a task has run. Past editions retain their original agent and model.
 
 Use a five-field cron expression and an IANA timezone for recurring work:
 
@@ -41,8 +44,10 @@ session. **Delete** removes the schedule while retaining its run history.
 ## Read editions
 
 The sidebar and Overview show the latest unarchived session per task. Reading
-or replying to an older edition does not promote it. Use **Run history** from
-a scheduled session's header or its task-management row to open older editions.
+or replying to an older edition does not promote it. The task manager lists
+configured schedules. Choose **Edit** to see a task's settings, with its own
+**Run history** at the bottom of that page. A scheduled session's **Run history**
+button opens the same task page. Choose an edition there to open its transcript.
 An older session also offers **Latest run**. A new run does not interrupt the
 edition you are reading.
 

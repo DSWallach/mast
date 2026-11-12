@@ -40,7 +40,7 @@ pub struct ScheduledTasksPage {
     catalog_loading: bool,
     catalog_error: Option<String>,
     editor: Option<TaskEditor>,
-    history: Option<String>,
+    requested_task: Option<String>,
     error: Option<String>,
     message: Option<String>,
     busy: bool,
@@ -71,7 +71,7 @@ impl ScheduledTasksPage {
                 this.busy = false;
                 this.snapshot = Default::default();
                 this.editor = None;
-                this.history = None;
+                this.requested_task = None;
                 this.models.clear();
                 this.catalogs.clear();
                 this.harnesses.clear();
@@ -95,7 +95,7 @@ impl ScheduledTasksPage {
             catalog_loading: false,
             catalog_error: None,
             editor: None,
-            history: None,
+            requested_task: None,
             error: None,
             message: None,
             busy: false,
@@ -129,7 +129,7 @@ impl ScheduledTasksPage {
         }));
         page
     }
-    pub fn show_history(&mut self, id: String, device: Option<String>, cx: &mut Context<Self>) {
+    pub fn show_task(&mut self, id: String, device: Option<String>, cx: &mut Context<Self>) {
         if let Some(device) = device {
             if self.target.as_ref() != Some(&device) {
                 self.task = None;
@@ -141,33 +141,32 @@ impl ScheduledTasksPage {
                 self.harnesses.clear();
             }
         }
-        self.history = Some(id);
+        self.requested_task = Some(id);
         self.editor = None;
+        self.open_requested_task(cx);
         self.refresh(cx);
         cx.notify();
     }
     pub fn show_tasks(&mut self, cx: &mut Context<Self>) {
         self.editor = None;
-        self.history = None;
+        self.requested_task = None;
         self.choices = None;
         self.snapshot.preview.clear();
         self.refresh(cx);
         cx.notify();
     }
 
-    fn history_task(&self) -> Option<&ScheduledTask> {
-        let id = self.history.as_ref()?;
+    fn requested_task_definition(&self) -> Option<&ScheduledTask> {
+        let id = self.requested_task.as_ref()?;
         self.snapshot
             .tasks
             .iter()
             .find(|t| &t.id == id && Some(&t.device_id) == self.target.as_ref() && !t.deleted)
     }
 
-    fn edit_history_task(&mut self, cx: &mut Context<Self>) {
-        if !self.busy {
-            if let Some(task) = self.history_task().cloned() {
-                self.edit(Some(task), cx);
-            }
+    fn open_requested_task(&mut self, cx: &mut Context<Self>) {
+        if let Some(task) = self.requested_task_definition().cloned() {
+            self.edit(Some(task), cx);
         }
     }
     pub(crate) fn set_active(&mut self, active: bool) {
@@ -192,7 +191,10 @@ impl ScheduledTasksPage {
         self.error = None;
         let target = self.target.clone();
         let is_import = matches!(request, ScheduledTasksRequest::Import { .. });
-        let is_save = matches!(request, ScheduledTasksRequest::Save { .. });
+        let saved_id = match &request {
+            ScheduledTasksRequest::Save { id, .. } => Some(id.clone()),
+            _ => None,
+        };
         let is_preview = matches!(request, ScheduledTasksRequest::Preview { .. });
         let is_import_preview = matches!(request, ScheduledTasksRequest::ImportPreview { .. });
         let mut params = serde_json::to_value(request).unwrap();
@@ -239,10 +241,7 @@ impl ScheduledTasksPage {
                             };
                             p.snapshot = snapshot;
                             p.snapshot.candidates = candidates;
-                            if is_save {
-                                p.editor = None;
-                                p.message = Some("Task saved".into());
-                            }
+                            p.finish_task_load(saved_id.as_deref(), cx);
                         }
                     }
                     Err(e) => p.error = Some(e),
@@ -251,6 +250,18 @@ impl ScheduledTasksPage {
             });
         }));
         cx.notify();
+    }
+    fn finish_task_load(&mut self, saved_id: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(id) = saved_id {
+            if self.editor.as_ref().is_some_and(|e| e.id == id) {
+                if let Some(task) = self.snapshot.tasks.iter().find(|t| t.id == id).cloned() {
+                    self.edit(Some(task), cx);
+                }
+            }
+            self.message = Some("Task saved. Model changes apply to future runs.".into());
+        } else {
+            self.open_requested_task(cx);
+        }
     }
     fn load_catalog(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -470,7 +481,7 @@ impl ScheduledTasksPage {
             draft,
             subscriptions,
         });
-        self.history = None;
+        self.requested_task = None;
         self.message = None;
         self.snapshot.preview.clear();
         self.choices = None;
@@ -607,6 +618,69 @@ impl ScheduledTasksPage {
         self.choices = None;
         cx.notify();
     }
+    fn render_task_history(
+        &self,
+        task_id: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut content = div()
+            .id("task-run-history")
+            .debug_selector(|| "task-run-history".into())
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .mt(px(16.0))
+            .pt(px(16.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(div().text_size(px(16.0)).child("Run history"));
+        let mut chats: Vec<_> = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .filter(|c| {
+                c.scheduled_task_info
+                    .as_ref()
+                    .is_some_and(|t| t.task_id == task_id)
+                    && Some(&c.device_id) == self.target.as_ref()
+            })
+            .cloned()
+            .collect();
+        chats.sort_by(|a, b| mast_proto::task_chat_order(b).cmp(&mast_proto::task_chat_order(a)));
+        if chats.is_empty() {
+            content = content.child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child("No runs yet for this task."),
+            );
+        }
+        for (i, chat) in chats.into_iter().enumerate() {
+            let id = chat.id.clone();
+            let selector_id = id.clone();
+            content = content.child(
+                popover::btn_ghost(
+                    theme,
+                    &format!(
+                        "{} · {}{}",
+                        chrono::DateTime::from_timestamp_millis(
+                            mast_proto::task_chat_order(&chat).0
+                        )
+                        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+                        .unwrap_or_default(),
+                        chat.title.as_deref().unwrap_or("Task run"),
+                        if i == 0 { " · Latest" } else { "" }
+                    ),
+                    format!("history-{}", chat.id),
+                )
+                .id(SharedString::from(format!("history-{}", chat.id)))
+                .debug_selector(move || format!("task-run-{selector_id}").into())
+                .on_click(cx.listener(move |p, _, _, cx| p.open_chat(id.clone(), cx))),
+            );
+        }
+        content.into_any_element()
+    }
     fn open_chat(&mut self, id: String, cx: &mut Context<Self>) {
         cx.emit(TaskPageEvent::OpenChat(id));
     }
@@ -644,8 +718,8 @@ impl Render for ScheduledTasksPage {
             .text_color(theme.text);
         let title = if self.editor.is_some() {
             "Edit scheduled task"
-        } else if self.history.is_some() {
-            "Task run history"
+        } else if self.requested_task.is_some() {
+            "Scheduled task"
         } else {
             "Scheduled tasks"
         };
@@ -662,14 +736,17 @@ impl Render for ScheduledTasksPage {
                         .flex()
                         .flex_wrap()
                         .gap(px(8.0))
-                        .when(self.editor.is_some() || self.history.is_some(), |el| {
-                            el.child(
-                                popover::btn_ghost(&theme, "Manage tasks", "tasks-manage")
-                                    .id("tasks-manage")
-                                    .debug_selector(|| "tasks-manage".into())
-                                    .on_click(cx.listener(|p, _, _, cx| p.show_tasks(cx))),
-                            )
-                        })
+                        .when(
+                            self.editor.is_some() || self.requested_task.is_some(),
+                            |el| {
+                                el.child(
+                                    popover::btn_ghost(&theme, "Manage tasks", "tasks-manage")
+                                        .id("tasks-manage")
+                                        .debug_selector(|| "tasks-manage".into())
+                                        .on_click(cx.listener(|p, _, _, cx| p.show_tasks(cx))),
+                                )
+                            },
+                        )
                         .child(
                             popover::btn_ghost(&theme, "Refresh", "tasks-refresh")
                                 .id("tasks-refresh")
@@ -711,7 +788,7 @@ impl Render for ScheduledTasksPage {
                         if !p.busy {
                             p.target = Some(id.clone());
                             p.editor = None;
-                            p.history = None;
+                            p.requested_task = None;
                             p.snapshot = Default::default();
                             p.models.clear();
                             p.catalogs.clear();
@@ -1043,6 +1120,7 @@ impl Render for ScheduledTasksPage {
                     .child(
                         popover::btn_primary(&theme, "Save changes")
                             .id("task-save")
+                            .debug_selector(|| "task-save".into())
                             .on_click(cx.listener(|p, _, _, cx| p.save(cx))),
                     )
                     .child(
@@ -1076,55 +1154,13 @@ impl Render for ScheduledTasksPage {
                     .unwrap_or_default();
                 content = content.child(div().text_size(px(12.0)).child(stamp));
             }
-        } else if let Some(task_id) = &self.history {
-            let mut chats: Vec<_> = self
-                .state
-                .read(cx)
-                .chats
-                .iter()
-                .filter(|c| {
-                    c.scheduled_task_info
-                        .as_ref()
-                        .is_some_and(|t| &t.task_id == task_id)
-                        && Some(&c.device_id) == self.target.as_ref()
-                })
-                .cloned()
-                .collect();
-            chats.sort_by(|a, b| {
-                mast_proto::task_chat_order(b).cmp(&mast_proto::task_chat_order(a))
-            });
-            if let Some(task) = self.history_task() {
-                content = content
-                    .child(div().text_size(px(15.0)).child(task.draft.name.clone()))
-                    .child(
-                        popover::btn_primary(&theme, "Edit task")
-                            .id("history-edit-task")
-                            .debug_selector(|| "history-edit-task".into())
-                            .on_click(cx.listener(|p, _, _, cx| p.edit_history_task(cx))),
-                    );
-            } else if !self.busy && self.error.is_none() {
-                content = content.child("No editable schedule was found on this device. Use Manage tasks to view or import its schedule; these past sessions remain available.");
-            }
-            for (i, chat) in chats.into_iter().enumerate() {
-                let id = chat.id.clone();
-                content = content.child(
-                    popover::btn_ghost(
-                        &theme,
-                        &format!(
-                            "{} · {}{}",
-                            chrono::DateTime::from_timestamp_millis(
-                                mast_proto::task_chat_order(&chat).0
-                            )
-                            .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
-                            .unwrap_or_default(),
-                            chat.title.as_deref().unwrap_or("Task run"),
-                            if i == 0 { " · Latest" } else { "" }
-                        ),
-                        format!("history-{}", chat.id),
-                    )
-                    .id(SharedString::from(format!("history-{}", chat.id)))
-                    .on_click(cx.listener(move |p, _, _, cx| p.open_chat(id.clone(), cx))),
-                );
+            content = content.child(self.render_task_history(&e.id, &theme, cx));
+        } else if let Some(task_id) = &self.requested_task {
+            if self.busy {
+                content = content.child("Loading task settings…");
+            } else if self.error.is_none() {
+                content = content.child("This schedule is no longer available on this device. Its past runs remain below; use Manage tasks to view or import schedules.");
+                content = content.child(self.render_task_history(task_id, &theme, cx));
             }
         } else {
             content = content.child(
@@ -1151,7 +1187,6 @@ impl Render for ScheduledTasksPage {
                 let toggle = task.clone();
                 let delete = task.clone();
                 let run_id = task.id.clone();
-                let history_id = task.id.clone();
                 let recent = self.snapshot.runs.iter().find(|r| r.task_id == task.id);
                 let detail = recent
                     .map(|r| {
@@ -1283,17 +1318,6 @@ impl Render for ScheduledTasksPage {
                         })),
                     )
                     .child(
-                        popover::btn_ghost(
-                            &theme,
-                            "Run history",
-                            format!("history-task-{}", task.id),
-                        )
-                        .id(SharedString::from(format!("history-task-{}", task.id)))
-                        .on_click(cx.listener(move |p, _, _, cx| {
-                            p.show_history(history_id.clone(), None, cx)
-                        })),
-                    )
-                    .child(
                         popover::btn_ghost(&theme, "Delete", format!("delete-{}", task.id))
                             .id(SharedString::from(format!("delete-{}", task.id)))
                             .on_click(cx.listener(move |p, _, _, cx| {
@@ -1363,11 +1387,16 @@ impl Render for ScheduledTasksPage {
 mod tests {
     use super::*;
     #[gpui::test]
-    fn run_history_can_edit_its_schedule_and_return_to_all_tasks(cx: &mut gpui::TestAppContext) {
+    fn task_list_opens_settings_with_only_that_tasks_history_below(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::default()));
         let state = cx.new(|_| AppState::new());
         let (page, cx) = cx.add_window_view(|_, cx| {
-            let mut p = ScheduledTasksPage::new(state, cx);
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            state.update(cx, |s, _| {
+                s.chats = [("morning-run", "morning"), ("weekly-run", "weekly")].into_iter().map(|(id, task)| {
+                    serde_json::from_value(serde_json::json!({"id":id,"deviceId":"host","archived":false,"createdAt":"2026-01-01T00:00:00Z","scheduledTaskInfo":{"taskId":task,"taskName":task,"runId":id}})).unwrap()
+                }).collect();
+            });
             p.target = Some("host".into());
             p.edit(None, cx);
             let mut draft = p.editor.take().unwrap().draft;
@@ -1389,15 +1418,19 @@ mod tests {
             second.id = "weekly".into();
             second.draft.name = "Weekly report".into();
             p.snapshot.tasks = vec![task, second];
-            p.show_history("morning".into(), None, cx);
+            p.show_tasks(cx);
             p.error = None;
             p
         });
-        cx.simulate_resize(gpui::size(px(900.0), px(900.0)));
+        cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
         cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("task-run-history").is_none(),
+            "the main view lists tasks, not runs"
+        );
         let edit = cx
-            .debug_bounds("history-edit-task")
-            .expect("history exposes Edit task")
+            .debug_bounds("task-edit-morning")
+            .expect("the task has an edit action")
             .center();
         cx.simulate_click(edit, gpui::Modifiers::default());
         cx.run_until_parked();
@@ -1406,8 +1439,37 @@ mod tests {
             assert_eq!(e.id, "morning");
             assert_eq!(e.revision, 7);
             assert_eq!(e.prompt.read(cx).text(), "Read the morning procedure");
-            assert!(p.history.is_none());
+            assert!(p.requested_task.is_none());
         });
+        assert!(cx.debug_bounds("task-run-morning-run").is_some());
+        assert!(cx.debug_bounds("task-run-weekly-run").is_none());
+        assert!(
+            cx.debug_bounds("task-run-history").unwrap().top()
+                > cx.debug_bounds("task-save").unwrap().bottom()
+        );
+        page.update(cx, |p, cx| {
+            p.catalogs.insert(
+                HarnessId::Codex,
+                vec![Model {
+                    id: "codex-fixture".into(),
+                    label: "Codex fixture".into(),
+                    description: None,
+                    reasoning_levels: vec![],
+                    options: vec![],
+                }],
+            );
+            p.choice("harness", "codex".into(), cx);
+            let draft = p.editor_draft(cx).unwrap();
+            assert_eq!(draft.config.harness, HarnessId::Codex);
+            assert_eq!(draft.config.model.as_deref(), Some("codex-fixture"));
+            assert_eq!(p.editor.as_ref().unwrap().revision, 7);
+            p.snapshot.tasks[0].draft = draft;
+            p.snapshot.tasks[0].revision = 8;
+            p.finish_task_load(Some("morning"), cx);
+            assert_eq!(p.editor.as_ref().unwrap().revision, 8);
+            assert_eq!(p.editor_draft(cx).unwrap().config.harness, HarnessId::Codex);
+        });
+        cx.run_until_parked();
         let manage = cx
             .debug_bounds("tasks-manage")
             .expect("editor exposes Manage tasks")
@@ -1415,7 +1477,7 @@ mod tests {
         cx.simulate_click(manage, gpui::Modifiers::default());
         cx.run_until_parked();
         page.read_with(cx, |p, _| {
-            assert!(p.history.is_none());
+            assert!(p.requested_task.is_none());
             assert!(p.editor.is_none());
             assert_eq!(p.snapshot.tasks.len(), 2);
         });
@@ -1426,17 +1488,29 @@ mod tests {
         cx.simulate_click(edit_second, gpui::Modifiers::default());
         cx.run_until_parked();
         page.read_with(cx, |p, _| {
-            assert_eq!(p.editor.as_ref().unwrap().id, "weekly")
+            assert_eq!(p.editor.as_ref().unwrap().id, "weekly");
         });
+        assert!(cx.debug_bounds("task-run-weekly-run").is_some());
+        assert!(cx.debug_bounds("task-run-morning-run").is_none());
         page.update(cx, |p, cx| {
-            p.show_history("morning".into(), None, cx);
-            p.target = Some("another-host".into());
+            p.show_task("morning".into(), None, cx);
+            assert_eq!(p.editor.as_ref().unwrap().id, "morning");
+            let mut remote_task = p.snapshot.tasks[0].clone();
+            p.show_task("morning".into(), Some("another-host".into()), cx);
             assert!(
-                p.history_task().is_none(),
+                p.requested_task_definition().is_none(),
                 "never edit another device's definition"
             );
+            remote_task.device_id = "another-host".into();
+            p.snapshot.tasks = vec![remote_task];
+            p.finish_task_load(None, cx);
+            assert_eq!(
+                p.editor.as_ref().unwrap().id,
+                "morning",
+                "a loaded definition opens directly in its editor"
+            );
             p.show_tasks(cx);
-            assert!(p.editor.is_none() && p.history.is_none());
+            assert!(p.editor.is_none() && p.requested_task.is_none());
         });
     }
 
@@ -1627,19 +1701,25 @@ mod tests {
         ] {
             crate::snapshot::render_to_png(
                 &format!("scheduled-task-editor-{name}"),
-                gpui::size(px(850.0), px(1100.0)),
+                gpui::size(px(850.0), px(1500.0)),
                 crate::ui_style::UiStyleId::Default,
                 appearance,
                 |_, cx| {
                     let _ = crate::typography::register_fonts(cx);
                     let state = cx.new(|_| AppState::new());
                     let page = cx.new(|cx| {
-                        let mut p = ScheduledTasksPage::new(state, cx);
+                        let mut p = ScheduledTasksPage::new(state.clone(), cx);
+                        p.target = Some("host".into());
+                        state.update(cx, |s, _| {
+                            s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Morning engineering briefing","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Morning engineering briefing","runId":"morning-previous"}})).unwrap()];
+                        });
                         p.edit(None, cx);
+                        p.editor.as_mut().unwrap().id = "morning".into();
+                        p.editor.as_mut().unwrap().revision = 2;
                         let e = p.editor.as_ref().unwrap();
                         e.name.update(cx, |i,cx|i.set_text("Morning engineering briefing",cx));
                         e.cwd.update(cx, |i,cx|i.set_text("/Users/david/Work/mast/.worktrees/scheduled-tasks/very-long-working-directory-for-the-daily-briefing",cx));
-                        e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n".repeat(8),cx));
+                        e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n",cx));
                         p.error = None;
                         p
                     });
@@ -1658,10 +1738,10 @@ mod tests {
         let page = cx.new(|cx| ScheduledTasksPage::new(state, cx));
         page.update(cx, |p, cx| {
             p.target = Some("device-b".into());
-            p.show_history("task".into(), Some("device-a".into()), cx);
+            p.show_task("task".into(), Some("device-a".into()), cx);
             assert_eq!(p.target.as_deref(), Some("device-a"));
             p.target = Some("device-b".into());
-            p.show_history("task".into(), None, cx);
+            p.show_task("task".into(), None, cx);
             assert_eq!(p.target.as_deref(), Some("device-b"));
         });
     }

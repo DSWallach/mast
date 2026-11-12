@@ -4868,7 +4868,7 @@ impl Shell {
         let page = self.ensure_scheduled_tasks_page(cx);
         if let Some(id) = history {
             let device=self.state.read(cx).selected_chat_row().filter(|c|c.scheduled_task_info.as_ref().is_some_and(|t|t.task_id==id)).map(|c|c.device_id.clone());
-            page.update(cx, |p, cx| p.show_history(id, device, cx));
+            page.update(cx, |p, cx| p.show_task(id, device, cx));
         } else {
             page.update(cx, |p, cx| p.show_tasks(cx));
         }
