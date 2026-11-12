@@ -7331,6 +7331,7 @@ impl Shell {
     fn render_chat_row(
         &self,
         id: String,
+        row_scope: Option<&str>,
         title: SharedString,
         time_ago: SharedString,
         space_name: SharedString,
@@ -7357,10 +7358,12 @@ impl Shell {
         // relative time instead. Hovering the ROW swaps the corner for the
         // ARCHIVE button. Compact rows keep status first and elapsed time last;
         // their archive control occupies the remote-icon slot on hover.
-        // A chat can appear on both surfaces at once. Namespace every hover
-        // key and child id so the palette never animates the sidebar copy.
+        // A chat can appear in the list, fixed current-session row and palette.
+        // Namespace hover keys and child ids so each copy animates independently.
         let row_id = if search_query.is_some() {
             format!("palette-chat-{id}")
+        } else if let Some(scope) = row_scope {
+            format!("{scope}-chat-{id}")
         } else {
             format!("chat-{id}")
         };

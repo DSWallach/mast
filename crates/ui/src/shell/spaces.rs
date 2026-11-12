@@ -5088,6 +5088,7 @@ impl Shell {
                 } else {
                     self.render_chat_row(
                         chat.id.clone(),
+                        None,
                         transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
                         )
@@ -5552,23 +5553,64 @@ impl Shell {
     /// The personal assistant's own section, above the space filter: it stays
     /// put whatever the filter, sort or grouping. A scheduled-task assistant
     /// shows and opens its latest run, and stays lit on any of its runs.
+    /// The open session sits directly below it, independent of list filters.
     pub(super) fn render_personal_assistant_section(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = Utc::now();
-        let (row, selected) = {
+        let (row, selected, open_row) = {
             let state = self.state.read(cx);
             let chat = state.personal_assistant.current(&state.chats)?.clone();
+            // Keep the open session reachable even outside the current filter.
+            // Older assistant task runs also get their own row beneath the latest.
+            let open_row = state
+                .selected_chat_row()
+                .filter(|open| open.id != chat.id)
+                .map(|open| {
+                    self.sidebar_chat_data(
+                        state.display_status_for(open, now),
+                        open.clone(),
+                        state,
+                    )
+                });
             let selected = state
                 .selected_chat_row()
                 .is_some_and(|selected| state.personal_assistant.covers(selected));
             (
                 self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
                 selected,
+                open_row,
             )
         };
+        let open_element = open_row.map(|row| {
+            let chat = row.chat;
+            let harness = self
+                .settings
+                .sidebar_show_harness
+                .then(|| chat.config.as_ref().map(|c| c.harness))
+                .flatten();
+            self.render_chat_row(
+                chat.id.clone(),
+                Some("current-session"),
+                transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
+                format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+                row.folder.into(),
+                row.branch.map(SharedString::from),
+                row.change_request,
+                harness,
+                row.status,
+                true,
+                chat.archived,
+                false,
+                None,
+                None,
+                None,
+                theme,
+                cx,
+            )
+        });
         let chat = row.chat;
         let harness = self
             .settings
@@ -5577,6 +5619,7 @@ impl Shell {
             .flatten();
         let element = self.render_chat_row(
             chat.id.clone(),
+            None,
             transcript::single_line(&chat.title.clone().unwrap_or_else(|| "New session".into()))
                 .into(),
             format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
@@ -5615,6 +5658,15 @@ impl Shell {
                         )),
                 )
                 .child(element)
+                .when_some(open_element, |el, row| {
+                    el.child(
+                        div()
+                            .id("sidebar-current-session")
+                            .debug_selector(|| "sidebar-current-session".into())
+                            .pt(px(SIDEBAR_LIST_GAP))
+                            .child(row),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -5808,6 +5860,7 @@ impl Shell {
                 list = list.child(
                     self.render_chat_row(
                         chat.id.clone(),
+                        None,
                         transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
                         )
