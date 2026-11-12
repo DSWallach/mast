@@ -458,7 +458,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder)." },
                     "title": { "type": "string", "description": "Human title, e.g. \"Receiving flow — plan\". Same title + role on the same work item = same artifact." },
-                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet"], "description": "Defaults from the file extension." },
+                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet", "plan"], "description": "Structured plan JSON uses kind plan; otherwise defaults from the file extension." },
                     "role": { "type": "string", "description": "plan, diagram, state-machine, comparison, or doc (free-form)." },
                     "note": { "type": "string", "description": "One line: what changed in this revision." },
                     "pinAsPlan": { "type": "boolean", "default": false, "description": "Make this the work item's plan (unpins the previous one)." },

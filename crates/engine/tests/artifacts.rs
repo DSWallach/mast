@@ -2544,3 +2544,47 @@ async fn plan_answers_are_recorded_as_one_batch() {
     assert_eq!(answers.len(), 2);
     assert_eq!(answers[0].at, answers[1].at);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn structured_plan_publish_and_get_round_trip() {
+    let rig = rig().await;
+    let path = rig.worktree.join("plan.json");
+    let source = include_str!("../../../docs/artifact-kit/plan-example.json");
+    std::fs::write(&path, source).unwrap();
+    let first = publish(&rig, &rig.token, json!({"path":path, "title":"Structured plan", "kind":"plan", "role":"plan", "pinAsPlan":true, "idempotencyKey":"structured-plan"})).await;
+    assert_eq!(
+        artifact(&rig, first["artifactId"].as_str().unwrap()).kind,
+        ArtifactKind::Plan
+    );
+    assert!(!first["warnings"].as_array().unwrap().is_empty());
+    let fetched = tool(&rig, &rig.token, "artifact_get_plan", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        fetched["plan"],
+        serde_json::from_str::<Value>(source).unwrap()
+    );
+    let mut invalid: Value = serde_json::from_str(source).unwrap();
+    invalid["tickets"][0]["goal"] = json!("");
+    std::fs::write(&path, invalid.to_string()).unwrap();
+    assert!(tool(&rig, &rig.token, "artifact_publish", json!({"path":path, "title":"Structured plan", "kind":"plan", "idempotencyKey":"bad-plan"})).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn structured_plan_validates_readable_sheet_rows() {
+    let rig = rig().await;
+    let sheet_path = rig.worktree.join("sheet.json");
+    let sheet = r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"event-order","title":"Order","status":{"state":"decided","date":"2026-01-01"},"steps":[]}] }"#;
+    std::fs::write(&sheet_path, sheet).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path": sheet_path, "title":"Sheet", "kind":"decision-sheet", "idempotencyKey":"plan-sheet"})).await;
+    let path = rig.worktree.join("plan.json");
+    let mut plan: Value = serde_json::from_str(include_str!("../../../docs/artifact-kit/plan-example.json")).unwrap();
+    plan["sheet"]["ref"] = json!(format!("mast-artifact:{}", published["artifactId"].as_str().unwrap()));
+    std::fs::write(&path, plan.to_string()).unwrap();
+    let reply = publish(&rig, &rig.token, json!({"path":path,"title":"Plan","kind":"plan","idempotencyKey":"valid-plan-sheet"})).await;
+    assert_eq!(reply["warnings"], json!([]));
+    plan["tickets"][0]["behavior"][0]["row"] = json!("missing");
+    std::fs::write(&path, plan.to_string()).unwrap();
+    let error = tool(&rig, &rig.token, "artifact_publish", json!({"path":path,"title":"Plan","kind":"plan","idempotencyKey":"invalid-plan-sheet"})).await.unwrap_err();
+    assert!(error.contains("tickets[0].behavior[0].row"), "{error}");
+}

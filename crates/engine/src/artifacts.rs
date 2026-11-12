@@ -950,6 +950,29 @@ impl ArtifactsService {
             mast_proto::decision_sheet::DecisionSheet::parse(std::str::from_utf8(&bytes).expect("validated UTF-8"))
                 .map_err(|e| ArtifactError::invalid(format!("invalid decision sheet: {e}")))?;
         }
+        if kind == ArtifactKind::Plan {
+            let plan = mast_proto::plan::Plan::parse(std::str::from_utf8(&bytes).expect("validated UTF-8"))
+                .map_err(|e| ArtifactError::invalid(format!("invalid plan: {e}")))?;
+            if let Some(sheet_ref) = plan.sheet.as_ref() {
+                let id = sheet_ref.r#ref.strip_prefix("mast-artifact:").unwrap_or("");
+                if let Some(sheet_artifact) = self.workspace().artifact(id)
+                    && sheet_artifact.space_id == space.id
+                    && sheet_artifact.kind == ArtifactKind::DecisionSheet
+                    && sheet_artifact.current_revision as u64 == sheet_ref.rev
+                    && sheet_artifact.archived_at.is_none()
+                    && match (&request.work_item_id, sheet_artifact.plan_scope()) {
+                        (Some(item), Some(PlanScope::WorkItem(theirs))) => item == theirs,
+                        (None, Some(PlanScope::Chat(chat))) => request.chat_id.as_deref() == Some(chat),
+                        _ => false,
+                    }
+                    && let Ok(sheet_bytes) = self.current_bytes(&sheet_artifact)
+                    && let Ok(sheet_text) = std::str::from_utf8(&sheet_bytes)
+                    && let Ok(mut sheet) = mast_proto::decision_sheet::DecisionSheet::parse(sheet_text) {
+                        sheet.apply_decisions(&sheet_artifact.decisions);
+                        plan.validate_sheet(&sheet).map_err(ArtifactError::invalid)?;
+                    }
+            }
+        }
         let manifest = if kind == ArtifactKind::Options {
             Some(OptionsManifest::parse(&String::from_utf8_lossy(&bytes))?)
         } else {
@@ -2517,7 +2540,7 @@ impl ArtifactsService {
             Some(raw) => Some(ArtifactKind::parse(raw).ok_or_else(|| {
                 ArtifactError::invalid(format!(
                     "kind must be markdown, html-fragment, html-page, mermaid, image, or \
-                     options, or decision-sheet, not {raw:?}"
+                     options, decision-sheet, or plan, not {raw:?}"
                 ))
             })?),
             None => None,
@@ -2550,7 +2573,23 @@ impl ArtifactsService {
             let (_, orphans) = mast_proto::decision_sheet::partition_decisions(&sheet, &artifact.decisions);
             Some(orphans.into_iter().map(|decision| decision.row_id.clone()).collect::<Vec<_>>())
         }).unwrap_or_default();
+        let mut warnings = Vec::<String>::new();
+        if kind == Some(ArtifactKind::Plan) {
+            if let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
+                && let Ok(bytes) = self.current_bytes(&artifact)
+                && let Ok(source) = std::str::from_utf8(&bytes)
+                && let Ok(plan) = mast_proto::plan::Plan::parse(source)
+                && let Some(sheet_ref) = plan.sheet {
+                let readable = sheet_ref.r#ref.strip_prefix("mast-artifact:").and_then(|id| self.workspace().artifact(id)).is_some_and(|sheet| {
+                    sheet.space_id == caller.space_id && sheet.kind == ArtifactKind::DecisionSheet && sheet.archived_at.is_none() && sheet.current_revision as u64 == sheet_ref.rev
+                    && match (&caller.work_item_id, sheet.plan_scope()) { (Some(item), Some(PlanScope::WorkItem(theirs))) => item == theirs, (None, Some(PlanScope::Chat(chat))) => chat == caller.chat_id, _ => false }
+                    && self.current_bytes(&sheet).ok().and_then(|b| String::from_utf8(b).ok()).and_then(|s| mast_proto::decision_sheet::DecisionSheet::parse(&s).ok()).is_some()
+                });
+                if !readable { warnings.push("Linked decision sheet revision is not readable; row references were not validated".into()); }
+            }
+        }
         Ok(json!({
+            "warnings": warnings,
             "artifactId": reply.artifact_id,
             "revision": reply.revision,
             "url": reply.url,
@@ -2603,6 +2642,7 @@ impl ArtifactsService {
             "revision": plan.current_revision,
             "storedPath": plan.stored_path,
             "url": plan.url(),
+            "plan": if plan.kind == ArtifactKind::Plan { content.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()) } else { None },
             "content": content,
             "openQuestions": open_questions,
             "unverifiedClaims": unverified_claims,
