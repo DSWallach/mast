@@ -276,7 +276,7 @@ pub fn linear_body(t: &Ticket) -> String {
         let _ = writeln!(s, "- {} — {}", o.text, o.lives_in);
     }
     if t.out_of_scope.is_empty() {
-        s.push_str("- —\n");
+        s.push_str("—\n");
     }
     if let Some(c) = &t.contract {
         s.push_str("\n## Contract\n");
@@ -312,6 +312,78 @@ pub fn linear_body(t: &Ticket) -> String {
     s
 }
 
+/// Render a plan for sharing as Markdown.
+pub fn markdown(plan: &Plan) -> String {
+    use std::fmt::Write;
+    let mut out = format!("# {}\n\n{}\n", plan.title, plan.summary);
+    if let Some(scope) = &plan.scope {
+        out.push_str("\n## Scope\n");
+        for item in &scope.r#in {
+            let _ = writeln!(out, "- In: {item}");
+        }
+        for item in &scope.out {
+            let _ = writeln!(out, "- Out: {} — {}", item.item, item.lives_in);
+        }
+        for item in &scope.optional {
+            let _ = writeln!(out, "- Optional: {} — {}", item.item, item.question);
+        }
+        for item in &scope.constraints {
+            let _ = writeln!(out, "- Constraint: {item}");
+        }
+    }
+    out.push_str("\n## Build order\n");
+    for ticket in plan.tickets.as_deref().unwrap_or(&[]) {
+        let deps = ticket
+            .depends_on
+            .iter()
+            .map(|d| format!("{} ({})", d.id, d.mode))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "- {}: {} — depends on: {}; status: {}",
+            ticket.id,
+            ticket.title,
+            if deps.is_empty() { "none" } else { &deps },
+            ticket.status.state
+        );
+    }
+    for ticket in plan.tickets.as_deref().unwrap_or(&[]) {
+        let _ = write!(out, "\n---\n\n{}\n", linear_body(ticket));
+    }
+    out.push_str("\n## Contracts\n");
+    for contract in plan.contracts.as_deref().unwrap_or(&[]) {
+        let _ = writeln!(
+            out,
+            "\n### {}: {}\n\n{}\n\nProduced by: {}\n\nConsumed by: {}",
+            contract.id,
+            contract.name,
+            contract.summary,
+            contract.produced_by.join(", "),
+            contract.consumed_by.join(", ")
+        );
+        if let Some(example) = &contract.example {
+            let _ = writeln!(out, "\nExample: {example}");
+        }
+    }
+    out.push_str("\n## Open questions\n");
+    for q in plan.questions.as_deref().unwrap_or(&[]) {
+        let _ = writeln!(
+            out,
+            "- {}: {} (row: {}; blocking: {}; blocks: {})",
+            q.id,
+            q.text,
+            q.row,
+            q.blocking,
+            q.blocks.join(", ")
+        );
+        if let Some(example) = &q.example {
+            let _ = writeln!(out, "  Example: {example}");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,12 +394,23 @@ mod tests {
         Plan::parse(&v.to_string())
     }
     #[test]
+    fn markdown_includes_plan_and_ticket_details() {
+        let plan = parse(&fixture()).unwrap();
+        let output = markdown(&plan);
+        assert_eq!(output, include_str!("snapshots/plan-markdown.md"));
+        assert!(output.contains(&format!("# {}", plan.title)));
+        assert!(output.contains("## Build order"));
+        for ticket in plan.tickets.as_deref().unwrap_or(&[]) {
+            assert!(output.contains(&linear_body(ticket)));
+        }
+    }
+    #[test]
     fn synthetic_plan_and_linear_body() {
         let p = parse(&fixture()).unwrap();
         let body = linear_body(&p.tickets.unwrap()[0]);
         assert_eq!(
             body,
-            "# Order history improvement 1 with a descriptive title\n\n## Goal\nImprove order history step 1.\n\n## Behavior\n- Show the agreed behavior. [event-order]\n\n## Acceptance\n- The behavior works.\n\n## Out of scope\n- —\n\n## Contract\nevents (produces)\n\n## Where\n- app/orders/views.py:120\n\n## Depends on\n—\n\n## Size\nM: 100–200 lines"
+            "# Order history improvement 1 with a descriptive title\n\n## Goal\nImprove order history step 1.\n\n## Behavior\n- Show the agreed behavior. [event-order]\n\n## Acceptance\n- The behavior works.\n\n## Out of scope\n—\n\n## Contract\nevents (produces)\n\n## Where\n- app/orders/views.py:120\n\n## Depends on\n—\n\n## Size\nM: 100–200 lines"
         );
     }
     #[test]

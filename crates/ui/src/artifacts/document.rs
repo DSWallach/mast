@@ -97,6 +97,48 @@ pub(crate) fn web_document(
     }
 }
 
+/// A standalone document without the host frame or Mast messaging bridges.
+/// `source` is already rendered for structured artifact kinds.
+pub(crate) fn export_document(kind: WebKind, source: &str, title: &str, pdf: bool) -> String {
+    let light = FragmentTheme::from_theme(&crate::theme::Theme::light());
+    let dark = FragmentTheme::from_theme(&crate::theme::Theme::dark());
+    let mut style = fragment::base_stylesheet(&light, false);
+    if !pdf {
+        let mut dark_vars = String::from("color-scheme: dark;\n");
+        for (name, value) in &dark.vars {
+            dark_vars.push_str(&format!("{name}: {value};\n"));
+        }
+        style.push_str(&format!("\n@media (prefers-color-scheme: dark) {{ :root:not([data-theme]) {{ {dark_vars} }} }}\n:root[data-theme=dark] {{ {dark_vars} }}\n"));
+    }
+    style.push_str("html, body { background: var(--background); } body { padding: 24px !important; } .mk-sheet-actions { display: none !important; }\n");
+    if kind == WebKind::DecisionSheet {
+        style.push_str(".mk-grid, .mk-screenshots { grid-template-columns: minmax(0, 1fr); } .mk-table { table-layout: fixed; } .mk-table th, .mk-table td { white-space: normal; min-width: 0; overflow-wrap: anywhere; } .mk-table th:first-child, .mk-table td:first-child { width: 72px; } .mk-row-id, .mk-mono, .mk-step-chip, .mk-step-params { white-space: normal; overflow-wrap: anywhere; word-break: normal; } .mk-screenshot-placeholder { min-height: 0; padding: 10px; }\n");
+    }
+    if pdf {
+        style.push_str("@page { size: A4; margin: 15mm; } @media print { body { padding: 0 !important; } .pl-rail { display: none !important; } }\n");
+    }
+    let theme_script = if pdf {
+        "document.documentElement.dataset.theme='light'; document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('details').forEach(d => d.open = true));"
+    } else {
+        "const m=matchMedia('(prefers-color-scheme: dark)'); const theme=()=>document.documentElement.dataset.theme=m.matches?'dark':'light'; theme(); m.addEventListener('change',theme);"
+    };
+    let extras = format!("<style>{style}{QUESTION_CSS}</style><script>{theme_script}</script>");
+    let runtime = format!("<script>{}</script>", fragment::RUNTIME_SCRIPT);
+    if kind == WebKind::Page {
+        let page = inject_head_markup(source, &extras);
+        if let Some(pos) = page.to_ascii_lowercase().rfind("</body>") {
+            format!("{}{runtime}{}", &page[..pos], &page[pos..])
+        } else {
+            format!("{page}{runtime}")
+        }
+    } else {
+        let body = if kind == WebKind::Mermaid {
+            mermaid_fragment(source, false)
+        } else { source.to_owned() };
+        format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title>{extras}</head><body>{body}{runtime}</body></html>", escape_text(title))
+    }
+}
+
 /// The viewport a compare render uses for each pane (and the offscreen
 /// renders behind "Highlight changes" and onion skin), so both revisions lay
 /// out at the same width and region boxes line up with the panes.
@@ -740,5 +782,46 @@ if (!broken || !broken.errors.some(e => e.includes('Render probe failed: fixture
             .write_all(input.as_bytes())
             .unwrap();
         assert!(node.wait().unwrap().success());
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn mermaid_uses_cdn_and_pdf_expands_details() {
+        let html = export_document(WebKind::Mermaid, "graph TD; A-->B", "Diagram", false);
+        assert!(html.contains(&format!("<script src=\"{MERMAID_SRC}\"></script>")));
+        let pdf_mermaid = export_document(WebKind::Mermaid, "graph TD; A-->B", "Diagram", true);
+        assert!(pdf_mermaid.contains(&format!("<script src=\"{MERMAID_SRC}\"></script>")));
+        assert!(html.contains("graph TD; A--&gt;B"));
+        let pdf = export_document(WebKind::Fragment, "<details><summary>More</summary>Text</details>", "PDF", true);
+        assert!(pdf.contains("d.open = true"));
+        assert!(pdf.contains("@page"));
+    }
+
+    #[test]
+    fn standalone_documents_have_kit_without_mast_bridges() {
+        let plan = mast_proto::plan::Plan::parse(include_str!("../../../../docs/artifact-kit/plan-example.json")).unwrap();
+        let sheet = mast_proto::decision_sheet::DecisionSheet::parse(include_str!("../../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
+        if std::env::var_os("MAST_WRITE_EXPORT_EXAMPLES").is_some() {
+            let dir = std::path::Path::new("/private/tmp/artifact-export");
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("plan.html"), export_document(WebKind::Plan, &mast_proto::plan_render::render(&plan), &plan.title, false)).unwrap();
+            std::fs::write(dir.join("decision-sheet.html"), export_document(WebKind::DecisionSheet, &mast_proto::decision_sheet_render::render(&sheet), &sheet.title, false)).unwrap();
+        }
+        for (kind, body) in [
+            (WebKind::Plan, mast_proto::plan_render::render(&plan)),
+            (WebKind::DecisionSheet, mast_proto::decision_sheet_render::render(&sheet)),
+            (WebKind::Fragment, "<p>Fragment</p>".to_owned()),
+        ] {
+            let html = export_document(kind, &body, "Example", false);
+            assert!(html.contains("--mk-blue"));
+            assert!(html.contains("prefers-color-scheme"));
+            assert!(!html.contains("mastMsg"));
+            assert!(!html.contains("mastRenderProbe"));
+            assert!(!html.contains("srcdoc="));
+        }
     }
 }
