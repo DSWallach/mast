@@ -3519,7 +3519,7 @@ impl Shell {
             .chats
             .iter()
             .find(|chat| chat.id == self.active_chat)?;
-        let root = chat.cwd.clone()?;
+        let root = crate::files::client::FilesRequestContext::for_chat(state, &self.active_chat)?.cwd;
         let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
         Some((root, local))
     }
@@ -3875,19 +3875,15 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(chat) = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == self.active_chat)
-        else {
+        // Resolve with the same checkout used by FilesSurface. Resolving
+        // against chat.cwd first would prefix a bound-worktree link twice.
+        let Some(context) = crate::files::client::FilesRequestContext::for_chat(
+            self.state.read(cx),
+            &self.active_chat,
+        ) else {
             return false;
         };
-        let Some(root) = chat.cwd.as_deref() else {
-            return false;
-        };
-        let Some(link) = resolve_workspace_file_link(target, root) else {
+        let Some(link) = resolve_workspace_file_link(target, &context.cwd) else {
             return false;
         };
 
@@ -14642,6 +14638,113 @@ mod exit_regressions {
             .unwrap();
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn review_file_link_uses_bound_checkout_root(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let bound = root.join(".worktrees/ui-pr-5767");
+        std::fs::create_dir_all(bound.join(".mast/reviews")).unwrap();
+        let payload = bound.join(".mast/reviews/pr-5767.review.json");
+        std::fs::write(&payload, "{}").unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: mast_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "viz".into();
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("here".into());
+                    state.selected_chat = Some("viz".into());
+                    state.chats.push(mast_proto::Chat {
+                        id: "viz".into(),
+                        device_id: "here".into(),
+                        title: None,
+                        archived: false,
+                        cwd: Some(root_text.clone()),
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: None,
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        actual_model: None,
+                        parent_chat_id: None,
+                        space_id: None,
+                        last_seen_at: None,
+                        room_gen: None,
+                        linked_pr_url: None,
+                        linked_pr_source: None,
+                        linked_ticket_id: None,
+                        linked_ticket_source: None,
+                    });
+                    state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                        chat_id: "viz".into(),
+                        targets: vec![mast_proto::ChatDiffTargetView {
+                            path: bound.to_string_lossy().into_owned(),
+                            checkout_id: "ui-wt".into(),
+                            source: mast_proto::ChatDiffTargetSource::Agent,
+                            selected: true,
+                            repo_name: "ui".into(),
+                            branch: None,
+                            head_sha: None,
+                        }],
+                        ref_targets: vec![],
+                    }]);
+                });
+                let activation = LinkActivation {
+                    target: LinkTarget::new("Saved review", payload.to_str().unwrap()),
+                    action: LinkAction::Primary,
+                    source_session: Some("viz".into()),
+                };
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert_eq!(shell.file_surface_paths.len(), 1);
+                assert_eq!(
+                    shell.file_surface_paths.values().next().unwrap(),
+                    ".mast/reviews/pr-5767.review.json"
+                );
+                assert_eq!(
+                    shell.active_checkout(cx).unwrap().0,
+                    bound.to_string_lossy()
+                );
+                let context =
+                    crate::files::client::FilesRequestContext::for_chat(shell.state.read(cx), "viz")
+                        .unwrap();
+                assert_eq!(context.target.checkout_path.as_deref(), bound.to_str());
+                assert_eq!(
+                    shell.state.read(cx).chats[0].cwd.as_deref(),
+                    Some(root_text.as_str())
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]
