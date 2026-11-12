@@ -6,6 +6,19 @@ use gpui::{
     WindowControlArea, div, prelude::*, px,
 };
 
+pub(crate) fn scheduled_tasks_page(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .p(px(24.0))
+        .max_w(px(1050.0))
+        .w_full()
+        .text_size(crate::typography::ui_rems(13.0))
+        .font_family(theme.font_sans.clone())
+        .text_color(theme.text)
+}
+
 pub(crate) fn sidebar_separator(theme: &Theme) -> gpui::Div {
     div()
         .h(px(if theme.ui_style.design_roles.sidebar_border.unwrap_or_else(|| !super::is_horizon(theme)) {
