@@ -28,6 +28,25 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 82: structured plan artifacts** (2026-11-11, 2ecae0d4b; targeted: mast-proto 279, mast-engine
+  artifacts 43 + agent_tools 62, mast-mcp 55, mast-ui artifacts 235):
+  - New artifact kind `plan` (.json): crates/proto/src/plan.rs (types, strict parse, the 8 rules in
+    docs/artifact-kit/plan-schema.md incl. linked-sheet row checks, `linear_body`) and plan_render.rs (summary chips,
+    build-order strip, ticket cards beside their Linear body, citation chips, collapsed evidence). Example:
+    docs/artifact-kit/plan-example.json (synthetic; the real kit plan stays private). `artifact_get_plan` returns the
+    JSON for plan-kind artifacts; markdown plans unchanged.
+  - Backup: `~/zeron-dev-app-backups/mast-release-81`.
+
+- **Release 81: render check false positives** (2026-11-11, f5a2c6f98; fast-tracked, mast-ui artifacts 234/0): the
+  contrast check falls back to the rendered theme's `--background`, not the OS dark-mode query; `narrowTextColumn`
+  skips empty text, `pre` and cells of tables that fit. Backup: `~/zeron-dev-app-backups/mast-release-80`.
+
+- **Release 80: render check works again** (2026-11-11, d22a2145f; fast-tracked, mast-ui artifacts 234/0):
+  - The in-frame render probe referenced an undefined `metrics` since e8ff10cb4, so `report()` threw and every
+    `artifact_render_check` said "The render probe did not report" (bb6e6f10). The probe now collects
+    `ElementMetrics` (capped at 1,000) for the layout heuristics, and any probe exception still posts a report with
+    "Render probe failed: …". Backup: `~/zeron-dev-app-backups/mast-release-79`.
+
 - **Release 79: hand off to another provider/model** (2026-11-11, 07ecc9648; full suite):
   - Hand off to new chat (dialog, `HandOffOrchestrator` RPC, `hand_off_orchestrator` MCP) takes optional
     `harness`, `model`, `reasoning`. The dialog reuses the new-chat picker, preset to the source chat. A different
@@ -1098,10 +1117,17 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 79** (full suite).
+- **Installed: release 82** (plan kind; targeted tests on top of full-suite release 79).
+- **Plans are structured now:** the kit plan published as kind `plan` renders clean in the app (test artifact
+  5381891f on the Mast Dev item). The project-planner skill (~/.agents/skills, backup
+  ~/zeron-dev-app-backups/skills-2026-11-11-project-planner-v2) now publishes plan JSON per
+  docs/artifact-kit/plan-schema.md and copies each ticket's generated Linear body. Follow-up: the overlap
+  heuristic flags wrapped inline `code` chips (noise). Workflow pack (2bbe25e5) still in progress.
+- **PR #1 approved** on GitHub at c6bf195c1 (Mikey: approve if good) with two non-blocking follow-ups; not merged.
 - **PR #1 (David Wallach, idle CPU + input latency):** reviewed (item 953b96ee, Required Action 08002e19):
   merge after three fixes (nested-submodule diff filter, scheduled-run backfill marker, @-completion freshness on
-  over-budget checkouts). Waiting on Mikey: David fixes vs we fix. Review checkout `.worktrees/zeron/mast-pr-1`.
+  over-budget checkouts). David force-pushed c6bf195c1 (dropped the scheduled-task commit, so the backfill finding is gone); two
+  findings remain. Waiting on Mikey: David fixes vs we fix. Review checkout `.worktrees/zeron/mast-pr-1`.
 - **main is kept current (Mikey, 2026-11-11):** after each integration push the coordinator fast-forwards `main` in
   both repos (`git push origin origin/work-outline-implementation:refs/heads/main`; parent `zeron-work-outline`).
   Fast-forward only. Workers never touch main.

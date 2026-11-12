@@ -1248,6 +1248,7 @@ async fn read_subtree_lists_descendants_chats_and_requests_within_the_callers_su
     let leaf = &step["children"][0];
     assert_eq!(leaf["id"], a_grand);
     assert_eq!(leaf["chats"][0]["id"], OTHER_CHAT);
+    assert_eq!(leaf["chats"][0]["url"], "mast://chat/chat-other");
     assert_eq!(leaf["chats"][0]["status"], "idle");
     assert!(leaf["chats"][0].get("lastMessageAt").is_some());
     let request = &leaf["openUserActionRequests"][0];

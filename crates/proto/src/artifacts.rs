@@ -144,6 +144,7 @@ pub enum ArtifactKind {
     Review,
     #[serde(alias = "decision-sheet")]
     DecisionSheet,
+    Plan,
     #[default]
     #[serde(other)]
     Unknown,
@@ -160,6 +161,7 @@ impl ArtifactKind {
             Self::Options => "options",
             Self::Review => "review",
             Self::DecisionSheet => "decision-sheet",
+            Self::Plan => "plan",
             Self::Unknown => "unknown",
         }
     }
@@ -176,6 +178,7 @@ impl ArtifactKind {
             "options" => Some(Self::Options),
             "review" => Some(Self::Review),
             "decision-sheet" | "decisionSheet" => Some(Self::DecisionSheet),
+            "plan" => Some(Self::Plan),
             _ => None,
         }
     }
@@ -220,6 +223,7 @@ impl ArtifactKind {
                 | Self::Image
                 | Self::Options
                 | Self::DecisionSheet
+                | Self::Plan
         )
     }
 }

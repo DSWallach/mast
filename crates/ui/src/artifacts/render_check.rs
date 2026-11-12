@@ -130,6 +130,10 @@ pub(crate) fn request_document(
         document::web_document(kind, source, &title, mime, theme, false, true)
     };
     match kind {
+        ArtifactKind::Plan => {
+            let plan = mast_proto::plan::Plan::parse(&text()?).map_err(RenderSkip::Invalid)?;
+            Ok(web(WebKind::Plan, &mast_proto::plan_render::render(&plan), "text/html"))
+        }
         ArtifactKind::DecisionSheet => {
             let sheet = mast_proto::decision_sheet::DecisionSheet::parse(&text()?)
                 .map_err(RenderSkip::Invalid)?;

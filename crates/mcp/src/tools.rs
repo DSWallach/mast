@@ -120,7 +120,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_chats",
-            description: "Chats with their Space, host device, harness, model (the model that actually ran when the harness reported it: see modelIsActual, actualModel, configuredModel), live status, and last activity. Newest activity first.",
+            description: "Chats with their Space, host device, harness, model (the model that actually ran when the harness reported it: see modelIsActual, actualModel, configuredModel), live status, and last activity. Newest activity first. Each url is an internal Mast session link: use [session title](url) in replies so the user can click to open the session.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -135,7 +135,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_chat",
-            description: "One chat's metadata, live status, and any question its agent is currently blocked on.",
+            description: "One chat's metadata, live status, and any question its agent is currently blocked on. Use its url as [session title](url) in replies to link to the session in Mast.",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
@@ -272,7 +272,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::READ_SUBTREE,
-            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). Use it to see children and their requests. Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tasks); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
+            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, url, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). Use it to see children and their requests. Link sessions in replies as [session title](url); these open directly inside Mast. Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tasks); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -461,7 +461,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder)." },
                     "title": { "type": "string", "description": "Human title, e.g. \"Receiving flow — plan\". Same title + role on the same work item = same artifact." },
-                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet"], "description": "Defaults from the file extension." },
+                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet", "plan"], "description": "Structured plan JSON uses kind plan; otherwise defaults from the file extension." },
                     "role": { "type": "string", "description": "plan, diagram, state-machine, comparison, or doc (free-form)." },
                     "note": { "type": "string", "description": "One line: what changed in this revision." },
                     "pinAsPlan": { "type": "boolean", "default": false, "description": "Make this the work item's plan (unpins the previous one)." },
@@ -820,6 +820,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
     let (status, status_age) = status_of(session.as_ref());
     json!({
         "id": chat.id,
+        "url": mast_proto::session_link::session_link(&chat.id),
         "title": chat.title,
         "project": space.map(|s| json!({
             "id": s.id,
@@ -1538,6 +1539,7 @@ impl Tools {
 
         let mut result = json!({
             "chatId": chat_id,
+            "url": mast_proto::session_link::session_link(&chat_id),
             "deviceId": device_id,
             "project": space.as_ref().map(|s| json!({ "id": s.id, "name": s.display_name(), "path": s.path })),
             "harness": harness,
@@ -1667,6 +1669,7 @@ impl Tools {
         let truncated = dropped > 0 || window.iter().any(|m| m.text_omitted_bytes.is_some());
         let mut result = json!({
             "chatId": chat.id,
+            "url": mast_proto::session_link::session_link(&chat.id),
             "title": chat.title,
             "total": total,
             "returned": window.len(),
@@ -2844,7 +2847,9 @@ mod tests {
         let alpha = listed["chats"].as_array().unwrap().iter().find(|c| c["id"] == "chat-alpha-1").unwrap();
         assert_eq!(alpha["awaitingInput"]["questions"][0]["question"], "Run build?");
         assert_eq!(alpha["lastTurnToolFailures"]["count"], 2);
+        assert_eq!(alpha["url"], "mast://chat/chat-alpha-1");
         let chat = tools.call("get_chat", json!({ "chat": "alpha" })).await.unwrap();
+        assert_eq!(chat["url"], alpha["url"]);
         assert_eq!(chat["awaitingInput"], alpha["awaitingInput"]);
         assert_eq!(chat["lastTurnToolFailures"], alpha["lastTurnToolFailures"]);
     }
