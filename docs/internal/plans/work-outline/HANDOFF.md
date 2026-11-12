@@ -28,6 +28,10 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 81: render check false positives** (2026-11-11, f5a2c6f98; fast-tracked, mast-ui artifacts 234/0): the
+  contrast check falls back to the rendered theme's `--background`, not the OS dark-mode query; `narrowTextColumn`
+  skips empty text, `pre` and cells of tables that fit. Backup: `~/zeron-dev-app-backups/mast-release-80`.
+
 - **Release 80: render check works again** (2026-11-11, d22a2145f; fast-tracked, mast-ui artifacts 234/0):
   - The in-frame render probe referenced an undefined `metrics` since e8ff10cb4, so `report()` threw and every
     `artifact_render_check` said "The render probe did not report" (bb6e6f10). The probe now collects
@@ -1104,7 +1108,11 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 80** (render check fix; fast-tracked on top of full-suite release 79).
+- **Installed: release 81** (render check fixes; fast-tracked on top of full-suite release 79).
+- **Building:** structured `plan` artifact kind (item df948c36, Terra chat 01fcc1c7, branch `plan-kind` in
+  `.worktrees/zeron/plan-kind`; inputs in /tmp/plan-kind-inputs; design mast-artifact:6ca2067c). After install,
+  update the project-planner skill to emit it. Workflow pack (2bbe25e5) still in progress.
+- **PR #1 approved** on GitHub at c6bf195c1 (Mikey: approve if good) with two non-blocking follow-ups; not merged.
 - **PR #1 (David Wallach, idle CPU + input latency):** reviewed (item 953b96ee, Required Action 08002e19):
   merge after three fixes (nested-submodule diff filter, scheduled-run backfill marker, @-completion freshness on
   over-budget checkouts). David force-pushed c6bf195c1 (dropped the scheduled-task commit, so the backfill finding is gone); two
