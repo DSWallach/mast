@@ -736,10 +736,9 @@ fn default_registry_with_model_discovery_cwd(
             Ok(Arc::new(harness) as Arc<dyn Harness>)
         }),
     );
-    // antigravity over acp (google's agy_acp_server), same lazy pattern: the
-    // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
-    // extension (turn boundaries), and effort is baked into the model ids, so
-    // the ladder lives on each model rather than the harness.
+    // antigravity over acp (`agy acp`), same lazy pattern: the static
+    // descriptor mirrors AcpHarness::antigravity() exactly. No steering
+    // extension (turn boundaries), with Low/Medium/High thinking levels.
     let discovery_cwd = model_discovery_cwd;
     registry.register_lazy(
         HarnessDescriptor {
@@ -747,7 +746,11 @@ fn default_registry_with_model_discovery_cwd(
             name: "Antigravity".into(),
             supports_steering: true,
             steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ],
             installed: true,
             can_install: false,
             enabled: None,
@@ -900,7 +903,14 @@ mod tests {
         assert_eq!(antigravity.id(), HarnessId::Antigravity);
         assert_eq!(antigravity.display_name(), "Antigravity");
         assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
-        assert!(antigravity.reasoning_levels().is_empty());
+        assert_eq!(
+            antigravity.reasoning_levels(),
+            &[
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High
+            ]
+        );
         let pi = registry.resolve(HarnessId::Pi).unwrap();
         assert_eq!(pi.id(), HarnessId::Pi);
         assert_eq!(pi.display_name(), "Pi");
@@ -1124,13 +1134,10 @@ mod tests {
         let bin = home.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let cli = bin.join("agy");
-        std::fs::write(&cli, "#!/bin/sh\nexit 91\n").unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let server = bin.join("agy_acp_server.par");
         for installed in [false, true] {
             if installed {
-                std::fs::write(&server, "#!/bin/sh\nexit 91\n").unwrap();
-                std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+                std::fs::write(&cli, "#!/bin/sh\nexit 91\n").unwrap();
+                std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -1140,6 +1147,7 @@ mod tests {
                 ])
                 .env("HOME", home.path())
                 .env("PATH", &bin)
+                .env_remove("AGY_EXECUTABLE")
                 .env_remove("ANTIGRAVITY_ACP_EXECUTABLE")
                 .env("MAST_NO_LOGIN_SHELL", "1")
                 .env("MAST_TEST_AGY_INSTALLED", installed.to_string())
