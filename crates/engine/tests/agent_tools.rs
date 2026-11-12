@@ -3751,6 +3751,57 @@ async fn an_admin_chat_archives_any_chat_of_its_space_without_the_rule_and_it_is
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_personal_assistant_archives_chats_of_every_space_and_it_is_logged() {
+    const ELSEWHERE: &str = "chat-elsewhere";
+    let a = archive_rig().await;
+    let path = std::path::Path::new(&a.rig.space_path).join("elsewhere");
+    std::fs::create_dir_all(&path).unwrap();
+    for params in [
+        json!({ "op": "createSpace", "spaceId": OTHER_SPACE, "deviceId": a.rig.core.device_id,
+                "path": path.to_string_lossy() }),
+        json!({ "op": "createChat", "chatId": ELSEWHERE, "spaceId": OTHER_SPACE,
+                "deviceId": a.rig.core.device_id }),
+    ] {
+        a.rig.client.call(methods::MUTATE, params).await.unwrap();
+    }
+    a.rig
+        .client
+        .call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": CHAT }))
+        .await
+        .unwrap();
+    let origin = a
+        .rig
+        .client
+        .call(mast_proto::agent_tools::AUTHENTICATE_METHOD, json!({ "token": a.orchestrator }))
+        .await
+        .unwrap();
+    assert_eq!(origin["personalAssistant"], true);
+    // An unfinished worker, another Space, no Space: no rule, no force.
+    for target in [OTHER_CHAT, ELSEWHERE, PROJECTLESS] {
+        tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": target }))
+            .await
+            .unwrap();
+        assert!(chat_archived(&a.rig, target), "{target}");
+    }
+    let log = a.rig.service.agent_tools().agent_archives_since(0);
+    assert!(log.iter().all(|e| !e.forced && e.reason == "personal assistant"), "{log:?}");
+    assert!(log.iter().any(|e| e.chat_id == ELSEWHERE && e.space_id == OTHER_SPACE));
+    // Never itself.
+    assert!(tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": CHAT }))
+        .await
+        .is_err());
+    // Cleared: the next call is back to the ordinary reach.
+    a.rig
+        .client
+        .call(methods::CLEAR_PERSONAL_ASSISTANT, json!({}))
+        .await
+        .unwrap();
+    tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": ELSEWHERE, "archived": false }))
+        .await
+        .unwrap_err();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bulk_change_rejects_non_approval_resolutions() {
     for outcome in [
         None,
