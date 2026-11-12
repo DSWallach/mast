@@ -133,10 +133,7 @@ pub(crate) fn export_document(kind: WebKind, source: &str, title: &str, pdf: boo
         }
     } else {
         let body = if kind == WebKind::Mermaid {
-            mermaid_fragment(source, false).replace(
-                &format!("<script src=\"{MERMAID_SRC}\"></script>"),
-                &format!("<script>{}</script>", include_str!("../../assets/mermaid.min.js")),
-            )
+            mermaid_fragment(source, false)
         } else { source.to_owned() };
         format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title>{extras}</head><body>{body}{runtime}</body></html>", escape_text(title))
     }
@@ -793,9 +790,11 @@ mod export_tests {
     use super::*;
 
     #[test]
-    fn mermaid_is_bundled_and_pdf_expands_details() {
+    fn mermaid_uses_cdn_and_pdf_expands_details() {
         let html = export_document(WebKind::Mermaid, "graph TD; A-->B", "Diagram", false);
-        assert!(!html.contains(MERMAID_SRC));
+        assert!(html.contains(&format!("<script src=\"{MERMAID_SRC}\"></script>")));
+        let pdf_mermaid = export_document(WebKind::Mermaid, "graph TD; A-->B", "Diagram", true);
+        assert!(pdf_mermaid.contains(&format!("<script src=\"{MERMAID_SRC}\"></script>")));
         assert!(html.contains("graph TD; A--&gt;B"));
         let pdf = export_document(WebKind::Fragment, "<details><summary>More</summary>Text</details>", "PDF", true);
         assert!(pdf.contains("d.open = true"));
