@@ -73,12 +73,12 @@ pub(crate) fn settings_layout_preview(
         .flex()
         .flex_col()
         .gap(px(gap))
-        .children((0..4).map(|index| {
+        .children((0..4).map(|_| {
             div()
                 .h(px(12.0))
                 .w_full()
                 .rounded(px(3.0))
-                .bg(if index == 0 { theme.accent } else { theme.surface_raised })
+                .bg(theme.surface_raised)
         }))
         .child(
             div()
@@ -557,7 +557,7 @@ pub(crate) fn settings_style_preview(theme: &Theme, id: crate::ui_style::UiStyle
                 .h(px(12.0))
                 .w_full()
                 .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(3.0)))
-                .bg(theme.surface_raised)
+                .bg(if index == 0 { theme.accent } else { theme.surface_raised })
         }))
         .child(
             div()
