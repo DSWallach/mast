@@ -25,6 +25,16 @@ impl HandOffDialog {
 }
 
 impl Shell {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_snapshot_hand_off(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, _| {
+            if let Some(worker) = state.chats.iter_mut().find(|chat| chat.id == "fixture-design") {
+                worker.parent_chat_id = Some("fixture-chat".into());
+            }
+        });
+        self.open_hand_off("fixture-chat".into(), cx);
+    }
+
     pub(super) fn hand_off_pickers(&self) -> Option<Entity<Pickers>> {
         match self.work_outline_modal.as_ref() {
             Some(WorkOutlineModal::HandOff(dialog)) => Some(dialog.pickers.clone()),

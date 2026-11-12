@@ -109,6 +109,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "side-chat",
         "details",
         "walkthrough",
+        "handoff",
         "appearance",
         "controls",
         "components",

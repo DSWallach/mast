@@ -453,6 +453,22 @@ fn work_outline_catalog() -> Vec<ToolDef> {
 /// `docs/planning-artifact-conventions.md`). The engine scopes each call to
 /// the calling Chat's work item (or the Chat).
 fn artifact_catalog() -> Vec<ToolDef> {
+    let review = json!({"type": "object", "description": "The mast.review/v1 object described above."});
+    let target = json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["pr", "branch"]},
+            "repo": {"type": "string"}, "number": {"type": "integer"},
+            "checkoutPath": {"type": "string"}, "branch": {"type": "string"},
+            "baseRef": {"type": "string"}, "baseSha": {"type": "string"},
+            "headSha": {"type": "string"}
+        },
+        "required": ["kind", "headSha"],
+        "description": "PR: kind pr, repo, number, baseSha, headSha. Branch: kind branch, repo or checkoutPath, baseRef or baseSha, headSha, optional branch."
+    });
+    let pr_url = json!({"type": "string", "description": "Pull request URL."});
+    let head_sha = json!({"type": "string", "description": "Full reviewed head commit SHA (for prUrl)."});
+
     vec![
         ToolDef {
             name: agent_tool_names::ARTIFACT_PUBLISH,
@@ -490,6 +506,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "artifactId": { "type": "string", "description": "A published artifact of your work item." },
                     "path": { "type": "string", "description": "Or an unpublished file you wrote." },
+                    "kind": { "type": "string", "description": "Optional artifact kind override for a path." },
                     "viewports": {
                         "type": "array",
                         "description": "Viewports to render. Default: [{width: 800, height: 800, label: \"narrow\"}, {width: 1440, height: 900, label: \"wide\"}].",
@@ -522,17 +539,24 @@ fn artifact_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::REVIEW_PUBLISH,
-            description: "Publish a review sidecar scoped to this chat for a PR or committed branch range. Mast validates every step hunk and anchor against the merge-base diff at headSha and reports valid hunks on errors. review is mast.review/v1: schema, pr {repo, number, headSha, baseSha} for a PR, summary (3–8 lines), optional verdictHint, steps [{id, title, file, hunks [{newStart, newEnd}], what, why, risk (none|low|med|high), riskNote, tags, optional group}], highlights [{kind (risk|missing-tests|behaviour-change|security|migration|perf|style), severity, text, anchor}], questions, suggestedComments [{anchor, body, severity, optional suggestion}]. An anchor is {file, side (left|right), startLine, endLine}. Mast stores hunk hashes. Verdict hints and suggested comments are never posted.",
+            description: "Publish a review sidecar scoped to this chat for a PR or committed branch range. Required top-level arguments: {prUrl, headSha, review}, or {target, review}. For prUrl, review.pr must include repo, number, headSha and baseSha; top-level baseSha is not used. Validation uses the chat’s selected bound checkout, falling back to chat.cwd; a branch target can specify checkoutPath. Returns {artifactId, revision, url, storedPath, changed}; link the returned mast-artifact URL in chat. Mast validates every step hunk and anchor against the merge-base diff at headSha and reports valid hunks on errors. review is mast.review/v1: schema, pr {repo, number, headSha, baseSha} for a PR, summary (3–8 lines), optional verdictHint, steps [{id, title, file, hunks [{newStart, newEnd}], what, why, risk (none|low|med|high), riskNote, tags, optional group}], highlights [{kind (risk|missing-tests|behaviour-change|security|migration|perf|style), severity, text, anchor}], questions, suggestedComments [{anchor, body, severity, optional suggestion}]. An anchor is {file, side (left|right), startLine, endLine}. Mast stores hunk hashes. Verdict hints and suggested comments are never posted.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prUrl": { "type": "string", "description": "Pull request URL." },
-                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA (for prUrl)." },
-                    "target": { "type": "object", "description": "Alternative to prUrl: {kind: pr, repo, number, baseSha, headSha} or {kind: branch, repo, checkoutPath, branch, baseRef or baseSha, headSha}." },
-                    "review": { "type": "object", "description": "The mast.review/v1 object described above." }
+                    "prUrl": pr_url,
+                    "headSha": head_sha,
+                    "target": target,
+                    "review": review
                 },
                 "required": ["review"],
-                "anyOf": [{"required": ["prUrl", "headSha"]}, {"required": ["target"]}]
+                // Keep each alternative self-describing: schema-to-tool adapters
+                // may render anyOf branches without inheriting root properties.
+                "anyOf": [
+                    {"type": "object", "properties": {"prUrl": pr_url, "headSha": head_sha, "review": review},
+                        "required": ["prUrl", "headSha", "review"]},
+                    {"type": "object", "properties": {"target": target, "review": review},
+                        "required": ["target", "review"]}
+                ]
             }),
         },
         ToolDef {
@@ -2756,7 +2780,13 @@ mod tests {
         let def = artifact_catalog().into_iter()
             .find(|def| def.name == agent_tool_names::REVIEW_PUBLISH).unwrap();
         assert_eq!(def.input_schema["required"], json!(["review"]));
-        assert_eq!(def.input_schema["anyOf"], json!([{"required": ["prUrl", "headSha"]}, {"required": ["target"]}]));
+        let alternatives = &def.input_schema["anyOf"];
+        assert_eq!(alternatives[0]["required"], json!(["prUrl", "headSha", "review"]));
+        assert_eq!(alternatives[1]["required"], json!(["target", "review"]));
+        assert_eq!(alternatives[0]["properties"]["headSha"]["type"], "string");
+        assert_eq!(alternatives[1]["properties"]["target"]["properties"]["kind"]["enum"], json!(["pr", "branch"]));
+        assert!(def.description.contains("{prUrl, headSha, review}"));
+        assert!(def.description.contains("{target, review}"));
         let world = Arc::new(World::default());
         let agent = tools(world.clone(), Some(BETA_TOKEN));
         let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1"}});

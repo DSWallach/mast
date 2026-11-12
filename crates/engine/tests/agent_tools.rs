@@ -1533,6 +1533,83 @@ fn bind_ok(rig: &BindRig, path: &Path, key: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_publish_uses_bound_submodule_worktree_without_moving_chat() {
+    let rig = bind_rig(true);
+    let base = git(&rig.sub_wt, &["rev-parse", "HEAD"]);
+    std::fs::write(rig.sub_wt.join("flagship.txt"), "reviewed change\n").unwrap();
+    git(&rig.sub_wt, &["commit", "-qam", "review change"]);
+    let head = git(&rig.sub_wt, &["rev-parse", "HEAD"]);
+    let parent_head = git(&rig.ws, &["rev-parse", "HEAD"]);
+    let parent_branch = git(&rig.ws, &["branch", "--show-current"]);
+    let bound = bind_ok(&rig, &rig.sub_wt, "review-bind");
+    assert_eq!(bound["selected"], true);
+    let review = json!({
+        "schema": "mast.review/v1",
+        "pr": {"repo": "owner/flagship", "number": 42, "baseSha": base, "headSha": head},
+        "summary": "Review the submodule change.",
+        "steps": [{"id": "change", "title": "Change", "file": "flagship.txt",
+            "hunks": [{"newStart": 1, "newEnd": 1}], "what": "Changes text", "why": "Update",
+            "risk": "low", "riskNote": "Text only", "tags": []}],
+        "highlights": [], "questions": [], "suggestedComments": []
+    });
+    let call = |arguments| {
+        rig.rpc
+            .agent_tools()
+            .call(&mast_proto::agent_tools::AgentToolCallParams {
+                token: rig.token.clone(),
+                tool: "review_publish".into(),
+                arguments,
+            })
+    };
+    // Both public PR calling forms must resolve the selected submodule checkout.
+    for arguments in [
+        json!({"prUrl": "https://github.com/owner/flagship/pull/42", "headSha": head, "review": review}),
+        json!({"target": {"kind": "pr", "repo": "owner/flagship", "number": 42,
+            "baseSha": base, "headSha": head}, "review": review}),
+    ] {
+        let reply = call(arguments).unwrap();
+        let id = reply["artifactId"].as_str().unwrap();
+        assert_eq!(reply["url"], format!("mast-artifact:{id}"));
+        assert!(rig.core.workspace.artifact(id).is_some());
+        let stored: Value =
+            serde_json::from_slice(&std::fs::read(reply["storedPath"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(stored["pr"]["headSha"], head);
+        assert_eq!(
+            stored["steps"][0]["hunks"][0]["hunkHash"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+    }
+    let missing = "a".repeat(40);
+    let mut invalid = review.clone();
+    invalid["pr"]["headSha"] = json!(missing);
+    let error = call(json!({"prUrl": "https://github.com/owner/flagship/pull/42",
+        "headSha": missing, "review": invalid}))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains(&text(&rig.sub_wt)), "{error}");
+    assert!(
+        error.contains("rev-parse") && error.contains("--verify"),
+        "{error}"
+    );
+    assert!(error.contains(&format!("{missing}^{{commit}}")), "{error}");
+    assert_eq!(
+        rig.core.workspace.chat(CHAT).unwrap().unwrap().cwd,
+        Some(text(&rig.ws))
+    );
+    assert_eq!(git(&rig.ws, &["rev-parse", "HEAD"]), parent_head);
+    assert_eq!(git(&rig.ws, &["branch", "--show-current"]), parent_branch);
+    assert_eq!(git(&rig.sub_wt, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git(&rig.sub_wt, &["branch", "--show-current"]),
+        "feat-eng-3012"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bind_chat_worktree_records_and_selects_a_submodule_worktree() {
     let rig = bind_rig(true);
     let reply = bind_ok(&rig, &rig.sub_wt, "bind-flagship");

@@ -427,6 +427,18 @@ struct PublishArgs {
     idempotency_key: Option<String>,
 }
 
+fn render_path_kind(path: &Path, bytes: &[u8]) -> ArtifactKind {
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+        if let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
+            .and_then(|value| value.get("kind").and_then(Value::as_str).and_then(ArtifactKind::parse))
+            .filter(|kind| matches!(kind, ArtifactKind::DecisionSheet | ArtifactKind::Plan | ArtifactKind::Options))
+        {
+            return kind;
+        }
+    }
+    ArtifactKind::from_path(&path.to_string_lossy())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RenderCheckArgs {
@@ -2231,6 +2243,23 @@ impl ArtifactsService {
             .and_then(|c| c.cwd)
             .filter(|c| !c.is_empty())
             .unwrap_or_else(|| space.path.clone());
+        // Binding a diff checkout deliberately leaves chat.cwd unchanged.
+        // Review validation must use the checkout selected by that binding.
+        if let Some(row) = self
+            .workspace()
+            .chat_diff_targets(&caller.chat_id)
+            .map_err(|e| ArtifactError::io(e.to_string()))?
+        {
+            if let Some(selected) = row.selected.as_deref()
+                && row.targets.iter().any(|target| target.path == selected)
+            {
+                cwd = selected.to_owned();
+            } else if let Some(selected) = row.selected_ref.as_deref()
+                && let Some(target) = row.ref_targets.iter().find(|target| target.id == selected)
+            {
+                cwd = target.path.clone();
+            }
+        }
         let mut target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
@@ -2760,7 +2789,7 @@ impl ArtifactsService {
                     .kind
                     .as_deref()
                     .and_then(ArtifactKind::parse)
-                    .unwrap_or_else(|| ArtifactKind::from_path(&path.to_string_lossy()));
+                    .unwrap_or_else(|| render_path_kind(&path, &bytes));
                 request.title = default_title_for(&path);
                 request.kind = kind;
                 request.path = path.to_string_lossy().into_owned();
@@ -3126,6 +3155,15 @@ mod tests {
             drop(stream);
             assert_eq!(broker.subscriber_count(), 0);
         });
+    }
+
+    #[test]
+    fn render_path_detects_structured_json_kind() {
+        for (kind, expected) in [("decision-sheet", ArtifactKind::DecisionSheet), ("plan", ArtifactKind::Plan), ("options", ArtifactKind::Options)] {
+            let content = format!(r#"{{"kind":"{kind}"}}"#);
+            assert_eq!(render_path_kind(Path::new("example.json"), content.as_bytes()), expected);
+        }
+        assert_eq!(render_path_kind(Path::new("example.json"), b"{}"), ArtifactKind::Markdown);
     }
 
     #[test]
