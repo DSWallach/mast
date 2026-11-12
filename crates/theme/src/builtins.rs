@@ -39,6 +39,11 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
             family("ayu", "Ayu", vec![ayu_light(), ayu_dark(), ayu_mirage()]),
             family("gruvbox", "Gruvbox", vec![gruvbox_light(), gruvbox_dark()]),
             family(
+                "solarized",
+                "Solarized",
+                vec![solarized(false), solarized(true)],
+            ),
+            family(
                 "rose-pine",
                 "Rosé Pine",
                 vec![rose_pine_dawn(), rose_pine_moon()],
@@ -968,6 +973,78 @@ fn gruvbox_dark() -> ThemeVariant {
             "vscode",
             "https://github.com/jdinhify/vscode-theme-gruvbox",
             "ca3b8ad203e84a884ca33fb84b5795cf43032709",
+            "MIT",
+        ),
+    })
+}
+
+// Canonical Solarized bases and ANSI slot mapping from the pinned upstream
+// xresources/solarized definition. Light mode rebases only the neutral colors.
+fn solarized(dark: bool) -> ThemeVariant {
+    let (id, name, appearance, base03, base02, base01, base00, base0, base1, base2, base3) = if dark
+    {
+        (
+            "solarized-dark",
+            "Solarized Dark",
+            Appearance::Dark,
+            "#002b36",
+            "#073642",
+            "#586e75",
+            "#657b83",
+            "#839496",
+            "#93a1a1",
+            "#eee8d5",
+            "#fdf6e3",
+        )
+    } else {
+        (
+            "solarized-light",
+            "Solarized Light",
+            Appearance::Light,
+            "#fdf6e3",
+            "#eee8d5",
+            "#93a1a1",
+            "#839496",
+            "#657b83",
+            "#586e75",
+            "#073642",
+            "#002b36",
+        )
+    };
+    let text = c(base1).ensure_contrast(c(base02), 4.5).to_string();
+    variant(Seeds {
+        id,
+        family_id: "solarized",
+        name,
+        appearance,
+        treatment: SurfaceTreatment::Opaque,
+        background: base03,
+        shell: base02,
+        raised: base02,
+        card: base03,
+        // Slightly strengthen the emphasized foreground where needed for the
+        // shell, including forced frost. Syntax and ANSI keep the source hues.
+        text: &text,
+        muted: base0,
+        faint: base01,
+        accent: "#268bd2",
+        danger: "#dc322f",
+        warning: "#b58900",
+        success: "#859900",
+        terminal_background: base03,
+        ansi: [
+            base02, "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", base2,
+            base03, "#cb4b16", base01, base00, base0, "#6c71c4", base1, base3,
+        ],
+        syntax: [
+            base01, "#859900", "#2aa198", "#d33682", "#b58900", "#268bd2", "#268bd2", base0, base0,
+            "#268bd2", "#b58900", "#dc322f",
+        ],
+        source: source(
+            id,
+            "native",
+            "https://github.com/altercation/solarized",
+            "62f656a02f93c5190a8753159e34b385588d5ff3",
             "MIT",
         ),
     })

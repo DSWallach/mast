@@ -38,6 +38,7 @@ fn run_request(prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        fork_from: None,
         instructions: None,
     }
 }
@@ -1063,6 +1064,111 @@ async fn claude_multiple_questions_resolve_through_command_queue() {
 }
 
 #[tokio::test]
+async fn custom_approval_reply_interrupts_and_delivers_new_instruction() {
+    // Harness that asks a question through RunControls and echoes the answer.
+    struct AskingHarness;
+    #[async_trait]
+    impl Harness for AskingHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Asking"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+            tokio::spawn(async move {
+                if request.prompt != "ask me" {
+                    let _ = tx.send(Ok(AgentEvent::TextDelta { text: request.prompt })).await;
+                    let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+                    return;
+                }
+                let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion {
+                    command_approval: None,
+                    allow_custom: false,
+                    id: "q1".into(),
+                    header: "Approve command".into(),
+                    question: "Run this command?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    multi_select: false,
+                }])
+                .await
+                .unwrap_or_default();
+                if answers.is_empty() {
+                    controls.interrupt.cancelled().await;
+                    let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+                    return;
+                }
+                let picked = answers
+                    .first()
+                    .and_then(|a| a.labels.first().cloned())
+                    .unwrap_or_else(|| "none".into());
+                let _ = tx
+                    .send(Ok(AgentEvent::TextDelta {
+                        text: format!("picked {picked}"),
+                    }))
+                    .await;
+                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(AskingHarness));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(handle.doc(), "cmd-run-ask", SessionCommandPayload::Run {
+        request: run_request("ask me"), message_id: "m-1".into(),
+    });
+    wait_for(|| entries(&core).iter().any(|entry| entry.parts.iter().any(|part|
+        matches!(part, MessagePart::Input { resolved: false, .. })
+    )), "approval in doc").await;
+    let input = core.sessions.session_status(CHAT).unwrap().awaiting_input.unwrap();
+    let correction = "Use the existing checkout instead";
+    queue_as_viewer(handle.doc(), "cmd-correction", SessionCommandPayload::RespondInput {
+        request_id: input.request_id.clone(),
+        answers: vec![mast_proto::UserInputAnswer {
+            question_id: input.questions[0].id.clone(), labels: vec![correction.into()],
+        }],
+    });
+    wait_for(|| entries_now(&core).iter().any(|entry|
+        entry.status == Some(MessageStatus::Complete) && entry.parts.iter().any(|part|
+            matches!(part, MessagePart::Text { text, .. } if text == correction))
+    ), "correction delivered as the next prompt").await;
+    wait_for(|| command_status(&core, "cmd-correction").is_some_and(|(status, _)|
+        status == SessionCommandStatus::Applied
+    ), "correction command applied").await;
+    assert!(entries(&core).iter().any(|entry| entry.role == MessageRole::User
+        && entry.parts.iter().any(|part| matches!(part, MessagePart::Text { text, .. } if text == correction))));
+    assert!(!entries(&core).iter().any(|entry| entry.parts.iter().any(|part|
+        matches!(part, MessagePart::Input { request_id, resolved: false, .. } if request_id == &input.request_id)
+    )));
+    assert!(entries(&core).iter().any(|entry| entry.status == Some(MessageStatus::Aborted)
+        && entry.parts.iter().any(|part|
+            matches!(part, MessagePart::Input { request_id, .. } if request_id == &input.request_id))));
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn respond_input_resolves_pending_question() {
     // Harness that asks a question through RunControls and echoes the answer.
     struct AskingHarness;
@@ -1972,6 +2078,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         auto_approve: false,
         attachments: vec![path],
         resume: None,
+        fork_from: None,
         worktree: None,
         instructions: None,
     };

@@ -6208,7 +6208,7 @@ fn code_text_viewport(
                 el.whitespace_nowrap()
             }
         })
-        .child(gpui::StyledText::new(text).with_runs(runs));
+        .child(crate::markdown::render::plain_text(text, theme).with_runs(runs));
     let viewport = div()
         .flex_1()
         .min_w_0()
@@ -8271,7 +8271,11 @@ index 1111111..2222222 160000
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

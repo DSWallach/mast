@@ -1,4 +1,5 @@
 //! Account-synced sections; local workspaces keep their settings on this device.
+use std::collections::HashSet;
 use super::*;
 use crate::settings::SidebarSection;
 use mast_proto::{SidebarPinChange, SidebarSectionChange};
@@ -9,6 +10,14 @@ pub(super) struct SectionDialog {
     input: Entity<ComposerInput>,
     focus_pending: bool,
     _events: Subscription,
+}
+
+fn section_menu_labels(id: &str) -> &'static [&'static str] {
+    if id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX) {
+        &["Edit group in Work Outline", "Archive all"]
+    } else {
+        &["Edit section", "Archive all", "Delete"]
+    }
 }
 
 impl Shell {
@@ -29,7 +38,30 @@ impl Shell {
                 change.project_sections(&mut sections);
             }
         }
-        sections
+        if !self.settings.sidebar_outline_groups {
+            return sections;
+        }
+        let state = self.state.read(cx);
+        let pins = self.raw_sidebar_pins(cx);
+        let mut managed = Vec::new();
+        for space in &state.spaces {
+            if self.settings.space_filter.as_ref().is_some_and(|id| id != &space.id) {
+                continue;
+            }
+            if let crate::work_outline::WorkOutlineLoad::Ready(snapshot) = state.work_outline(&space.id) {
+                for mut section in mast_proto::outline_sidebar_sections(&snapshot) {
+                    section.session_ids.retain(|id| !pins.contains(id));
+                    section.collapsed = self.sidebar_collapsed_groups.contains(&section.id);
+                    managed.push(section);
+                }
+            }
+        }
+        let assigned: HashSet<_> = managed.iter().flat_map(|section| section.session_ids.iter()).collect();
+        for section in &mut sections {
+            section.session_ids.retain(|id| !assigned.contains(id));
+        }
+        managed.extend(sections);
+        managed
     }
 
     pub(super) fn assign_sidebar_section(
@@ -52,6 +84,17 @@ impl Shell {
         change: SidebarSectionChange,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let SidebarSectionChange::Collapse { id, collapsed } = &change
+            && id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX)
+        {
+            if *collapsed {
+                self.sidebar_collapsed_groups.insert(id.clone());
+            } else {
+                self.sidebar_collapsed_groups.remove(id);
+            }
+            cx.notify();
+            return true;
+        }
         let Some(key) = self.active_sidebar_pin_profile_key(cx) else {
             return false;
         };
@@ -270,11 +313,16 @@ impl Shell {
         let toggle_id = id.clone();
         let toggle_motion = motion_key.clone();
         let menu_id = id.clone();
+        let managed = id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX);
         let show_menu = self.section_header_hover.as_ref() == Some(&id)
             || self.section_menu.as_ref().is_some_and(|(s, _)| s == &id);
         let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
         let header = div()
             .id(SharedString::from(format!("section-header-{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("section-header-{id}")
+            })
             .h(px(spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
             .px(px(Theme::SPACE_SM))
             .flex()
@@ -313,6 +361,10 @@ impl Shell {
                 el.child(
                     div()
                         .id(SharedString::from(format!("section-menu-{menu_id}")))
+                        .debug_selector({
+                            let id = menu_id.clone();
+                            move || format!("section-menu-{id}")
+                        })
                         .size(px(20.0))
                         .flex()
                         .items_center()
@@ -351,7 +403,7 @@ impl Shell {
                         .items_center()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.5))
-                        .child("Drop sessions here"),
+                        .child(if managed { "Manage sessions in Work Outline" } else { "Drop sessions here" }),
                 )
             })
             .children(rows.into_iter().map(|(_, _, row)| row))
@@ -409,6 +461,44 @@ impl Shell {
     }
 
     fn activate_section_menu(&mut self, action: usize, id: &str, cx: &mut Context<Self>) {
+        if id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX) {
+            match action {
+                0 => {
+                    let target = {
+                        let state = self.state.read(cx);
+                        state.spaces.iter().find_map(|space| {
+                            let prefix = format!(
+                                "{}{}:",
+                                mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX,
+                                space.id
+                            );
+                            let item_id = id.strip_prefix(&prefix)?;
+                            let crate::work_outline::WorkOutlineLoad::Ready(snapshot) =
+                                state.work_outline(&space.id)
+                            else {
+                                return None;
+                            };
+                            snapshot
+                                .items
+                                .iter()
+                                .any(|item| item.id == item_id)
+                                .then(|| (space.id.clone(), item_id.to_owned()))
+                        })
+                    };
+                    self.section_menu = None;
+                    if let Some((space_id, item_id)) = target {
+                        self.open_overview(cx);
+                        self.ensure_overview_page(cx).update(cx, |overview, cx| {
+                            overview.open_work_item_details(space_id, item_id, cx);
+                        });
+                    }
+                    cx.notify();
+                }
+                1 => self.archive_sidebar_section(id, cx),
+                _ => {}
+            }
+            return;
+        }
         match action {
             0 => self.open_section_dialog(Some(id.to_string()), cx),
             1 => self.archive_sidebar_section(id, cx),
@@ -429,18 +519,19 @@ impl Shell {
                 self.section_menu = None;
                 return overlays;
             }
+            let labels = section_menu_labels(&id);
             let mut card = popover::popover_card(&theme)
                 .w(px(180.0))
                 .flex()
                 .flex_col()
                 .track_focus(&self.section_menu_focus)
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                     match event.keystroke.key.as_str() {
                         "escape" => this.section_menu = None,
                         "up" | "down" => {
                             this.section_menu_active = popover::menu_step(
                                 this.section_menu_active,
-                                3,
+                                labels.len(),
                                 if event.keystroke.key == "up" { -1 } else { 1 },
                             )
                         }
@@ -460,10 +551,7 @@ impl Shell {
                     this.section_menu = None;
                     cx.notify();
                 }));
-            for (action, label) in ["Edit section", "Archive all", "Delete"]
-                .into_iter()
-                .enumerate()
-            {
+            for (action, &label) in labels.iter().enumerate() {
                 let target = id.clone();
                 card = card.child(
                     popover::menu_row_nav(
@@ -473,6 +561,7 @@ impl Shell {
                         format!("section-action-{action}"),
                     )
                     .id(("section-action", action))
+                    .debug_selector(move || format!("section-action-{action}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.activate_section_menu(action, &target, cx);
                         cx.stop_propagation();
@@ -647,6 +736,123 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[gpui::test]
+    fn outline_group_menu_opens_work_item_editor(cx: &mut gpui::TestAppContext) {
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    let rows = shell.render_active_rows(&Theme::default(), cx);
+                    div()
+                        .w(px(280.0))
+                        .h(px(600.0))
+                        .flex()
+                        .flex_col()
+                        .children(rows.rows.into_iter().map(|(_, _, row)| row))
+                        .children(shell.render_section_overlays(
+                            gpui::size(px(800.0), px(600.0)),
+                            window,
+                            cx,
+                        ))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        let shell = window.update(cx, |shell, _, cx| {
+            prepare(shell, cx);
+            let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
+            snapshot.available = true;
+            snapshot.items = serde_json::from_value(serde_json::json!([
+                {"id":"focus","spaceId":"space","title":"Focus","chatIds":["regular"]}
+            ])).unwrap();
+            shell.state.update(cx, |state, _| {
+                state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"space","deviceId":"local","path":"/workspace","createdAt":"2026-09-20T00:00:00Z"})).unwrap()];
+                state.set_work_outline_for_test(snapshot);
+            });
+            shell.settings.sidebar_outline_groups = true;
+            cx.entity()
+        }).unwrap();
+        let (_, cx) = cx.add_window_view(|_, _| SidebarHost(shell.clone()));
+        let header = cx
+            .debug_bounds("section-header-outline:space:focus")
+            .unwrap()
+            .center();
+        cx.simulate_mouse_move(header, None, gpui::Modifiers::default());
+        let menu = cx
+            .debug_bounds("section-menu-outline:space:focus")
+            .expect("outline groups expose their menu on hover")
+            .center();
+        cx.simulate_click(menu, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.section_menu.as_ref().map(|(id, _)| id.as_str()),
+                Some("outline:space:focus")
+            );
+            assert!(
+                !shell
+                    .sidebar_collapsed_groups
+                    .contains("outline:space:focus")
+            );
+        });
+        assert!(cx.debug_bounds("section-action-0").is_some());
+        assert!(cx.debug_bounds("section-action-1").is_some());
+        assert!(
+            cx.debug_bounds("section-action-2").is_none(),
+            "outline groups cannot be deleted as sidebar preferences"
+        );
+        let edit = cx.debug_bounds("section-action-0").unwrap().center();
+        cx.simulate_click(edit, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.section_menu.is_none());
+            assert!(shell.section_dialog.is_none());
+            assert!(matches!(shell.route, Route::Overview));
+            assert!(
+                shell
+                    .overview_page
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .has_work_item_details()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn outline_sidebar_toggle_preserves_custom_sections_and_pins(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window.update(cx, |shell, _, cx| {
+            prepare(shell, cx);
+            shell.settings.sidebar_sections_by_profile.get_mut("local").unwrap()[0].session_ids = vec!["regular".into(), "other".into()];
+            let original = shell.active_sidebar_sections(cx);
+            let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
+            snapshot.available = true;
+            snapshot.items = serde_json::from_value(serde_json::json!([
+                {"id":"focus","spaceId":"space","title":"Focus from outline","chatIds":["regular","pin"]}
+            ])).unwrap();
+            shell.state.update(cx, |state, _| {
+                state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"space","deviceId":"local","path":"/workspace","createdAt":"2026-09-20T00:00:00Z"})).unwrap()];
+                state.set_work_outline_for_test(snapshot.clone());
+            });
+            assert_eq!(shell.active_sidebar_sections(cx), original);
+            shell.settings.sidebar_outline_groups = true;
+            let sections = shell.active_sidebar_sections(cx);
+            assert_eq!(sections[0].name, "Focus from outline");
+            assert_eq!(sections[0].session_ids, ["regular"]);
+            assert_eq!(sections[1].session_ids, ["other"]);
+            assert_eq!(shell.active_sidebar_pins(cx), ["pin"]);
+            let id = sections[0].id.clone();
+            shell.change_sidebar_section(SidebarSectionChange::Collapse { id, collapsed: true }, cx);
+            assert!(shell.active_sidebar_sections(cx)[0].collapsed);
+            snapshot.items[0].title = "Renamed outline group".into();
+            shell.state.update(cx, |state, _| state.set_work_outline_for_test(snapshot));
+            assert_eq!(shell.active_sidebar_sections(cx)[0].name, "Renamed outline group");
+            shell.settings.sidebar_outline_groups = false;
+            assert_eq!(shell.active_sidebar_sections(cx), original);
+        }).unwrap();
     }
 
     #[gpui::test]

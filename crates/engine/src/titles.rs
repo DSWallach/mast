@@ -286,6 +286,7 @@ impl TitleGenerator {
                 auto_approve: false,
                 attachments: Vec::new(),
                 resume: None,
+                fork_from: None,
                 worktree: None,
                 instructions: None,
             };
@@ -576,6 +577,7 @@ mod tests {
             sandbox: SandboxLevel::ReadOnly,
             auto_approve: false,
             resume: None,
+            fork_from: None,
             attachments: vec![],
             worktree: None,
             instructions: None,

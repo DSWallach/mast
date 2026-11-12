@@ -93,6 +93,8 @@ pub(crate) enum MenuAction {
     RevokeAdmin(String),
     ArchiveChat(String),
     HandOffChat(String),
+    /// Open a side chat of this Chat in its right pane.
+    AskOnSide(String),
     /// Hide the Space from the Outline (device-local).
     HideSpace(String),
     UnhideSpace(String),
@@ -153,6 +155,7 @@ impl MenuAction {
             | Self::GrantAdmin(_)
             | Self::RevokeAdmin(_)
             | Self::HandOffChat(_)
+            | Self::AskOnSide(_)
             | Self::HideSpace(_)
             | Self::UnhideSpace(_)
             | Self::RenameSpace(_)

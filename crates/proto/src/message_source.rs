@@ -37,7 +37,9 @@ pub fn classify(text: &str) -> (MessageSource, &str) {
     if let Some(rest) = trimmed.strip_prefix("[Mast system message")
         && let Some((envelope, body)) = rest.split_once(']')
     {
-        let label = if envelope.contains("worker updates") {
+        let label = if envelope.contains(crate::side_chat::SIDE_CHAT_KEYWORD) {
+            "Side chat"
+        } else if envelope.contains("worker updates") {
             "Worker updates"
         } else if envelope.contains("coordinator hand-off") {
             "Coordinator hand-off"

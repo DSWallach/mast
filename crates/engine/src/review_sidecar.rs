@@ -17,11 +17,11 @@ fn git(repository: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         .current_dir(repository)
         .args(args)
         .output()
-        .map_err(|error| format!("could not run git: {error}"))?;
+        .map_err(|error| format!("could not run git {args:?} in {}: {error}", repository.display()))?;
     if !output.status.success() {
         return Err(format!(
-            "git {} failed: {}",
-            args[0],
+            "git {args:?} in {} failed: {}",
+            repository.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }

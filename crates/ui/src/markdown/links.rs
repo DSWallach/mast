@@ -6,6 +6,11 @@ pub struct LinkTarget {
     pub navigation: Result<String, &'static str>,
 }
 impl LinkTarget {
+    pub fn is_session(&self) -> bool {
+        mast_proto::session_link::parse_session_link(&self.original).is_some()
+            || crate::links::parse_mast_conversation_link(&self.original).is_ok()
+    }
+
     pub fn new(label: &str, original: &str) -> Self {
         Self {
             label: label.into(),
@@ -64,6 +69,23 @@ impl LinkActivation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_links_parse_from_markdown_and_never_open_as_web_urls() {
+        let tree = super::super::parser::parse_full("[Worker session](mast://chat/worker-123)");
+        let super::super::parser::Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph")
+        };
+        let target = LinkTarget::new(&runs[0].text, runs[0].style.link.as_deref().unwrap());
+        assert!(target.is_session());
+        let activation = LinkActivation {
+            target,
+            action: LinkAction::External,
+            source_session: Some("source".into()),
+        };
+        assert_eq!(activation.web_outcome(false), LinkOutcome::Rejected);
+        assert!(LinkTarget::new("Copied", "mast://open/chat/id?workspace=w").is_session());
+        assert!(!LinkTarget::new("Malformed", "mast://chat/%GG").is_session());
+    }
     #[test]
     fn internal_external_and_unsupported_platform_routes() {
         let mut a = LinkActivation {

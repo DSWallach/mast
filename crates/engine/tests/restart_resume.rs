@@ -48,6 +48,7 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        fork_from: None,
         instructions: None,
     }
 }
@@ -1352,6 +1353,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        fork_from: None,
         instructions: None,
     };
     let assemble_real = || {

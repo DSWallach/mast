@@ -902,15 +902,16 @@ struct EditSnapshot {
     selection_reversed: bool,
 }
 
-/// A strict, local-only Markdown representation of a file mention. The
-/// underlying prompt always contains this form; the editor projects it to a
-/// chip for display without leaking a second data model into submission.
+/// An atomic inline chip backed by readable prompt text. File references
+/// carry a path; selected-text chips carry their complete excerpt in `path`
+/// for the shared hover preview. Draft storage always retains the raw text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FileMentionLink {
+struct ComposerChip {
     range: Range<usize>,
     basename: String,
     path: String,
     is_dir: bool,
+    is_selection: bool,
 }
 
 fn percent_encode_path(path: &str) -> String {
@@ -1042,7 +1043,7 @@ fn label_close(text: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
+fn file_mention_links(text: &str) -> Vec<ComposerChip> {
     let mut links = Vec::new();
     let mut search = 0;
     while let Some(relative_start) = text[search..].find('[') {
@@ -1075,11 +1076,12 @@ fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
         });
         if let Some((path, is_dir)) = parsed {
             let basename = path.rsplit('/').next().unwrap_or_default().to_string();
-            links.push(FileMentionLink {
+            links.push(ComposerChip {
                 range: start..end,
                 basename,
                 path,
                 is_dir,
+                is_selection: false,
             });
         }
         search = end;
@@ -1090,7 +1092,7 @@ fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
 #[derive(Debug, Clone, Default)]
 struct TextProjection {
     display: String,
-    mentions: Vec<(FileMentionLink, Range<usize>)>,
+    mentions: Vec<(ComposerChip, Range<usize>)>,
 }
 
 /// A path alone is not enough: two identical relative paths can appear in a
@@ -1194,7 +1196,25 @@ struct MentionHit {
 
 impl TextProjection {
     fn new(raw: &str) -> Self {
-        let links = file_mention_links(raw);
+        let selections = crate::selection_chip::blocks(raw);
+        let mut links = file_mention_links(raw);
+        links.retain(|link| {
+            !selections
+                .iter()
+                .any(|block| block.range.contains(&link.range.start))
+        });
+        links.extend(selections.into_iter().map(|block| ComposerChip {
+            range: block.range,
+            basename: crate::selection_chip::label(block.text),
+            path: block.text.to_string(),
+            is_dir: false,
+            is_selection: true,
+        }));
+        links.sort_by_key(|link| link.range.start);
+        Self::from_links(raw, links)
+    }
+
+    fn from_links(raw: &str, links: Vec<ComposerChip>) -> Self {
         let labels = mention_display_labels(&links);
         let mut projection = Self::default();
         let mut raw_at = 0;
@@ -1207,7 +1227,9 @@ impl TextProjection {
             // must exist in Geist (no exotic whitespace — U+2003/U+202F shape
             // at fallback width and collapsed the chip once already).
             projection.display.push_str(MENTION_SIDE_PAD);
-            projection.display.push(MENTION_PREFIX);
+            if !link.is_selection {
+                projection.display.push(MENTION_PREFIX);
+            }
             for ch in label.chars() {
                 projection
                     .display
@@ -1301,11 +1323,12 @@ impl TextProjection {
 /// Basenames are compact in the common case. When the same basename appears
 /// more than once, use the shortest unique path suffix so chips remain
 /// distinguishable without always expanding to full paths.
-fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
+fn mention_display_labels(links: &[ComposerChip]) -> Vec<String> {
     links
         .iter()
         .enumerate()
         .map(|(ix, link)| {
+            if link.is_selection { return link.basename.clone(); }
             if links
                 .iter()
                 .filter(|other| other.basename == link.basename)
@@ -1354,7 +1377,12 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
     if !raw.contains(FILE_MENTION_SCHEME) && !raw.contains(LEGACY_FILE_MENTION_SCHEME) {
         return None;
     }
-    let projection = TextProjection::new(raw);
+    // Sent excerpts remain readable in full. Only actual file references
+    // outside those excerpts collapse in the transcript.
+    let selections = crate::selection_chip::blocks(raw);
+    let mut links = file_mention_links(raw);
+    links.retain(|link| !selections.iter().any(|block| block.range.contains(&link.range.start)));
+    let projection = TextProjection::from_links(raw, links);
     if projection.mentions.is_empty() {
         return None;
     }
@@ -1977,7 +2005,8 @@ impl ComposerInput {
         self.needs_measure = true;
         if self.mentions_enabled
             && (self.content.contains(FILE_MENTION_SCHEME)
-                || self.content.contains(LEGACY_FILE_MENTION_SCHEME))
+                || self.content.contains(LEGACY_FILE_MENTION_SCHEME)
+                || self.content.contains("```selected-text\n"))
         {
             self.projection = TextProjection::new(&self.content);
         } else {
@@ -3879,7 +3908,7 @@ impl Render for ComposerInput {
         } else {
             theme.text
         };
-        div()
+        let child = div()
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
             .aria_label(self.placeholder.clone())
@@ -3972,7 +4001,34 @@ impl Render for ComposerInput {
                         input.scroll_top,
                     )
                 })
+            });
+        let selected = !self.selected_range.is_empty();
+        let editable = !self.read_only;
+        let mut entries: Vec<_> = [
+            ("Cut", editable && selected, 0),
+            ("Copy", selected, 1),
+            ("Paste", editable && cx.read_from_clipboard().is_some(), 2),
+            ("Select All", !self.content.is_empty(), 3),
+        ]
+        .into_iter()
+        .map(|(label, enabled, action)| {
+            let input = cx.entity();
+            crate::text_menu::Entry::new(label, enabled, move |window, cx| {
+                input.update(cx, |input, cx| {
+                    window.focus(&input.focus_handle, cx);
+                    match action {
+                        0 => input.cut(&Cut, window, cx),
+                        1 => input.copy(&Copy, window, cx),
+                        2 => input.paste(&Paste, window, cx),
+                        _ => input.select_all(&SelectAll, window, cx),
+                    }
+                });
             })
+        })
+        .collect();
+        let selected_text = self.content.get(self.selected_range.clone()).filter(|text| !text.is_empty()).map(str::to_string);
+        entries.insert(2, crate::text_menu::Entry::add_to_session(selected, move || selected_text.clone()));
+        crate::text_menu::TextMenu::new("composer-text-menu", child, entries)
     }
 }
 
@@ -4495,6 +4551,9 @@ pub struct Composer {
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
+    /// The draft the composer held when the question panel borrowed its
+    /// input. Kept out of the answer and handed back when the panel closes.
+    wizard_draft: Option<String>,
     send_task: Option<Task<()>>,
     /// The queued message being edited in the composer (see
     /// [`Composer::begin_queue_edit`]).
@@ -4659,6 +4718,35 @@ impl Composer {
         &self.pickers
     }
 
+    pub(crate) fn add_selected_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        self.on_state_changed(cx);
+        self.input.update(cx, |input, cx| {
+            if input.read_only {
+                return;
+            }
+            let end = input.content.len();
+            let separator = if end == 0 || input.content.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            let inserted = format!("{separator}{}\n", crate::selection_chip::markdown(text));
+            input.move_to(end, cx);
+            input.replace_text_in_range(None, &inserted, window, cx);
+            window.focus(&input.focus_handle, cx);
+        });
+        self.focus_pending = true;
+        cx.notify();
+    }
+
     /// Feed the stable conversation-column width into responsive composer
     /// controls.
     pub fn set_available_width(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -4799,6 +4887,7 @@ impl Composer {
             wizard: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
+            wizard_draft: None,
             failure_key: None,
             failed_send: None,
             retry_send_id: None,
@@ -6554,7 +6643,13 @@ impl Composer {
                 self.launching_new_chat && self.current_key.is_empty() && !key.is_empty();
             let returning_to_new_thread = !self.current_key.is_empty() && key.is_empty();
             self.launching_new_chat = false;
-            let old_text = self.input.read(cx).text().to_string();
+            // With the question panel up, the input holds an answer in
+            // progress; the chat's real draft is the stashed one.
+            let old_text = if self.wizard.is_some() {
+                self.wizard_draft.take().unwrap_or_default()
+            } else {
+                self.input.read(cx).text().to_string()
+            };
             if old_text.is_empty() {
                 self.drafts.remove(&self.current_key);
             } else {
@@ -6617,10 +6712,17 @@ impl Composer {
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
                     self.reset_mention(None, cx);
+                    // A replaced question's half-typed answer is dropped; the
+                    // draft stashed for the first question still stands.
+                    if self.wizard.is_none() {
+                        let draft = self.input.read(cx).text().to_string();
+                        self.wizard_draft = (!draft.is_empty()).then_some(draft);
+                    }
                     self.wizard = Some(Wizard::new(request_id, questions));
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
+                        input.set_text("", cx);
                         input.set_placeholder("Type your own answer, or pick an option above", cx)
                     });
                 }
@@ -6643,8 +6745,13 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
-                        self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                        let draft = self.wizard_draft.take();
+                        self.input.update(cx, |input, cx| {
+                            if let Some(draft) = draft {
+                                input.set_text(draft, cx);
+                            }
+                            input.set_placeholder("Do anything…", cx)
+                        });
                     }
                 }
             }
@@ -7452,6 +7559,7 @@ impl Composer {
                         // pickers row; new-chat draft on first send).
                         auto_approve: resolved.auto_approve,
                         resume: None,
+                        fork_from: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,
                         instructions: None,
@@ -7762,8 +7870,9 @@ impl Composer {
         };
         self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
+        let draft = self.wizard_draft.take().unwrap_or_default();
         self.input.update(cx, |input, cx| {
-            input.set_text("", cx);
+            input.set_text(draft, cx);
             // The panel borrowed the composer input; hand back its identity.
             input.set_placeholder("Do anything…", cx);
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
@@ -7858,7 +7967,7 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -7953,6 +8062,11 @@ impl Composer {
             .flex_col()
             .child(
                 div()
+                    .id(("wizard-body", page))
+                    // Keep the footer inside the window even for large inputs
+                    // or many options; the body can scroll independently.
+                    .max_h(window.viewport_size().height * 0.6)
+                    .overflow_y_scroll()
                     .px(px(16.0))
                     .pt(px(16.0))
                     .flex()
@@ -7991,6 +8105,12 @@ impl Composer {
                     )
                     .child(
                         div()
+                            .id(("wizard-question", page))
+                            // A long command gets its own viewport so the
+                            // approval choices stay close at hand.
+                            .max_h(window.viewport_size().height * 0.25)
+                            .flex_shrink_0()
+                            .overflow_y_scroll()
                             .mt(px(6.0))
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
@@ -8400,7 +8520,7 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let wizard = self.render_wizard(window, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 
@@ -9376,6 +9496,70 @@ mod tests {
     }
 
     #[gpui::test]
+    fn input_text_menu_preserves_selection_and_respects_read_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.write_to_clipboard(ClipboardItem::new_string("pasted".into()));
+        });
+        let (input, cx) = cx.add_window_view(|_, cx| {
+            let mut input = ComposerInput::new("Draft", cx);
+            input.set_text("hello world", cx);
+            input.selected_range = 0..5;
+            input
+        });
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.run_until_parked();
+        let position = input.read_with(cx, |input, _| {
+            input.last_bounds.unwrap().origin + point(px(5.0), px(9.0))
+        });
+        cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            input.read_with(cx, |input, _| input.selected_range.clone()),
+            0..5
+        );
+        let cut = cx.debug_bounds("text-menu-Cut").unwrap().center();
+        cx.simulate_mouse_down(cut, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(cut, MouseButton::Left, gpui::Modifiers::default());
+        assert_eq!(
+            input.read_with(cx, |input, _| input.content.to_string()),
+            " world"
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("hello")
+            )
+        });
+        cx.update(|_, cx| {
+            input.update(cx, |input, cx| {
+                input.read_only = true;
+                input.selected_range = 0..input.content.len();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.run_until_parked();
+        for selector in ["text-menu-Cut", "text-menu-Paste"] {
+            let point = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_mouse_down(point, MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_up(point, MouseButton::Left, gpui::Modifiers::default());
+            assert_eq!(
+                input.read_with(cx, |input, _| input.content.to_string()),
+                " world"
+            );
+        }
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("text-menu-Copy").is_none());
+    }
+
+    #[gpui::test]
     fn inputs_release_focus_on_click_away(cx: &mut gpui::TestAppContext) {
         struct Inputs(Vec<Entity<ComposerInput>>);
         impl Render for Inputs {
@@ -9457,7 +9641,11 @@ mod tests {
                 cwd: None, branch: None, checkout_id: None, source_context: None, config: None,
                 last_message_preview: None, last_message_at: None, created_at: chrono::Utc::now(),
                 harness_session_id: None, harness_session_cwd: None, actual_model: None,
+                scheduled_task: None,
+                scheduled_task_info: None,
                 parent_chat_id: None, space_id: None, last_seen_at: None, room_gen: None,
+                side_of: None,
+                side_absorbed_through: None,
                 linked_pr_url: None, linked_pr_source: None, linked_ticket_id: None,
                 linked_ticket_source: None,
             });
@@ -10114,6 +10302,85 @@ mod tests {
     }
 
     #[test]
+    fn selection_chip_projection_preserves_payload_and_atomic_editing() {
+        let excerpt = "  error α\n```\n[a.rs](mast-file:src/a.rs)\n";
+        let raw = format!(
+            "draft\n{}\nafter {}",
+            crate::selection_chip::markdown(excerpt),
+            local_file_link("src/b.rs", false)
+        );
+        let projection = TextProjection::new(&raw);
+        assert_eq!(projection.mentions.len(), 2);
+        let (chip, display) = &projection.mentions[0];
+        assert!(chip.is_selection);
+        assert_eq!(chip.path, excerpt);
+        assert!(projection.display.contains("Selected\u{a0}text"));
+        assert!(!projection.display.contains("error α"));
+        assert_eq!(
+            projection.previous_boundary(chip.range.end),
+            Some(chip.range.start)
+        );
+        assert_eq!(
+            projection.next_boundary(chip.range.start),
+            Some(chip.range.end)
+        );
+        assert_eq!(
+            projection.normalize_range(chip.range.start + 1..chip.range.end - 1),
+            chip.range
+        );
+        assert_eq!(projection.display_to_raw(display.start), chip.range.start);
+        let (sent, spans) = sent_mention_display(&raw).unwrap();
+        assert!(
+            sent.contains(excerpt),
+            "sent text must expose the complete excerpt"
+        );
+        assert_eq!(
+            spans.len(),
+            1,
+            "references inside selected text are literal text"
+        );
+    }
+
+    #[gpui::test]
+    fn selection_chip_keeps_draft_text_and_supports_undo_and_session_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let excerpt = "  terminal output\r\n```\n尾\n";
+        handle
+            .update(cx, |composer, window, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("Please inspect this", cx));
+                composer.add_selected_text(excerpt, window, cx);
+                let original = composer.input.read(cx).text().to_string();
+                assert!(original.starts_with("Please inspect this\n"));
+                assert_eq!(crate::selection_chip::blocks(&original)[0].text, excerpt);
+                assert_eq!(composer.input.read(cx).projection.mentions.len(), 1);
+                assert!(composer.input.read(cx).focus_handle.is_focused(window));
+                composer
+                    .input
+                    .update(cx, |input, cx| input.undo(&Undo, window, cx));
+                assert_eq!(composer.input.read(cx).text(), "Please inspect this");
+                composer
+                    .input
+                    .update(cx, |input, cx| input.redo(&Redo, window, cx));
+                assert_eq!(composer.input.read(cx).text(), original);
+                composer.state.update(cx, |state, cx| {
+                    state.select_chat(Some("other-session".into()), cx);
+                });
+                composer.on_state_changed(cx);
+                assert!(composer.input.read(cx).text().is_empty());
+                composer
+                    .state
+                    .update(cx, |state, cx| state.select_chat(None, cx));
+                composer.on_state_changed(cx);
+                assert_eq!(composer.input.read(cx).text(), original);
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn duplicate_mention_basenames_use_unique_suffixes() {
         let raw = format!(
             "{} {}",
@@ -10128,17 +10395,19 @@ mod tests {
     #[test]
     fn mention_suffixes_compare_path_components() {
         let links = vec![
-            FileMentionLink {
+            ComposerChip {
                 range: 0..0,
                 basename: "mod.rs".into(),
                 path: "foo/mod.rs".into(),
                 is_dir: false,
+                is_selection: false,
             },
-            FileMentionLink {
+            ComposerChip {
                 range: 0..0,
                 basename: "oomod.rs".into(),
                 path: "bar/oomod.rs".into(),
                 is_dir: false,
+                is_selection: false,
             },
         ];
         assert_eq!(
@@ -11035,6 +11304,83 @@ mod tests {
             answers[1].labels,
             vec!["custom answer"],
             "typed overrides picked, trimmed"
+        );
+    }
+
+    fn asked(request_id: &str, resolved: bool) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "m".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: format!("in-{request_id}"),
+                request_id: request_id.into(),
+                questions: vec![question("q", &["yes", "no"], false)],
+                resolved,
+            }],
+            created_at: 0,
+            device_id: "d".into(),
+            status: Some(mast_doc::MessageStatus::Streaming),
+            continuation_of: None,
+        }
+    }
+
+    #[gpui::test]
+    fn picking_an_answer_sends_the_option_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+        use super::instruction_reset::tests::{draw, harness};
+        let (mut h, vcx) = harness(cx);
+        let _guard = h._runtime.enter();
+        let input = h.composer.read_with(vcx, |composer, _| composer.input.clone());
+        input.update(vcx, |input, cx| input.set_text("my unsent draft", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", false)]);
+            cx.notify();
+        });
+        draw(vcx);
+        h.composer.read_with(vcx, |composer, cx| {
+            assert!(composer.wizard.is_some());
+            assert!(composer.input.read(cx).is_empty(), "the draft is not the answer");
+        });
+
+        h.composer
+            .update(vcx, |composer, cx| composer.wizard_select(1, cx));
+        vcx.executor()
+            .advance_clock(Duration::from_millis(AUTO_ADVANCE_MS + 10));
+        draw(vcx);
+
+        let sent = h.sent(methods::QUEUE_COMMAND);
+        assert_eq!(sent.len(), 1);
+        let command = &sent[0]["params"]["command"];
+        assert_eq!(command["kind"], "respondInput");
+        assert_eq!(command["answers"][0]["labels"], serde_json::json!(["no"]));
+        assert_eq!(
+            input.read_with(vcx, |input, _| input.text().to_string()),
+            "my unsent draft"
+        );
+    }
+
+    #[gpui::test]
+    fn a_question_resolved_elsewhere_hands_the_draft_back(cx: &mut gpui::TestAppContext) {
+        use super::instruction_reset::tests::{draw, harness};
+        let (h, vcx) = harness(cx);
+        let _guard = h._runtime.enter();
+        let input = h.composer.read_with(vcx, |composer, _| composer.input.clone());
+        input.update(vcx, |input, cx| input.set_text("my unsent draft", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", false)]);
+            cx.notify();
+        });
+        draw(vcx);
+        input.update(vcx, |input, cx| input.set_text("half an answer", cx));
+        h.state.update(vcx, |state, cx| {
+            state.apply_transcript(vec![asked("r1", true)]);
+            cx.notify();
+        });
+        draw(vcx);
+        h.composer
+            .read_with(vcx, |composer, _| assert!(composer.wizard.is_none()));
+        assert_eq!(
+            input.read_with(vcx, |input, _| input.text().to_string()),
+            "my unsent draft"
         );
     }
 

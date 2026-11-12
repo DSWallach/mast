@@ -15,7 +15,7 @@ use crate::theme::Theme;
 
 /// Archived rows in sidebar (recency) order. Pure.
 pub fn archived_chats(chats: &[Chat]) -> Vec<&Chat> {
-    chats.iter().filter(|c| c.archived).collect()
+    chats.iter().filter(|c| c.archived && !c.is_side_chat()).collect()
 }
 
 pub struct ArchivedPage {
@@ -358,7 +358,11 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

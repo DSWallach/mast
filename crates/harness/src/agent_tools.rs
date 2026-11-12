@@ -45,6 +45,22 @@ impl AgentToolsInjection {
         })
     }
 
+    /// The server entry in ACP's `mcpServers` (`McpServerStdio`) shape for
+    /// `session/new` and `session/load`.
+    pub fn acp_mcp_server(&self) -> Value {
+        let env: Vec<Value> = self
+            .env
+            .iter()
+            .map(|(name, value)| json!({ "name": name, "value": value }))
+            .collect();
+        json!({
+            "name": self.server_name,
+            "command": self.command.to_string_lossy(),
+            "args": self.args,
+            "env": env,
+        })
+    }
+
     /// The `config` overrides that add this server to one Codex thread.
     pub fn codex_config_overrides(&self) -> serde_json::Map<String, Value> {
         let prefix = format!("mcp_servers.{}", self.server_name);
@@ -296,6 +312,21 @@ mod tests {
             overrides
                 .keys()
                 .all(|k| k.starts_with("mcp_servers.mast-agent."))
+        );
+    }
+
+    #[test]
+    fn acp_mcp_server_uses_stdio_env_name_value_pairs() {
+        let server = injection().acp_mcp_server();
+        assert_eq!(server["name"], "mast-agent");
+        assert_eq!(server["command"], "/opt/zeron/bin/zeron");
+        assert_eq!(server["args"], json!(["mcp"]));
+        assert_eq!(
+            server["env"],
+            json!([
+                {"name": "MAST_AGENT_TOKEN", "value": "secret-token"},
+                {"name": "MAST_IPC_PORT", "value": "27654"},
+            ])
         );
     }
 }

@@ -50,7 +50,7 @@ pub fn blurb(harness: HarnessId) -> &'static str {
         HarnessId::Hermes => "Nous Research's Hermes Agent (hermes CLI).",
         HarnessId::Pi => "The pi coding agent (pi CLI).",
         HarnessId::Opencode => "SST's opencode agent (opencode CLI).",
-        HarnessId::Antigravity => "Google's Antigravity agent (Antigravity ACP server).",
+        HarnessId::Antigravity => "Google's Antigravity agent (agy CLI).",
         HarnessId::Mock => "Scripted test harness.",
     }
 }
@@ -64,13 +64,8 @@ fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> boo
 }
 
 fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String {
-    if harness == HarnessId::Antigravity {
-        return if can_install {
-            "Install Antigravity to enable"
-        } else {
-            "Set ANTIGRAVITY_ACP_EXECUTABLE to enable Antigravity"
-        }
-        .into();
+    if harness == HarnessId::Antigravity && can_install {
+        return "Install Antigravity to enable".into();
     }
     if enabled {
         format!(
@@ -93,7 +88,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Hermes => "hermes",
         HarnessId::Pi => "pi",
         HarnessId::Opencode => "opencode",
-        HarnessId::Antigravity => "Antigravity",
+        HarnessId::Antigravity => "agy",
         HarnessId::Mock => "mock",
     }
 }
@@ -1248,12 +1243,13 @@ fn antigravity_install_visibility_and_hint_follow_target_capabilities() {
             }
         }
     }
-    assert_eq!(cli_name(HarnessId::Antigravity), "Antigravity");
+    assert_eq!(cli_name(HarnessId::Antigravity), "agy");
     assert_eq!(
         install_hint(HarnessId::Antigravity, false, true),
         "Install Antigravity to enable"
     );
-    assert!(
-        install_hint(HarnessId::Antigravity, false, false).contains("ANTIGRAVITY_ACP_EXECUTABLE")
+    assert_eq!(
+        install_hint(HarnessId::Antigravity, false, false),
+        "Install the agy CLI to enable"
     );
 }

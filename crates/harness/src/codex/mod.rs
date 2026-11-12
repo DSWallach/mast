@@ -68,6 +68,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+mod context;
 pub mod instructions;
 mod normalize;
 mod subagents;
@@ -370,6 +371,7 @@ impl CodexHarness {
                 }
                 .into());
             }
+            context::enrich(&mut models, self.account_home.as_deref());
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
@@ -651,7 +653,12 @@ impl Harness for CodexHarness {
             &[],
             self.account_home.as_deref(),
         )
-        .map(Some)
+        .map(|mut context| {
+            // Retire persisted catalogs written before context choices existed.
+            use sha2::Digest as _;
+            context.hash = format!("{:x}", sha2::Sha256::digest(format!("codex-context-v1:{}", context.hash)));
+            Some(context)
+        })
     }
     fn scoped_to_account_home(&self, home: &std::path::Path) -> Option<Arc<dyn Harness>> {
         Some(Arc::new(Self {
@@ -664,7 +671,9 @@ impl Harness for CodexHarness {
         }))
     }
     fn fallback_models(&self) -> Vec<Model> {
-        static_models()
+        let mut models = static_models();
+        context::enrich(&mut models, self.account_home.as_deref());
+        models
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
@@ -772,18 +781,11 @@ impl CodexHarness {
         // malformed mount that kills every command. Without `auto_approve`
         // the request's own sandbox level is honored and approvals are
         // "on-request" (see [`approval_policy_for`]).
-        // A `read-only` request is never widened by auto-approve: yolo would
-        // both select danger-full-access and auto-accept sandbox escalations.
-        if request.sandbox == mast_proto::SandboxLevel::ReadOnly {
-            request.auto_approve = false;
-        }
-        request.sandbox = if title_only {
-            mast_proto::SandboxLevel::ReadOnly
-        } else if request.auto_approve {
-            mast_proto::SandboxLevel::DangerFullAccess
-        } else {
-            request.sandbox
-        };
+        // A `read-only` request is never widened by auto-approve: it keeps
+        // its sandbox, and auto-approve only turns prompts off (policy
+        // "never"; escalations fail instead of asking). Its stray approval
+        // requests still go to the input bridge rather than being accepted.
+        request.sandbox = effective_sandbox(&request, title_only);
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
@@ -920,6 +922,18 @@ impl TurnRouter {
     }
 }
 
+/// The sandbox a run gets: title runs and read-only requests stay read-only;
+/// otherwise auto-approve (yolo) widens to full access.
+fn effective_sandbox(request: &RunRequest, title_only: bool) -> mast_proto::SandboxLevel {
+    if title_only || request.sandbox == mast_proto::SandboxLevel::ReadOnly {
+        mast_proto::SandboxLevel::ReadOnly
+    } else if request.auto_approve {
+        mast_proto::SandboxLevel::DangerFullAccess
+    } else {
+        request.sandbox
+    }
+}
+
 /// The wire approval policy. `"never"` for yolo runs and the read-only title
 /// run; `"on-request"` otherwise — codex's standard "Auto" preset: commands
 /// run in the sandbox and only sandbox escalations ask. (`"untrusted"` would
@@ -1027,6 +1041,11 @@ fn thread_start_params(request: &RunRequest, title_only: bool) -> serde_json::Ma
     }
     if let Some(tier) = service_tier(request) {
         p.insert("serviceTier".into(), Value::String(tier));
+    }
+    if !title_only {
+        if let Some(tokens) = context::selected(request) {
+            p.entry("config").or_insert_with(|| json!({}))["model_context_window"] = json!(tokens);
+        }
     }
     p
 }
@@ -1557,7 +1576,8 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.auto_approve,
+                        request.auto_approve
+                            && request.sandbox != mast_proto::SandboxLevel::ReadOnly,
                         &request_input,
                         &ApprovalCtx {
                             event_tx: &event_tx,
@@ -2199,6 +2219,29 @@ mod tests {
     }
 
     #[test]
+    fn context_window_is_passed_to_start_and_resume_without_changing_defaults() {
+        let mut request = instruction_request(None, mast_proto::InstructionTransition::Fresh);
+        assert!(!thread_start_params(&request, false).contains_key("config"));
+        request.model_options.insert("contextWindow".into(), json!("872000"));
+        let mut start = thread_start_params(&request, false);
+        assert_eq!(start["config"]["model_context_window"], json!(872000));
+        let tools = crate::AgentToolsInjection {
+            server_name: "mast-agent".into(), command: "/opt/mast".into(),
+            args: vec!["mcp".into()], env: Default::default(),
+        };
+        with_agent_tools(&mut start, Some(&tools));
+        assert_eq!(start["config"]["model_context_window"], json!(872000));
+        assert_eq!(start["config"]["mcp_servers.mast-agent.command"], json!("/opt/mast"));
+        let resumed = thread_resume_params(&start, "thread");
+        assert_eq!(resumed["config"]["model_context_window"], json!(872000));
+        assert!(thread_start_params(&request, true)["config"].get("model_context_window").is_none());
+        for value in ["default", "0", "-1", "invalid"] {
+            request.model_options.insert("contextWindow".into(), json!(value));
+            assert!(!thread_start_params(&request, false).contains_key("config"));
+        }
+    }
+
+    #[test]
     fn developer_instructions_ride_thread_start_and_every_resume() {
         use mast_proto::InstructionTransition::{Continue, Fresh};
         let fresh = thread_start_params(&instruction_request(None, Fresh), false);
@@ -2250,6 +2293,22 @@ mod tests {
                 .get("developerInstructions")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn read_only_auto_approve_stays_read_only_and_never_asks() {
+        let mut request = instruction_request(None, mast_proto::InstructionTransition::Fresh);
+        request.instructions = None;
+        request.sandbox = mast_proto::SandboxLevel::ReadOnly;
+        request.auto_approve = true;
+        request.sandbox = effective_sandbox(&request, false);
+        assert_eq!(request.sandbox, mast_proto::SandboxLevel::ReadOnly);
+        let params = thread_start_params(&request, false);
+        assert_eq!(params["approvalPolicy"], json!("never"));
+        assert_eq!(params["sandbox"], json!(sandbox_mode(mast_proto::SandboxLevel::ReadOnly)));
+        // Auto-approve still widens a writable run.
+        request.sandbox = mast_proto::SandboxLevel::WorkspaceWrite;
+        assert_eq!(effective_sandbox(&request, false), mast_proto::SandboxLevel::DangerFullAccess);
     }
 
     #[test]

@@ -243,6 +243,7 @@ fn run_command(prompt: &str, cwd: &str) -> SessionCommandPayload {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
             resume: None,
+            fork_from: None,
             attachments: Vec::new(),
             worktree: None,
             instructions: None,
@@ -1247,6 +1248,7 @@ async fn read_subtree_lists_descendants_chats_and_requests_within_the_callers_su
     let leaf = &step["children"][0];
     assert_eq!(leaf["id"], a_grand);
     assert_eq!(leaf["chats"][0]["id"], OTHER_CHAT);
+    assert_eq!(leaf["chats"][0]["url"], "mast://chat/chat-other");
     assert_eq!(leaf["chats"][0]["status"], "idle");
     assert!(leaf["chats"][0].get("lastMessageAt").is_some());
     let request = &leaf["openUserActionRequests"][0];
@@ -1528,6 +1530,83 @@ fn bind_ok(rig: &BindRig, path: &Path, key: &str) -> Value {
         json!({ "path": text(path), "idempotencyKey": key }),
     )
     .unwrap_or_else(|e| panic!("bind {}: {e}", path.display()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_publish_uses_bound_submodule_worktree_without_moving_chat() {
+    let rig = bind_rig(true);
+    let base = git(&rig.sub_wt, &["rev-parse", "HEAD"]);
+    std::fs::write(rig.sub_wt.join("flagship.txt"), "reviewed change\n").unwrap();
+    git(&rig.sub_wt, &["commit", "-qam", "review change"]);
+    let head = git(&rig.sub_wt, &["rev-parse", "HEAD"]);
+    let parent_head = git(&rig.ws, &["rev-parse", "HEAD"]);
+    let parent_branch = git(&rig.ws, &["branch", "--show-current"]);
+    let bound = bind_ok(&rig, &rig.sub_wt, "review-bind");
+    assert_eq!(bound["selected"], true);
+    let review = json!({
+        "schema": "mast.review/v1",
+        "pr": {"repo": "owner/flagship", "number": 42, "baseSha": base, "headSha": head},
+        "summary": "Review the submodule change.",
+        "steps": [{"id": "change", "title": "Change", "file": "flagship.txt",
+            "hunks": [{"newStart": 1, "newEnd": 1}], "what": "Changes text", "why": "Update",
+            "risk": "low", "riskNote": "Text only", "tags": []}],
+        "highlights": [], "questions": [], "suggestedComments": []
+    });
+    let call = |arguments| {
+        rig.rpc
+            .agent_tools()
+            .call(&mast_proto::agent_tools::AgentToolCallParams {
+                token: rig.token.clone(),
+                tool: "review_publish".into(),
+                arguments,
+            })
+    };
+    // Both public PR calling forms must resolve the selected submodule checkout.
+    for arguments in [
+        json!({"prUrl": "https://github.com/owner/flagship/pull/42", "headSha": head, "review": review}),
+        json!({"target": {"kind": "pr", "repo": "owner/flagship", "number": 42,
+            "baseSha": base, "headSha": head}, "review": review}),
+    ] {
+        let reply = call(arguments).unwrap();
+        let id = reply["artifactId"].as_str().unwrap();
+        assert_eq!(reply["url"], format!("mast-artifact:{id}"));
+        assert!(rig.core.workspace.artifact(id).is_some());
+        let stored: Value =
+            serde_json::from_slice(&std::fs::read(reply["storedPath"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(stored["pr"]["headSha"], head);
+        assert_eq!(
+            stored["steps"][0]["hunks"][0]["hunkHash"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+    }
+    let missing = "a".repeat(40);
+    let mut invalid = review.clone();
+    invalid["pr"]["headSha"] = json!(missing);
+    let error = call(json!({"prUrl": "https://github.com/owner/flagship/pull/42",
+        "headSha": missing, "review": invalid}))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains(&text(&rig.sub_wt)), "{error}");
+    assert!(
+        error.contains("rev-parse") && error.contains("--verify"),
+        "{error}"
+    );
+    assert!(error.contains(&format!("{missing}^{{commit}}")), "{error}");
+    assert_eq!(
+        rig.core.workspace.chat(CHAT).unwrap().unwrap().cwd,
+        Some(text(&rig.ws))
+    );
+    assert_eq!(git(&rig.ws, &["rev-parse", "HEAD"]), parent_head);
+    assert_eq!(git(&rig.ws, &["branch", "--show-current"]), parent_branch);
+    assert_eq!(git(&rig.sub_wt, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git(&rig.sub_wt, &["branch", "--show-current"]),
+        "feat-eng-3012"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3746,6 +3825,57 @@ async fn an_admin_chat_archives_any_chat_of_its_space_without_the_rule_and_it_is
             .is_err());
         assert!(!chat_archived(&a.rig, target), "{target}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_personal_assistant_archives_chats_of_every_space_and_it_is_logged() {
+    const ELSEWHERE: &str = "chat-elsewhere";
+    let a = archive_rig().await;
+    let path = std::path::Path::new(&a.rig.space_path).join("elsewhere");
+    std::fs::create_dir_all(&path).unwrap();
+    for params in [
+        json!({ "op": "createSpace", "spaceId": OTHER_SPACE, "deviceId": a.rig.core.device_id,
+                "path": path.to_string_lossy() }),
+        json!({ "op": "createChat", "chatId": ELSEWHERE, "spaceId": OTHER_SPACE,
+                "deviceId": a.rig.core.device_id }),
+    ] {
+        a.rig.client.call(methods::MUTATE, params).await.unwrap();
+    }
+    a.rig
+        .client
+        .call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": CHAT }))
+        .await
+        .unwrap();
+    let origin = a
+        .rig
+        .client
+        .call(mast_proto::agent_tools::AUTHENTICATE_METHOD, json!({ "token": a.orchestrator }))
+        .await
+        .unwrap();
+    assert_eq!(origin["personalAssistant"], true);
+    // An unfinished worker, another Space, no Space: no rule, no force.
+    for target in [OTHER_CHAT, ELSEWHERE, PROJECTLESS] {
+        tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": target }))
+            .await
+            .unwrap();
+        assert!(chat_archived(&a.rig, target), "{target}");
+    }
+    let log = a.rig.service.agent_tools().agent_archives_since(0);
+    assert!(log.iter().all(|e| !e.forced && e.reason == "personal assistant"), "{log:?}");
+    assert!(log.iter().any(|e| e.chat_id == ELSEWHERE && e.space_id == OTHER_SPACE));
+    // Never itself.
+    assert!(tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": CHAT }))
+        .await
+        .is_err());
+    // Cleared: the next call is back to the ordinary reach.
+    a.rig
+        .client
+        .call(methods::CLEAR_PERSONAL_ASSISTANT, json!({}))
+        .await
+        .unwrap();
+    tool(&a.rig, &a.orchestrator, "chat_archive", json!({ "chatId": ELSEWHERE, "archived": false }))
+        .await
+        .unwrap_err();
 }
 
 #[tokio::test(flavor = "multi_thread")]

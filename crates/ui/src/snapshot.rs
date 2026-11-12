@@ -79,6 +79,15 @@ pub fn populated_walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>
 
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    chat_fixture_with(data_dir, |_, _| {}, cx)
+}
+
+/// [`chat_fixture`] with extra state applied before the shell is built.
+fn chat_fixture_with(
+    data_dir: PathBuf,
+    edit: impl FnOnce(&mut crate::state::AppState, &mut gpui::Context<crate::state::AppState>),
+    cx: &mut App,
+) -> Entity<crate::shell::Shell> {
     let codex = std::env::var("MAST_PREVIEW_HARNESS").is_ok_and(|value| value == "codex");
     let (harness, model) = if codex { ("codex", "gpt-6-astra") } else { ("claude-code", "Claude Opus 5.5 — Extended reasoning") };
     let state = cx.new(|_| {
@@ -97,6 +106,15 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
             ("fixture-design", "Design review"),
             ("fixture-tests", "Verify the changes"),
         ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
+        if std::env::var_os("MAST_PREVIEW_ASSISTANT").is_some() {
+            // Two runs of one scheduled task; the older one is designated and
+            // the section shows the newer.
+            for (id, title, created) in [("fixture-assistant-old", "Daily briefing (yesterday)", 1_i64), ("fixture-assistant", "Daily briefing assistant", 2)] {
+                state.chats.push(serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"},"scheduledTaskInfo":{"taskId":"fixture-briefing","taskName":"Daily briefing","runId":id,"sessionCreatedAt":created}})).unwrap());
+            }
+            let designated = mast_proto::PersonalAssistant::for_chat(&state.chats[state.chats.len() - 2], 0);
+            state.personal_assistant.apply(mast_proto::PersonalAssistantReply { assistant: Some(designated) });
+        }
         preview_chat_outline(&mut state);
         state
     });
@@ -115,6 +133,14 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
                 {"id":"failure","role":"assistant","parts":[{"id":"error","kind":"error","message":"The service is overloaded. Please try again."}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
             ])).unwrap() }, cx).unwrap();
         }
+        if std::env::var_os("MAST_PREVIEW_SUBAGENTS").is_some() {
+            let spawn = |id: &str, description: &str, status: &str| serde_json::json!({"id":id,"kind":"tool","call":{"kind":"unknown","name":format!("Agent: {description}"),"input":{"description":description}},"resolved":true,"subagentRef":format!("fixture-chat--sub--{id}"),"subagentStatus":status});
+            state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
+                {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+                {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I'll split the review across subagents."},spawn("a1","Audit the sidebar layout","running"),spawn("a2","Check the theme contrast","running"),spawn("a3","List the changed files","done")],"createdAt":1788900001000_i64,"deviceId":"local","status":"streaming"}
+            ])).unwrap() }, cx).unwrap();
+        }
+        edit(state, cx);
     });
     let boot = crate::EngineBootConfig {
         data_dir,
@@ -208,6 +234,14 @@ pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
 pub fn team_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let shell = chat_fixture(data_dir, cx);
     shell.update(cx, |shell, cx| shell.fixture_snapshot_team(cx));
+    shell
+}
+
+/// Offline chat shell with a side chat open in the right pane, an absorbed
+/// exchange in the main transcript, and the chat menu open.
+pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture_with(data_dir, crate::shell::fixture_side_chat_state, cx);
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_side_chat(cx));
     shell
 }
 

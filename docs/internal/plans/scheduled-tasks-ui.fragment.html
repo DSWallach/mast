@@ -1,0 +1,204 @@
+<style>
+#mast-schedule-mock { --ms-bg:light-dark(#ffffff,#1e2023); --ms-rail:light-dark(#f5f5f4,#191b1e); --ms-ink:light-dark(#242629,#eceeed); --ms-dim:light-dark(#666b70,#a5aaaf); --ms-line:light-dark(#e4e5e3,#36393c); --ms-hover:light-dark(#eeefed,#2c3034); --ms-accent:light-dark(#285f53,#a3d0bc); --ms-soft:light-dark(#e9f2ed,#273b33); --ms-warn:light-dark(#825717,#e0bd81); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ms-ink); }
+#mast-schedule-mock.mk-sheet { max-width:none; width:100%; }
+#mast-schedule-mock * { box-sizing:border-box; }
+#mast-schedule-mock [hidden] { display:none!important; }
+#mast-schedule-mock button,#mast-schedule-mock input,#mast-schedule-mock select,#mast-schedule-mock textarea { font:inherit; color:inherit; }
+#mast-schedule-mock button { background:var(--ms-bg); border:1px solid var(--ms-line); border-radius:6px; padding:6px 10px; cursor:pointer; text-align:left; }
+#mast-schedule-mock button:hover { background:var(--ms-hover); }
+#mast-schedule-mock button:disabled { color:var(--ms-dim); cursor:default; }
+#mast-schedule-mock button.ms-primary { background:var(--ms-ink); color:var(--ms-bg); border-color:var(--ms-ink); }
+#mast-schedule-mock button.ms-quiet { background:transparent; border-color:transparent; }
+#mast-schedule-mock button[aria-current="page"] { background:var(--ms-hover); }
+#mast-schedule-mock input,#mast-schedule-mock select,#mast-schedule-mock textarea { width:100%; min-width:0; padding:8px 9px; border:1px solid var(--ms-line); border-radius:6px; background:var(--ms-bg); }
+#mast-schedule-mock textarea { resize:vertical; min-height:105px; }
+#mast-schedule-mock h1,#mast-schedule-mock h2,#mast-schedule-mock h3,#mast-schedule-mock p { margin:0; }
+#mast-schedule-mock h1 { font-size:24px; font-weight:600; letter-spacing:-.6px; }
+#mast-schedule-mock h2 { font-size:18px; font-weight:600; letter-spacing:-.3px; }
+#mast-schedule-mock h3 { font-size:14px; font-weight:600; }
+#mast-schedule-mock .ms-dim { color:var(--ms-dim); }
+#mast-schedule-mock .ms-small { font-size:12px; }
+#mast-schedule-mock .ms-label { font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--ms-dim); }
+#mast-schedule-mock .ms-top { padding:10px 0 14px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+#mast-schedule-mock .ms-top span:last-child { margin-left:auto; padding-right:90px; }
+#mast-schedule-mock .ms-app { display:grid; grid-template-columns:205px minmax(0,1fr); min-height:675px; background:var(--ms-bg); border:1px solid var(--ms-line); border-radius:10px; overflow:clip; }
+#mast-schedule-mock aside { padding:20px 12px; background:var(--ms-rail); border-right:1px solid var(--ms-line); }
+#mast-schedule-mock .ms-brand { padding:0 10px 24px; font-size:18px; font-weight:600; letter-spacing:-.4px; }
+#mast-schedule-mock .ms-nav { display:grid; gap:3px; }
+#mast-schedule-mock .ms-nav button { width:100%; }
+#mast-schedule-mock .ms-rail-section { padding:25px 9px 10px; }
+#mast-schedule-mock .ms-latest { display:grid; gap:4px; }
+#mast-schedule-mock .ms-latest button { width:100%; padding:9px; }
+#mast-schedule-mock .ms-latest button span { display:block; }
+#mast-schedule-mock main { min-width:0; padding:28px; }
+#mast-schedule-mock .ms-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:14px; margin-bottom:22px; }
+#mast-schedule-mock .ms-actions { display:flex; flex-wrap:wrap; gap:7px; align-items:center; }
+#mast-schedule-mock .ms-heading p { margin-top:5px; }
+#mast-schedule-mock .ms-host { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; padding-bottom:17px; margin-bottom:6px; border-bottom:1px solid var(--ms-line); }
+#mast-schedule-mock .ms-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ms-accent); margin-right:7px; vertical-align:middle; }
+#mast-schedule-mock .ms-task { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; padding:14px 0; border-bottom:1px solid var(--ms-line); }
+#mast-schedule-mock .ms-task-name { display:block; font-weight:500; }
+#mast-schedule-mock .ms-task-meta { margin-top:4px; display:flex; flex-wrap:wrap; gap:3px 12px; font-size:12px; color:var(--ms-dim); }
+#mast-schedule-mock .ms-status { display:inline-block; font-size:11px; font-weight:500; padding:2px 7px; border-radius:4px; color:var(--ms-accent); background:var(--ms-soft); }
+#mast-schedule-mock .ms-status.ms-paused { color:var(--ms-dim); background:var(--ms-hover); }
+#mast-schedule-mock .ms-status.ms-attention { color:var(--ms-warn); background:var(--ms-hover); }
+#mast-schedule-mock .ms-foot { margin-top:17px; font-size:12px; color:var(--ms-dim); }
+#mast-schedule-mock .ms-back { margin-bottom:17px; }
+#mast-schedule-mock .ms-form { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:17px; max-width:760px; }
+#mast-schedule-mock .ms-form label { display:grid; align-content:start; gap:6px; font-size:12px; }
+#mast-schedule-mock .ms-full { grid-column:1/-1; }
+#mast-schedule-mock .ms-field-note { color:var(--ms-dim); font-size:12px; }
+#mast-schedule-mock .ms-check { display:flex!important; align-items:center; gap:8px!important; }
+#mast-schedule-mock .ms-check input { width:auto; }
+#mast-schedule-mock .ms-rule { padding:16px 0; border-top:1px solid var(--ms-line); border-bottom:1px solid var(--ms-line); }
+#mast-schedule-mock .ms-rule p { margin-top:5px; }
+#mast-schedule-mock .ms-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+#mast-schedule-mock .ms-edition { border:1px solid var(--ms-line); border-radius:8px; padding:18px; display:grid; gap:11px; }
+#mast-schedule-mock .ms-edition p { font-size:13px; color:var(--ms-dim); }
+#mast-schedule-mock .ms-session-bar { display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px; align-items:center; padding:14px 0; border-top:1px solid var(--ms-line); border-bottom:1px solid var(--ms-line); }
+#mast-schedule-mock .ms-session-layout { display:grid; grid-template-columns:minmax(0,1fr); gap:24px; margin-top:24px; }
+#mast-schedule-mock .ms-session-layout.ms-history-open { grid-template-columns:minmax(0,1fr) minmax(210px,.7fr); }
+#mast-schedule-mock .ms-transcript { display:grid; align-content:start; gap:20px; min-width:0; }
+#mast-schedule-mock .ms-message { display:grid; gap:8px; }
+#mast-schedule-mock .ms-history { padding-left:18px; border-left:1px solid var(--ms-line); min-width:0; }
+#mast-schedule-mock .ms-history h3 { margin-bottom:12px; }
+#mast-schedule-mock .ms-history button { display:block; width:100%; margin-bottom:7px; }
+#mast-schedule-mock .ms-history button[aria-pressed="true"] { background:var(--ms-soft); border-color:var(--ms-accent); }
+#mast-schedule-mock .ms-history button span { display:block; margin-top:3px; font-size:12px; color:var(--ms-dim); }
+#mast-schedule-mock .ms-older { color:var(--ms-warn); font-size:12px; }
+#mast-schedule-mock .ms-notice { min-height:22px; margin-top:10px; font-size:12px; color:var(--ms-accent); }
+@media(max-width:1050px) { #mast-schedule-mock .ms-app { grid-template-columns:170px minmax(0,1fr); } #mast-schedule-mock main { padding:22px; } #mast-schedule-mock .ms-session-layout.ms-history-open { grid-template-columns:1fr; } #mast-schedule-mock .ms-history { border-left:0; padding-left:0; border-top:1px solid var(--ms-line); padding-top:18px; } }
+@media(max-width:650px) { #mast-schedule-mock .ms-app { grid-template-columns:1fr; } #mast-schedule-mock aside { border-right:0; border-bottom:1px solid var(--ms-line); padding:12px; } #mast-schedule-mock .ms-brand { padding:0 8px 10px; } #mast-schedule-mock .ms-nav { display:flex; flex-wrap:wrap; } #mast-schedule-mock .ms-nav button { width:auto; } #mast-schedule-mock .ms-rail-section,#mast-schedule-mock .ms-latest { display:none; } #mast-schedule-mock main { padding:18px; } #mast-schedule-mock .ms-task { grid-template-columns:1fr; } #mast-schedule-mock .ms-form,#mast-schedule-mock .ms-grid { grid-template-columns:1fr; } #mast-schedule-mock .ms-top span:last-child { padding-right:0; margin-left:0; } }
+@media(pointer:coarse) { #mast-schedule-mock button { min-height:44px; } #mast-schedule-mock input,#mast-schedule-mock select,#mast-schedule-mock textarea { font-size:16px; } }
+</style>
+<div id="mast-schedule-mock" class="mk-sheet">
+  <div class="ms-top ms-small"><span>Scheduled tasks · UI proposal</span><span class="ms-dim">Interactive mockup · sample results</span></div>
+  <div class="ms-app">
+    <aside aria-label="Mast navigation">
+      <div class="ms-brand">mast <span class="ms-dim ms-small">/ Personal</span></div>
+      <nav class="ms-nav" aria-label="Workspace views">
+        <button type="button" class="ms-quiet" data-view="overview">Overview</button>
+        <button type="button" class="ms-quiet" data-view="manage" aria-current="page">Scheduled tasks</button>
+      </nav>
+      <div class="ms-rail-section ms-label">Latest task sessions</div>
+      <div class="ms-latest" id="ms-sidebar"></div>
+    </aside>
+    <main id="ms-main" aria-label="Scheduled tasks"></main>
+  </div>
+  <p class="ms-notice" id="ms-notice" role="status" aria-live="polite"></p>
+</div>
+<script>
+(() => {
+  const root = document.getElementById('mast-schedule-mock');
+  const main = root.querySelector('#ms-main');
+  const notice = root.querySelector('#ms-notice');
+  const tasks = [
+    {id:'slack',name:'Slack Briefing',time:'03:30',state:'Enabled',preview:'Mentions and unanswered conversations, ready for your morning.',outcome:'Completed',clock:'03:34'},
+    {id:'sessions',name:'Claude Sessions Briefing',time:'03:45',state:'Enabled',preview:'Your recent sessions, decisions, and open threads.',outcome:'Completed',clock:'03:51'},
+    {id:'projects',name:'Linear Project Briefing',time:'04:00',state:'Enabled',preview:'Project updates and the next decisions to make.',outcome:'Completed',clock:'04:12'},
+    {id:'tickets',name:'Linear Tickets Briefing',time:'04:30',state:'Enabled',preview:'Your assigned work and items ready for triage.',outcome:'Completed',clock:'04:36'},
+    {id:'github',name:'GitHub priority briefing',time:'04:40',state:'Enabled',preview:'Two reviews need a decision. Three of your PRs are ready to revisit.',outcome:'Completed',clock:'04:48'},
+    {id:'codespaces',name:'Codespace Manager',time:'04:45',state:'Needs setup',preview:'Connect the execution account before enabling this task.',outcome:'No sessions',clock:'—'},
+    {id:'assistant',name:'Assistant daily summary',time:'05:00',state:'Paused',preview:'Your morning priorities, collected in one place.',outcome:'Completed',clock:'05:14'},
+    {id:'watch',name:'Codespace Stall Watch',time:'09:00',state:'Enabled',preview:'No stalled runs found in the latest check.',outcome:'Completed',clock:'13:02',interval:true}
+  ];
+  let view='manage', selected='github', edition=0, showHistory=false;
+  const models = {
+    'claude-sonnet-5': {label:'Sonnet 5', thinking:['low','medium','high','xhigh','max','ultrathink'], context:['200k','1m']},
+    'claude-opus-5-5': {label:'Opus 5.5', thinking:['low','medium','high','xhigh','max','ultracode','ultrathink'], context:['200k','1m']},
+    'claude-haiku-4-5': {label:'Haiku 4.5', thinking:['off','on'], context:['default']}
+  };
+  const optionLabels={low:'Low',medium:'Medium',high:'High',xhigh:'Extra high',max:'Max',ultracode:'Ultracode',ultrathink:'Ultrathink',off:'Off',on:'On','200k':'200K tokens','1m':'1M tokens',default:'Model default'};
+  const configFor = t => ({model:t.model||'claude-sonnet-5',thinking:t.thinking||'high',context:t.context||'200k'});
+  const options = (values,current) => values.map(v=>`<option value="${v}" ${v===current?'selected':''}>${optionLabels[v]||models[v]?.label||v}</option>`).join('');
+  const modelFields = t => {
+    const c=configFor(t),m=models[c.model];
+    return `<label>Agent<select name="agent"><option>Claude</option></select></label><label>Model<select name="model">${options(Object.keys(models),c.model)}</select></label><label>Thinking level<select name="thinking">${options(m.thinking,c.thinking)}</select></label><label>Context window<select name="context" ${m.context.length===1?'disabled':''}>${options(m.context,c.context)}</select></label><p class="ms-field-note ms-full" id="ms-model-note">${m.context.length===1?'This model uses its default context window.':'Choose 200K or 1M tokens of context.'} Settings apply to future editions.</p>`;
+  };
+  const esc = v => String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const task = () => tasks.find(t=>t.id===selected)||tasks[0];
+  const schedule = t => t.interval?'Every 30 min · Weekdays, 09:00–17:30':`Weekdays · ${t.time}`;
+  const badge = t => `<span class="ms-status ${t.state==='Paused'?'ms-paused':t.state==='Needs setup'?'ms-attention':''}">${esc(t.state)}</span>`;
+  const say = text => notice.textContent = text;
+  const persist = () => {
+    if(window.openai?.setWidgetState) window.openai.setWidgetState({modelContent:{view,task:task().name,edition:edition===0?'latest':`older edition ${edition}`,execution:configFor(task())},privateContent:{view,selected,edition,showHistory,taskSettings:Object.fromEntries(tasks.map(t=>[t.id,configFor(t)]))}}).catch(()=>{});
+  };
+  function sidebar() {
+    root.querySelector('#ms-sidebar').innerHTML=tasks.filter(t=>t.outcome!=='No sessions').map(t=>`<button class="ms-quiet" type="button" data-open="${t.id}"><span>${esc(t.name)}</span><span class="ms-dim ms-small">Today · ${t.clock}${t.state==='Paused'?' · Paused':''}</span></button>`).join('');
+    root.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));
+  }
+  function heading(title,sub,actions='') {return `<div class="ms-heading"><div><h1>${title}</h1><p class="ms-dim ms-small">${sub}</p></div><div class="ms-actions">${actions}</div></div>`;}
+  function render() {
+    sidebar();
+    if(view==='manage') {
+      main.innerHTML=heading('Scheduled tasks','Personal / Automations',`<button type="button" data-import>Import from Claude</button><button class="ms-primary" type="button" data-new>+ New task</button>`)+
+      `<div class="ms-host ms-small"><span><b class="ms-dot"></b>David’s Mac · Engine online</span><span class="ms-dim">America/New_York · Host must be awake to run</span></div>`+
+      tasks.map(t=>`<div class="ms-task"><div><span class="ms-task-name">${esc(t.name)}</span><div class="ms-task-meta"><span>${schedule(t)} ET</span><span>${t.outcome==='No sessions'?'No sessions yet':`Latest · Today, ${t.clock}`}</span></div></div><div class="ms-actions">${badge(t)}${t.outcome!=='No sessions'?`<button class="ms-quiet" type="button" data-open="${t.id}">Open latest</button>`:''}<button type="button" data-edit="${t.id}">${t.state==='Needs setup'?'Set up':'Edit'}</button></div></div>`).join('')+
+      `<p class="ms-foot">One latest session per task. Open a session to browse earlier editions.</p>`;
+    } else if(view==='overview') {
+      main.innerHTML=heading('Overview','Personal / Latest task sessions',`<button type="button" data-view="manage">Manage tasks</button>`)+
+      `<div class="ms-grid">${tasks.filter(t=>t.outcome!=='No sessions').map(t=>`<article class="ms-edition"><div class="ms-small ms-dim">Today · ${t.clock} ET</div><h2>${esc(t.name)}</h2><p>${esc(t.preview)}</p><div class="ms-actions"><button type="button" data-open="${t.id}">Open latest</button><button class="ms-quiet" type="button" data-history="${t.id}">Run history</button></div></article>`).join('')}</div>`;
+    } else if(view==='session') {
+      const t=task(); const date=edition===0?'Wed, Nov 11':edition===1?'Tue, Nov 10':'Mon, Nov 9';
+      main.innerHTML=`<button class="ms-quiet ms-back" type="button" data-view="manage">← Scheduled tasks</button>`+
+      heading(esc(t.name),`${date}, 2026 · ${t.clock} ET`, `<button type="button" data-edit="${t.id}">Edit task</button>`)+
+      `<div class="ms-session-bar"><div><span class="ms-status">Completed</span> <span class="ms-dim ms-small">${edition===0?'Latest edition':'Earlier edition'}</span></div><div class="ms-actions">${edition!==0?'<button type="button" data-latest>Latest run ↗</button>':''}<button type="button" data-toggle-history aria-expanded="${showHistory}">Run history ${showHistory?'▴':'▾'}</button></div></div>`+
+      `<div class="ms-session-layout ${showHistory?'ms-history-open':''}"><div class="ms-transcript">${edition!==0?'<p class="ms-older">You’re reading an older edition. The sidebar still opens the latest.</p>':''}<div class="ms-message"><span class="ms-label">Scheduled task</span><p>Run ${esc(t.name)} using its saved procedure.</p><span class="ms-dim ms-small">${date} · ${t.time} ET</span></div><div class="ms-message"><span class="ms-label">Claude · ${date}</span><h2>${edition===0?'Your latest update':edition===1?'Yesterday’s update':'Monday’s update'}</h2><p>${esc(edition===0?t.preview:edition===1?'The prior edition stays here with its original findings, links, and follow-up conversation.':'Earlier findings remain available alongside their original conversation.')}</p><p class="ms-dim">This is an example transcript for the UI proposal.</p></div><label class="ms-small">Follow up on this edition<textarea placeholder="Ask about this run…" aria-label="Follow up on this edition"></textarea></label><div><button type="button" data-followup>Send follow-up</button></div></div>${showHistory?`<section class="ms-history" aria-label="Task run history"><h3>Run history</h3><p class="ms-dim ms-small">${esc(t.name)} · Eastern time</p><br>${[0,1,2].map((e)=>`<button type="button" data-edition="${e}" aria-pressed="${edition===e}">${['Today · Nov 11','Yesterday · Nov 10','Monday · Nov 9'][e]}${e===0?' · Latest':''}<span>${t.clock} ET · Completed${edition===e?' · Viewing':''}</span></button>`).join('')}</section>`:''}</div>`;
+    } else if(view==='edit'||view==='new') {
+      const t=view==='new'?{id:'',name:'',time:'08:00',state:'Paused'}:task();
+      main.innerHTML=`<button class="ms-quiet ms-back" type="button" data-view="manage">← Scheduled tasks</button>`+
+      heading(view==='new'?'New scheduled task':esc(t.name),view==='new'?'Create a task in Personal':'Schedule and execution settings')+
+      `<form id="ms-edit-form" class="ms-form"><label class="ms-full">Task name<input name="name" value="${esc(t.name)}" placeholder="e.g. Morning briefing" required></label><label>Schedule<select name="schedule"><option value="weekdays" ${!t.interval?'selected':''}>Every weekday</option><option value="interval" ${t.interval?'selected':''}>Every 30 min · Weekdays 09:00–17:30</option></select></label><label>Time<input name="time" type="time" value="${t.time}" ${t.interval?'disabled':''} required></label><label>Timezone<select name="timezone"><option>America/New_York</option></select></label><label>Run on<select><option>David’s Mac</option></select></label><p class="ms-field-note ms-full" id="ms-next-preview">Next run · Thu, Nov 12 at ${t.interval?'09:00':t.time} ET</p>${modelFields(t)}<label class="ms-full">Instructions<textarea name="prompt" required>${view==='new'?'':`Follow the saved ${esc(t.name)} procedure. Read its current instructions in Notion each run.`}</textarea><span class="ms-field-note">Imported tasks keep their procedure pointers.</span></label><label class="ms-full">Working directory<input value="~/Work/workspace" aria-label="Working directory"></label><label>When the host misses a run<select><option>Latest within 6 hours</option><option>Skip missed runs</option></select></label><label>Permissions<select><option>Ask when permission is needed</option><option>Auto-approve for this task</option></select></label><div class="ms-full ms-rule"><label class="ms-check"><input name="enabled" type="checkbox" ${t.state==='Enabled'?'checked':''}>Enable scheduled runs</label><p class="ms-field-note">An approval request can pause a run until you respond. Older editions stay in Run history.</p>${t.state==='Needs setup'?'<p class="ms-older">Setup needed: connect Notion and verify the Codespace command tools.</p>':''}</div><div class="ms-full ms-actions"><button class="ms-primary" type="submit">${view==='new'?'Create task':'Save changes'}</button><button type="button" data-view="manage">Cancel</button>${view!=='new'&&t.state!=='Needs setup'?`<button type="button" data-run-now="${t.id}">Run now</button><button type="button" data-pause="${t.id}">${t.state==='Paused'?'Enable task':'Pause task'}</button>`:''}</div></form>`;
+    } else if(view==='import') {
+      main.innerHTML=`<button class="ms-quiet ms-back" type="button" data-view="manage">← Scheduled tasks</button>`+heading('Import from Claude','Preview · No source schedules will be changed')+`<div class="ms-rule"><h3>8 recurring tasks found</h3><p class="ms-dim">All eight are represented in this sample workspace. Importing again checks for changes.</p></div><div class="ms-task"><div><span class="ms-task-name">Keep task history together</span><p class="ms-dim ms-small">Existing Claude editions remain accessible from each task’s Run history.</p></div></div><div class="ms-task"><div><span class="ms-task-name">4 disabled one-time jobs</span><p class="ms-dim ms-small">Keep disabled. Retired prompt files are excluded.</p></div></div><p class="ms-foot">New imports start paused. Verify tools and permissions, then pause the Claude schedule before enabling Mast.</p><br><button type="button" data-view="manage">Done</button>`;
+    }
+    main.setAttribute('aria-label',view==='session'?task().name:'Scheduled tasks '+view);
+  }
+  root.addEventListener('click',e=>{
+    const b=e.target.closest('button'); if(!b)return;
+    if(b.dataset.view){view=b.dataset.view;say('');}
+    else if(b.dataset.open){selected=b.dataset.open;view='session';edition=0;showHistory=false;say('');}
+    else if(b.dataset.history){selected=b.dataset.history;view='session';edition=0;showHistory=true;say('');}
+    else if(b.dataset.edit){selected=b.dataset.edit;view='edit';say('');}
+    else if(b.hasAttribute('data-new')){view='new';say('');}
+    else if(b.hasAttribute('data-import')){view='import';say('');}
+    else if(b.hasAttribute('data-toggle-history')){showHistory=!showHistory;}
+    else if(b.hasAttribute('data-edition')){edition=Number(b.dataset.edition);}
+    else if(b.hasAttribute('data-latest')){edition=0;}
+    else if(b.dataset.runNow){const t=task();t.clock='13:15';t.outcome='Completed';view='session';edition=0;showHistory=false;say('A new latest edition is shown as an example. No real task was executed.');}
+    else if(b.dataset.pause){const t=task();t.state=t.state==='Paused'?'Enabled':'Paused';view='manage';say(`${t.name} ${t.state.toLowerCase()} in this mockup only.`);}
+    else if(b.hasAttribute('data-followup')){say('Example only: a follow-up stays with this edition and does not change the latest session.');return;}
+    else return;
+    render();persist();
+  });
+  root.addEventListener('input',e=>{
+    if(!['time','schedule'].includes(e.target.name))return;
+    const form=root.querySelector('#ms-edit-form'); if(!form)return;
+    const interval=form.elements.schedule.value==='interval';
+    form.elements.time.disabled=interval;
+    root.querySelector('#ms-next-preview').textContent=`Next run · Thu, Nov 12 at ${interval?'09:00':form.elements.time.value} ET`;
+  });
+  root.addEventListener('change',e=>{
+    if(e.target.name!=='model')return;
+    const form=root.querySelector('#ms-edit-form'),m=models[form.elements.model.value];
+    const previousThinking=form.elements.thinking.value,previousContext=form.elements.context.value;
+    form.elements.thinking.innerHTML=options(m.thinking,m.thinking.includes(previousThinking)?previousThinking:m.thinking.includes('high')?'high':m.thinking[0]);
+    form.elements.context.innerHTML=options(m.context,m.context.includes(previousContext)?previousContext:m.context[0]);
+    form.elements.context.disabled=m.context.length===1;
+    root.querySelector('#ms-model-note').textContent=(m.context.length===1?'This model uses its default context window.':'Choose 200K or 1M tokens of context.')+' Settings apply to future editions.';
+  });
+  root.addEventListener('submit',e=>{
+    if(e.target.id!=='ms-edit-form')return;e.preventDefault();
+    const data=new FormData(e.target);let t;
+    if(view==='new'){t={id:'new-'+tasks.length,outcome:'No sessions',clock:'—',preview:'Your new task has not run yet.'};tasks.push(t);}else t=task();
+    t.name=String(data.get('name'));t.time=String(data.get('time')||'09:00');t.interval=data.get('schedule')==='interval';t.state=t.state==='Needs setup'?'Needs setup':data.has('enabled')?'Enabled':'Paused';
+    t.model=String(data.get('model'));const capabilities=models[t.model];
+    t.thinking=capabilities.thinking.includes(data.get('thinking'))?String(data.get('thinking')):capabilities.thinking[0];
+    t.context=capabilities.context.includes(data.get('context'))?String(data.get('context')):capabilities.context[0];
+    selected=t.id;view='manage';render();persist();say('Saved in the mockup only. No actual schedule was changed.');
+  });
+  const applyState = s => {const p=s?.privateContent;if(p&&['manage','overview','session','edit','import'].includes(p.view)){view=p.view;selected=tasks.some(t=>t.id===p.selected)?p.selected:'github';edition=[0,1,2].includes(p.edition)?p.edition:0;showHistory=!!p.showHistory;for(const t of tasks){const c=p.taskSettings?.[t.id],m=models[c?.model];if(m){t.model=c.model;t.thinking=m.thinking.includes(c.thinking)?c.thinking:m.thinking[0];t.context=m.context.includes(c.context)?c.context:m.context[0];}}}render();};
+  applyState(window.openai?.widgetState);
+  window.addEventListener('openai:set_globals',e=>{if(e.detail?.globals?.widgetState)applyState(e.detail.globals.widgetState);});
+})();
+</script>

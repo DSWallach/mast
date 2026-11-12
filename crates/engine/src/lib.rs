@@ -45,6 +45,7 @@ pub mod local_import;
 pub mod managed_accounts;
 mod model_catalogs;
 pub mod orchestrator_wakes;
+pub mod personal_assistant;
 pub mod pr_chat_links;
 pub mod pr_dash;
 pub mod pr_review_launch;
@@ -60,6 +61,8 @@ pub mod repository_discovery;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
+pub mod scheduled_tasks;
+pub mod side_chat;
 pub mod source_control;
 pub mod spaces;
 pub mod subagent_scan;
@@ -170,6 +173,7 @@ pub struct EngineConfig {
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
 pub struct EngineCore {
+    pub scheduled_tasks: scheduled_tasks::ScheduledTasks,
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
     pub workspace: WorkspaceHost,
@@ -339,6 +343,13 @@ impl EngineCore {
         );
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        // Before recovery, so a side chat interrupted by the restart is
+        // retired instead of revived.
+        match doc_host.archive_orphaned_side_chats() {
+            0 => {}
+            archived => tracing::info!(archived, "archived side chats left without a pane"),
+        }
+        doc_host.spawn_side_chat_reaper();
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
@@ -467,6 +478,14 @@ impl EngineCore {
                     Ok(n) => tracing::info!(count = n, "resolved missing titles on imported chats"),
                     Err(err) => tracing::warn!(error = %err, "title repair pass failed"),
                 }
+            });
+        }
+        {
+            let importer = external_import.clone();
+            tokio::task::spawn_blocking(move || match importer.repair_scheduled_tasks() {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(count = n, "tagged imported scheduled-task runs"),
+                Err(err) => tracing::warn!(error = %err, "scheduled-task repair pass failed"),
             });
         }
         // Chats that ran before `Chat.actual_model` existed: recover the model
@@ -617,12 +636,19 @@ impl EngineCore {
             .agent_tokens()
             .admin()
             .set_store(data_dir.join("admin-grants.json"));
+        sessions
+            .agent_tokens()
+            .personal_assistant()
+            .set_store(data_dir.join("personal-assistant.json"));
         orchestrator_wakes.spawn_watchers();
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));
         pr_ticket_cache.spawn_sweep_loop();
+        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
+        scheduled_tasks.start();
         Ok(Self {
+            scheduled_tasks,
             sessions,
             doc_host,
             workspace,
@@ -789,6 +815,7 @@ impl EngineCore {
         .with_context_usage(self.context_usage.clone())
         .with_artifacts(self.artifacts.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
+        rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -817,6 +844,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.scheduled_tasks.shutdown().await;
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts

@@ -111,7 +111,10 @@ impl AgentToolsService {
             .read_chats()
             .unwrap_or_default()
             .into_iter()
-            .filter(|c| c.space_id.as_deref() == Some(context.grant.space_id.as_str()))
+            .filter(|c| {
+                context.personal_assistant
+                    || c.space_id.as_deref() == Some(context.grant.space_id.as_str())
+            })
             .collect();
         let mut scope = worker_scope(
             snapshot,
@@ -119,8 +122,11 @@ impl AgentToolsService {
             &context.grant.chat_id,
             context.current_item_id().as_deref(),
         );
-        // An admin chat (live user grant on this Space) reaches every chat of it.
-        if context.admin_space.as_deref() == Some(context.grant.space_id.as_str()) {
+        // An admin chat (live user grant on this Space) reaches every chat of
+        // it; the personal assistant every chat of every Space.
+        if context.personal_assistant
+            || context.admin_space.as_deref() == Some(context.grant.space_id.as_str())
+        {
             scope.extend(chats.iter().map(|c| c.id.clone()));
             scope.remove(&context.grant.chat_id);
         }
@@ -135,11 +141,22 @@ impl AgentToolsService {
         let args: InfoArgs = parse_args(arguments)?;
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         let (chats, scope) = self.archive_scope(context, &snapshot);
+        // The personal assistant's scope spans Spaces: judge each chat
+        // against its own Space's outline.
+        let mut other_spaces = std::collections::HashMap::new();
         let mut out = serde_json::Map::new();
         for chat in chats.iter().filter(|c| {
             (args.chat_ids.is_empty() || args.chat_ids.contains(&c.id)) && scope.contains(&c.id)
         }) {
-            let v = self.archivable_verdict(chat, &snapshot);
+            let space = chat.space_id.as_deref().unwrap_or_default();
+            let snapshot = if space == context.grant.space_id {
+                &snapshot
+            } else {
+                other_spaces
+                    .entry(space.to_owned())
+                    .or_insert_with(|| self.work_outline.snapshot(space))
+            };
+            let v = self.archivable_verdict(chat, snapshot);
             out.insert(
                 chat.id.clone(),
                 json!({ "archivable": v.archivable, "reason": v.reason, "inScope": true }),
@@ -173,7 +190,9 @@ impl AgentToolsService {
         let mut forced = false;
         let mut reason = String::new();
         let admin = context.admin_space.as_deref() == Some(context.grant.space_id.as_str());
-        if args.archived && admin && !child {
+        if args.archived && context.personal_assistant && !child {
+            reason = "personal assistant".to_owned();
+        } else if args.archived && admin && !child {
             reason = "admin chat".to_owned();
         } else if args.archived && !child {
             let verdict = self.archivable_verdict(chat, &snapshot);
@@ -215,7 +234,11 @@ impl AgentToolsService {
                 .find(|c| c.id == *caller)
                 .and_then(|c| c.title.clone());
             self.archive_log.record(AgentArchive {
-                space_id: context.grant.space_id.clone(),
+                // The archived chat's Space, so Recent changes there offers the undo.
+                space_id: chat
+                    .space_id
+                    .clone()
+                    .unwrap_or_else(|| context.grant.space_id.clone()),
                 chat_id: chat.id.clone(),
                 chat_title: chat.title.clone(),
                 orchestrator_chat_id: caller.clone(),

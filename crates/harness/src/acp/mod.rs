@@ -523,7 +523,7 @@ fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
 
 /// Whether the listing device has a pinned, explicitly installable archive.
 pub fn can_install(harness: HarnessId) -> bool {
-    harness == HarnessId::Antigravity && antigravity_archive().is_some()
+    harness == HarnessId::Antigravity && antigravity_spec().archive.is_some()
 }
 
 /// Only an explicit Settings action may call this installer.
@@ -533,7 +533,8 @@ pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
         .flatten()
         .ok_or_else(|| {
             HarnessError::NotInstalled(
-                "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
+                "Set AGY_EXECUTABLE to an installed agy CLI (or ANTIGRAVITY_ACP_EXECUTABLE)"
+                    .into(),
             )
         })?;
     crate::archive_install::ensure_installed(pin, "Antigravity").await?;
@@ -550,6 +551,7 @@ fn antigravity_skill_dirs() -> Vec<PathBuf> {
             vec![
                 home.join("config").join("skills"),
                 home.join("antigravity-cli").join("skills"),
+                home.join("antigravity-cli").join("builtin").join("skills"),
             ]
         })
         .unwrap_or_default()
@@ -615,6 +617,17 @@ fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>
         .and_then(|auth| auth.method)
         .filter(|method| !method.is_empty())
         .map(ConfiguredAuthMethod::new))
+}
+
+fn configured_auth_method_in_home(
+    gemini_home: &Path,
+) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
+    if let Some(method) =
+        configured_auth_method_in(&gemini_home.join("antigravity-cli").join("settings.json"))?
+    {
+        return Ok(Some(method));
+    }
+    configured_auth_method_in(&gemini_home.join("antigravity-acp").join("settings.json"))
 }
 
 fn sign_in_auth_method(
@@ -720,26 +733,52 @@ fn first_sentence(text: &str) -> String {
 /// root-started server running as the invoking user.
 const ANTIGRAVITY_LINUX_ARGS: &[&str] = &["--uid="];
 
+pub fn antigravity_home() -> Result<PathBuf, HarnessError> {
+    antigravity_paths::home()
+}
+
+pub(crate) fn agy_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join(".local").join("bin").join("agy"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/agy"));
+    dirs.push(PathBuf::from("/usr/local/bin/agy"));
+    dirs
+}
+
 fn antigravity_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Antigravity,
         display_name: "Antigravity",
-        executable: "agy_acp_server",
-        env_override: "ANTIGRAVITY_ACP_EXECUTABLE",
-        args: if cfg!(target_os = "linux") {
-            ANTIGRAVITY_LINUX_ARGS
-        } else {
-            &[]
-        },
+        executable: "agy",
+        env_override: "AGY_EXECUTABLE",
+        args: &["acp", "--dangerously-skip-permissions"],
         npm_package: None,
-        archive: antigravity_archive(),
-        extra_paths: Vec::new,
-        cli_executable: "agy_acp_server",
-        cli_extra_paths: Vec::new,
-        install_hint: "Install Antigravity to enable, or set ANTIGRAVITY_ACP_EXECUTABLE to its ACP server",
+        archive: None,
+        extra_paths: agy_install_paths,
+        cli_executable: "agy",
+        cli_extra_paths: agy_install_paths,
+        install_hint: "agy (searched PATH, the login shell's PATH, ~/.local/bin, \
+             /opt/homebrew/bin, and /usr/local/bin; set AGY_EXECUTABLE or \
+             ANTIGRAVITY_ACP_EXECUTABLE to override)",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
+                Model {
+                    id: "gemini-4-argon".into(),
+                    label: "Gemini 4 Argon".into(),
+                    description: None,
+                    reasoning_levels: vec![Low, Medium, High],
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "gemini-3.8-flash".into(),
+                    label: "Gemini 3.8 Flash".into(),
+                    description: None,
+                    reasoning_levels: vec![Low, Medium, High],
+                    options: Vec::new(),
+                },
                 Model {
                     id: "gemini-3.7-flash".into(),
                     label: "Gemini 3.7 Flash".into(),
@@ -757,7 +796,11 @@ fn antigravity_spec() -> AcpAgentSpec {
             ]
         },
         steering_mode: SteeringMode::TurnBoundary,
-        reasoning_levels: &[],
+        reasoning_levels: &[
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+        ],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
         ladder_extras: &[],
@@ -979,9 +1022,7 @@ impl AcpHarness {
             .transpose()?;
         let configured_method = gemini_home
             .as_ref()
-            .map(|home| {
-                configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
-            })
+            .map(|home| configured_auth_method_in_home(home))
             .transpose()?
             .flatten();
         let mut cmd = Command::new(&exe);
@@ -1131,15 +1172,49 @@ impl AcpHarness {
         }
     }
 
+    fn env_override_path(&self) -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os(self.spec.env_override)
+            && !p.is_empty()
+        {
+            return Some(PathBuf::from(p));
+        }
+        if self.spec.id == HarnessId::Antigravity
+            && let Some(p) = std::env::var_os("ANTIGRAVITY_ACP_EXECUTABLE")
+            && !p.is_empty()
+        {
+            return Some(PathBuf::from(p));
+        }
+        None
+    }
+
+    fn launch_args_for(&self, program: &Path) -> Vec<String> {
+        if self.spec.id == HarnessId::Antigravity
+            && program
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("agy_acp_server"))
+        {
+            return if cfg!(target_os = "linux") {
+                ANTIGRAVITY_LINUX_ARGS
+                    .iter()
+                    .map(|a| (*a).to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        }
+        self.spec.args.iter().map(|a| (*a).to_string()).collect()
+    }
+
     /// Resolve what to spawn: an explicit/installed adapter binary, or the
     /// managed install of the spec's pinned npm package. `NotInstalled` only
     /// when neither the binary nor the machinery to install it (npm) exists.
     fn find_server(&self) -> Option<PathBuf> {
         find_on_paths(self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
             if self.spec.id == HarnessId::Antigravity {
-                ["agy_acp_server.par", "agy_acp_server.exe"]
+                ["agy_acp_server", "agy_acp_server.par", "agy_acp_server.exe"]
                     .into_iter()
-                    .find_map(|name| find_on_paths(name, (self.spec.cli_extra_paths)()))
+                    .find_map(|name| find_on_paths(name, Vec::new()))
             } else {
                 None
             }
@@ -1149,17 +1224,20 @@ impl AcpHarness {
     fn resolve_launch(&self) -> Result<Launch, HarnessError> {
         let spec_args: Vec<String> = self.spec.args.iter().map(|a| a.to_string()).collect();
         if let Some(p) = &self.executable {
-            return crate::executable::validate_native_override(p)
-                .map(|program| Launch::Program(program, spec_args));
+            return crate::executable::validate_native_override(p).map(|program| {
+                let args = self.launch_args_for(&program);
+                Launch::Program(program, args)
+            });
         }
-        if let Some(p) = std::env::var_os(self.spec.env_override)
-            && !p.is_empty()
-        {
-            return crate::executable::validate_native_override(&PathBuf::from(p))
-                .map(|program| Launch::Program(program, spec_args));
+        if let Some(p) = self.env_override_path() {
+            return crate::executable::validate_native_override(&p).map(|program| {
+                let args = self.launch_args_for(&program);
+                Launch::Program(program, args)
+            });
         }
         if let Some(found) = self.find_server() {
-            return Ok(Launch::Program(found, spec_args));
+            let args = self.launch_args_for(&found);
+            return Ok(Launch::Program(found, args));
         }
         if let Some(pkg) = self.spec.npm_package {
             let pin = crate::adapter_install::NpmPin::parse(pkg);
@@ -1727,10 +1805,8 @@ impl Harness for AcpHarness {
         if let Some(p) = &self.executable {
             return crate::executable::validate_native_override(p).is_ok();
         }
-        if let Some(p) = std::env::var_os(self.spec.env_override)
-            && !p.is_empty()
-        {
-            return crate::executable::validate_native_override(&PathBuf::from(p)).is_ok();
+        if let Some(p) = self.env_override_path() {
+            return crate::executable::validate_native_override(&p).is_ok();
         }
         if self
             .spec
@@ -1761,14 +1837,22 @@ impl Harness for AcpHarness {
                 .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version))),
         };
         let extra = if self.id() == HarnessId::Antigravity {
-            let root = antigravity_paths::home()?.join("antigravity-acp");
-            vec![
-                root.join("settings.json"),
-                root.join("oauth_creds.json"),
-                root.join("google_accounts.json"),
-                root.join("credentials.json"),
-                root.join("auth.json"),
-            ]
+            let home = antigravity_paths::home()?;
+            let mut files = Vec::new();
+            for dir in ["antigravity-cli", "antigravity-acp"] {
+                let root = home.join(dir);
+                for name in [
+                    "settings.json",
+                    "acp_auth_state.json",
+                    "oauth_creds.json",
+                    "google_accounts.json",
+                    "credentials.json",
+                    "auth.json",
+                ] {
+                    files.push(root.join(name));
+                }
+            }
+            files
         } else {
             vec![]
         };
@@ -1844,15 +1928,66 @@ impl Harness for AcpHarness {
         Ok(commands)
     }
 
+    fn instruction_support(&self) -> crate::InstructionSupport {
+        if self.spec.id == HarnessId::Antigravity {
+            if self.installed() {
+                crate::InstructionSupport::Supported {
+                    channel: crate::InstructionChannel::SystemPromptAppend,
+                    replace_strategy: crate::InstructionReplaceStrategy::RespawnResume,
+                    max_bytes: 256 * 1024,
+                }
+            } else {
+                crate::InstructionSupport::Unsupported {
+                    reason: self.spec.install_hint.into(),
+                    upgrade_hint: Some("Install Antigravity (agy CLI)".into()),
+                }
+            }
+        } else {
+            crate::InstructionSupport::no_channel()
+        }
+    }
+
+    fn supports_agent_tools(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        // No instruction channel (m0-instruction-delivery.md section 2):
-        // refuse instruction-bearing runs before spawning (acceptance 12).
+        self.run_with_tools(request, controls, None).await
+    }
+
+    async fn run_with_agent_tools(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        tools: crate::AgentToolsInjection,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_tools(request, controls, Some(tools)).await
+    }
+}
+
+impl AcpHarness {
+    async fn run_with_tools(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        agent_tools: Option<crate::AgentToolsInjection>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         crate::require_read_only_support(self.id(), &request)?;
         crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
+        if let Some(delivery) = &request.instructions {
+            let digest = mast_proto::envelope_sha256(&delivery.envelope.rendered);
+            if digest != delivery.envelope.envelope_sha256 {
+                return Err(HarnessError::Capability {
+                    harness: self.id(),
+                    detail: "the rendered instructions do not match their envelope hash".into(),
+                    upgrade_hint: None,
+                });
+            }
+        }
         let (scratch, mut child, stderr_tail) =
             self.spawn_agent(Some(&request.cwd), true, &[]).await?;
         let stdin = child
@@ -1873,6 +2008,7 @@ impl Harness for AcpHarness {
             event_tx,
             controls,
             request,
+            agent_tools,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
             prompt_transform: self.spec.prompt_transform,
@@ -1913,6 +2049,7 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     request: RunRequest,
+    agent_tools: Option<crate::AgentToolsInjection>,
     harness: HarnessId,
     agent_name: &'static str,
     prompt_complete_extension: bool,
@@ -2690,6 +2827,13 @@ fn effort_variant_id(
     if choices.iter().any(|(id, _)| *id == model) {
         return model.to_owned();
     }
+    if let Some(base) = EFFORT_SUFFIXES
+        .iter()
+        .find_map(|(id_suffix, _, _)| model.strip_suffix(id_suffix))
+        && choices.iter().any(|(id, _)| *id == base)
+    {
+        return base.to_owned();
+    }
     let groups = effort_groups(choices);
     let Some(group) = groups.iter().find(|group| group.id == model) else {
         return model.to_owned();
@@ -2851,6 +2995,33 @@ fn steering_call_future(
     prompt_like_request(client.clone(), "_session/steering", params)
 }
 
+fn build_session_params(
+    harness: HarnessId,
+    request: &RunRequest,
+    agent_tools: Option<&crate::AgentToolsInjection>,
+) -> Value {
+    let mcp_servers = match agent_tools {
+        Some(tools) => json!([tools.acp_mcp_server()]),
+        None => json!([]),
+    };
+    let mut params = json!({
+        "cwd": request.cwd,
+        "mcpServers": mcp_servers,
+    });
+    if harness == HarnessId::Antigravity
+        && let Some(delivery) = &request.instructions
+    {
+        params["_meta"] = json!({
+            "antigravity": {
+                "systemPrompt": {
+                    "append": delivery.envelope.rendered,
+                }
+            }
+        });
+    }
+    params
+}
+
 /// The per-run event loop: one task multiplexing agent messages, the pending
 /// turn, the steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
@@ -2863,6 +3034,7 @@ async fn run_session(session: Session) {
         event_tx,
         controls,
         request,
+        agent_tools,
         harness,
         agent_name,
         prompt_complete_extension,
@@ -2893,7 +3065,7 @@ async fn run_session(session: Session) {
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
 
-        let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
+        let session_params = build_session_params(harness, &request, agent_tools.as_ref());
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
@@ -4885,6 +5057,22 @@ mod tests {
             fallback,
             vec![
                 (
+                    "gemini-4-argon".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.8-flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
                     "gemini-3.7-flash".into(),
                     vec![
                         ReasoningLevel::Low,
@@ -4897,6 +5085,145 @@ mod tests {
                     vec![ReasoningLevel::Low, ReasoningLevel::High]
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn antigravity_cli_1_5_6_base_models_and_thought_level_work_with_effort_grouping() {
+        let live = json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "gemini-4-argon",
+                    "options": [
+                        {"value": "gemini-4-argon", "name": "Gemini 4 Argon"},
+                        {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"},
+                        {"value": "gpt-oss-120b-medium", "name": "GPT-OSS 120B (Medium)"}
+                    ]
+                },
+                {
+                    "id": "thought_level",
+                    "name": "Thinking Level",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "medium", "name": "Medium"},
+                        {"value": "high", "name": "High"}
+                    ]
+                }
+            ]
+        });
+        let models = group_effort_variants(models_from_session(&live, &(antigravity_spec().models)()));
+        let rows: Vec<(String, String, Vec<ReasoningLevel>)> = models
+            .into_iter()
+            .map(|m| (m.id, m.label, m.reasoning_levels))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "gemini-4-argon".into(),
+                    "Gemini 4 Argon".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.8-flash".into(),
+                    "Gemini 3.8 Flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gpt-oss-120b".into(),
+                    "GPT-OSS 120B".into(),
+                    vec![ReasoningLevel::Medium]
+                ),
+            ]
+        );
+        // Base model IDs pass through to config_option_sets, which sets both
+        // `model` and `thought_level`; saved variant IDs strip to the base ID;
+        // single-level suffixed models map back to their advertised variant.
+        assert_eq!(
+            effort_variant_id(&live, "gemini-3.8-flash", Some(ReasoningLevel::High)),
+            "gemini-3.8-flash"
+        );
+        assert_eq!(
+            effort_variant_id(&live, "gemini-3.8-flash-high", Some(ReasoningLevel::High)),
+            "gemini-3.8-flash"
+        );
+        assert_eq!(
+            effort_variant_id(&live, "gpt-oss-120b", Some(ReasoningLevel::High)),
+            "gpt-oss-120b-medium"
+        );
+        assert_eq!(
+            config_option_sets(
+                &live,
+                Some("gemini-3.8-flash"),
+                &["high"],
+                &serde_json::Map::new()
+            ),
+            vec![
+                ("model".to_owned(), json!({"value": "gemini-3.8-flash"})),
+                ("thought_level".to_owned(), json!({"value": "high"})),
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_session_params_include_mcp_servers_and_system_prompt_append() {
+        let mut req: RunRequest = serde_json::from_value(json!({
+            "prompt": "hi",
+            "model": "gemini-4-argon",
+            "reasoning": "high",
+            "cwd": "/work/space",
+            "sandbox": "workspace-write",
+            "resume": null
+        }))
+        .unwrap();
+        let rendered = "<zeron_work_outline_instructions>\nFollow outline\n</zeron_work_outline_instructions>\n";
+        req.instructions = Some(mast_proto::InstructionDelivery {
+            envelope: mast_proto::InstructionEnvelope {
+                revision_id: "r1".into(),
+                revision_hash: "h1".into(),
+                envelope_version: 1,
+                envelope_sha256: mast_proto::envelope_sha256(rendered),
+                rendered: rendered.into(),
+            },
+            transition: mast_proto::InstructionTransition::Fresh,
+        });
+        let tools = crate::AgentToolsInjection {
+            server_name: "mast-agent".into(),
+            command: PathBuf::from("/usr/local/bin/mast"),
+            args: vec!["mcp".into()],
+            env: [("MAST_AGENT_TOKEN".to_owned(), "tok-1".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        let params = build_session_params(HarnessId::Antigravity, &req, Some(&tools));
+        assert_eq!(params["cwd"], "/work/space");
+        assert_eq!(
+            params["mcpServers"],
+            json!([{
+                "name": "mast-agent",
+                "command": "/usr/local/bin/mast",
+                "args": ["mcp"],
+                "env": [{"name": "MAST_AGENT_TOKEN", "value": "tok-1"}]
+            }])
+        );
+        assert_eq!(
+            params["_meta"]["antigravity"]["systemPrompt"]["append"],
+            rendered
         );
     }
 

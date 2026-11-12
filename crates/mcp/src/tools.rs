@@ -24,6 +24,10 @@
 //! - `list_projects` / `list_devices` list only the token's Space / device;
 //!   `list_harnesses` / `list_models` (this device's capabilities) and
 //!   `whoami` are unscoped.
+//! - the personal assistant chat (`personal_assistant`, user-designated)
+//!   reaches every chat of every Space with all the chat tools above, lists
+//!   every Space and device, and creates chats in any Space or on any device
+//!   (its sandbox and Auto still cap the new chat's).
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -117,7 +121,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_chats",
-            description: "Chats with their Space, host device, harness, model (the model that actually ran when the harness reported it: see modelIsActual, actualModel, configuredModel), live status, and last activity. Newest activity first.",
+            description: "Chats with their Space, host device, harness, model (the model that actually ran when the harness reported it: see modelIsActual, actualModel, configuredModel), live status, and last activity. Newest activity first. Each url is an internal Mast session link: use [session title](url) in replies so the user can click to open the session.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -132,7 +136,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_chat",
-            description: "One chat's metadata, live status, and any question its agent is currently blocked on.",
+            description: "One chat's metadata, live status, and any question its agent is currently blocked on. Use its url as [session title](url) in replies to link to the session in Mast.",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
@@ -148,7 +152,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
+            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto). The personal assistant chat may create in any Space (`project`), or without one on any `device`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -173,7 +177,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads the chats you created, yourself, and (read-only) the chats on items inside your own project.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads the chats you created, yourself, and (read-only) the chats on items inside your own project. The personal assistant chat reads every chat in every Space.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -183,7 +187,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
+            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`. The personal assistant chat can message any chat in any Space.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -202,19 +206,19 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat.",
+            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat. The personal assistant chat can wait on any chat.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
         },
         ToolDef {
             name: "interrupt_chat",
-            description: "Stop the chat's running turn.",
+            description: "Stop the running turn of a chat you created (the personal assistant chat: any chat).",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
             name: "respond_to_input",
-            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput.",
+            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput. Reaches chats you created (the personal assistant chat: any chat).",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
                 "answers": {
@@ -232,7 +236,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "archive_chat",
-            description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches direct children, project workers, and for an admin chat, other chats in its Space. Direct children and admin targets do not require force. Other project workers that are not archivable require force=true and a short reason (logged). The user can undo.",
+            description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches direct children, project workers, and for an admin chat, other chats in its Space. Direct children and admin targets do not require force. Other project workers that are not archivable require force=true and a short reason (logged). The personal assistant chat reaches any chat in any Space without force. The user can undo.",
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true },
                 "force": { "type": "boolean", "default": false, "description": "For a non-child project worker without admin access, archive although archivable is false; needs reason." },
@@ -269,7 +273,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::READ_SUBTREE,
-            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). Use it to see children and their requests. Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tasks); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
+            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, url, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). Use it to see children and their requests. Link sessions in replies as [session title](url); these open directly inside Mast. Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tasks); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -449,6 +453,22 @@ fn work_outline_catalog() -> Vec<ToolDef> {
 /// `docs/planning-artifact-conventions.md`). The engine scopes each call to
 /// the calling Chat's work item (or the Chat).
 fn artifact_catalog() -> Vec<ToolDef> {
+    let review = json!({"type": "object", "description": "The mast.review/v1 object described above."});
+    let target = json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["pr", "branch"]},
+            "repo": {"type": "string"}, "number": {"type": "integer"},
+            "checkoutPath": {"type": "string"}, "branch": {"type": "string"},
+            "baseRef": {"type": "string"}, "baseSha": {"type": "string"},
+            "headSha": {"type": "string"}
+        },
+        "required": ["kind", "headSha"],
+        "description": "PR: kind pr, repo, number, baseSha, headSha. Branch: kind branch, repo or checkoutPath, baseRef or baseSha, headSha, optional branch."
+    });
+    let pr_url = json!({"type": "string", "description": "Pull request URL."});
+    let head_sha = json!({"type": "string", "description": "Full reviewed head commit SHA (for prUrl)."});
+
     vec![
         ToolDef {
             name: agent_tool_names::ARTIFACT_PUBLISH,
@@ -519,17 +539,24 @@ fn artifact_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::REVIEW_PUBLISH,
-            description: "Publish a review sidecar scoped to this chat for a PR or committed branch range. Mast validates every step hunk and anchor against the merge-base diff at headSha and reports valid hunks on errors. review is mast.review/v1: schema, pr {repo, number, headSha, baseSha} for a PR, summary (3–8 lines), optional verdictHint, steps [{id, title, file, hunks [{newStart, newEnd}], what, why, risk (none|low|med|high), riskNote, tags, optional group}], highlights [{kind (risk|missing-tests|behaviour-change|security|migration|perf|style), severity, text, anchor}], questions, suggestedComments [{anchor, body, severity, optional suggestion}]. An anchor is {file, side (left|right), startLine, endLine}. Mast stores hunk hashes. Verdict hints and suggested comments are never posted.",
+            description: "Publish a review sidecar scoped to this chat for a PR or committed branch range. Required top-level arguments: {prUrl, headSha, review}, or {target, review}. For prUrl, review.pr must include repo, number, headSha and baseSha; top-level baseSha is not used. Validation uses the chat’s selected bound checkout, falling back to chat.cwd; a branch target can specify checkoutPath. Returns {artifactId, revision, url, storedPath, changed}; link the returned mast-artifact URL in chat. Mast validates every step hunk and anchor against the merge-base diff at headSha and reports valid hunks on errors. review is mast.review/v1: schema, pr {repo, number, headSha, baseSha} for a PR, summary (3–8 lines), optional verdictHint, steps [{id, title, file, hunks [{newStart, newEnd}], what, why, risk (none|low|med|high), riskNote, tags, optional group}], highlights [{kind (risk|missing-tests|behaviour-change|security|migration|perf|style), severity, text, anchor}], questions, suggestedComments [{anchor, body, severity, optional suggestion}]. An anchor is {file, side (left|right), startLine, endLine}. Mast stores hunk hashes. Verdict hints and suggested comments are never posted.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prUrl": { "type": "string", "description": "Pull request URL." },
-                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA (for prUrl)." },
-                    "target": { "type": "object", "description": "Alternative to prUrl: {kind: pr, repo, number, baseSha, headSha} or {kind: branch, repo, checkoutPath, branch, baseRef or baseSha, headSha}." },
-                    "review": { "type": "object", "description": "The mast.review/v1 object described above." }
+                    "prUrl": pr_url,
+                    "headSha": head_sha,
+                    "target": target,
+                    "review": review
                 },
                 "required": ["review"],
-                "anyOf": [{"required": ["prUrl", "headSha"]}, {"required": ["target"]}]
+                // Keep each alternative self-describing: schema-to-tool adapters
+                // may render anyOf branches without inheriting root properties.
+                "anyOf": [
+                    {"type": "object", "properties": {"prUrl": pr_url, "headSha": head_sha, "review": review},
+                        "required": ["prUrl", "headSha", "review"]},
+                    {"type": "object", "properties": {"target": target, "review": review},
+                        "required": ["target", "review"]}
+                ]
             }),
         },
         ToolDef {
@@ -818,6 +845,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
     let (status, status_age) = status_of(session.as_ref());
     json!({
         "id": chat.id,
+        "url": mast_proto::session_link::session_link(&chat.id),
         "title": chat.title,
         "project": space.map(|s| json!({
             "id": s.id,
@@ -993,6 +1021,7 @@ impl Tools {
             "originDeviceId": origin.map(|o| o.device_id.clone()),
             "runId": origin.map(|o| o.run_id.clone()),
             "adminSpaceId": origin.and_then(|o| o.admin_space_id.clone()),
+            "personalAssistant": origin.is_some_and(|o| o.personal_assistant),
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
             "workOutlineTools": if origin.is_some() {
@@ -1011,7 +1040,10 @@ impl Tools {
                  create_chat works only in this chat's Space, never with a wider \
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
                  need an idempotency key. Admin chats (user-granted, per Space, expiring) \
-                 also reach every chat and item of their Space; see adminSpaceId."
+                 also reach every chat and item of their Space; see adminSpaceId. The \
+                 personal assistant chat (user-designated; see personalAssistant) reaches \
+                 every chat in every Space with every chat tool, and create_chat works \
+                 in any Space or on any device, still never wider than this chat's sandbox."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
@@ -1021,7 +1053,7 @@ impl Tools {
     async fn list_devices(&self, origin: Option<&AgentOrigin>) -> anyhow::Result<Value> {
         let (mut devices, local) =
             tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
-        if let Some(origin) = origin {
+        if let Some(origin) = origin.filter(|o| !o.personal_assistant) {
             devices.retain(|d| d.id == origin.device_id);
         }
         Ok(json!({
@@ -1038,7 +1070,7 @@ impl Tools {
 
     async fn list_projects(&self, origin: Option<&AgentOrigin>) -> anyhow::Result<Value> {
         let (mut spaces, devices) = tokio::try_join!(self.zeron.spaces(), self.zeron.devices())?;
-        if let Some(origin) = origin {
+        if let Some(origin) = origin.filter(|o| !o.personal_assistant) {
             spaces.retain(|s| s.id == origin.space_id);
         }
         let device_name = |id: &str| devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
@@ -1093,7 +1125,7 @@ impl Tools {
             self.zeron.spaces(),
             self.zeron.sessions()
         )?;
-        if let Some(origin) = origin {
+        if let Some(origin) = origin.filter(|o| !o.personal_assistant) {
             let scope = if args.workers {
                 self.archive_info(&[]).await.unwrap_or_default()
             } else {
@@ -1272,6 +1304,24 @@ impl Tools {
         };
 
         let (space, device_id) = match (origin, args.project.as_deref()) {
+            // The personal assistant: any Space (on that Space's device), or
+            // no Space on any device.
+            (Some(origin), Some(project)) if origin.personal_assistant => {
+                let space = self.zeron.resolve_space(project).await?;
+                if let Some(device) = args.device.as_deref()
+                    && self.zeron.resolve_device_id(Some(device)).await? != space.device_id
+                {
+                    anyhow::bail!(
+                        "that Space is on another device; omit device or name the Space's own"
+                    );
+                }
+                let device_id = space.device_id.clone();
+                (Some(space), device_id)
+            }
+            (Some(origin), None) if origin.personal_assistant && args.device.is_some() => (
+                None,
+                self.zeron.resolve_device_id(args.device.as_deref()).await?,
+            ),
             // Agent mode: the token's Space on the token's device, only.
             (Some(origin), project) => {
                 let space = self
@@ -1335,7 +1385,9 @@ impl Tools {
         // its own item and nesting under it. Only when it could start for an
         // item anyway (a prompt, no cwd or branch).
         if work_item_id.is_none()
-            && origin.is_some()
+            && let Some(origin) = origin
+            // Only in the caller's own Space: its destination is there.
+            && space.as_ref().is_some_and(|s| s.id == origin.space_id)
             && cwd.is_none()
             && args.branch.as_deref().is_none_or(|b| b.trim().is_empty())
             && let Some(key) = agent_key.as_deref()
@@ -1533,6 +1585,7 @@ impl Tools {
 
         let mut result = json!({
             "chatId": chat_id,
+            "url": mast_proto::session_link::session_link(&chat_id),
             "deviceId": device_id,
             "project": space.as_ref().map(|s| json!({ "id": s.id, "name": s.display_name(), "path": s.path })),
             "harness": harness,
@@ -1565,7 +1618,11 @@ impl Tools {
                 harness_session_id: None,
                 harness_session_cwd: None,
                 actual_model: None,
+                scheduled_task: None,
+                scheduled_task_info: None,
                 parent_chat_id: parent_chat_id.clone(),
+                side_of: None,
+                side_absorbed_through: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
@@ -1658,6 +1715,7 @@ impl Tools {
         let truncated = dropped > 0 || window.iter().any(|m| m.text_omitted_bytes.is_some());
         let mut result = json!({
             "chatId": chat.id,
+            "url": mast_proto::session_link::session_link(&chat.id),
             "title": chat.title,
             "total": total,
             "returned": window.len(),
@@ -1921,6 +1979,15 @@ impl Tools {
         // Admin chats reach their whole Space for everything but interrupt/respond.
         let admin_ok = reach != Reach::Child;
         let all = self.zeron.chats().await?;
+        // The personal assistant reaches every chat of every Space (itself
+        // only where the reach allows it).
+        if origin.personal_assistant {
+            let chats: Vec<Chat> = all
+                .into_iter()
+                .filter(|c| allow_self || c.id != origin.chat_id)
+                .collect();
+            return resolve_chat_in(&chats, key);
+        }
         let parent = (reach == Reach::SelfChildOrParent)
             .then(|| {
                 all.iter()
@@ -1997,7 +2064,9 @@ impl Tools {
             }
             _ => short(origin_id).to_owned(),
         };
-        let admin = if origin.is_some_and(|o| o.admin_space_id.is_some()) {
+        let admin = if origin.is_some_and(|o| o.personal_assistant) {
+            " (the user's personal assistant chat; this is not the user's own message)"
+        } else if origin.is_some_and(|o| o.admin_space_id.is_some()) {
             " (an admin chat, granted by Mikey; this is not Mikey's own message)"
         } else {
             ""
@@ -2164,13 +2233,14 @@ impl Tools {
     }
 }
 
-/// Which chats an agent-mode call may target.
+/// Which chats an agent-mode call may target. The personal assistant
+/// reaches every chat for each of these (see `reach_chat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reach {
     /// Only chats the caller created (`parentChatId` = the caller).
     Child,
-    /// Those, or the caller itself (reads, sends). An admin chat also
-    /// reaches every chat of its Space.
+    /// Those, or the caller itself (`get_chat`, the `list_chats` parent
+    /// filter). An admin chat also reaches every chat of its Space.
     SelfOrChild,
     /// Those, the caller itself, or the caller's parent chat (`send_message`).
     SelfChildOrParent,
@@ -2263,6 +2333,7 @@ fn run_request(chat: &Chat, space: Option<&Space>, harness: HarnessId, text: Str
         // The chat's own approval mode (default Ask).
         auto_approve: config.as_ref().is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments: Vec::new(),
         worktree: None,
         instructions: None,
@@ -2299,6 +2370,8 @@ mod tests {
     const BETA_TOKEN: &str = "tok-beta";
     /// Chat beta holding a live user grant over space-1.
     const ADMIN_TOKEN: &str = "tok-admin";
+    /// Chat beta designated as the personal assistant.
+    const ASSISTANT_TOKEN: &str = "tok-assistant";
 
     /// A fixed little workspace: one device, one project, two chats with a
     /// two-message transcript, and one live agent token (`tok-beta`, minted
@@ -2427,7 +2500,7 @@ mod tests {
                                       |n| format!("HEAD{}TAIL", "x".repeat(n))) }] }
                 ]})),
                 agent_tools::AUTHENTICATE_METHOD => {
-                    if params["token"] != BETA_TOKEN && params["token"] != ADMIN_TOKEN {
+                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -2439,10 +2512,13 @@ mod tests {
                     if params["token"] == ADMIN_TOKEN {
                         origin["adminSpaceId"] = json!("space-1");
                     }
+                    if params["token"] == ASSISTANT_TOKEN {
+                        origin["personalAssistant"] = json!(true);
+                    }
                     RpcReply::Value(origin)
                 }
                 agent_tools::TOOL_CALL_METHOD => {
-                    if params["token"] != BETA_TOKEN && params["token"] != ADMIN_TOKEN {
+                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -2704,7 +2780,13 @@ mod tests {
         let def = artifact_catalog().into_iter()
             .find(|def| def.name == agent_tool_names::REVIEW_PUBLISH).unwrap();
         assert_eq!(def.input_schema["required"], json!(["review"]));
-        assert_eq!(def.input_schema["anyOf"], json!([{"required": ["prUrl", "headSha"]}, {"required": ["target"]}]));
+        let alternatives = &def.input_schema["anyOf"];
+        assert_eq!(alternatives[0]["required"], json!(["prUrl", "headSha", "review"]));
+        assert_eq!(alternatives[1]["required"], json!(["target", "review"]));
+        assert_eq!(alternatives[0]["properties"]["headSha"]["type"], "string");
+        assert_eq!(alternatives[1]["properties"]["target"]["properties"]["kind"]["enum"], json!(["pr", "branch"]));
+        assert!(def.description.contains("{prUrl, headSha, review}"));
+        assert!(def.description.contains("{target, review}"));
         let world = Arc::new(World::default());
         let agent = tools(world.clone(), Some(BETA_TOKEN));
         let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1"}});
@@ -2823,7 +2905,9 @@ mod tests {
         let alpha = listed["chats"].as_array().unwrap().iter().find(|c| c["id"] == "chat-alpha-1").unwrap();
         assert_eq!(alpha["awaitingInput"]["questions"][0]["question"], "Run build?");
         assert_eq!(alpha["lastTurnToolFailures"]["count"], 2);
+        assert_eq!(alpha["url"], "mast://chat/chat-alpha-1");
         let chat = tools.call("get_chat", json!({ "chat": "alpha" })).await.unwrap();
+        assert_eq!(chat["url"], alpha["url"]);
         assert_eq!(chat["awaitingInput"], alpha["awaitingInput"]);
         assert_eq!(chat["lastTurnToolFailures"], alpha["lastTurnToolFailures"]);
     }
@@ -3083,6 +3167,75 @@ mod tests {
         );
         // An expired or revoked grant is gone from the next authenticate.
         assert!(plain.call("get_chat", json!({ "chat": "chat-alpha-1" })).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_personal_assistant_reaches_and_changes_chats_in_every_space() {
+        let world = Arc::new(World::default());
+        world.created.lock().unwrap().push(json!({
+            "id": "chat-nova-3", "deviceId": "dev-other", "title": "Nova",
+            "archived": false, "spaceId": "space-2", "createdAt": "2026-09-03T00:00:00Z"
+        }));
+        let assistant = tools(world.clone(), Some(ASSISTANT_TOKEN));
+        let plain = tools(world.clone(), Some(BETA_TOKEN));
+        for chat in ["chat-alpha-1", "chat-nova-3"] {
+            for (name, extra) in [
+                ("get_chat", json!({})),
+                ("read_chat", json!({})),
+                ("send_message", json!({ "text": "hi" })),
+                ("wait_for_turn", json!({ "timeout_secs": 1 })),
+                ("interrupt_chat", json!({})),
+                ("archive_chat", json!({})),
+            ] {
+                let mut args = extra;
+                args["chat"] = json!(chat);
+                assert!(assistant.call(name, args.clone()).await.is_ok(), "assistant {name} {chat}");
+                assert!(plain.call(name, args).await.is_err(), "plain {name} {chat}");
+            }
+        }
+        // Itself only where any chat may reach itself.
+        assert!(assistant.call("interrupt_chat", json!({ "chat": "chat-beta-2" })).await.is_err());
+        let sent = world.writes_of(methods::QUEUE_COMMAND);
+        assert!(
+            sent.iter().any(|w| w.to_string().contains("personal assistant chat")),
+            "{sent:?}"
+        );
+        // Another Space, on that Space's device; the sandbox cap still holds.
+        let created = assistant
+            .call(
+                "create_chat",
+                json!({ "project": "nova", "idempotency_key": "pa-1", "title": "Nova helper" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["project"]["id"], "space-2");
+        let wider = assistant
+            .call(
+                "create_chat",
+                json!({ "project": "nova", "idempotency_key": "pa-2", "sandbox": "danger-full-access" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(wider.contains("more permissive"), "{wider}");
+        assert!(
+            plain
+                .call("create_chat", json!({ "project": "nova", "idempotency_key": "b-1" }))
+                .await
+                .unwrap_err()
+                .contains("own Space")
+        );
+        let listed = assistant.call("list_chats", json!({})).await.unwrap();
+        let ids: Vec<&str> = listed["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"chat-alpha-1") && ids.contains(&"chat-nova-3"), "{ids:?}");
+        let projects = assistant.call("list_projects", json!({})).await.unwrap();
+        assert_eq!(projects["projects"].as_array().unwrap().len(), 2);
+        let me = assistant.call("whoami", json!({})).await.unwrap();
+        assert_eq!(me["personalAssistant"], json!(true));
     }
 
     #[tokio::test]

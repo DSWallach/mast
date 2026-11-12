@@ -2063,7 +2063,7 @@ pub(crate) fn panel_text(theme: &Theme, value: String, muted: bool) -> gpui::Div
         .min_w_0()
         .text_size(crate::typography::ui_rems(if muted { 11.0 } else { 12.0 }))
         .text_color(if muted { theme.text_muted } else { theme.text })
-        .child(SharedString::from(value))
+        .child(crate::markdown::render::plain_text(value, theme))
 }
 
 pub(crate) fn panel_link(
@@ -2650,7 +2650,7 @@ pub(crate) fn start_chat_readout(theme: &Theme, selector: &'static str, text: St
         })
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text)
-        .child(SharedString::from(text))
+        .child(crate::markdown::render::plain_text(text, theme))
 }
 
 pub(crate) fn start_chat_account_toggle(

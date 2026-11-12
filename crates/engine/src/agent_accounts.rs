@@ -394,6 +394,22 @@ impl AgentAccounts {
                     credentials
                 }
             }
+            HarnessId::Antigravity => {
+                if mast_harness::antigravity_cli_path().is_some() {
+                    if detect_antigravity_email().is_some() {
+                        LocalSignInStatus::SignedIn
+                    } else if mast_harness::antigravity_home()
+                        .map(|h| h.join("antigravity-cli").exists())
+                        .unwrap_or(false)
+                    {
+                        LocalSignInStatus::SignedIn
+                    } else {
+                        LocalSignInStatus::SignedOut
+                    }
+                } else {
+                    LocalSignInStatus::SignedOut
+                }
+            }
             _ => LocalSignInStatus::Unknown,
         };
         let mut cache = lock(&self.inner.sign_in_cache);
@@ -458,13 +474,22 @@ impl AgentAccounts {
                 });
             }
         }
+        if let Some(detected) = self.detect_antigravity() {
+            active_keys.insert(HarnessId::Antigravity, detected.account_key.clone());
+            self.snapshot_detected(HarnessId::Antigravity, &detected)?;
+        }
 
         *lock(&self.inner.last_active) = Some(active_keys.clone());
 
         // Stable presentation order: provider, then slot creation order (never
         // active-first — switching must not reshuffle the cards).
         let mut accounts: Vec<AgentAccount> = Vec::new();
-        for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Cursor] {
+        for harness in [
+            HarnessId::ClaudeCode,
+            HarnessId::Codex,
+            HarnessId::Cursor,
+            HarnessId::Antigravity,
+        ] {
             let active_key = active_keys.get(&harness).cloned();
             let slots = self.read_slots(harness);
             for slot in &slots {
@@ -1392,6 +1417,26 @@ impl AgentAccounts {
         read_json(&self.inner.config.cursor_sdk_auth_file).and_then(parse_cursor_auth)
     }
 
+    fn detect_antigravity(&self) -> Option<Detected> {
+        let _bin = mast_harness::antigravity_cli_path()?;
+        let email = detect_antigravity_email();
+        let account_key = email.clone().unwrap_or_else(|| "default".to_string());
+        let display_email = email.unwrap_or_else(|| "Antigravity".to_string());
+
+        Some(Detected {
+            account_key,
+            profile: SlotProfile {
+                email: display_email,
+                display_name: Some("Google Antigravity".to_string()),
+                organization: None,
+                plan: None,
+                auth_kind: AgentAuthKind::Oauth,
+            },
+            credentials: Some(serde_json::json!({ "harness": "antigravity" })),
+            claude_config: None,
+        })
+    }
+
     /// A live cursor login that runs can actually use: present, parseable,
     /// and not past the minted key's expiry.
     fn cursor_live_usable(&self) -> bool {
@@ -1561,6 +1606,7 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.claude_usage(slot, is_active).await,
             HarnessId::Codex => self.codex_usage(&slot.credentials).await,
             HarnessId::Cursor => self.cursor_usage(slot).await,
+            HarnessId::Antigravity => self.antigravity_usage().await,
             _ => None,
         };
         lock(&self.inner.usage_cache).insert(key, (usage.clone(), Instant::now()));
@@ -1781,6 +1827,35 @@ impl AgentAccounts {
             windows: vec![window],
             plan_label: None,
         })
+    }
+
+    async fn antigravity_usage(&self) -> Option<UsageSnapshot> {
+        #[cfg(test)]
+        if let Ok(fake_json) = std::env::var("MAST_TEST_ANTIGRAVITY_USAGE_JSON") {
+            if let Ok(val) = serde_json::from_str(&fake_json) {
+                return parse_antigravity_usage(&val);
+            }
+        }
+
+        let exe = mast_harness::antigravity_cli_path()?;
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.args(["--output-format", "json", "--print", "/usage"]);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let child = cmd.output();
+        let output = tokio::time::timeout(Duration::from_secs(15), child)
+            .await
+            .ok()?
+            .ok()?;
+        if !output.status.success() {
+            tracing::debug!(target: "usage", status = ?output.status, "agy /usage failed");
+            return None;
+        }
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        parse_antigravity_usage(&body)
     }
 
     /// Refresh a saved Claude slot's expired access token so its usage stays
@@ -2278,6 +2353,160 @@ fn cursor_usage_window(body: &serde_json::Value) -> Option<AgentUsageWindow> {
     })
 }
 
+fn parse_antigravity_usage(body: &serde_json::Value) -> Option<UsageSnapshot> {
+    let groups = body
+        .get("command")
+        .and_then(|c| c.get("data"))
+        .and_then(|d| d.get("groups"))
+        .and_then(|g| g.as_array())?;
+
+    let mut session_window = None;
+    let mut week_window = None;
+    let mut other_windows = Vec::new();
+
+    for group in groups {
+        let group_name = group.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let buckets = group.get("buckets").and_then(|v| v.as_array());
+        if let Some(buckets) = buckets {
+            for bucket in buckets {
+                let window_str = bucket.get("window").and_then(|v| v.as_str()).unwrap_or("");
+                let remaining = bucket
+                    .get("remaining_fraction")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0);
+                let used_fraction = (1.0 - remaining).clamp(0.0, 1.0) as f32;
+                let resets_at = parse_when(bucket.get("reset_time"));
+
+                if group_name == "Gemini Models" {
+                    if window_str == "5h" {
+                        session_window = Some(AgentUsageWindow {
+                            label: "Session".to_string(),
+                            used_fraction,
+                            resets_at,
+                        });
+                        continue;
+                    }
+                    if window_str == "weekly" {
+                        week_window = Some(AgentUsageWindow {
+                            label: "Week".to_string(),
+                            used_fraction,
+                            resets_at,
+                        });
+                        continue;
+                    }
+                }
+
+                if window_str == "5h" && session_window.is_none() {
+                    session_window = Some(AgentUsageWindow {
+                        label: "Session".to_string(),
+                        used_fraction,
+                        resets_at,
+                    });
+                    continue;
+                }
+                if window_str == "weekly" && week_window.is_none() {
+                    week_window = Some(AgentUsageWindow {
+                        label: "Week".to_string(),
+                        used_fraction,
+                        resets_at,
+                    });
+                    continue;
+                }
+
+                let label = bucket
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(group_name);
+                other_windows.push(AgentUsageWindow {
+                    label: label.to_string(),
+                    used_fraction,
+                    resets_at,
+                });
+            }
+        }
+    }
+
+    let mut windows = Vec::new();
+    if let Some(w) = session_window {
+        windows.push(w);
+    }
+    if let Some(w) = week_window {
+        windows.push(w);
+    }
+    for w in other_windows {
+        if w.label.contains("Argon") {
+            windows.push(w);
+            break;
+        }
+    }
+
+    if windows.is_empty() {
+        return None;
+    }
+
+    Some(UsageSnapshot {
+        windows,
+        plan_label: None,
+    })
+}
+
+fn detect_antigravity_email() -> Option<String> {
+    let gemini_home = mast_harness::antigravity_home().ok()?;
+    let cli_dir = gemini_home.join("antigravity-cli");
+    let mut log_paths = Vec::new();
+    let cli_log = cli_dir.join("cli.log");
+    if cli_log.exists() {
+        log_paths.push(cli_log);
+    }
+    if let Ok(entries) = std::fs::read_dir(cli_dir.join("log")) {
+        let mut log_files: Vec<_> = entries
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("cli-") && n.ends_with(".log"))
+            })
+            .collect();
+        log_files.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).ok()));
+        for file in log_files.into_iter().take(5) {
+            log_paths.push(file.path());
+        }
+    }
+
+    for path in log_paths {
+        if let Ok(file) = std::fs::File::open(&path) {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok).take(500) {
+                if let Some(email) = extract_email_from_log_line(&line) {
+                    return Some(email);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_email_from_log_line(line: &str) -> Option<String> {
+    for prefix in [
+        "OAuth: authenticated successfully as ",
+        "consumerOAuth: authenticated successfully as ",
+        "applyAuthResult: email=",
+    ] {
+        if let Some(idx) = line.find(prefix) {
+            let rest = &line[idx + prefix.len()..];
+            let email: String = rest
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != ',')
+                .collect();
+            if email.contains('@') && email.contains('.') {
+                return Some(email);
+            }
+        }
+    }
+    None
+}
+
 /// Unix-millis timestamp arriving as a JSON number or proto3 int64 string.
 fn json_ms(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     let ms = match value? {
@@ -2675,6 +2904,75 @@ mod tests {
         }))
         .expect("window");
         assert_eq!(window.used_fraction, 0.0);
+    }
+
+    #[test]
+    fn antigravity_usage_windows_map_session_and_week() {
+        let body = serde_json::json!({
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.8147699236869812,
+                                    "reset_time": "2026-11-18T22:02:26Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.42276158928871155,
+                                    "reset_time": "2026-11-12T19:17:38Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Gemini 4 Argon",
+                            "buckets": [
+                                {
+                                    "id": "gemini-argon-wtu-weekly",
+                                    "name": "Gemini 4 Argon Weekly Limit",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.42724573612213135,
+                                    "reset_time": "2026-11-18T21:47:13Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let snapshot = parse_antigravity_usage(&body).expect("snapshot");
+        assert_eq!(snapshot.windows.len(), 3);
+        assert_eq!(snapshot.windows[0].label, "Session");
+        assert!((snapshot.windows[0].used_fraction - (1.0 - 0.42276158928871155) as f32).abs() < 1e-5);
+        assert_eq!(snapshot.windows[1].label, "Week");
+        assert!((snapshot.windows[1].used_fraction - (1.0 - 0.8147699236869812) as f32).abs() < 1e-5);
+        assert_eq!(snapshot.windows[2].label, "Gemini 4 Argon Weekly Limit");
+    }
+
+    #[test]
+    fn antigravity_email_extraction_from_log_lines() {
+        assert_eq!(
+            extract_email_from_log_line("I1112 09:43:42.524340 160 server_oauth.go:226] OAuth: authenticated successfully as test.user@gmail.com"),
+            Some("test.user@gmail.com".to_string())
+        );
+        assert_eq!(
+            extract_email_from_log_line("I1111 16:46:30.563846 486 browser.go:167] consumerOAuth: authenticated successfully as test.user@gmail.com"),
+            Some("test.user@gmail.com".to_string())
+        );
+        assert_eq!(
+            extract_email_from_log_line("I1112 12:57:41.217415 1 server_oauth.go:221] applyAuthResult: email=test.user@gmail.com, authMethod=consumer, quotaProject="),
+            Some("test.user@gmail.com".to_string())
+        );
+        assert_eq!(extract_email_from_log_line("unrelated log line"), None);
     }
 
     #[test]

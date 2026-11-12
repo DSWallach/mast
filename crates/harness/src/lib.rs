@@ -152,6 +152,11 @@ pub trait Harness: Send + Sync {
     fn deterministic_turn_end(&self) -> bool {
         false
     }
+    /// Whether `RunRequest::fork_from` starts a new native session copied
+    /// from another one. Without it a side chat is seeded with text instead.
+    fn supports_session_fork(&self) -> bool {
+        false
+    }
     /// Whether a user-prompted turn has an authoritative completion signal.
     /// Such turns must never be parked merely because their stream is quiet.
     /// Unlike deterministic_turn_end, this need not cover autonomous activity.
@@ -763,3 +768,18 @@ mod sandbox_support_tests {
 #[cfg(test)]
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+mod model_rows;
+pub use model_rows::normalize_model_rows;
+
+pub use acp::antigravity_home;
+
+/// Path to the `agy` CLI binary, if installed.
+pub fn antigravity_cli_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("AGY_EXECUTABLE").map(std::path::PathBuf::from) {
+        if executable::validate_native_override(&p).is_ok() {
+            return Some(p);
+        }
+    }
+    executable::find_on_paths("agy", acp::agy_install_paths())
+}

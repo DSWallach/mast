@@ -369,6 +369,7 @@ impl Shell {
                     .flatten();
                 self.render_chat_row(
                     id.clone(),
+                    None,
                     transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now())
                         .into(),

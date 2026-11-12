@@ -208,6 +208,7 @@ fn harness_name(harness: HarnessId) -> Option<&'static str> {
     match harness {
         HarnessId::ClaudeCode => Some("Claude Code"),
         HarnessId::Codex => Some("Codex"),
+        HarnessId::Antigravity => Some("Antigravity"),
         _ => None,
     }
 }
@@ -262,7 +263,11 @@ pub fn usage_accounts(
     managed: Option<&ManagedAccountsSnapshot>,
 ) -> Vec<UsageAccount> {
     let mut out = Vec::new();
-    for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+    for harness in [
+        HarnessId::ClaudeCode,
+        HarnessId::Codex,
+        HarnessId::Antigravity,
+    ] {
         let Some(product) = harness_name(harness) else {
             continue;
         };
@@ -1311,7 +1316,12 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::*;
 

@@ -8,7 +8,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
-DEV_ROOT="$ROOT/target/macos-dev"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+DEV_ROOT="$TARGET_DIR/macos-dev"
 APP="$DEV_ROOT/Mast Dev.app"
 CONTENTS="$APP/Contents"
 if [[ -n "${MAST_DEV_DATA_DIR:-${ZERON_DEV_DATA_DIR:-}}" ]]; then
@@ -30,7 +31,7 @@ cd "$ROOT"
 cargo build -p mast
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
-install -m 755 "$ROOT/target/debug/mast" "$CONTENTS/MacOS/mast"
+install -m 755 "$TARGET_DIR/debug/mast" "$CONTENTS/MacOS/mast"
 ln -sfn mast "$CONTENTS/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.MAST_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
@@ -65,7 +66,7 @@ echo "running Mast Dev (bundle computer.mikey.mast.dev, data $DATA_DIR, IPC $IPC
 # LaunchServices must own the process. Launching Contents/MacOS/mast directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the
-# isolated data directory (`target/macos-dev/data/logs/mast-headed.log`).
+# isolated data directory (`$DATA_DIR/logs/mast-headed.log`).
 OPEN_ENV=(
   --env "MAST_DATA_DIR=$DATA_DIR"
   --env "MAST_IPC_PORT=$IPC_PORT"

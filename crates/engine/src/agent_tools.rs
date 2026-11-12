@@ -163,6 +163,7 @@ impl AgentGrant {
             space_id: self.space_id.clone(),
             device_id: self.device_id.clone(),
             admin_space_id: None,
+            personal_assistant: false,
         }
     }
 }
@@ -183,6 +184,8 @@ pub struct AgentTokens {
     grants: Mutex<HashMap<TokenKey, AgentGrant>>,
     /// User-granted admin chats (device-local; RPC-written only).
     admin: crate::admin::AdminGrants,
+    /// The user-designated personal assistant chat (device-local; RPC-written only).
+    personal_assistant: crate::personal_assistant::PersonalAssistantStore,
 }
 
 impl AgentTokens {
@@ -193,6 +196,10 @@ impl AgentTokens {
     /// The admin grant store (shared by every RPC surface of this engine).
     pub fn admin(&self) -> &crate::admin::AdminGrants {
         &self.admin
+    }
+
+    pub fn personal_assistant(&self) -> &crate::personal_assistant::PersonalAssistantStore {
+        &self.personal_assistant
     }
 
     /// Mint a token for one Run. Valid until the returned lease drops or
@@ -705,6 +712,9 @@ struct CallContext<'a> {
     /// The Space this chat administers right now (a live user grant on this
     /// call), else `None`.
     admin_space: Option<String>,
+    /// The chat is the user's personal assistant on this call: its chat
+    /// tools reach every Space.
+    personal_assistant: bool,
     /// The chat's title, for attribution.
     chat_title: String,
 }
@@ -971,6 +981,7 @@ impl AgentToolsService {
         let context = self.context(token)?;
         let mut origin = context.grant.origin();
         origin.admin_space_id = context.admin_space.clone();
+        origin.personal_assistant = context.personal_assistant;
         Ok(origin)
     }
 
@@ -993,10 +1004,13 @@ impl AgentToolsService {
             .live(&grant.chat_id)
             .filter(|g| g.space_id == grant.space_id)
             .map(|g| g.space_id);
+        // A later run of the assistant's scheduled task is the assistant too.
+        let personal_assistant = self.tokens.personal_assistant().is_assistant(&chat);
         Ok(CallContext {
             grant,
             workspace: &self.workspace,
             admin_space,
+            personal_assistant,
             chat_title: chat.title.clone().unwrap_or_default(),
         })
     }
@@ -2635,6 +2649,7 @@ impl SubtreeWalk<'_> {
             };
             let mut value = json!({
                 "id": chat.id,
+                "url": mast_proto::session_link::session_link(&chat.id),
                 "title": chat.title,
                 "status": status,
                 "awaitingInput": session.as_ref().and_then(|s| s.awaiting_input.as_ref()),
@@ -2677,6 +2692,7 @@ fn child_run_request(
             .unwrap_or(SandboxLevel::WorkspaceWrite),
         auto_approve: config.is_some_and(|c| c.auto_approve),
         resume: None,
+        fork_from: None,
         attachments,
         worktree: None,
         instructions: None,

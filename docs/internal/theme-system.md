@@ -41,7 +41,7 @@ Windows using their in-app renderers. Windows uses the bounded Direct3D
 `BackdropBlur` implementation; native window Acrylic remains independent.
 The preference remains portable even where a particular surface cannot honor blur.
 
-The built-in registry contains 34 variants across 21 families:
+The built-in registry contains 36 variants across 22 families:
 
 - Mast Light and Dark
 - Horizon Light and Dark
@@ -53,6 +53,7 @@ The built-in registry contains 34 variants across 21 families:
 - GitHub Light and Dark
 - Ayu Light, Dark, and Mirage
 - Gruvbox Light and Dark
+- Solarized Light and Dark
 - Rosé Pine Dawn and Moon
 - Nord
 - One Dark Pro

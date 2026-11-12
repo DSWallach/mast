@@ -129,6 +129,7 @@ async fn a_chat_with_no_configured_model_records_and_displays_what_ran() {
                     attachments: Vec::new(),
                     worktree: None,
                     resume: None,
+                    fork_from: None,
                     instructions: None,
                 },
                 message_id: "msg-1".into(),

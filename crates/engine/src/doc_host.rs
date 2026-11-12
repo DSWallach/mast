@@ -289,6 +289,8 @@ struct DocHostInner {
     /// Tracks every spawned worker so `shutdown_workers` can await them.
     tasks: TaskTracker,
     handles: Mutex<HashMap<String, Arc<ChatDocHandle>>>,
+    /// Absorbed side-chat rows still in a main chat's queue, by side chat.
+    side_absorbs: Mutex<HashMap<String, crate::side_chat::PendingAbsorb>>,
     /// Serialize cold opens without blocking access to already-live handles.
     opening: Mutex<()>,
     /// chat2 seeds in flight (one per chat — reopen storms must not race
@@ -721,11 +723,14 @@ pub struct ChatDocHandle {
     /// It also covers the gap a send-now's interrupt opens — between stopping
     /// the turn and starting its own the chat reads Idle, and an idle chat with
     /// a queue is exactly what the flush drains.
-    drain_lock: tokio::sync::Mutex<()>,
+    pub(crate) drain_lock: tokio::sync::Mutex<()>,
+    /// Serializes "Absorb into main chat" on a side chat, so one marker is
+    /// read and advanced per absorb.
+    pub(crate) absorb_lock: tokio::sync::Mutex<()>,
     /// An explicit user interrupt freezes automatic queue delivery. The next
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
-    queue_paused: AtomicBool,
+    pub(crate) queue_paused: AtomicBool,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -853,7 +858,7 @@ impl ChatDocHandle {
         });
     }
 
-    fn publish_queue(&self) {
+    pub(crate) fn publish_queue(&self) {
         match self.doc.read_queue() {
             Ok(items) => {
                 self.queue_tx.send_if_modified(|slot| {
@@ -1006,6 +1011,7 @@ impl DocHost {
                 edge_disconnected: AtomicBool::new(false),
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
+                side_absorbs: Mutex::new(HashMap::new()),
                 opening: Mutex::new(()),
                 seeding: Mutex::new(HashSet::new()),
                 seed_waiting: Mutex::new(HashSet::new()),
@@ -1064,7 +1070,18 @@ impl DocHost {
 
     /// The sessions engine, once wired. `None` before assembly or after
     /// `shutdown_workers` — callers treat both as "executor unavailable".
-    fn sessions(&self) -> Option<SessionsEngine> {
+    pub(crate) fn side_absorbs(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, crate::side_chat::PendingAbsorb>> {
+        lock(&self.inner.side_absorbs)
+    }
+
+    /// The chat's handle if its doc is already open (never opens one).
+    pub(crate) fn loaded(&self, chat_id: &str) -> Option<Arc<ChatDocHandle>> {
+        lock(&self.inner.handles).get(chat_id).cloned()
+    }
+
+    pub(crate) fn sessions(&self) -> Option<SessionsEngine> {
         lock(&self.inner.sessions).clone()
     }
 
@@ -1704,6 +1721,7 @@ impl DocHost {
             queue_tx,
             rejected_tx,
             drain_lock: tokio::sync::Mutex::new(()),
+            absorb_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
@@ -3112,6 +3130,18 @@ impl DocHost {
         self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))
     }
 
+    /// Queue context for `chat_id`'s next turn without interrupting or
+    /// pulling back anything already queued or running. Drains at once
+    /// when the chat is idle.
+    pub(crate) fn queue_context_message(
+        &self,
+        chat_id: &str,
+        id: &str,
+        text: &str,
+    ) -> Result<String, EngineError> {
+        self.queue_message_inner(chat_id, text, Vec::new(), true, false, Some(id))
+    }
+
     fn queue_message_inner(
         &self,
         chat_id: &str,
@@ -3174,6 +3204,9 @@ impl DocHost {
         let changed = handle.doc.set_queued_text(id, text, now_ms())?;
         if changed {
             handle.publish_queue();
+            if text.trim().is_empty() {
+                self.forget_side_absorb_row(chat_id, id);
+            }
         }
         Ok(changed)
     }
@@ -3212,6 +3245,7 @@ impl DocHost {
         let removed = handle.doc.remove_queued(id)?;
         if removed {
             handle.publish_queue();
+            self.forget_side_absorb_row(chat_id, id);
         }
         Ok(removed)
     }
@@ -3461,6 +3495,9 @@ impl DocHost {
             }
             handle.publish_queue();
             self.save_snapshot(&handle);
+            if replacement.is_some_and(|text| text.trim().is_empty()) {
+                self.forget_side_absorb_row(chat_id, id);
+            }
             match action {
                 FinishQueueEditAction::Commit => FinishQueueEditOutcome::Committed,
                 FinishQueueEditAction::Cancel => FinishQueueEditOutcome::Cancelled,
@@ -5210,6 +5247,29 @@ impl DocHost {
                 request_id,
                 answers,
             } => {
+                // Approval protocols accept option labels only. A custom reply is
+                // a new instruction, not a malformed verdict. Interrupt first so
+                // the pending operation cannot run ahead of the user's correction.
+                let open_questions = handle.doc.read_entries()?.iter().rev().find_map(|entry| {
+                    entry.parts.iter().find_map(|part| match part {
+                        MessagePart::Input { request_id: id, questions, resolved: false, .. }
+                            if id == request_id => Some(questions.clone()),
+                        _ => None,
+                    })
+                });
+                let current_request = !sessions.turn_in_flight(chat_id)
+                    || sessions.has_pending_input(chat_id, request_id);
+                if current_request
+                    && let Some(prompt) = open_questions.as_deref()
+                        .and_then(|questions| approval_reply_prompt(questions, answers))
+                {
+                    self.interrupt_and_pause_queue(sessions, handle).await?;
+                    handle.doc.resolve_input(request_id)?;
+                    return self.deliver_prompt(
+                        sessions, handle, &entry.id, &prompt,
+                        Some(format!("{}-reply", entry.id)), entry.issued_at,
+                    ).await;
+                }
                 if sessions.respond_input(chat_id, request_id, answers.clone())? {
                     return Ok((SessionCommandStatus::Applied, None));
                 }
@@ -6046,6 +6106,7 @@ impl DocHost {
             auto_approve: config.as_ref().is_some_and(|c| c.auto_approve),
             attachments: Vec::new(),
             resume: None,
+            fork_from: None,
             worktree: None,
             instructions: None,
         })
@@ -6119,6 +6180,23 @@ impl DocHost {
     }
 }
 
+/// Extract a custom instruction only from a single provider approval. Ordinary
+/// choice questions keep their existing answer validation.
+fn approval_reply_prompt(questions: &[UserInputQuestion], answers: &[UserInputAnswer]) -> Option<String> {
+    let [question] = questions else { return None; };
+    let [answer] = answers else { return None; };
+    let [label] = answer.labels.as_slice() else { return None; };
+    let header = question.header.trim_end_matches(" (subagent)");
+    let approval = question.command_approval.is_some()
+        || matches!(header, "Approve command" | "Approve permissions" | "Approve file change" | "Permission");
+    if !approval || label.trim().is_empty()
+        || question.options.iter().any(|option| option.eq_ignore_ascii_case(label.trim()))
+    {
+        return None;
+    }
+    Some(label.trim().to_owned())
+}
+
 /// The resumed-turn prompt for answers to a question whose run died: each
 /// answer paired with its question text so the reattached conversation reads
 /// naturally. Pure.
@@ -6157,6 +6235,30 @@ fn encode_part_segment(part_id: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod approval_reply_tests {
+    use super::*;
+
+    #[test]
+    fn custom_reply_overrides_approval_but_preserves_choice_validation() {
+        let mut question = UserInputQuestion {
+            id: "q".into(), header: "Approve command (subagent)".into(),
+            question: "Run it?".into(), options: vec!["Yes".into(), "No".into()],
+            multi_select: false, allow_custom: false, command_approval: None,
+        };
+        let answer = |label: &str| vec![UserInputAnswer {
+            question_id: "q".into(), labels: vec![label.into()],
+        }];
+        for label in ["Yes", "no", "", "  "] {
+            assert_eq!(approval_reply_prompt(&[question.clone()], &answer(label)), None);
+        }
+        assert_eq!(approval_reply_prompt(&[question.clone()], &answer("  Try another approach  ")),
+            Some("Try another approach".into()));
+        question.header = "Pick".into();
+        assert_eq!(approval_reply_prompt(&[question], &answer("Try another approach")), None);
+    }
 }
 
 #[cfg(test)]

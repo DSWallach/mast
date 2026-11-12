@@ -90,6 +90,9 @@ mod project_icon;
 mod required_actions_ui;
 mod menu_bar_ui;
 mod running_ui;
+mod side_chat_ui;
+#[cfg(feature = "snapshot")]
+pub(crate) use side_chat_ui::fixture_side_chat_state;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
@@ -622,6 +625,7 @@ pub enum Route {
     Settings(SettingsSection),
     /// Multi-chat overview (ticket 002): every chat at once, not one at a time.
     Overview,
+    ScheduledTasks,
     /// The PR page: dashboards plus the chats launched to review PRs.
     PrReviewChats,
     Review,
@@ -659,6 +663,9 @@ pub enum RightSurface {
     /// A planning artifact (`mast-artifact:` links) — keys
     /// `Shell::artifact_tabs`.
     Artifact(u64),
+    /// A side chat ("Ask on the side") with its own composer — keys
+    /// `Shell::side_chats`. Closing it archives the side chat.
+    SideChat(u64),
     /// The sticky "Item" tab: what the chat is for (work item, instructions,
     /// where it runs, model, account, open asks). Always first in the strip,
     /// never stored in `right_tabs`, never closed.
@@ -743,6 +750,7 @@ pub enum NavEntry {
     Chat(String),
     Settings(SettingsSection),
     Overview,
+    ScheduledTasks,
     PrReviewChats,
 }
 
@@ -1576,7 +1584,7 @@ impl Render for SidebarPane {
             match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
                 // Overview keeps the normal chat sidebar.
-                Route::Chat | Route::Overview | Route::PrReviewChats | Route::Review => {
+                Route::Chat | Route::Overview | Route::ScheduledTasks | Route::PrReviewChats | Route::Review => {
                     shell.render_chat_sidebar(&theme, cx)
                 }
             }
@@ -1618,6 +1626,8 @@ pub struct Shell {
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
+    /// The Scheduled tasks group: closed by default, session-transient.
+    pub(super) scheduled_tasks_open: bool,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
@@ -1665,6 +1675,9 @@ pub struct Shell {
     subagent_seq: u64,
     /// Planning artifact tabs (`shell/artifacts_ui.rs`).
     pub(crate) artifact_tabs: artifacts_ui::ArtifactTabs,
+    /// "Ask on the side" panes (`shell/side_chat_ui.rs`).
+    side_chats: side_chat_ui::SideChatTabs,
+    side_chats_task: Option<Task<()>>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -1684,6 +1697,8 @@ pub struct Shell {
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
     overview_page: Option<Entity<crate::overview::Overview>>,
+    scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
+    scheduled_tasks_events: Option<Subscription>,
     pr_review_chats_page: Option<Entity<crate::chat_type_view::ChatTypeView>>,
     /// `StartPrReview` operation ids (one per PR + action + agent).
     pr_review_ops: crate::pr_review_launch::PrReviewOperations,
@@ -1741,6 +1756,8 @@ pub struct Shell {
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
+    device_group_menu: Option<(String, Point<Pixels>)>,
+    device_group_menu_focus: FocusHandle,
     /// Per-project agent account picker / add-account sign-in.
     account_flow: Option<Entity<crate::managed_accounts::AccountFlow>>,
     account_flow_sub: Option<Subscription>,
@@ -2084,6 +2101,7 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
+        state.update(cx, |state, cx| state.set_sidebar_outline_sections(settings.sidebar_outline_groups, cx));
         state.update(cx, |state, cx| {
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
         });
@@ -2137,6 +2155,7 @@ impl Shell {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Overview => NavEntry::Overview,
+            Route::ScheduledTasks => NavEntry::ScheduledTasks,
             Route::PrReviewChats => NavEntry::PrReviewChats,
             Route::Review => NavEntry::Chat(String::new()),
         });
@@ -2165,6 +2184,7 @@ impl Shell {
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
+            scheduled_tasks_open: false,
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
@@ -2189,6 +2209,8 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             artifact_tabs: Default::default(),
+            side_chats: Default::default(),
+            side_chats_task: None,
             subagent_seq: 0,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
@@ -2202,6 +2224,8 @@ impl Shell {
             nav,
             devices_page: None,
             overview_page: None,
+            scheduled_tasks_page: None,
+            scheduled_tasks_events: None,
             pr_review_chats_page: None,
             review_hosts: Default::default(),
             pr_review_ops: Default::default(),
@@ -2243,6 +2267,8 @@ impl Shell {
             closeout_seq: 0,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
+            device_group_menu: None,
+            device_group_menu_focus: cx.focus_handle(),
             account_flow: None,
             account_flow_sub: None,
             sidebar_section_migration: None,
@@ -2483,6 +2509,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.reconcile_side_chats(cx);
         self.sync_status_light(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
@@ -3015,6 +3042,9 @@ impl Shell {
                 RightSurface::Artifact(id) => self
                     .artifact_tab_title(*id, cx)
                     .map(|title| (*surface, title, false, None)),
+                RightSurface::SideChat(id) => self
+                    .side_chat_pane(*id)
+                    .map(|_| (*surface, "Side chat".into(), false, None)),
                 RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
                     let browser = browser.read(cx);
                     (
@@ -3048,6 +3078,7 @@ impl Shell {
             | RightSurface::Terminal(_)
             | RightSurface::Subagent(_)
             | RightSurface::Artifact(_)
+            | RightSurface::SideChat(_)
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -3148,7 +3179,10 @@ impl Shell {
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
-            RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Artifact(_) => {}
+            RightSurface::Subagent(_)
+            | RightSurface::Browser(_)
+            | RightSurface::Artifact(_)
+            | RightSurface::SideChat(_) => {}
             RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.sync_explorer_selection(cx);
@@ -3266,6 +3300,54 @@ impl Shell {
             || self.state.read(cx).selected_chat.as_deref() != Some(self.active_chat.as_str())
         {
             return LinkOutcome::Rejected;
+        }
+        // Session references always stay in Mast, independent of web-link settings.
+        if activation.target.is_session() {
+            if !matches!(
+                activation.action,
+                LinkAction::Primary | LinkAction::Internal
+            ) {
+                return LinkOutcome::Rejected;
+            }
+            let chat_id = if let Some(id) =
+                mast_proto::session_link::parse_session_link(&activation.target.original)
+            {
+                id
+            } else {
+                let Ok(link) =
+                    crate::links::parse_mast_conversation_link(&activation.target.original)
+                else {
+                    return LinkOutcome::Rejected;
+                };
+                let state = self.state.read(cx);
+                if crate::links::workspace_locator(
+                    state.workspace_scope,
+                    state.auth.as_ref(),
+                    state.local_device_id.as_deref(),
+                )
+                .as_deref()
+                    != Some(link.workspace.as_str())
+                {
+                    self.sidebar_notice =
+                        Some("This conversation link belongs to another workspace".into());
+                    cx.notify();
+                    return LinkOutcome::Rejected;
+                }
+                link.chat_id
+            };
+            if !self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id)
+            {
+                self.sidebar_notice = Some("The linked conversation was not found".into());
+                cx.notify();
+                return LinkOutcome::Rejected;
+            }
+            self.open_chat(chat_id, cx);
+            return LinkOutcome::Internal;
         }
         if activation.target.navigation.is_err() {
             if crate::artifacts::model::link_target(&activation.target.original).is_some() {
@@ -3437,7 +3519,7 @@ impl Shell {
             .chats
             .iter()
             .find(|chat| chat.id == self.active_chat)?;
-        let root = chat.cwd.clone()?;
+        let root = crate::files::client::FilesRequestContext::for_chat(state, &self.active_chat)?.cwd;
         let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
         Some((root, local))
     }
@@ -3793,19 +3875,15 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(chat) = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == self.active_chat)
-        else {
+        // Resolve with the same checkout used by FilesSurface. Resolving
+        // against chat.cwd first would prefix a bound-worktree link twice.
+        let Some(context) = crate::files::client::FilesRequestContext::for_chat(
+            self.state.read(cx),
+            &self.active_chat,
+        ) else {
             return false;
         };
-        let Some(root) = chat.cwd.as_deref() else {
-            return false;
-        };
-        let Some(link) = resolve_workspace_file_link(target, root) else {
+        let Some(link) = resolve_workspace_file_link(target, &context.cwd) else {
             return false;
         };
 
@@ -3907,6 +3985,11 @@ impl Shell {
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
+        self.handle_transcript_event(event, cx);
+    }
+
+    /// Also run directly by the Item tab's running-subagent rows.
+    fn handle_transcript_event(&mut self, event: &TranscriptEvent, cx: &mut Context<Self>) {
         match event {
             TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::SignInAgain(chat_id) => self.sign_in_for_chat(chat_id.clone(), cx),
@@ -4152,6 +4235,7 @@ impl Shell {
                 }
             }
             RightSurface::Artifact(id) => self.close_artifact_tab(id, cx),
+            RightSurface::SideChat(id) => self.drop_side_chat(id, cx),
             RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
         }
         self.panels.update(&key, |p| {
@@ -4798,11 +4882,45 @@ impl Shell {
     /// web link) opens in the right pane, which only exists on the chat
     /// route — go there first so it isn't opened somewhere nobody can see.
     fn leave_overview_for_chat(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.route, Route::Overview) {
+        if matches!(self.route, Route::Overview | Route::ScheduledTasks) {
             self.route = Route::Chat;
             self.nav.push(NavEntry::Chat(self.active_chat.clone()));
             cx.notify();
         }
+    }
+
+    pub(super) fn ensure_scheduled_tasks_page(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::scheduled_tasks::ScheduledTasksPage> {
+        if let Some(page) = &self.scheduled_tasks_page {
+            return page.clone();
+        }
+        let state = self.state.clone();
+        let page = cx.new(|cx| crate::scheduled_tasks::ScheduledTasksPage::new(state, cx));
+        self.scheduled_tasks_events = Some(cx.subscribe(&page, |shell, _, event, cx| {
+            let crate::scheduled_tasks::TaskPageEvent::OpenChat(id) = event;
+            shell.route = Route::Chat;
+            shell
+                .state
+                .update(cx, |s, cx| s.select_chat(Some(id.clone()), cx));
+            cx.notify();
+        }));
+        self.scheduled_tasks_page = Some(page.clone());
+        page
+    }
+
+    pub(super) fn open_scheduled_tasks(&mut self, history: Option<String>, cx: &mut Context<Self>) {
+        self.route = Route::ScheduledTasks;
+        self.nav.push(NavEntry::ScheduledTasks);
+        let page = self.ensure_scheduled_tasks_page(cx);
+        if let Some(id) = history {
+            let device=self.state.read(cx).selected_chat_row().filter(|c|c.scheduled_task_info.as_ref().is_some_and(|t|t.task_id==id)).map(|c|c.device_id.clone());
+            page.update(cx, |p, cx| p.show_task(id, device, cx));
+        } else {
+            page.update(cx, |p, cx| p.show_tasks(cx));
+        }
+        cx.notify();
     }
 
     pub(crate) fn open_overview(&mut self, cx: &mut Context<Self>) {
@@ -4940,6 +5058,7 @@ impl Shell {
             NavEntry::Settings(section) => {
                 self.route = Route::Settings(section);
             }
+            NavEntry::ScheduledTasks => { self.route = Route::ScheduledTasks; }
             NavEntry::Overview => {
                 self.route = Route::Overview;
             }
@@ -4996,6 +5115,13 @@ impl Shell {
                     self.appearance_settings_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                            AppearanceSettingsEvent::SidebarOutlineGroupsChanged(value) => {
+                                this.settings.sidebar_outline_groups = value;
+                                this.state.update(cx, |state, cx| state.set_sidebar_outline_sections(value, cx));
+                                this.sidebar_prev_order.clear();
+                                this.schedule_save(cx);
+                                cx.notify();
+                            }
                             AppearanceSettingsEvent::CompactSingleChatChanged(value) => {
                                 this.settings.compact_single_chat = value;
                                 if let Some(overview) = &this.overview_page {
@@ -5701,6 +5827,8 @@ impl Shell {
             || self.workspace_search.is_some()
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
+            || self.device_group_menu.is_some()
+            || self.space_menu.is_open()
             || self.running.open
             || self.add_space.is_some()
             || self.work_outline_modal_open()
@@ -5743,6 +5871,7 @@ impl Shell {
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        self.drop_side_chats_of(&chat_id, cx);
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
                 if let RightSurface::Browser(id) = surface {
@@ -6492,7 +6621,7 @@ impl Shell {
     fn render_title_bar(&mut self, viewport_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
             Route::Chat | Route::Review => self.render_session_title_bar(viewport_height, cx),
-            Route::Settings(_) => {
+            Route::Settings(_) | Route::ScheduledTasks => {
                 let inner = div()
                     .size_full()
                     .flex()
@@ -7204,6 +7333,7 @@ impl Shell {
     fn render_chat_row(
         &self,
         id: String,
+        row_scope: Option<&str>,
         title: SharedString,
         time_ago: SharedString,
         space_name: SharedString,
@@ -7230,10 +7360,12 @@ impl Shell {
         // relative time instead. Hovering the ROW swaps the corner for the
         // ARCHIVE button. Compact rows keep status first and elapsed time last;
         // their archive control occupies the remote-icon slot on hover.
-        // A chat can appear on both surfaces at once. Namespace every hover
-        // key and child id so the palette never animates the sidebar copy.
+        // A chat can appear in the list, fixed current-session row and palette.
+        // Namespace hover keys and child ids so each copy animates independently.
         let row_id = if search_query.is_some() {
             format!("palette-chat-{id}")
+        } else if let Some(scope) = row_scope {
+            format!("{scope}-chat-{id}")
         } else {
             format!("chat-{id}")
         };
@@ -7335,7 +7467,7 @@ impl Shell {
                 .child(icon)
                 .into_any_element()
         });
-        let content_id = id.clone();
+        let content_id = row_scope.map_or_else(|| id.clone(), |scope| format!("{scope}-{id}"));
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
@@ -8044,6 +8176,7 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
+        let assistant_section = self.render_personal_assistant_section(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
@@ -8213,6 +8346,7 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
+            .children(assistant_section)
             .child(filter_row)
             .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
             .child(sidebar_lists)
@@ -8924,6 +9058,10 @@ impl Shell {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
+        if self.device_group_menu.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if self.closeout_dialog.is_some() {
             self.close_chat_closeout(cx);
             return true;
@@ -9104,6 +9242,8 @@ impl Shell {
             let admin_id = chat_id.clone();
             let revoke_id = chat_id.clone();
             let hand_off_id = chat_id.clone();
+            let ask_side_id = chat_id.clone();
+            let can_ask_side = self.can_ask_on_side(&chat_id, cx);
             let branch_review_id = chat_id.clone();
             let branch_review_available = self.branch_review_targets.contains_key(&chat_id);
             let branch_review_exists = self.branch_review_targets.get(&chat_id)
@@ -9111,6 +9251,8 @@ impl Shell {
             let has_workers = self.has_hand_off_workers(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
+            let assistant_id = chat_id.clone();
+            let is_assistant = self.state.read(cx).is_personal_assistant(&chat_id);
             let closeable = menu_state.closeable;
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
@@ -9140,6 +9282,17 @@ impl Shell {
                             }))
                             .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Hand off to new chat…")),
+                    ))
+                    .when(can_ask_side, |menu| menu.child(
+                        popover::menu_row(&theme, false, format!("chat-menu-ask-side-{chat_id}"))
+                            .id("chat-menu-ask-side")
+                            .debug_selector(|| "chat-menu-ask-side".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.ask_on_side(ask_side_id.clone(), cx);
+                            }))
+                            .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from("Ask on the side…")),
                     ))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
@@ -9234,6 +9387,34 @@ impl Shell {
                                 .child(SharedString::from(crate::admin::REVOKE_LABEL)),
                             )
                         })
+                    })
+                    .when(admin_space || is_assistant, |menu| {
+                        menu.child(
+                            popover::menu_row(&theme, false, format!("chat-menu-assistant-{chat_id}"))
+                                .id("chat-menu-assistant")
+                                .debug_selector(|| "chat-menu-assistant".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    let chat_id = assistant_id.clone();
+                                    this.state.update(cx, |state, cx| {
+                                        if is_assistant {
+                                            state.clear_personal_assistant(cx);
+                                        } else {
+                                            state.set_personal_assistant(&chat_id, cx);
+                                        }
+                                    });
+                                }))
+                                .child(
+                                    icon(icons::BOT)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from(if is_assistant {
+                                    crate::personal_assistant::CLEAR_LABEL
+                                } else {
+                                    crate::personal_assistant::SET_LABEL
+                                })),
+                        )
                     })
                     .when(closeable, |menu| {
                         menu.child(
@@ -9630,6 +9811,10 @@ impl Shell {
         transcript_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(page)=&self.scheduled_tasks_page {
+            let active=self.route==Route::ScheduledTasks;
+            page.update(cx,|p,_|p.set_active(active));
+        }
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
@@ -9648,6 +9833,11 @@ impl Shell {
                 .flex_col()
                 .child(div().flex_1().min_h_0().child(outlet))
                 .into_any_element();
+        }
+
+        if self.route == Route::ScheduledTasks {
+            let outlet = self.ensure_scheduled_tasks_page(cx);
+            return div().flex_1().min_w_0().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(outlet).into_any_element();
         }
 
         // Overview route: same shape as Settings (an outlet under the
@@ -10374,6 +10564,11 @@ impl Shell {
                     .artifact_tab(id)
                     .map(|tab| tab.into_any_element())
                     .unwrap_or_else(|| self.render_surface_picker(cx)),
+                RightSurface::SideChat(id) => self
+                    .side_chat_pane(id)
+                    .cloned()
+                    .map(|pane| pane.into_any_element())
+                    .unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Terminal(tab) => {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
@@ -10727,6 +10922,7 @@ impl Shell {
                     .unwrap_or(icons::LIST),
                 RightSurface::Review => icons::DOCUMENT,
                 RightSurface::Subagent(_) => icons::BOT,
+                RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Artifact(id) => self
                     .artifact_tab(id)
                     .and_then(|tab| tab.read(cx).artifact(cx))
@@ -10759,6 +10955,7 @@ impl Shell {
                         .last()
                         .is_some_and(|e| e.status == Some(mast_doc::MessageStatus::Streaming))
                 }),
+                RightSurface::SideChat(id) => self.side_chat_running(id, cx),
                 _ => false,
             };
             // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
@@ -11817,6 +12014,13 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
+            .on_action(cx.listener(|this, action: &crate::selection_chip::AddToSession, window, cx| {
+                if !matches!(this.route, Route::Chat | Route::Overview) {
+                    this.route = Route::Chat;
+                }
+                this.composer.update(cx, |composer, cx| composer.add_selected_text(&action.0, window, cx));
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)
@@ -14215,6 +14419,94 @@ mod exit_regressions {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[gpui::test]
+    fn session_chips_open_chats_and_reject_invalid_targets(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: mast_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window.update(cx, |shell, window, cx| {
+            shell.active_chat = "source".into();
+            shell.state.update(cx, |state, _| {
+                state.selected_chat = Some("source".into());
+                state.chats.push(mast_proto::Chat {
+                    id: "destination".into(),
+                    scheduled_task_info: None,
+                    scheduled_task: None,
+                    side_of: None,
+                    side_absorbed_through: None,
+                    device_id: "here".into(),
+                    title: None,
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: None,
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: Utc::now(),
+                    harness_session_id: None,
+                    harness_session_cwd: None,
+                    actual_model: None,
+                    parent_chat_id: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                    linked_pr_url: None,
+                    linked_pr_source: None,
+                    linked_ticket_id: None,
+                    linked_ticket_source: None,
+                });
+            });
+            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings.open_web_links_in_mast = false;
+            });
+            let mut activation = LinkActivation {
+                target: LinkTarget::new("Session", "mast://chat/destination"),
+                action: LinkAction::Primary,
+                source_session: Some("stale".into()),
+            };
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.source_session = Some("source".into());
+            activation.action = LinkAction::External;
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.action = LinkAction::Primary;
+            activation.target = LinkTarget::new("Missing", "mast://chat/missing");
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.target = LinkTarget::new("Other workspace",
+                "mast://open/chat/destination?workspace=other");
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
+            activation.target = LinkTarget::new("Session", "mast://chat/destination");
+            let browsers = shell.browsers.len();
+            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Internal);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("destination"));
+            assert!(matches!(shell.route, Route::Chat));
+            assert_eq!(shell.browsers.len(), browsers);
+        }).unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
     fn transcript_links_open_new_tabs_and_reject_stale_sessions(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -14345,6 +14637,117 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn review_file_link_uses_bound_checkout_root(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let bound = root.join(".worktrees/ui-pr-5767");
+        std::fs::create_dir_all(bound.join(".mast/reviews")).unwrap();
+        let payload = bound.join(".mast/reviews/pr-5767.review.json");
+        std::fs::write(&payload, "{}").unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: mast_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "viz".into();
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("here".into());
+                    state.selected_chat = Some("viz".into());
+                    state.chats.push(mast_proto::Chat {
+                        id: "viz".into(),
+                        device_id: "here".into(),
+                        title: None,
+                        archived: false,
+                        cwd: Some(root_text.clone()),
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: None,
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        actual_model: None,
+                        parent_chat_id: None,
+                        space_id: None,
+                        last_seen_at: None,
+                        room_gen: None,
+                        linked_pr_url: None,
+                        linked_pr_source: None,
+                        linked_ticket_id: None,
+                        linked_ticket_source: None,
+                        scheduled_task: None,
+                        scheduled_task_info: None,
+                        side_of: None,
+                        side_absorbed_through: None,
+                    });
+                    state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                        chat_id: "viz".into(),
+                        targets: vec![mast_proto::ChatDiffTargetView {
+                            path: bound.to_string_lossy().into_owned(),
+                            checkout_id: "ui-wt".into(),
+                            source: mast_proto::ChatDiffTargetSource::Agent,
+                            selected: true,
+                            repo_name: "ui".into(),
+                            branch: None,
+                            head_sha: None,
+                        }],
+                        ref_targets: vec![],
+                    }]);
+                });
+                let activation = LinkActivation {
+                    target: LinkTarget::new("Saved review", payload.to_str().unwrap()),
+                    action: LinkAction::Primary,
+                    source_session: Some("viz".into()),
+                };
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert_eq!(shell.file_surface_paths.len(), 1);
+                assert_eq!(
+                    shell.file_surface_paths.values().next().unwrap(),
+                    ".mast/reviews/pr-5767.review.json"
+                );
+                assert_eq!(
+                    shell.active_checkout(cx).unwrap().0,
+                    bound.to_string_lossy()
+                );
+                let context =
+                    crate::files::client::FilesRequestContext::for_chat(shell.state.read(cx), "viz")
+                        .unwrap();
+                assert_eq!(context.target.checkout_path.as_deref(), bound.to_str());
+                assert_eq!(
+                    shell.state.read(cx).chats[0].cwd.as_deref(),
+                    Some(root_text.as_str())
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn visualization_links_render_fragments_and_open_previews_externally(cx: &mut TestAppContext) {
         use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
         let dir = tempfile::tempdir().unwrap();
@@ -14399,7 +14802,11 @@ mod exit_regressions {
                         harness_session_id: None,
                         harness_session_cwd: None,
                         actual_model: None,
+                        scheduled_task: None,
+                        scheduled_task_info: None,
                         parent_chat_id: None,
+                        side_of: None,
+                        side_absorbed_through: None,
                         space_id: None,
                         last_seen_at: None,
                         room_gen: None,
@@ -15477,7 +15884,11 @@ mod titlebar_lamp_layout {
                             harness_session_id: None,
                             harness_session_cwd: None,
                             actual_model: None,
+                            scheduled_task: None,
+                            scheduled_task_info: None,
                             parent_chat_id: None,
+                            side_of: None,
+                            side_absorbed_through: None,
                             space_id: None,
                             last_seen_at: None,
                             room_gen: None,

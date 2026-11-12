@@ -2512,9 +2512,11 @@ impl Overview {
             .chats
             .iter()
             .filter(|chat| {
-                chat.space_id
-                    .as_deref()
-                    .is_none_or(|space_id| state.space_row(space_id).is_some())
+                !chat.is_side_chat()
+                    && chat
+                        .space_id
+                        .as_deref()
+                        .is_none_or(|space_id| state.space_row(space_id).is_some())
             })
             .map(|chat| {
                 let row = by_id.get(chat.id.as_str());
@@ -8329,7 +8331,11 @@ mod logic_tests {
             harness_session_id: None,
             harness_session_cwd: None,
             actual_model: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
             parent_chat_id: None,
+            side_of: None,
+            side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
