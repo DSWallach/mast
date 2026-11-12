@@ -273,19 +273,19 @@ pub fn run_app(config: UiConfig) {
             while let Some(chat_id) = click_rx.next().await {
                 let _ = cx.update(|cx| {
                     if let Some((space_id, request_id, decision)) = notify::parse_decision_target(&chat_id) {
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "linux"))]
                         handle_menu_bar_event(menu_bar::MenuEvent::Action(
                             menu_bar::MenuAction::DecideRequest { space_id, request_id, decision, via: "banner" },
                         ), &click_state, cx);
-                        #[cfg(not(target_os = "macos"))]
+                        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                         let _ = (space_id, request_id, decision);
                     } else if let Some((space_id, request_id)) = notify::parse_request_target(&chat_id) {
                         open_notified_chat(None, &click_state, cx);
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "linux"))]
                         handle_menu_bar_event(menu_bar::MenuEvent::Action(
                             menu_bar::MenuAction::OpenRequest { space_id, request_id },
                         ), &click_state, cx);
-                        #[cfg(not(target_os = "macos"))]
+                        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                         let _ = (space_id, request_id);
                     } else {
                         open_notified_chat(Some(chat_id), &click_state, cx);
@@ -317,7 +317,7 @@ pub fn run_app(config: UiConfig) {
             state: state.clone(),
             boot: config.boot(),
         });
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(mut events) = menu_bar::take_events() {
             let menu_state = state.clone();
             cx.spawn(async move |cx| {
@@ -377,7 +377,7 @@ fn open_notified_chat(
 
 /// The menu bar item's clicks: bring Mast forward (reopening the window) for
 /// chats and "Open Mast", and hand the rest to the Shell.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn handle_menu_bar_event(
     event: menu_bar::MenuEvent,
     state: &gpui::Entity<state::AppState>,

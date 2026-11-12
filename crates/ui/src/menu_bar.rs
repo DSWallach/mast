@@ -1311,7 +1311,12 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::*;
 
