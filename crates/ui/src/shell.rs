@@ -7471,7 +7471,7 @@ impl Shell {
                 .child(icon)
                 .into_any_element()
         });
-        let content_id = id.clone();
+        let content_id = row_scope.map_or_else(|| id.clone(), |scope| format!("{scope}-{id}"));
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;

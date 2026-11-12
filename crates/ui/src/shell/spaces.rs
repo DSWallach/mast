@@ -480,6 +480,104 @@ mod pinned_session_tests {
         }
     }
 
+    #[gpui::test]
+    fn current_session_beneath_assistant_follows_selection_and_filters(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::*;
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    let assistant = shell.render_personal_assistant_section(&Theme::default(), cx);
+                    let rows = shell.render_active_rows(&Theme::default(), cx);
+                    div()
+                        .w(px(300.0))
+                        .h(px(700.0))
+                        .flex()
+                        .flex_col()
+                        .children(assistant)
+                        .children(rows.rows.into_iter().map(|(_, _, row)| row))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        let shell = window
+            .update(cx, |shell, _, cx| {
+                shell.settings.space_filter = None;
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats_synced = true;
+                    let assistant = pin_test_chat("assistant");
+                    state
+                        .personal_assistant
+                        .apply(mast_proto::PersonalAssistantReply {
+                            assistant: Some(mast_proto::PersonalAssistant::for_chat(&assistant, 1)),
+                        });
+                    state.chats = vec![assistant, pin_test_chat("open"), pin_test_chat("next")];
+                    state.selected_chat = Some("open".into());
+                });
+                cx.entity()
+            })
+            .unwrap();
+        let (_, cx) = cx.add_window_view(|_, _| SidebarHost(shell.clone()));
+        let assistant = cx.debug_bounds("chat-assistant").unwrap();
+        let current = cx.debug_bounds("current-session-chat-open").unwrap();
+        assert!(current.top() >= assistant.bottom());
+        assert!(
+            cx.debug_bounds("chat-open").is_some(),
+            "the ordinary list copy remains available"
+        );
+        cx.simulate_mouse_move(current.center(), None, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.chat_status_hover.as_deref(),
+                Some("current-session-chat-open")
+            );
+        });
+        shell.update(cx, |shell, cx| {
+            shell.settings.space_filter = Some("elsewhere".into());
+            shell.settings.sidebar_compact = true;
+            cx.notify();
+        });
+        assert!(
+            cx.debug_bounds("current-session-chat-open").is_some(),
+            "the current session ignores the space filter"
+        );
+        assert!(cx.debug_bounds("chat-open").is_none());
+        shell.update(cx, |shell, cx| {
+            shell
+                .state
+                .update(cx, |state, _| state.selected_chat = Some("next".into()));
+            cx.notify();
+        });
+        assert!(cx.debug_bounds("current-session-chat-open").is_none());
+        assert!(cx.debug_bounds("current-session-chat-next").is_some());
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.selected_chat = Some("assistant".into())
+            });
+            cx.notify();
+        });
+        assert!(
+            cx.debug_bounds("sidebar-current-session").is_none(),
+            "opening the assistant does not duplicate its own row"
+        );
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.selected_chat = Some("open".into());
+                state
+                    .personal_assistant
+                    .apply(mast_proto::PersonalAssistantReply::default());
+            });
+            cx.notify();
+        });
+        assert!(cx.debug_bounds("sidebar-personal-assistant").is_none());
+    }
+
     fn remote_pin_state(state: &mut super::AppState, synced: bool, initialized: bool) {
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Synced);
         state.auth = Some(mast_proto::AuthState::SignedIn {
