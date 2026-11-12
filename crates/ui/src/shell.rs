@@ -1555,12 +1555,16 @@ struct SubagentTab {
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
 struct SidebarPane {
+    #[cfg(test)]
+    renders: usize,
     shell: gpui::WeakEntity<Shell>,
     _observation: Subscription,
 }
 
 impl Render for SidebarPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        { self.renders += 1; }
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("sidebar");
         crate::transcript::record_view_frame("sidebar");
@@ -1776,6 +1780,7 @@ pub struct Shell {
     chat_status_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
+    sidebar_row_extents: spaces::SidebarRowExtents,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -2142,6 +2147,8 @@ impl Shell {
         });
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
+            #[cfg(test)]
+            renders: 0,
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
@@ -2262,6 +2269,7 @@ impl Shell {
             project_icons: Default::default(),
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_row_extents: Default::default(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -7081,6 +7089,10 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let width = self.sidebar_now();
+        if width <= 0.0 {
+            return div().w(px(0.0)).h_full().flex_none().into_any_element();
+        }
         let theme = Theme::of(cx).clone();
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
@@ -7097,7 +7109,7 @@ impl Shell {
         // itself below the chrome.
         crate::components::shell_parts::sidebar_frame(
             &theme,
-            self.sidebar_now(),
+            width,
             inner.into_any_element(),
             cx.listener(|this, _, _, cx| this.open_new_session(cx)),
         )
