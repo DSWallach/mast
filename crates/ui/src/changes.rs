@@ -6208,7 +6208,7 @@ fn code_text_viewport(
                 el.whitespace_nowrap()
             }
         })
-        .child(gpui::StyledText::new(text).with_runs(runs));
+        .child(crate::markdown::render::plain_text(text, theme).with_runs(runs));
     let viewport = div()
         .flex_1()
         .min_w_0()

@@ -7483,6 +7483,8 @@ fn user_bubble_text(
     let layout = styled.layout().clone();
     let wash = theme.code_wash;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
+    let menu_key = sel_key.clone();
+    let menu_text = text.clone();
     let sel_theme = theme.clone();
     let underlay = canvas(
         |_, _, _| (),
@@ -7523,11 +7525,12 @@ fn user_bubble_text(
     )
     .absolute()
     .size_full();
-    div()
+    let child = div()
         .relative()
         .child(underlay)
         .child(styled)
-        .into_any_element()
+        .into_any_element();
+    crate::text_menu::read_only(SharedString::from(menu_key.to_string()), menu_text, child).into_any_element()
 }
 
 fn visualization_card(
@@ -7814,8 +7817,8 @@ fn detail_body(
                 .py(px(6.0))
                 .font_family(theme.font_mono.clone())
                 .text_size(px(TOOL_TEXT_SIZE))
-                .children(lines.iter().map(|line| {
-                    crate::components::conversation_tool_output_line(theme, OUTPUT_LINE_HEIGHT, line.clone())
+                .children(lines.iter().enumerate().map(|(index, line)| {
+                    crate::components::conversation_tool_output_line(theme, OUTPUT_LINE_HEIGHT, format!("{scroll_id}:output:{index}"), line.clone())
                 }))
                 .when(*truncated_by > 0, |block| {
                     block.child(crate::components::conversation_tool_more_lines(theme, *truncated_by, OUTPUT_LINE_HEIGHT, TOOL_TEXT_SIZE))

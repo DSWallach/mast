@@ -11805,6 +11805,13 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
+            .on_action(cx.listener(|this, action: &crate::selection_chip::AddToSession, window, cx| {
+                if !matches!(this.route, Route::Chat | Route::Overview) {
+                    this.route = Route::Chat;
+                }
+                this.composer.update(cx, |composer, cx| composer.add_selected_text(&action.0, window, cx));
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)

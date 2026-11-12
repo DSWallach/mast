@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, Render, SharedString,
+    AnyElement, App, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, Render, SharedString,
     StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad,
     size,
 };
@@ -1538,6 +1538,8 @@ pub(super) fn flat_text_presented_element(
         find,
         row_key: opts.row_key.clone(),
     });
+    let menu_key = sel_key.clone();
+    let menu_text = flat_text.clone();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -1592,6 +1594,9 @@ pub(super) fn flat_text_presented_element(
         .child(underlay)
         .child(text_el)
         .into_any_element();
+    let child = crate::text_menu::read_only(
+        SharedString::from(menu_key.to_string()), menu_text, child,
+    ).into_any_element();
     if flat.links.is_empty() {
         return child;
     }
@@ -1674,6 +1679,9 @@ fn paint_text_selection_with_wash(
         }
     }
     REGISTRY.with(|r| {
+        if key.starts_with("ui-text-") {
+            r.borrow_mut().retain(|entry| entry.key != *key);
+        }
         r.borrow_mut().push(RegEntry {
             key: key.clone(),
             text: text.clone(),
@@ -1691,8 +1699,14 @@ fn selectable_text_element(
     wash: Hsla,
     find: Option<FindPaint>,
 ) -> AnyElement {
-    let styled = StyledText::new(text.clone()).with_runs(runs);
+    let styled = if runs.is_empty() {
+        StyledText::new(text.clone())
+    } else {
+        StyledText::new(text.clone()).with_runs(runs)
+    };
     let layout = styled.layout().clone();
+    let menu_key = key.clone();
+    let menu_text = text.clone();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -1701,11 +1715,73 @@ fn selectable_text_element(
     )
     .absolute()
     .size_full();
-    div()
+    let child = div()
         .relative()
         .child(underlay)
         .child(styled)
+        .into_any_element();
+    crate::text_menu::read_only(SharedString::from(menu_key.to_string()), menu_text, child)
         .into_any_element()
+}
+
+/// Plain transcript rows share the markdown registry, so selection can cross
+/// tool-output lines and adjacent messages.
+pub(crate) fn transcript_text(key: String, text: SharedString, theme: &Theme) -> AnyElement {
+    selectable_text_element(key.into(), text, Vec::new(), theme.selection, None)
+}
+
+/// Selectable plain content outside the transcript, isolated from chat selection.
+#[derive(IntoElement)]
+pub(crate) struct PlainText {
+    text: SharedString,
+    caller: &'static std::panic::Location<'static>,
+    wash: Hsla,
+    runs: Vec<TextRun>,
+}
+
+struct PlainTextState(std::sync::Arc<str>);
+impl Drop for PlainTextState {
+    fn drop(&mut self) {
+        clear_selection_surface(&self.0);
+    }
+}
+
+#[track_caller]
+pub(crate) fn plain_text(text: impl Into<SharedString>, theme: &Theme) -> PlainText {
+    PlainText {
+        text: text.into(),
+        caller: std::panic::Location::caller(),
+        wash: theme.selection,
+        runs: Vec::new(),
+    }
+}
+
+impl PlainText {
+    pub(crate) fn with_runs(mut self, runs: Vec<TextRun>) -> Self {
+        self.runs = runs;
+        self
+    }
+}
+
+impl RenderOnce for PlainText {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let id = SharedString::from(format!(
+            "plain-text-{}:{}:{}",
+            self.caller.file(),
+            self.caller.line(),
+            self.text
+        ));
+        let state = window.use_keyed_state(id, cx, |_, cx| {
+            PlainTextState(format!("ui-text-{}|", cx.entity_id()).into())
+        });
+        selectable_text_element(
+            state.read(cx).0.clone(),
+            self.text,
+            self.runs,
+            self.wash,
+            None,
+        )
+    }
 }
 
 /// Mermaid fences render as diagrams; find skips them.
@@ -1878,7 +1954,9 @@ pub fn selection_frame_reset() -> impl IntoElement {
 }
 
 fn selection_scope(key: &str) -> &str {
-    if key.starts_with("md-preview-") {
+    if key.starts_with("ui-text-") {
+        key
+    } else if key.starts_with("md-preview-") {
         key.split_once('|').map_or("", |(scope, _)| scope)
     } else {
         ""

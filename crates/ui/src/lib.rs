@@ -98,6 +98,8 @@ mod status_style;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
+mod text_menu;
+mod selection_chip;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;
