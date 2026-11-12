@@ -858,10 +858,20 @@ impl Render for ScheduledTasksPage {
                         .map(|r| crate::pickers::reasoning_label(r).to_owned())
                         .unwrap_or("Model default".into())
                 });
-            let context_label = config
-                .model_options
-                .get("contextWindow")
-                .and_then(|v| v.as_str())
+            let context_option =
+                model.and_then(|m| m.options.iter().find(|o| o.id == "contextWindow"));
+            let context_label = context_option
+                .and_then(|o| {
+                    let value = config
+                        .model_options
+                        .get("contextWindow")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&o.default_choice);
+                    o.choices
+                        .iter()
+                        .find(|c| c.id == value)
+                        .map(|c| c.label.as_str())
+                })
                 .unwrap_or("Model default");
             let mut selects = div().flex().flex_wrap().gap(px(10.0));
             let space_label = e
@@ -1631,7 +1641,21 @@ mod tests {
                 label: "Session model".into(),
                 description: None,
                 reasoning_levels: vec![ReasoningLevel::High],
-                options: vec![],
+                options: vec![ModelOption {
+                    id: "contextWindow".into(),
+                    label: "Context Window".into(),
+                    default_choice: "default".into(),
+                    choices: vec![
+                        ModelOptionChoice {
+                            id: "default".into(),
+                            label: "Model default (500K)".into(),
+                        },
+                        ModelOptionChoice {
+                            id: "872000".into(),
+                            label: "872K (max)".into(),
+                        },
+                    ],
+                }],
             };
             p.catalogs.insert(HarnessId::Codex, vec![other]);
             p.choice("harness", "codex".into(), cx);
@@ -1642,6 +1666,16 @@ mod tests {
             assert_eq!(draft.config.reasoning, Some(ReasoningLevel::High));
             assert!(draft.config.model_options.is_empty());
             assert_eq!(draft.prompt, "Keep these instructions");
+            p.choice("contextWindow", "872000".into(), cx);
+            assert_eq!(
+                p.editor_draft(cx).unwrap().config.model_options["contextWindow"],
+                "872000"
+            );
+            p.choice("contextWindow", "default".into(), cx);
+            assert_eq!(
+                p.editor_draft(cx).unwrap().config.model_options["contextWindow"],
+                "default"
+            );
             p.choice("harness", "claude-code".into(), cx);
             assert_eq!(
                 p.editor_draft(cx).unwrap().config.model.as_deref(),

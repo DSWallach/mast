@@ -68,6 +68,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+mod context;
 pub mod instructions;
 mod normalize;
 mod subagents;
@@ -370,6 +371,7 @@ impl CodexHarness {
                 }
                 .into());
             }
+            context::enrich(&mut models, self.account_home.as_deref());
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
@@ -651,7 +653,12 @@ impl Harness for CodexHarness {
             &[],
             self.account_home.as_deref(),
         )
-        .map(Some)
+        .map(|mut context| {
+            // Retire persisted catalogs written before context choices existed.
+            use sha2::Digest as _;
+            context.hash = format!("{:x}", sha2::Sha256::digest(format!("codex-context-v1:{}", context.hash)));
+            Some(context)
+        })
     }
     fn scoped_to_account_home(&self, home: &std::path::Path) -> Option<Arc<dyn Harness>> {
         Some(Arc::new(Self {
@@ -664,7 +671,9 @@ impl Harness for CodexHarness {
         }))
     }
     fn fallback_models(&self) -> Vec<Model> {
-        static_models()
+        let mut models = static_models();
+        context::enrich(&mut models, self.account_home.as_deref());
+        models
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
@@ -1032,6 +1041,11 @@ fn thread_start_params(request: &RunRequest, title_only: bool) -> serde_json::Ma
     }
     if let Some(tier) = service_tier(request) {
         p.insert("serviceTier".into(), Value::String(tier));
+    }
+    if !title_only {
+        if let Some(tokens) = context::selected(request) {
+            p.entry("config").or_insert_with(|| json!({}))["model_context_window"] = json!(tokens);
+        }
     }
     p
 }
@@ -2202,6 +2216,29 @@ mod tests {
             transition,
         });
         request
+    }
+
+    #[test]
+    fn context_window_is_passed_to_start_and_resume_without_changing_defaults() {
+        let mut request = instruction_request(None, mast_proto::InstructionTransition::Fresh);
+        assert!(!thread_start_params(&request, false).contains_key("config"));
+        request.model_options.insert("contextWindow".into(), json!("872000"));
+        let mut start = thread_start_params(&request, false);
+        assert_eq!(start["config"]["model_context_window"], json!(872000));
+        let tools = crate::AgentToolsInjection {
+            server_name: "mast-agent".into(), command: "/opt/mast".into(),
+            args: vec!["mcp".into()], env: Default::default(),
+        };
+        with_agent_tools(&mut start, Some(&tools));
+        assert_eq!(start["config"]["model_context_window"], json!(872000));
+        assert_eq!(start["config"]["mcp_servers.mast-agent.command"], json!("/opt/mast"));
+        let resumed = thread_resume_params(&start, "thread");
+        assert_eq!(resumed["config"]["model_context_window"], json!(872000));
+        assert!(thread_start_params(&request, true)["config"].get("model_context_window").is_none());
+        for value in ["default", "0", "-1", "invalid"] {
+            request.model_options.insert("contextWindow".into(), json!(value));
+            assert!(!thread_start_params(&request, false).contains_key("config"));
+        }
     }
 
     #[test]
