@@ -1133,6 +1133,35 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-12; coordinator f89abb61 handing off)
+
+- **Installed: release 85.** Releases 78–85 this session: sheet note keys + Accept/Answer differently/Don't do this
+  (78), hand off picks harness/model (79, full suite), render check fixed (80, 81), structured `plan` artifact kind
+  (82), artifact Export HTML/PDF/markdown (83), visual audit fixes (84, full suite), PR #1 idle CPU (85).
+- **Running:**
+  - Workflow pack, Terra chat 2bbe25e5, branch `workflow-pack`. It ends its turn after a commit or two, so nudge it
+    with "continue until Ready to merge". Left: apply item creation + undo, MCP tools, confirmed apply, Settings UI.
+  - Orchestrator-friction audit, Sonnet chat c8dce614, item 62aa8fe0: why planning with orchestrators is frustrating,
+    using the Cofactr kit redesign chats (coordinator 532a490a), plus the phase 0 go/no-go (9516dd7c). Raises
+    "Review: orchestrator friction".
+- **Waiting on Mikey:** pinned tabs A revised (mast-artifact:18746fbb, request eb86590b: overflow rule, initials tiles in
+  the Space colour derived from the id, Pinned group in the sidebar); older: active-checkout design (a53732a1),
+  agent setup audit (204f55c6), iOS research (99cf645c), Horizon worker idle (1ad5d3ee).
+- **Next queued:** build pinned tabs once decided; approach questions with 2–3 options (7db226ae); freeze watchdog
+  (17c9d278); perf follow-ups (2694931e, partly covered by PR #1); render-check overlap heuristic flags wrapped
+  inline `code` chips (noise); verify release 84's sheet fixes with artifact_render_check on
+  docs/artifact-kit/decision-sheet-example.json after Mikey restarts.
+- **Mikey still has to paste into the Cofactr kit chat 532a490a** (other Space, unreachable): re-read
+  project-planner, republish the plan as `kind: "plan"`, mark droppable sheet rows `optional: true`.
+- **Rules learned this session:**
+  - `main` is fast-forwarded to the integration head in both repos after every push.
+  - The Cofactr palette is for Mast branding assets only; UI styles (Default, Industrial, Horizon) are deliberate and
+    judged on their own intent. The Area taste (one surface, no lines) applies to Area only.
+  - Review worker visuals yourself before merging: `artifact_render_check` (artifacts; also JSON by path since 84)
+    and `scripts/ui-preview.sh` (Mast screens, offscreen PNGs; `handoff` screen exists). UI workers attach a sheet.
+  - Disk: orphaned `*.rcgu.o` (`find <target> -name '*.rcgu.o' -links 1 -mmin +15 -delete`) freed ~65 GB at once.
+  - Admin grants are per Space; Cofactr chats need a read-only snapshot (~/mast-metrics, .worktrees/phase0-data).
+
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
 - **Installed: release 85** (PR #1; touched-crate tests on top of full-suite release 84).
