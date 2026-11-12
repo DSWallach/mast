@@ -94,7 +94,7 @@
 @container (max-width: 380px) { .mk-lane { grid-template-columns: 1fr; } }
 
 /* Keep each flow's steps together and readable at every card width. */
-.mk-sheet .mk-lane { display: flex; overflow-x: auto; align-items: stretch; gap: 24px; padding-bottom: 6px; }
+.mk-sheet .mk-lane { display: flex; flex-direction: row; overflow-x: auto; align-items: stretch; gap: 24px; padding-bottom: 6px; }
 .mk-sheet .mk-lane .mk-step { position: relative; flex: 0 0 160px; min-width: 0; }
 .mk-sheet .mk-lane .mk-step + .mk-step::before { content: '→'; position: absolute; left: -19px; top: 12px; color: var(--mk-sage); }
 .mk-sheet .mk-step-chip, .mk-sheet .mk-step-params { overflow-wrap: anywhere; }
