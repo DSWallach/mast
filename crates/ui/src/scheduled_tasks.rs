@@ -146,6 +146,30 @@ impl ScheduledTasksPage {
         self.refresh(cx);
         cx.notify();
     }
+    pub fn show_tasks(&mut self, cx: &mut Context<Self>) {
+        self.editor = None;
+        self.history = None;
+        self.choices = None;
+        self.snapshot.preview.clear();
+        self.refresh(cx);
+        cx.notify();
+    }
+
+    fn history_task(&self) -> Option<&ScheduledTask> {
+        let id = self.history.as_ref()?;
+        self.snapshot
+            .tasks
+            .iter()
+            .find(|t| &t.id == id && Some(&t.device_id) == self.target.as_ref() && !t.deleted)
+    }
+
+    fn edit_history_task(&mut self, cx: &mut Context<Self>) {
+        if !self.busy {
+            if let Some(task) = self.history_task().cloned() {
+                self.edit(Some(task), cx);
+            }
+        }
+    }
     pub(crate) fn set_active(&mut self, active: bool) {
         self.active = active;
     }
@@ -636,7 +660,16 @@ impl Render for ScheduledTasksPage {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .gap(px(8.0))
+                        .when(self.editor.is_some() || self.history.is_some(), |el| {
+                            el.child(
+                                popover::btn_ghost(&theme, "Manage tasks", "tasks-manage")
+                                    .id("tasks-manage")
+                                    .debug_selector(|| "tasks-manage".into())
+                                    .on_click(cx.listener(|p, _, _, cx| p.show_tasks(cx))),
+                            )
+                        })
                         .child(
                             popover::btn_ghost(&theme, "Refresh", "tasks-refresh")
                                 .id("tasks-refresh")
@@ -1031,11 +1064,7 @@ impl Render for ScheduledTasksPage {
                     .child(
                         popover::btn_ghost(&theme, "Back to tasks", "task-back")
                             .id("task-back")
-                            .on_click(cx.listener(|p, _, _, cx| {
-                                p.editor = None;
-                                p.history = None;
-                                p.load(cx)
-                            })),
+                            .on_click(cx.listener(|p, _, _, cx| p.show_tasks(cx))),
                     ),
             );
             for at in &self.snapshot.preview {
@@ -1064,14 +1093,18 @@ impl Render for ScheduledTasksPage {
             chats.sort_by(|a, b| {
                 mast_proto::task_chat_order(b).cmp(&mast_proto::task_chat_order(a))
             });
-            content = content.child(
-                popover::btn_ghost(&theme, "Back to tasks", "history-back")
-                    .id("history-back")
-                    .on_click(cx.listener(|p, _, _, cx| {
-                        p.history = None;
-                        cx.notify();
-                    })),
-            );
+            if let Some(task) = self.history_task() {
+                content = content
+                    .child(div().text_size(px(15.0)).child(task.draft.name.clone()))
+                    .child(
+                        popover::btn_primary(&theme, "Edit task")
+                            .id("history-edit-task")
+                            .debug_selector(|| "history-edit-task".into())
+                            .on_click(cx.listener(|p, _, _, cx| p.edit_history_task(cx))),
+                    );
+            } else if !self.busy && self.error.is_none() {
+                content = content.child("No editable schedule was found on this device. Use Manage tasks to view or import its schedule; these past sessions remain available.");
+            }
             for (i, chat) in chats.into_iter().enumerate() {
                 let id = chat.id.clone();
                 content = content.child(
@@ -1201,6 +1234,10 @@ impl Render for ScheduledTasksPage {
                     .child(
                         popover::btn_ghost(&theme, "Edit", format!("edit-{}", task.id))
                             .id(SharedString::from(format!("edit-{}", task.id)))
+                            .debug_selector({
+                                let id = task.id.clone();
+                                move || format!("task-edit-{id}").into()
+                            })
                             .on_click(cx.listener(move |p, _, _, cx| {
                                 if !p.busy {
                                     p.edit(Some(edit.clone()), cx)
@@ -1325,6 +1362,84 @@ impl Render for ScheduledTasksPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn run_history_can_edit_its_schedule_and_return_to_all_tasks(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state, cx);
+            p.target = Some("host".into());
+            p.edit(None, cx);
+            let mut draft = p.editor.take().unwrap().draft;
+            draft.name = "Morning briefing".into();
+            draft.prompt = "Read the morning procedure".into();
+            let task = ScheduledTask {
+                id: "morning".into(),
+                revision: 7,
+                device_id: "host".into(),
+                draft,
+                created_at: 1,
+                updated_at: 2,
+                next_due: None,
+                deleted: false,
+                import_source: None,
+                source_handoff_at: None,
+            };
+            let mut second = task.clone();
+            second.id = "weekly".into();
+            second.draft.name = "Weekly report".into();
+            p.snapshot.tasks = vec![task, second];
+            p.show_history("morning".into(), None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(900.0)));
+        cx.run_until_parked();
+        let edit = cx
+            .debug_bounds("history-edit-task")
+            .expect("history exposes Edit task")
+            .center();
+        cx.simulate_click(edit, gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.read_with(cx, |p, cx| {
+            let e = p.editor.as_ref().unwrap();
+            assert_eq!(e.id, "morning");
+            assert_eq!(e.revision, 7);
+            assert_eq!(e.prompt.read(cx).text(), "Read the morning procedure");
+            assert!(p.history.is_none());
+        });
+        let manage = cx
+            .debug_bounds("tasks-manage")
+            .expect("editor exposes Manage tasks")
+            .center();
+        cx.simulate_click(manage, gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.read_with(cx, |p, _| {
+            assert!(p.history.is_none());
+            assert!(p.editor.is_none());
+            assert_eq!(p.snapshot.tasks.len(), 2);
+        });
+        let edit_second = cx
+            .debug_bounds("task-edit-weekly")
+            .expect("every configured task is editable")
+            .center();
+        cx.simulate_click(edit_second, gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.read_with(cx, |p, _| {
+            assert_eq!(p.editor.as_ref().unwrap().id, "weekly")
+        });
+        page.update(cx, |p, cx| {
+            p.show_history("morning".into(), None, cx);
+            p.target = Some("another-host".into());
+            assert!(
+                p.history_task().is_none(),
+                "never edit another device's definition"
+            );
+            p.show_tasks(cx);
+            assert!(p.editor.is_none() && p.history.is_none());
+        });
+    }
+
     #[gpui::test]
     fn latest_editions_and_side_chat_filtering_work_together(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| AppState::new());
