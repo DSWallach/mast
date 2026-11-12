@@ -58,12 +58,12 @@ pub(crate) fn web_document(
     };
     let probe_script = Some(frame_scripts);
     let document = match kind {
-        WebKind::Fragment | WebKind::DecisionSheet => {
+        WebKind::Fragment | WebKind::DecisionSheet | WebKind::Plan => {
             let body = with_probe_prefix(&with_question_style(source), probe_script.as_deref());
             fragment::host_document(
                 &body,
                 title,
-                kind == WebKind::DecisionSheet,
+                matches!(kind, WebKind::DecisionSheet | WebKind::Plan),
                 theme,
                 reduced_motion,
             )
@@ -189,14 +189,14 @@ pub(crate) fn compare_frame(
     let scripts = format!("{LINK_FRAME_SCRIPT}{QUESTION_FRAME_SCRIPT}{script}");
     let body = |fragment: &str| format!("<script>{scripts}</script>\n{fragment}\n{overlay}");
     let (html, wide) = match kind {
-        WebKind::Fragment | WebKind::DecisionSheet => (
+        WebKind::Fragment | WebKind::DecisionSheet | WebKind::Plan => (
             fragment::frame_document(
                 &body(&with_question_style(source)),
                 title,
                 theme,
                 reduced_motion,
             ),
-            kind == WebKind::DecisionSheet,
+            matches!(kind, WebKind::DecisionSheet | WebKind::Plan),
         ),
         WebKind::Mermaid => (
             fragment::frame_document(

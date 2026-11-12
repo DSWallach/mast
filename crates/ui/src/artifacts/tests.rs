@@ -1057,3 +1057,13 @@ fn render_executor_serves_the_stream_with_bounded_concurrency(cx: &mut TestAppCo
     answered.sort();
     assert_eq!(answered, ["req-1", "req-2", "req-3"]);
 }
+
+#[gpui::test]
+fn structured_plan_builds_web_host(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let content = include_str!("../../../../docs/artifact-kit/plan-example.json");
+    let reply = reply_with(content_reply(ArtifactKind::Plan, 1, content, ArtifactContentEncoding::Utf8));
+    let (tab, _, shown, vcx) = open_tab(cx, artifact(&id(1), "Plan", ArtifactKind::Plan), reply);
+    assert_eq!(tab.read_with(vcx, |tab, _| tab.presenter()), Presenter::Web(super::model::WebKind::Plan));
+    assert!(shown.borrow()[0].1.contains("pl-strip"));
+}
