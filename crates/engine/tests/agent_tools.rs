@@ -4187,3 +4187,172 @@ async fn project_orchestrator_can_dismiss_friction() {
     let result = tool(&rig, lease.token(), "dismiss_friction", json!({"id":id,"reason":"Fixed in branch"})).await.unwrap();
     assert_eq!(result["report"]["status"], "dismissed");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_management_checks_designation_and_groups_sessions_across_spaces() {
+    let rig = rig().await;
+    let lease = rig
+        .core
+        .sessions
+        .agent_tokens()
+        .mint(CHAT, "manage", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    let manage = mast_proto::mast_management::TOOL;
+    assert!(
+        tool(&rig, token, manage, json!({}))
+            .await
+            .unwrap_err()
+            .contains("unauthorized")
+    );
+    rig.client
+        .call(methods::SET_PERSONAL_ASSISTANT, json!({"chatId":CHAT}))
+        .await
+        .unwrap();
+    let other_lease =
+        rig.core
+            .sessions
+            .agent_tokens()
+            .mint(OTHER_CHAT, "ordinary", SPACE, &rig.core.device_id);
+    assert!(
+        tool(&rig, other_lease.token(), manage, json!({}))
+            .await
+            .unwrap_err()
+            .contains("unauthorized")
+    );
+    let guide = tool(&rig, token, manage, json!({})).await.unwrap();
+    assert!(guide.get("ScheduledTasks").is_some());
+    assert!(guide.get("WatchSidebarPreferences").is_some());
+    assert!(
+        tool(
+            &rig,
+            token,
+            manage,
+            json!({"method":"GrantAdmin", "params":{}})
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        tool(
+            &rig,
+            token,
+            manage,
+            json!({"method":"AgentToolCall", "params":{}})
+        )
+        .await
+        .is_err()
+    );
+    // No Space: this chat is outside the caller's ordinary project scope.
+    for params in [
+        json!({"op":"renameChat", "chatId":PROJECTLESS, "title":"Managed"}),
+        json!({"op":"changeSidebarPin", "change":{"action":"section", "change":{"action":"create", "id":"group", "name":"Follow up"}}}),
+        json!({"op":"changeSidebarPin", "change":{"action":"section", "change":{"action":"assign", "sessionId":PROJECTLESS, "sectionId":"group"}}}),
+    ] {
+        tool(
+            &rig,
+            token,
+            manage,
+            json!({"method":"Mutate", "params":params}),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        rig.core
+            .workspace
+            .chat(PROJECTLESS)
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Managed")
+    );
+    let prefs = tool(
+        &rig,
+        token,
+        manage,
+        json!({"method":"WatchSidebarPreferences"}),
+    )
+    .await
+    .unwrap();
+    assert!(prefs.to_string().contains(PROJECTLESS));
+    assert!(prefs.to_string().contains("Follow up"));
+    rig.client
+        .call(methods::CLEAR_PERSONAL_ASSISTANT, json!({}))
+        .await
+        .unwrap();
+    assert!(tool(&rig, token, manage, json!({"method":"Mutate", "params":{"op":"renameChat", "chatId":PROJECTLESS, "title":"Refused"}})).await.unwrap_err().contains("unauthorized"));
+    assert_eq!(
+        rig.core
+            .workspace
+            .chat(PROJECTLESS)
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Managed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_management_edits_tasks_and_reruns_with_revision_and_replay_checks() {
+    let rig = rig().await;
+    let lease =
+        rig.core
+            .sessions
+            .agent_tokens()
+            .mint(CHAT, "manage-tasks", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    rig.client
+        .call(methods::SET_PERSONAL_ASSISTANT, json!({"chatId":CHAT}))
+        .await
+        .unwrap();
+    let manage = mast_proto::mast_management::TOOL;
+    let mut draft = json!({
+        "name":"Briefing", "prompt":"Original prompt", "cwd":rig.space_path,
+        "spaceId":SPACE, "config":{"harness":"mock", "sandbox":"workspace-write", "autoApprove":false},
+        "schedule":{"type":"cron", "expression":"0 8 * * 1-5", "timezone":"America/New_York"},
+        "enabled":false, "graceMinutes":60
+    });
+    tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{
+        "action":"save", "id":"managed-task", "expectedRevision":0, "draft":draft, "operationId":"create-managed-task"
+    }})).await.unwrap();
+    let first = tool(
+        &rig,
+        token,
+        manage,
+        json!({"method":"ScheduledTasks", "params":{"action":"list"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["tasks"][0]["draft"]["prompt"], "Original prompt");
+    draft["prompt"] = json!("Updated prompt");
+    tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{
+        "action":"save", "id":"managed-task", "expectedRevision":1, "draft":draft, "operationId":"edit-managed-task"
+    }})).await.unwrap();
+    assert!(tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{
+        "action":"save", "id":"managed-task", "expectedRevision":1, "draft":draft, "operationId":"stale-edit"
+    }})).await.is_err());
+    for _ in 0..2 {
+        tool(
+            &rig,
+            token,
+            manage,
+            json!({"method":"ScheduledTasks", "params":{
+                "action":"runNow", "id":"managed-task", "operationId":"same-rerun"
+            }}),
+        )
+        .await
+        .unwrap();
+    }
+    let history = tool(
+        &rig,
+        token,
+        manage,
+        json!({"method":"ScheduledTasks", "params":{"action":"history", "id":"managed-task"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(history["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(history["runs"][0]["snapshot"]["prompt"], "Updated prompt");
+}

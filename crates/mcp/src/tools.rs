@@ -620,7 +620,8 @@ fn friction_catalog() -> Vec<ToolDef> {
 
 /// Whether `name` is an engine-side agent tool (`AgentToolCall`).
 fn is_engine_agent_tool(name: &str) -> bool {
-    agent_tool_names::WORK_OUTLINE.contains(&name)
+    name == mast_proto::mast_management::TOOL
+        || agent_tool_names::WORK_OUTLINE.contains(&name)
         || agent_tool_names::ARTIFACTS.contains(&name)
         || DIFF_TARGET_TOOLS.contains(&name)
         || name == agent_tool_names::REPORT_FRICTION
@@ -913,6 +914,16 @@ impl Tools {
             defs.extend(artifact_catalog());
             defs.extend(diff_target_catalog());
             defs.extend(friction_catalog());
+            let catalog = mast_proto::mast_management::operations();
+            let methods: Vec<_> = catalog.as_object().expect("management catalog").keys().collect();
+            defs.push(ToolDef {
+                name: mast_proto::mast_management::TOOL,
+                description: "View and manage Mast across all Spaces as the user-designated personal assistant. Call with {} first for supported methods and parameter examples. Reads return current snapshots. Covers scheduled-task details, editing, enabling/disabling, history and manual re-runs; sessions, sidebar groups and pins; Spaces, devices, Work Outline items/instructions/settings, project actions, harnesses, wake and title settings, friction and session links. Use existing chat tools for transcripts, messages and running work. Ordinary chats cannot use this tool; every call rechecks the designation. Read current details before replacing them; preserve fields you are not changing. Reuse operationId for retries of the same write, and use a new one for each new action.",
+                input_schema: json!({"type":"object", "properties": {
+                    "method":{"type":"string", "enum":methods},
+                    "params":{"type":"object", "description":"Parameters from the guide returned by an empty mast_manage call; desktop RPC wire shapes."}
+                }, "additionalProperties":false}),
+            });
         }
         defs
     }
@@ -1022,6 +1033,11 @@ impl Tools {
             "runId": origin.map(|o| o.run_id.clone()),
             "adminSpaceId": origin.and_then(|o| o.admin_space_id.clone()),
             "personalAssistant": origin.is_some_and(|o| o.personal_assistant),
+            "managementTools": if origin.is_some_and(|o| o.personal_assistant) {
+                json!([mast_proto::mast_management::TOOL])
+            } else {
+                json!([])
+            },
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
             "workOutlineTools": if origin.is_some() {
@@ -1043,7 +1059,10 @@ impl Tools {
                  also reach every chat and item of their Space; see adminSpaceId. The \
                  personal assistant chat (user-designated; see personalAssistant) reaches \
                  every chat in every Space with every chat tool, and create_chat works \
-                 in any Space or on any device, still never wider than this chat's sandbox."
+                 in any Space or on any device, still never wider than this chat's sandbox. \
+                 The personal assistant can also use mast_manage to inspect and edit \
+                 scheduled tasks, trigger re-runs, organize sessions into sidebar groups \
+                 and pins, and manage Mast across Spaces; call it with {} for its guide."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
@@ -2744,6 +2763,35 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["token"], BETA_TOKEN);
         assert_eq!(calls[0]["arguments"]["path"], "/tmp/wt");
+    }
+
+    #[tokio::test]
+    async fn management_is_discoverable_and_forwarded_with_the_run_token() {
+        let world = Arc::new(World::default());
+        assert!(!tools(world.clone(), None).has(mast_proto::mast_management::TOOL));
+        let agent = tools(world.clone(), Some(BETA_TOKEN));
+        let def = agent
+            .list()
+            .into_iter()
+            .find(|d| d.name == mast_proto::mast_management::TOOL)
+            .unwrap();
+        assert!(
+            def.input_schema["properties"]["method"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("ScheduledTasks"))
+        );
+        agent
+            .call(
+                mast_proto::mast_management::TOOL,
+                json!({"method":"ScheduledTasks", "params":{"action":"list"}}),
+            )
+            .await
+            .unwrap();
+        let calls = world.agent_calls(mast_proto::mast_management::TOOL);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["token"], BETA_TOKEN);
+        assert_eq!(calls[0]["arguments"]["method"], "ScheduledTasks");
     }
 
     #[test]
