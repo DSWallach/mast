@@ -89,6 +89,7 @@ pub(crate) fn build_dbus_menu(
     (out_items, actions)
 }
 
+#[derive(Clone)]
 pub struct StatusNotifierItemInterface {
     state: Arc<Mutex<LinuxMenuState>>,
     event_tx: UnboundedSender<MenuEvent>,
@@ -415,6 +416,7 @@ async fn run_tray_worker(
         state: state.clone(),
         event_tx: event_tx.clone(),
     };
+    let sni_iface_for_updates = sni_iface.clone();
     let menu_iface = DBusMenuInterface {
         state: state.clone(),
         event_tx: event_tx.clone(),
@@ -449,18 +451,27 @@ async fn run_tray_worker(
 
     let update_task = async {
         while let Some(()) = update_rx.next().await {
-            let revision = {
+            let (status, revision) = {
                 let s = state.lock().unwrap();
-                s.revision
+                let status = if s.view.is_some() {
+                    "Active"
+                } else {
+                    "Passive"
+                };
+                (status, s.revision)
             };
 
-            // Emit NewIcon and NewToolTip on StatusNotifierItem
+            // Emit NewStatus, NewIcon and NewToolTip on StatusNotifierItem
             if let Ok(emitter) = zbus::object_server::SignalEmitter::new(
                 &connection,
                 ObjectPath::from_static_str_unchecked("/StatusNotifierItem"),
             ) {
+                let _ = StatusNotifierItemInterface::new_status(&emitter, status).await;
                 let _ = StatusNotifierItemInterface::new_icon(&emitter).await;
                 let _ = StatusNotifierItemInterface::new_tool_tip(&emitter).await;
+                let _ = sni_iface_for_updates.status_changed(&emitter).await;
+                let _ = sni_iface_for_updates.icon_pixmap_changed(&emitter).await;
+                let _ = sni_iface_for_updates.tool_tip_changed(&emitter).await;
             }
 
             // Emit LayoutUpdated on DBusMenu
