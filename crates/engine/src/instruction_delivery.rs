@@ -144,6 +144,7 @@ pub async fn resolve_pin_waiting(
 /// User-facing name of a harness for capability messages.
 pub fn harness_label(harness: HarnessId) -> &'static str {
     match harness {
+        HarnessId::Antigravity => "Antigravity",
         HarnessId::ClaudeCode => "Claude Code",
         HarnessId::Codex => "Codex",
         HarnessId::Cursor => "Cursor",
@@ -212,7 +213,11 @@ pub fn context_reset_message(harness: HarnessId) -> String {
 }
 
 /// Harnesses whose instruction support is advertised per device.
-pub const INSTRUCTION_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
+pub const INSTRUCTION_HARNESSES: &[HarnessId] = &[
+    HarnessId::Antigravity,
+    HarnessId::ClaudeCode,
+    HarnessId::Codex,
+];
 
 /// Harnesses on this device that can deliver instructions right now (installed
 /// and probe passing). Runs the cached CLI probes; call off the async runtime.

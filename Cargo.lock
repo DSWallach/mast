@@ -5467,6 +5467,8 @@ dependencies = [
  "windows-sys 0.61.2",
  "wry",
  "x11rb 0.14.0",
+ "zbus",
+ "zvariant",
 ]
 
 [[package]]

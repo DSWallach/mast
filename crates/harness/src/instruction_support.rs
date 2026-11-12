@@ -45,7 +45,9 @@ pub enum InstructionReplaceStrategy {
 /// Apply that will need a fresh session). `None`: no instruction delivery.
 pub fn declared_replace_strategy(harness: HarnessId) -> Option<InstructionReplaceStrategy> {
     match harness {
-        HarnessId::ClaudeCode => Some(InstructionReplaceStrategy::RespawnResume),
+        HarnessId::Antigravity | HarnessId::ClaudeCode => {
+            Some(InstructionReplaceStrategy::RespawnResume)
+        }
         HarnessId::Codex => Some(InstructionReplaceStrategy::FreshSession),
         _ => None,
     }
@@ -371,6 +373,10 @@ mod declared_strategy_tests {
         ));
         assert_eq!(
             declared_replace_strategy(HarnessId::ClaudeCode),
+            Some(InstructionReplaceStrategy::RespawnResume)
+        );
+        assert_eq!(
+            declared_replace_strategy(HarnessId::Antigravity),
             Some(InstructionReplaceStrategy::RespawnResume)
         );
         assert_eq!(declared_replace_strategy(HarnessId::Cursor), None);
