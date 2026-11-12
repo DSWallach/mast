@@ -66,6 +66,7 @@ pub(crate) fn fresh_session_apply_warning(state: &AppState, chat_id: &str) -> Op
 
 fn harness_display_name(harness: mast_proto::HarnessId) -> Option<&'static str> {
     match harness {
+        mast_proto::HarnessId::Antigravity => Some("Antigravity"),
         mast_proto::HarnessId::Codex => Some("Codex"),
         mast_proto::HarnessId::ClaudeCode => Some("Claude Code"),
         _ => None,
