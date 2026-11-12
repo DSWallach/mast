@@ -205,6 +205,14 @@ pub fn render(p: &Plan) -> String {
                 esc(&d.mode)
             );
         }
+        for d in t.external.as_deref().unwrap_or(&[]) {
+            let _ = write!(
+                o,
+                "<span class=\"pl-dep\">{} · {}</span>",
+                esc(&d.label),
+                esc(&d.state)
+            );
+        }
         let _ = write!(
             o,
             "</span></div></div><div class=\"pl-linear\"><div class=\"pl-cap\">Linear body</div><pre>{}</pre></div></div></div>",
@@ -241,9 +249,12 @@ pub fn render(p: &Plan) -> String {
     for q in qs {
         let _ = write!(
             o,
-            "<div class=\"pl-qrow\"><span class=\"pl-q\">{}</span> {}</div>",
+            "<div class=\"pl-qrow\"><div><span class=\"pl-q\">{}</span> {} <span class=\"pl-row pl-static\">{}</span></div><div class=\"mk-muted\">Blocks {} {}</div></div>",
             esc(&q.id),
-            esc(&q.text)
+            esc(&q.text),
+            esc(&q.row),
+            esc(&q.blocks.join(", ")),
+            inline(q.example.as_deref().unwrap_or(""))
         );
     }
     section(&mut o, "evidence", "Evidence");
@@ -260,27 +271,58 @@ pub fn render(p: &Plan) -> String {
             .unwrap_or("");
         let _ = write!(
             o,
-            "<li>{} <span class=\"pl-cite pl-{}\"><u></u>{}</span></li>",
+            "<li>{} <span class=\"pl-cite pl-{}\" title=\"{}\"><u></u>{} <i>{}</i></span></li>",
             inline(&f.claim),
             esc(&f.status),
-            esc(cite)
+            esc(cite),
+            esc(cite.rsplit('/').next().unwrap_or(cite)),
+            esc(&f.status)
         );
     }
     o.push_str("</ul></details>");
     section(&mut o, "blast", "Blast radius");
     o.push_str("<details class=\"pl-ev\"><summary>Surfaces</summary><ul>");
     for b in p.blast_radius.as_deref().unwrap_or(&[]) {
-        let _ = write!(o, "<li>{}: {}</li>", esc(&b.surface), inline(&b.change));
+        let _ = write!(
+            o,
+            "<li><b>{}</b> · {} · {}: {} <span class=\"mk-muted\">{}</span></li>",
+            esc(&b.surface),
+            esc(&b.kind),
+            esc(&b.audience),
+            inline(&b.change),
+            esc(&b.gate)
+        );
     }
     o.push_str("</ul></details>");
     section(&mut o, "verify", "Verification");
     o.push_str("<details class=\"pl-ev\"><summary>Checks</summary><ul>");
     for v in p.verification.as_deref().unwrap_or(&[]) {
-        let _ = write!(o, "<li>{}</li>", esc(&v.text));
+        let _ = write!(
+            o,
+            "<li>{} {}</li>",
+            esc(v.ticket.as_deref().unwrap_or("")),
+            esc(&v.text)
+        );
+    }
+    o.push_str("</ul></details>");
+    if let Some(items) = &p.superseded {
+        if !items.is_empty() {
+            o.push_str("<details class=\"pl-ev\"><summary>Superseded</summary><ul>");
+            for x in items {
+                let _ = write!(
+                    o,
+                    "<li>{} — {} ({})</li>",
+                    esc(&x.item),
+                    esc(&x.reason),
+                    esc(&x.date)
+                );
+            }
+            o.push_str("</ul></details>");
+        }
     }
     let _ = write!(
         o,
-        "</ul></details></div></div></div><script>{}</script>",
+        "</div></div></div><script>{}</script>",
         include_str!("plan.js")
     );
     o

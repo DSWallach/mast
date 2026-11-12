@@ -1,7 +1,7 @@
 # Plan JSON
 
 Publish a UTF-8 `.json` file with `artifact_publish`, `kind: "plan"` and a title. See
-[kit-plan.json](kit-plan.json) for all sections. Arrays retain display order. Prose fields
+[plan-example.json](plan-example.json) for all sections. Arrays retain display order. Prose fields
 (`summary`, `goal`, `text`, `claim`, `change`) allow inline markdown (bold, code, links); everything
 else is plain text. Unknown keys are rejected. Summary chips (counts by ticket status, open
 questions) are computed by Mast. Ids are nonempty, unique within their array, and stable across
