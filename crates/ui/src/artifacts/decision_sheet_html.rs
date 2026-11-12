@@ -21,7 +21,7 @@ const CSS: &str = r#"
 .mk-sheet-actions[hidden], .mk-sheet-note[hidden] { display:none; }
 .mk-sheet-actions button, .mk-sheet-bar button { font:inherit; font-size:13px; font-weight:600; border:0; border-radius:14px; padding:4px 14px; cursor:pointer; color:var(--foreground); }
 .mk-sheet-actions [data-sheet-accept], .mk-sheet-bar [data-sheet-send] { background:color-mix(in srgb,var(--mk-green) 30%,var(--background)); }
-.mk-sheet-actions [data-sheet-reject] { background:color-mix(in srgb,var(--foreground) 6%,var(--background)); color:var(--muted-foreground); }
+.mk-sheet-actions [data-sheet-reject], .mk-sheet-actions [data-sheet-answer] { background:color-mix(in srgb,var(--foreground) 6%,var(--background)); color:var(--muted-foreground); }
 .mk-sheet-actions [data-sheet-change], .mk-sheet-actions [data-sheet-undo], .mk-sheet-actions [data-sheet-note-toggle], .mk-sheet-bar [data-sheet-discard] { background:transparent; color:var(--muted-foreground); padding:4px 3px; }
 .mk-sheet .mk-sheet-note { grid-column:1 / -1; color:var(--muted-foreground); font-size:12px; }
 .mk-sheet-note input { box-sizing:border-box; display:block; width:100%; margin-top:4px; padding:6px 8px; font:inherit; color:var(--foreground); background:var(--background); border:1px solid var(--border); border-radius:6px; }
@@ -50,7 +50,7 @@ const SCRIPT: &str = r#"(() => {
     if (!controls) return;
     const note = controls.querySelector('label'); const input = note.querySelector('input');
     note.className = 'mk-sheet-note'; note.textContent = 'Note'; note.appendChild(input); note.hidden = true; row.appendChild(note);
-    const toggle = document.createElement('button'); toggle.type='button'; toggle.textContent='💬'; toggle.setAttribute('data-sheet-note-toggle',''); toggle.setAttribute('aria-label','Add note');
+    const toggle = document.createElement('button'); toggle.type='button'; toggle.textContent='Note'; toggle.setAttribute('data-sheet-note-toggle',''); toggle.setAttribute('aria-label','Add note');
     const change = document.createElement('button'); change.type='button'; change.textContent='Change'; change.setAttribute('data-sheet-change','');
     controls.insertBefore(change, controls.querySelector('[data-sheet-undo]')); controls.appendChild(toggle);
   });
@@ -78,6 +78,7 @@ const SCRIPT: &str = r#"(() => {
       const note = row.querySelector('.mk-sheet-note'); const input = note.querySelector('input');
       note.hidden = !!saved || !noteOpen.has(id);
       note.firstChild.textContent = answering.has(id) ? 'Your answer' : 'Note';
+      input.placeholder = answering.has(id) ? 'Your answer' : 'Note';
       if (document.activeElement !== input) input.value = notes.get(id) || '';
     });
   };
