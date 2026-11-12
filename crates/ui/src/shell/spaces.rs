@@ -5550,7 +5550,8 @@ impl Shell {
     }
 
     /// The personal assistant's own section, above the space filter: it stays
-    /// put whatever the filter, sort or grouping.
+    /// put whatever the filter, sort or grouping. A scheduled-task assistant
+    /// shows and opens its latest run, and stays lit on any of its runs.
     pub(super) fn render_personal_assistant_section(
         &mut self,
         theme: &Theme,
@@ -5559,12 +5560,10 @@ impl Shell {
         let now = Utc::now();
         let (row, selected) = {
             let state = self.state.read(cx);
-            let chat = state
-                .chats
-                .iter()
-                .find(|chat| state.personal_assistant.is(&chat.id))?
-                .clone();
-            let selected = state.selected_chat.as_deref() == Some(chat.id.as_str());
+            let chat = state.personal_assistant.current(&state.chats)?.clone();
+            let selected = state
+                .selected_chat_row()
+                .is_some_and(|selected| state.personal_assistant.covers(selected));
             (
                 self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
                 selected,
@@ -5717,7 +5716,7 @@ impl Shell {
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
                 .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
-                .filter(|c| !state.personal_assistant.is(&c.id))
+                .filter(|c| !state.personal_assistant.covers(c))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,

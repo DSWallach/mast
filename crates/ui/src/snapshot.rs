@@ -107,13 +107,13 @@ fn chat_fixture_with(
             ("fixture-tests", "Verify the changes"),
         ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
         if std::env::var_os("MAST_PREVIEW_ASSISTANT").is_some() {
-            state.chats.push(serde_json::from_value(serde_json::json!({"id":"fixture-assistant","deviceId":"local","spaceId":"fixture-space","title":"Daily briefing assistant","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap());
-            state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
-                assistant: Some(mast_proto::PersonalAssistant {
-                    chat_id: "fixture-assistant".into(),
-                    designated_at_ms: 0,
-                }),
-            });
+            // Two runs of one scheduled task; the older one is designated and
+            // the section shows the newer.
+            for (id, title, created) in [("fixture-assistant-old", "Daily briefing (yesterday)", 1_i64), ("fixture-assistant", "Daily briefing assistant", 2)] {
+                state.chats.push(serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"},"scheduledTaskInfo":{"taskId":"fixture-briefing","taskName":"Daily briefing","runId":id,"sessionCreatedAt":created}})).unwrap());
+            }
+            let designated = mast_proto::PersonalAssistant::for_chat(&state.chats[state.chats.len() - 2], 0);
+            state.personal_assistant.apply(mast_proto::PersonalAssistantReply { assistant: Some(designated) });
         }
         preview_chat_outline(&mut state);
         state

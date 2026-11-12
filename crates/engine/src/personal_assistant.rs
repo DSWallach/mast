@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use mast_proto::PersonalAssistant;
+use mast_proto::{Chat, PersonalAssistant};
 
 #[derive(Default)]
 struct State {
@@ -44,12 +44,11 @@ impl PersonalAssistantStore {
         }
     }
 
-    /// Designate `chat_id`, replacing any previous assistant.
-    pub fn set(&self, chat_id: &str) -> PersonalAssistant {
-        let assistant = PersonalAssistant {
-            chat_id: chat_id.to_owned(),
-            designated_at_ms: chrono::Utc::now().timestamp_millis(),
-        };
+    /// Designate `chat` (and its scheduled task, if it is a run), replacing
+    /// any previous assistant.
+    pub fn set(&self, chat: &Chat) -> PersonalAssistant {
+        let assistant =
+            PersonalAssistant::for_chat(chat, chrono::Utc::now().timestamp_millis());
         let mut state = lock(&self.state);
         state.current = Some(assistant.clone());
         Self::persist(&state);
@@ -67,11 +66,11 @@ impl PersonalAssistantStore {
         lock(&self.state).current.clone()
     }
 
-    pub fn is_assistant(&self, chat_id: &str) -> bool {
+    pub fn is_assistant(&self, chat: &Chat) -> bool {
         lock(&self.state)
             .current
             .as_ref()
-            .is_some_and(|a| a.chat_id == chat_id)
+            .is_some_and(|a| a.covers(chat))
     }
 }
 
@@ -79,20 +78,35 @@ impl PersonalAssistantStore {
 mod tests {
     use super::*;
 
+    fn chat(id: &str, task: Option<&str>) -> Chat {
+        let mut chat = serde_json::json!({
+            "id": id, "deviceId": "d1", "archived": false, "spaceId": "s1",
+            "createdAt": "2026-11-01T00:00:00Z"
+        });
+        if let Some(task) = task {
+            chat["scheduledTaskInfo"] =
+                serde_json::json!({ "taskId": task, "taskName": "Briefing", "runId": id });
+        }
+        serde_json::from_value(chat).unwrap()
+    }
+
     #[test]
     fn set_replaces_and_survives_a_reload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("personal-assistant.json");
         let store = PersonalAssistantStore::default();
         store.set_store(path.clone());
-        store.set("a");
-        store.set("b");
-        assert!(!store.is_assistant("a"));
-        assert!(store.is_assistant("b"));
+        store.set(&chat("a", None));
+        store.set(&chat("b", Some("t1")));
+        assert!(!store.is_assistant(&chat("a", None)));
+        assert!(store.is_assistant(&chat("b", Some("t1"))));
+        // A later run of the same task is the assistant too.
+        assert!(store.is_assistant(&chat("c", Some("t1"))));
 
         let reloaded = PersonalAssistantStore::default();
         reloaded.set_store(path.clone());
         assert_eq!(reloaded.get().map(|a| a.chat_id), Some("b".into()));
+        assert!(reloaded.is_assistant(&chat("c", Some("t1"))));
 
         reloaded.clear();
         let cleared = PersonalAssistantStore::default();

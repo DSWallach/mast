@@ -2783,7 +2783,7 @@ impl RpcService for EngineRpc {
                     ));
                 }
                 RpcReply::value(&mast_proto::PersonalAssistantReply {
-                    assistant: Some(self.agent_tools.tokens().personal_assistant().set(&p.chat_id)),
+                    assistant: Some(self.agent_tools.tokens().personal_assistant().set(&chat)),
                 })
             }
             methods::CLEAR_PERSONAL_ASSISTANT => {
