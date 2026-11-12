@@ -1169,7 +1169,9 @@ fn kick_relevant(paths: &[PathBuf], git_dir: &Path) -> bool {
         match parts.first().map(|part| part.as_ref()) {
             Some("objects" | "logs" | "worktrees" | "FETCH_HEAD" | "ORIG_HEAD") => false,
             Some("modules") if parts.len() > 2 => {
-                matches!(parts[2].as_ref(), "HEAD" | "refs" | "packed-refs")
+                parts[2..].iter().any(|part| {
+                    matches!(part.as_ref(), "HEAD" | "refs" | "packed-refs")
+                })
             }
             _ => true,
         }
@@ -3253,6 +3255,16 @@ mod watch_budget_tests {
         assert!(kicks(&["/repo/.git/info/exclude"]), "unknown git files count");
         assert!(kicks(&["/repo/.git/modules/ui/HEAD"]), "submodule HEAD moves the gitlink");
         assert!(kicks(&["/repo/.git/modules/ui/refs/heads/main"]));
+        for module in ["components/ui", "outer/modules/inner"] {
+            for reference in ["HEAD", "refs/heads/main", "packed-refs"] {
+                assert!(kicks(&[&format!(
+                    "/repo/.git/modules/{module}/{reference}"
+                )]));
+            }
+            for noise in ["index", "objects/ab/cdef", "refs/heads/main.lock"] {
+                assert!(!kicks(&[&format!("/repo/.git/modules/{module}/{noise}")]));
+            }
+        }
         assert!(!kicks(&["/repo/.git/modules/ui/index"]));
         assert!(!kicks(&["/repo/.git/modules/flagship/worktrees/wt/index"]));
         assert!(!kicks(&["/repo/.git/worktrees/wt/HEAD"]));

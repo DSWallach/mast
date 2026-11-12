@@ -106,3 +106,6 @@ pub fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+/// Discoverable management surface for the user-designated assistant.
+pub mod mast_management;

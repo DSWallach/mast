@@ -53,6 +53,8 @@
 
 use async_trait::async_trait;
 use base64::Engine as _;
+mod assistant_management;
+
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde::Deserialize;
@@ -3593,7 +3595,9 @@ impl RpcService for EngineRpc {
                 let grant = service.tokens().authenticate(&p.token).ok();
                 let tool = p.tool.clone();
                 let result: Result<serde_json::Value, RpcError> =
-                    if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
+                    if p.tool == mast_proto::mast_management::TOOL {
+                        self.assistant_manage(&p).await
+                    } else if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
                         match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p))
                             .await
                         {

@@ -28,6 +28,12 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 85: PR #1 (David Wallach) idle CPU + input latency** (2026-11-12, 52ab0bcbb; tests for touched crates
+  from 638cf1008: nextest 1327/1328, only the known Tailscale-only `peer::actual_webrtc_pair_streams…`; UI 2630/0):
+  search index re-walks on repair or rate-limited picker open, idle indexes retire; diff sync ignores foreign git-dir
+  churn but tracks (nested) submodule refs; preview scan backs off to 10 s; sidebar culls far-off rows; composer and
+  pickers redraw less. Backup: `~/zeron-dev-app-backups/mast-release-84`.
+
 - **Release 84: visual audit fixes** (2026-11-12, aa47417fe; full suite from 07ecc9648: nextest 2534/2535, only the
   known `preview::leak remote_preview_churn` hang; UI 2625/0): decision sheet flow lanes wrap/scroll with attached
   connectors; row controls (Accept primary, others secondary, monochrome note button, "Your answer" placeholder);
@@ -1127,9 +1133,40 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-12; coordinator f89abb61 handing off)
+
+- **Installed: release 85.** Releases 78–85 this session: sheet note keys + Accept/Answer differently/Don't do this
+  (78), hand off picks harness/model (79, full suite), render check fixed (80, 81), structured `plan` artifact kind
+  (82), artifact Export HTML/PDF/markdown (83), visual audit fixes (84, full suite), PR #1 idle CPU (85).
+- **Running:**
+  - Workflow pack, Terra chat 2bbe25e5, branch `workflow-pack`. It ends its turn after a commit or two, so nudge it
+    with "continue until Ready to merge". Left: apply item creation + undo, MCP tools, confirmed apply, Settings UI.
+  - Orchestrator-friction audit, Sonnet chat c8dce614, item 62aa8fe0: why planning with orchestrators is frustrating,
+    using the Cofactr kit redesign chats (coordinator 532a490a), plus the phase 0 go/no-go (9516dd7c). Raises
+    "Review: orchestrator friction".
+- **Waiting on Mikey:** pinned tabs A revised (mast-artifact:18746fbb, request eb86590b: overflow rule, initials tiles in
+  the Space colour derived from the id, Pinned group in the sidebar); older: active-checkout design (a53732a1),
+  agent setup audit (204f55c6), iOS research (99cf645c), Horizon worker idle (1ad5d3ee).
+- **Next queued:** build pinned tabs once decided; approach questions with 2–3 options (7db226ae); freeze watchdog
+  (17c9d278); perf follow-ups (2694931e, partly covered by PR #1); render-check overlap heuristic flags wrapped
+  inline `code` chips (noise); verify release 84's sheet fixes with artifact_render_check on
+  docs/artifact-kit/decision-sheet-example.json after Mikey restarts.
+- **Mikey still has to paste into the Cofactr kit chat 532a490a** (other Space, unreachable): re-read
+  project-planner, republish the plan as `kind: "plan"`, mark droppable sheet rows `optional: true`.
+- **Rules learned this session:**
+  - `main` is fast-forwarded to the integration head in both repos after every push.
+  - The Cofactr palette is for Mast branding assets only; UI styles (Default, Industrial, Horizon) are deliberate and
+    judged on their own intent. The Area taste (one surface, no lines) applies to Area only.
+  - Review worker visuals yourself before merging: `artifact_render_check` (artifacts; also JSON by path since 84)
+    and `scripts/ui-preview.sh` (Mast screens, offscreen PNGs; `handoff` screen exists). UI workers attach a sheet.
+  - Disk: orphaned `*.rcgu.o` (`find <target> -name '*.rcgu.o' -links 1 -mmin +15 -delete`) freed ~65 GB at once.
+  - Admin grants are per Space; Cofactr chats need a read-only snapshot (~/mast-metrics, .worktrees/phase0-data).
+
 ## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
 
-- **Installed: release 84** (full suite).
+- **Installed: release 85** (PR #1; touched-crate tests on top of full-suite release 84).
+- **Auditing:** orchestrator friction in the Cofactr kit redesign chats + phase 0 go/no-go (item 62aa8fe0, Sonnet chat
+  c8dce614; read-only snapshot under ~/mast-metrics/snapshots/2026-11-12-friction).
 - **Visual audit** 2026-11-12 (mast-artifact:d3e9de4d rev 3): 7 bug fixes shipped in release 84. Style colours of
   Horizon/Industrial are deliberate, not findings; the Cofactr palette is for branding only. Pinned tabs A revised
   (mast-artifact:18746fbb, request eb86590b) awaits Mikey's three decisions.

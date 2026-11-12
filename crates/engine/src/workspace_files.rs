@@ -41,6 +41,8 @@ pub const WATCH_REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 pub const MAX_WATCH_DIRS: usize = 8_000;
 const WATCH_EVENT_BUFFER: usize = 256;
 const WATCH_BROADCAST_BUFFER: usize = 64;
+// Picker opens request a refresh, coalesced and limited even on huge checkouts.
+const SEARCH_INDEX_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// An index nobody has subscribed to for two consecutive checks stops walking
 /// its checkout; the next subscriber starts a fresh one.
 const SEARCH_INDEX_IDLE_CHECK: Duration = Duration::from_secs(60);
@@ -56,7 +58,7 @@ struct WorkspaceFilesInner {
     device_id: String,
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
-    search_indexes: Mutex<HashMap<String, SearchIndexReceiver>>,
+    search_indexes: Mutex<HashMap<String, SearchIndex>>,
     cancel: CancellationToken,
 }
 
@@ -430,14 +432,22 @@ impl WorkspaceFiles {
         let (receiver, sender) = {
             let mut indexes = lock(&self.inner.search_indexes);
             if let Some(index) = indexes.get(&workspace.checkout_id) {
-                (index.clone(), None)
+                index.refresh.notify_one();
+                (index.receiver.clone(), None)
             } else {
                 let (sender, receiver) = tokio::sync::watch::channel(None);
-                indexes.insert(workspace.checkout_id.clone(), receiver.clone());
-                (receiver, Some(sender))
+                let refresh = Arc::new(Notify::new());
+                indexes.insert(
+                    workspace.checkout_id.clone(),
+                    SearchIndex {
+                        receiver: receiver.clone(),
+                        refresh: refresh.clone(),
+                    },
+                );
+                (receiver, Some((sender, refresh)))
             }
         };
-        if let Some(sender) = sender {
+        if let Some((sender, refresh)) = sender {
             let service = self.clone();
             let index_service = self.clone();
             let cancel = self.inner.cancel.child_token();
@@ -472,9 +482,8 @@ impl WorkspaceFiles {
                 // The subscription precedes the second walk, so events during
                 // that walk are replayed after it completes.
                 let _ = changes.recv().await;
-                // Over-budget checkouts have no live watcher; they re-walk on the
-                // watch's periodic repair resync rather than on a tight timer, since
-                // a walk of a large tree costs seconds of CPU.
+                // Over-budget checkouts re-walk on repair resyncs or new search
+                // subscriptions. No recurring refresh timer runs while idle.
                 let mut idle = tokio::time::interval(SEARCH_INDEX_IDLE_CHECK);
                 idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 idle.tick().await;
@@ -492,8 +501,15 @@ impl WorkspaceFiles {
                     if changed {
                         sender.send_replace(Some(result));
                     }
+                    let refresh_after = tokio::time::Instant::now() + SEARCH_INDEX_REFRESH_INTERVAL;
+                    let mut refresh_pending = false;
                     loop {
                         let change = tokio::select! {
+                            _ = refresh.notified() => {
+                                refresh_pending = true;
+                                continue;
+                            }
+                            _ = tokio::time::sleep_until(refresh_after), if refresh_pending => break,
                             _ = cancel.cancelled() => return,
                             _ = idle.tick() => {
                                 if retire_idle_search_index(
@@ -1090,11 +1106,16 @@ fn is_internal_temp_wire_path(path: &str) -> bool {
 
 type SearchIndexReceiver = tokio::sync::watch::Receiver<Option<Result<Vec<String>, String>>>;
 
+struct SearchIndex {
+    receiver: SearchIndexReceiver,
+    refresh: Arc<Notify>,
+}
+
 /// Removes the shared index once only the map's own receiver has remained for
 /// two consecutive checks. Runs under the map lock, which subscribers also
 /// take, so no subscriber can attach to a retiring index.
 fn retire_idle_search_index(
-    indexes: &Mutex<HashMap<String, SearchIndexReceiver>>,
+    indexes: &Mutex<HashMap<String, SearchIndex>>,
     checkout_id: &str,
     sender: &tokio::sync::watch::Sender<Option<Result<Vec<String>, String>>>,
     idle_checks: &mut u8,
@@ -1111,7 +1132,7 @@ fn retire_idle_search_index(
     let probe = sender.subscribe();
     if indexes
         .get(checkout_id)
-        .is_some_and(|receiver| receiver.same_channel(&probe))
+        .is_some_and(|index| index.receiver.same_channel(&probe))
     {
         indexes.remove(checkout_id);
     }
@@ -3110,10 +3131,16 @@ mod tests {
     #[test]
     fn idle_search_index_retires_only_after_two_unsubscribed_checks() {
         let (sender, map_receiver) = tokio::sync::watch::channel(None);
-        let indexes = Mutex::new(HashMap::from([("checkout".to_string(), map_receiver)]));
+        let indexes = Mutex::new(HashMap::from([(
+            "checkout".to_string(),
+            SearchIndex {
+                receiver: map_receiver,
+                refresh: Arc::new(Notify::new()),
+            },
+        )]));
         let mut idle_checks = 0;
 
-        let subscriber = lock(&indexes)["checkout"].clone();
+        let subscriber = lock(&indexes)["checkout"].receiver.clone();
         assert!(!retire_idle_search_index(
             &indexes,
             "checkout",
@@ -3129,7 +3156,7 @@ mod tests {
         ));
         assert!(lock(&indexes).contains_key("checkout"));
 
-        let subscriber = lock(&indexes)["checkout"].clone();
+        let subscriber = lock(&indexes)["checkout"].receiver.clone();
         assert!(!retire_idle_search_index(
             &indexes,
             "checkout",
@@ -3156,7 +3183,13 @@ mod tests {
     fn idle_search_index_leaves_a_replacement_entry_alone() {
         let (sender, _orphan) = tokio::sync::watch::channel(None);
         let (_other_sender, other_receiver) = tokio::sync::watch::channel(None);
-        let indexes = Mutex::new(HashMap::from([("checkout".to_string(), other_receiver)]));
+        let indexes = Mutex::new(HashMap::from([(
+            "checkout".to_string(),
+            SearchIndex {
+                receiver: other_receiver,
+                refresh: Arc::new(Notify::new()),
+            },
+        )]));
         let mut idle_checks = 1;
         drop(_orphan);
         assert!(retire_idle_search_index(
