@@ -532,7 +532,10 @@ impl mast_harness::Harness for ProviderFixture {
 }
 
 /// Holds its run open until interrupted, so the run keeps a dispatch slot.
-struct HeldOpenFixture;
+/// With `asks`, it parks on an approval nobody answers.
+struct HeldOpenFixture {
+    asks: bool,
+}
 #[async_trait::async_trait]
 impl mast_harness::Harness for HeldOpenFixture {
     fn id(&self) -> HarnessId {
@@ -562,7 +565,12 @@ impl mast_harness::Harness for HeldOpenFixture {
         mast_harness::HarnessError,
     > {
         use futures::StreamExt;
-        let interrupt = controls.interrupt;
+        let mast_harness::RunControls {
+            request_input,
+            interrupt,
+            ..
+        } = controls;
+        let asks = self.asks;
         Ok(futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::ClaudeCode,
             model: "fixture-model".into(),
@@ -572,6 +580,18 @@ impl mast_harness::Harness for HeldOpenFixture {
             assistant_message_id: "reply".into(),
         })])
         .chain(futures::stream::once(async move {
+            let _answer = asks.then(|| {
+                request_input(vec![UserInputQuestion {
+                    id: "approve".into(),
+                    header: "Notion".into(),
+                    question: "Allow notion-update-page?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    multi_select: false,
+                    allow_custom: false,
+                    command_approval: None,
+                    permission: None,
+                }])
+            });
             interrupt.cancelled().await;
             Ok(AgentEvent::Done {
                 status: DoneStatus::Interrupted,
@@ -588,7 +608,7 @@ impl mast_harness::Harness for HeldOpenFixture {
 async fn waiting_runs_expire_on_schedule_while_both_slots_are_held() {
     let dir = tempfile::tempdir().unwrap();
     let registry = mast_engine::HarnessRegistry::new();
-    registry.register(Arc::new(HeldOpenFixture));
+    registry.register(Arc::new(HeldOpenFixture { asks: false }));
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(dir.path(), "org", "user"),
         Arc::new(registry),
@@ -679,6 +699,82 @@ async fn waiting_runs_expire_on_schedule_while_both_slots_are_held() {
         state(&snapshot, "waiting"),
         (ScheduledRunState::Launching, None)
     );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_run_left_awaiting_input_is_stopped_after_thirty_minutes() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = mast_engine::HarnessRegistry::new();
+    registry.register(Arc::new(HeldOpenFixture { asks: true }));
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(registry),
+        HarnessId::ClaudeCode,
+        None,
+    )
+    .unwrap();
+    let mut d = draft(dir.path());
+    d.config.harness = HarnessId::ClaudeCode;
+    d.config.model = Some("fixture-model".into());
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Save {
+            id: "unattended".into(),
+            expected_revision: 0,
+            draft: d,
+            operation_id: "save-unattended".into(),
+        })
+        .await
+        .unwrap();
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::RunNow {
+            id: "unattended".into(),
+            operation_id: "run-unattended".into(),
+        })
+        .await
+        .unwrap();
+    let run = || async {
+        core.scheduled_tasks
+            .request(ScheduledTasksRequest::List)
+            .await
+            .unwrap()
+            .runs
+            .remove(0)
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let since = loop {
+        core.scheduled_tasks
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let r = run().await;
+        if r.state == ScheduledRunState::AwaitingInput {
+            break r.awaiting_since.unwrap();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "run never awaited input: {r:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    core.scheduled_tasks
+        .tick(since + 29 * 60_000)
+        .await
+        .unwrap();
+    let r = run().await;
+    assert_eq!(r.state, ScheduledRunState::AwaitingInput);
+    assert_eq!(r.awaiting_since, Some(since));
+    core.scheduled_tasks
+        .tick(since + 30 * 60_000)
+        .await
+        .unwrap();
+    let r = run().await;
+    assert_eq!(r.state, ScheduledRunState::Interrupted);
+    assert_eq!(
+        r.detail.as_deref(),
+        Some("Stopped after 30 min waiting for input: Notion")
+    );
+    assert_eq!(r.finished_at, Some(since + 30 * 60_000));
     core.shutdown().await;
 }
 

@@ -178,6 +178,8 @@ impl Store {
                     .then(|| crate::work_outline_launch::scheduled_id(&id, "chat")),
                 task_revision: task.revision,
                 snapshot: task.draft.clone(),
+                awaiting_request_id: None,
+                awaiting_since: None,
             };
             tx.execute(
                 "INSERT OR IGNORE INTO runs(id,task_id,slot,created_at,body,state) VALUES(?1,?2,?3,?4,?5,json_extract(?5,'$.state'))",
@@ -337,6 +339,8 @@ mod tests {
             chat_id: Some("chat".into()),
             task_revision: 1,
             snapshot: task.draft,
+            awaiting_request_id: None,
+            awaiting_since: None,
         };
         let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
         c.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,slot TEXT NOT NULL,created_at INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(task_id,slot)); PRAGMA user_version=1;").unwrap();
