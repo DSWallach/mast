@@ -1873,3 +1873,82 @@ fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
     assert!(has(vcx, "required-actions-info-markdown-detail"));
 }
+
+#[gpui::test]
+fn session_activity_pill_tracks_running_agents_and_dropdown(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    assert!(!has(vcx, "chat-header-chip-activity"));
+    let entry = |count: usize| -> mast_doc::SessionMessageEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "turn", "role": "assistant", "createdAt": 0, "deviceId": "d",
+            "parts": (0..count).map(|i| serde_json::json!({
+                "id": format!("s{i}"), "kind": "tool", "resolved": true,
+                "call": {"kind": "unknown", "name": format!("Agent: Worker {i}")},
+                "subagentRef": format!("sub-{i}"), "subagentStatus": "running"
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap()
+    };
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(vec![entry(2)]);
+            cx.notify();
+        })
+    });
+    draw(vcx);
+    assert!(has(vcx, "chat-header-chip-activity"));
+    let at = vcx.debug_bounds("chat-header-chip-activity")
+            .unwrap()
+            .center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    draw(vcx);
+    assert!(has(vcx, "session-activity-menu"));
+    shell.update(vcx, |shell, cx| {
+        assert!(shell.capture_escape_surface(cx));
+        assert!(!shell.session_activity_menu.is_open());
+        // Cancel the exit tween to exercise row selection independently of
+        // the wall-clock animation used by Popup.
+        shell.session_activity_menu.open(CHAT_API.into());
+        cx.notify();
+    });
+    draw(vcx);
+    let at = vcx.debug_bounds("session-activity-sub-0").unwrap().center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    draw(vcx);
+    shell.read_with(vcx, |shell, _| {
+        assert!(
+            shell
+                .subagent_tabs
+                .values()
+                .any(|tab| tab.doc_id == "sub-0")
+        )
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(vec![entry(1)]);
+            cx.notify();
+        })
+    });
+    draw(vcx);
+    assert!(!has(vcx, "session-activity-menu"));
+    let at = vcx.debug_bounds("chat-header-chip-activity")
+            .unwrap()
+            .center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    draw(vcx);
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(
+            shell.subagent_tabs.len(),
+            1,
+            "single pill focuses the existing agent tab"
+        )
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(vec![]);
+            cx.notify();
+        })
+    });
+    draw(vcx);
+    assert!(!has(vcx, "chat-header-chip-activity"));
+}

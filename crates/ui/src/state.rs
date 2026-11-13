@@ -1482,6 +1482,17 @@ impl AppState {
         Ok(())
     }
 
+    /// Header activity belongs to the loaded, selected session only.
+    pub(crate) fn running_activity(
+        &self,
+        chat_id: &str,
+    ) -> Vec<crate::transcript::RunningActivity> {
+        if self.selected_chat.as_deref() != Some(chat_id) {
+            return Vec::new();
+        }
+        crate::transcript::running_activity(chat_id, &self.transcript)
+    }
+
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
@@ -2129,6 +2140,12 @@ impl AppState {
             subagents ^= sh.finish();
         }
         subagents.hash(&mut h);
+        // Repaint the header only when its activity list changes.
+        if let Some(chat_id) = &self.selected_chat {
+            for running in self.running_activity(chat_id) {
+                (running.id, running.title).hash(&mut h);
+            }
+        }
         h.finish()
     }
 
@@ -5129,6 +5146,29 @@ mod tests {
         for (name, moved) in changed {
             assert!(moved, "{name} must change the shell fingerprint");
         }
+    }
+
+    #[test]
+    fn shell_fingerprint_follows_running_subagents() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        state.chats = vec![chat("a", 0, Some(10))];
+        state.selected_chat = Some("a".into());
+        let turn = |status: &str| -> SessionMessageEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": "turn", "role": "assistant", "createdAt": 0, "deviceId": "d",
+                "parts": [{"id": "s1", "kind": "tool", "resolved": true,
+                    "call": {"kind": "unknown", "name": "Agent: audit"},
+                    "subagentRef": "a--sub--s1", "subagentStatus": status}],
+            }))
+            .unwrap()
+        };
+        state.apply_transcript(vec![turn("running")]);
+        let running = state.shell_fingerprint(now);
+        assert_eq!(state.running_activity("a").len(), 1);
+        assert!(state.running_activity("b").is_empty(), "only the selected chat");
+        state.apply_transcript(vec![turn("done")]);
+        assert_ne!(state.shell_fingerprint(now), running, "the header drops the activity");
     }
 
     #[test]

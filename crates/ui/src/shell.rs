@@ -1832,6 +1832,7 @@ pub struct Shell {
     /// The header's hover context card (show / hide / ⌥⌘I pin) and the chat
     /// it belongs to.
     chat_item_card: crate::chat_item::CardState,
+    session_activity_menu: popover::Popup<String>,
     running: running_ui::RunningUi,
     chat_item_card_chat: String,
     /// The Item tab's open accordion rows, its embedded Needs-you list, and
@@ -2296,6 +2297,7 @@ impl Shell {
             chat_header_links: Default::default(),
             chat_header_links_pending: Default::default(),
             chat_item_card: Default::default(),
+            session_activity_menu: Default::default(),
             running: running_ui::RunningUi::new(
                 matches!(install, mast_update::InstallKind::MacApp { .. }),
                 cx,
@@ -3907,6 +3909,10 @@ impl Shell {
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
+        self.handle_transcript_event(event, cx);
+    }
+
+    fn handle_transcript_event(&mut self, event: &TranscriptEvent, cx: &mut Context<Self>) {
         match event {
             TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::SignInAgain(chat_id) => self.sign_in_for_chat(chat_id.clone(), cx),
@@ -8924,6 +8930,10 @@ impl Shell {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
+        if self.session_activity_menu.is_open() {
+            self.close_session_activity_menu(cx);
+            return true;
+        }
         if self.closeout_dialog.is_some() {
             self.close_chat_closeout(cx);
             return true;
