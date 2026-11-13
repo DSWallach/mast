@@ -433,9 +433,6 @@ impl ScheduledTasks {
                 self.0.store.update_run(&r)?;
                 continue;
             }
-            if running >= 2 {
-                continue;
-            }
             let deadline_base = if r.manual {
                 r.created_at
             } else {
@@ -451,6 +448,9 @@ impl ScheduledTasks {
                 r.detail = Some("Dispatch queue grace expired".into());
                 r.finished_at = Some(now);
                 self.0.store.update_run(&r)?;
+                continue;
+            }
+            if running >= 2 {
                 continue;
             }
             let model_check = tokio::select! {

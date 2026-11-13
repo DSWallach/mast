@@ -531,6 +531,157 @@ impl mast_harness::Harness for ProviderFixture {
     }
 }
 
+/// Holds its run open until interrupted, so the run keeps a dispatch slot.
+struct HeldOpenFixture;
+#[async_trait::async_trait]
+impl mast_harness::Harness for HeldOpenFixture {
+    fn id(&self) -> HarnessId {
+        HarnessId::ClaudeCode
+    }
+    fn display_name(&self) -> &str {
+        "Held-open fixture"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, mast_harness::HarnessError> {
+        mast_harness::Harness::models(&ProviderFixture(HarnessId::ClaudeCode)).await
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: mast_harness::RunControls,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<AgentEvent, mast_harness::HarnessError>>,
+        mast_harness::HarnessError,
+    > {
+        use futures::StreamExt;
+        let interrupt = controls.interrupt;
+        Ok(futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
+            harness: HarnessId::ClaudeCode,
+            model: "fixture-model".into(),
+            tools: vec![],
+            cwd: request.cwd,
+            session_id: "held-open".into(),
+            assistant_message_id: "reply".into(),
+        })])
+        .chain(futures::stream::once(async move {
+            interrupt.cancelled().await;
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                result: None,
+                error: None,
+                session_id: None,
+            })
+        }))
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn waiting_runs_expire_on_schedule_while_both_slots_are_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = mast_engine::HarnessRegistry::new();
+    registry.register(Arc::new(HeldOpenFixture));
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(registry),
+        HarnessId::ClaudeCode,
+        None,
+    )
+    .unwrap();
+    let run_now = |id: &'static str, grace_minutes: u32| {
+        let mut d = draft(dir.path());
+        d.config.harness = HarnessId::ClaudeCode;
+        d.config.model = Some("fixture-model".into());
+        d.grace_minutes = grace_minutes;
+        let tasks = core.scheduled_tasks.clone();
+        async move {
+            tasks
+                .request(ScheduledTasksRequest::Save {
+                    id: id.into(),
+                    expected_revision: 0,
+                    draft: d,
+                    operation_id: format!("save-{id}"),
+                })
+                .await
+                .unwrap();
+            tasks
+                .request(ScheduledTasksRequest::RunNow {
+                    id: id.into(),
+                    operation_id: format!("run-{id}"),
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let state = |snapshot: &ScheduledTasksSnapshot, id: &str| {
+        snapshot
+            .runs
+            .iter()
+            .find(|r| r.task_id == id)
+            .map(|r| (r.state, r.detail.clone()))
+            .unwrap()
+    };
+    run_now("first", 360).await;
+    run_now("second", 360).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        core.scheduled_tasks
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let snapshot = core
+            .scheduled_tasks
+            .request(ScheduledTasksRequest::List)
+            .await
+            .unwrap();
+        if ["first", "second"]
+            .iter()
+            .all(|id| state(&snapshot, id).0 == ScheduledRunState::Running)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "held runs did not start: {:?}",
+            snapshot.runs
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    run_now("expired", 1).await;
+    run_now("waiting", 360).await;
+    core.scheduled_tasks
+        .tick(chrono::Utc::now().timestamp_millis() + 2 * 60_000)
+        .await
+        .unwrap();
+    let snapshot = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::List)
+        .await
+        .unwrap();
+    assert_eq!(state(&snapshot, "first").0, ScheduledRunState::Running);
+    assert_eq!(state(&snapshot, "second").0, ScheduledRunState::Running);
+    assert_eq!(
+        state(&snapshot, "expired"),
+        (
+            ScheduledRunState::Skipped,
+            Some("Dispatch queue grace expired".into())
+        )
+    );
+    assert_eq!(
+        state(&snapshot, "waiting"),
+        (ScheduledRunState::Launching, None)
+    );
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn an_existing_task_can_switch_from_claude_to_codex_without_rewriting_past_runs() {
     let dir = tempfile::tempdir().unwrap();
