@@ -1721,7 +1721,7 @@ mod tests {
         assert_eq!(blocker(&shell, cx), None);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
-                state.chats[0].config = Some(mast_proto::ChatConfig {
+                state.chats[0].config = Some(mast_proto::ChatConfig { approval_rules: false,
                     harness: mast_proto::HarnessId::Codex,
                     model: None,
                     reasoning: None,
@@ -1763,7 +1763,7 @@ mod tests {
     fn codex_with_session(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext, session: bool) {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
-                state.chats[0].config = Some(mast_proto::ChatConfig {
+                state.chats[0].config = Some(mast_proto::ChatConfig { approval_rules: false,
                     harness: mast_proto::HarnessId::Codex,
                     model: None,
                     reasoning: None,

@@ -36,7 +36,7 @@ const CHAT: &str = "chat-restart";
 type RequestLog = Arc<Mutex<Vec<RunRequest>>>;
 
 fn run_request(prompt: &str, cwd: &str) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -1341,7 +1341,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     std::fs::create_dir_all(&cwd).unwrap();
     let cwd = cwd.to_string_lossy().to_string();
 
-    let real_request = |prompt: &str| RunRequest {
+    let real_request = |prompt: &str| RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: Some("haiku".into()),

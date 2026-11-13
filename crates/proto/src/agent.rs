@@ -138,6 +138,14 @@ pub struct RunRequest {
     pub sandbox: SandboxLevel,
     #[serde(default)]
     pub auto_approve: bool,
+    /// See [`crate::ChatConfig::approval_rules`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approval_rules: bool,
+    /// The scheduled task this run belongs to. Engine-owned; harnesses export
+    /// it to the agent process as `MAST_SCHEDULED_TASK` so the user's hooks
+    /// can tell an unattended run apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task: Option<String>,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Harness-native session to copy into a NEW session (a side chat's
@@ -367,6 +375,48 @@ pub struct UserInputQuestion {
     /// Provider-supplied command approval details, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_approval: Option<CommandApproval>,
+    /// What a tool permission prompt asks for, in provider-neutral form, so
+    /// the engine can answer it from the user's rules or offer Always allow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionRequest>,
+}
+
+/// The permission rules file as Settings shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRulesView {
+    pub path: String,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub ask: Vec<String>,
+    /// Rules Mast can't check (`Edit(...)`, `WebFetch(...)`); Claude's CLI
+    /// still applies its own copies.
+    pub unsupported: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// Prefix of the answer option that saves a permission rule; the rest of the
+/// label is the rule, e.g. `Always allow: Bash(git log:*)`.
+pub const ALWAYS_ALLOW_PREFIX: &str = "Always allow: ";
+
+pub fn is_always_allow_label(label: &str) -> bool {
+    label.starts_with(ALWAYS_ALLOW_PREFIX)
+}
+
+/// A provider's tool permission request. Built only from structured protocol
+/// fields, never from prompt text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PermissionRequest {
+    /// A shell command: a script string or an argv list.
+    Command { command: serde_json::Value },
+    /// An MCP tool, by the server name the provider configured.
+    McpTool { server: String, tool: String },
+    /// Any other named tool (Claude's `WebSearch`, `Edit`, …).
+    Tool { name: String },
+    /// An MCP tool named the OpenCode way: server and tool joined by `_`,
+    /// which can't be split back apart reliably.
+    McpToolJoined { name: String },
 }
 
 /// Preserve the provider's command representation without splitting shell text.
@@ -781,7 +831,7 @@ mod input_answer_tests {
 
     #[test]
     fn custom_answers_require_explicit_permission() {
-        let mut question = UserInputQuestion {
+        let mut question = UserInputQuestion { permission: None,
             command_approval: None,
             id: "approval".into(), header: "Approval".into(), question: "Allow?".into(),
             options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,

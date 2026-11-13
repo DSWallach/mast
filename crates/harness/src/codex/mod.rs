@@ -790,6 +790,7 @@ impl CodexHarness {
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         self.apply_home(&mut cmd);
+        crate::export_scheduled_task(&mut cmd, request.scheduled_task.as_deref());
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -1988,6 +1989,30 @@ fn elicitation_response(verdict: Verdict) -> Value {
     } })
 }
 
+/// The MCP tool behind a Codex tool-call approval (`_meta.codex_approval_kind`
+/// `"mcp_tool_call"`). Connector apps report under `codex_apps`, so their
+/// connector name stands in for the server.
+fn mcp_tool_call(params: &Value) -> Option<mast_proto::PermissionRequest> {
+    let meta = params.get("_meta")?;
+    if meta.get("codex_approval_kind")?.as_str()? != "mcp_tool_call" {
+        return None;
+    }
+    let name = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    let server = if meta.get("source").and_then(Value::as_str) == Some("connector") {
+        name(meta.get("connector_name")).or_else(|| name(meta.get("connector_id")))?
+    } else {
+        name(params.get("serverName"))?
+    };
+    Some(mast_proto::PermissionRequest::McpTool {
+        server,
+        tool: name(meta.get("tool_name"))?,
+    })
+}
+
 fn elicitation_question(params: &Value) -> UserInputQuestion {
     let server = params
         .get("serverName")
@@ -2008,6 +2033,7 @@ fn elicitation_question(params: &Value) -> UserInputQuestion {
         .map(|schema| format!("\nRequested form: {schema}"))
         .unwrap_or_default();
     UserInputQuestion {
+        permission: mcp_tool_call(params),
         command_approval: None,
         allow_custom: false,
         id: new_message_id(),
@@ -2039,7 +2065,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                 let id = field(["id", "questionId", "question_id"]);
                 if id.is_empty() { format!("q{ix}") } else { id }
             };
-            let question = UserInputQuestion {
+            let question = UserInputQuestion { permission: None,
                 command_approval: None,
                 allow_custom: false,
                 id: new_message_id(),
@@ -2164,6 +2190,14 @@ fn approval_question(
         question.push_str(&format!(" Reason: {reason}"));
     }
     UserInputQuestion {
+        permission: method
+            .contains("commandExecution")
+            .then(|| params.get("command"))
+            .flatten()
+            .filter(|command| command.is_string() || command.is_array())
+            .map(|command| mast_proto::PermissionRequest::Command {
+                command: command.clone(),
+            }),
         command_approval: if method.contains("commandExecution") {
             params.get("command")
                 .filter(|command| command.is_string() || command.is_array())
@@ -2195,6 +2229,42 @@ use crate::{Signal, send_signal, shutdown_child};
 mod tests {
     use super::*;
     use serde_json::json;
+    use mast_proto::PermissionRequest;
+
+    #[test]
+    fn permission_requests_come_from_structured_fields_only() {
+        let notion = json!({"serverName":"notion", "mode":"form", "message":"Allow?",
+            "_meta":{"codex_approval_kind":"mcp_tool_call", "tool_name":"notion-update-page", "tool_params":{"page_id":"x"}}});
+        assert_eq!(
+            elicitation_question(&notion).permission,
+            Some(PermissionRequest::McpTool { server: "notion".into(), tool: "notion-update-page".into() })
+        );
+        let connector = json!({"serverName":"codex_apps", "_meta":{"codex_approval_kind":"mcp_tool_call",
+            "tool_name":"search", "source":"connector", "connector_id":"c1", "connector_name":"Linear"}});
+        assert_eq!(
+            elicitation_question(&connector).permission,
+            Some(PermissionRequest::McpTool { server: "Linear".into(), tool: "search".into() })
+        );
+        for other in [
+            json!({"serverName":"notion", "message":"Pick one"}),
+            json!({"serverName":"notion", "_meta":{"codex_approval_kind":"browser_auth", "tool_name":"x"}}),
+            json!({"serverName":"notion", "_meta":{"codex_approval_kind":"mcp_tool_call"}}),
+        ] {
+            assert_eq!(elicitation_question(&other).permission, None, "{other}");
+        }
+        let command = approval_question(
+            "item/commandExecution/requestApproval",
+            &json!({"command":"/bin/zsh -lc 'gh_read pulls'", "cwd":"/tmp"}), &[], false,
+        );
+        assert_eq!(command.permission, Some(PermissionRequest::Command { command: json!("/bin/zsh -lc 'gh_read pulls'") }));
+        let network_only = approval_question(
+            "item/commandExecution/requestApproval",
+            &json!({"command":null, "networkApprovalContext":{"host":"x", "protocol":"https"}}), &[], false,
+        );
+        assert_eq!(network_only.permission, None);
+        let file = approval_question("item/fileChange/requestApproval", &json!({"changes":[]}), &[], false);
+        assert_eq!(file.permission, None);
+    }
 
     fn instruction_request(
         resume: Option<&str>,

@@ -13182,7 +13182,7 @@ mod tests {
                     "id": chat_id, "deviceId": "device", "archived": false,
                     "createdAt": chrono::Utc::now(), "spaceId": "space"
                 })).unwrap();
-                chat.config = Some(mast_proto::ChatConfig {
+                chat.config = Some(mast_proto::ChatConfig { approval_rules: false,
                     harness, model: None, reasoning: None,
                     model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
                     auto_approve: false,

@@ -372,7 +372,19 @@ impl WorkItemLaunchService {
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
         // CLI default (a retry derives the same fill).
-        let filled = with_default_model(p, self.doc_host.harness_for(&chat_id), &chat_id);
+        let mut filled = with_default_model(p, self.doc_host.harness_for(&chat_id), &chat_id);
+        // Ask doesn't gate Claude or ACP agents at all, so a child of a Rules
+        // chat that isn't Auto keeps the parent's rules.
+        let parent_rules = p
+            .parent_chat_id
+            .as_deref()
+            .and_then(|id| self.workspace.chat_config(id))
+            .is_some_and(|c| c.approval_rules && !c.auto_approve);
+        if let Some(config) = filled.config.as_mut().filter(|_| parent_rules) {
+            if !config.auto_approve {
+                config.approval_rules = true;
+            }
+        }
         let p = &filled;
 
         // Ownership: the Space must live on this device (the RPC layer
@@ -1256,7 +1268,7 @@ fn with_default_model(
     chat_id: &str,
 ) -> CreateChatForWorkItemParams {
     let mut p = p.clone();
-    let mut config = p.config.take().unwrap_or_else(|| ChatConfig {
+    let mut config = p.config.take().unwrap_or_else(|| ChatConfig { approval_rules: false,
         harness: default_harness,
         model: None,
         reasoning: None,
@@ -1273,7 +1285,7 @@ fn with_default_model(
 
 /// A Turn's request from a prompt, a chat config, and a cwd.
 fn prompt_request(prompt: &WorkItemPrompt, config: Option<&ChatConfig>, cwd: &str) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: config.is_some_and(|c| c.approval_rules),
         prompt: crate::doc_host::queued_message_prompt(&prompt.text, &prompt.attachments),
         harness: config.map(|c| c.harness),
         model: config.and_then(|c| c.model.clone()),
@@ -1335,7 +1347,7 @@ mod default_model_tests {
 
     #[test]
     fn a_launch_keeps_an_explicit_model_and_fills_an_empty_one() {
-        let config = |model: Option<&str>| ChatConfig {
+        let config = |model: Option<&str>| ChatConfig { approval_rules: false,
             harness: HarnessId::ClaudeCode,
             model: model.map(str::to_owned),
             reasoning: None,

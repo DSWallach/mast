@@ -98,7 +98,7 @@ impl Harness for HeldHarness {
         if self.asks {
             // Only the engine can mint a request id it will honour, so the
             // question has to go through controls rather than the stream.
-            let _answer = (controls.request_input)(vec![UserInputQuestion {
+            let _answer = (controls.request_input)(vec![UserInputQuestion { permission: None,
                 command_approval: None,
                 allow_custom: false,
                 id: "q1".into(),
@@ -1583,7 +1583,7 @@ async fn failed_queue_dispatch_stays_paused_until_explicit_retry() {
 async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
     for send_now in [false, true] {
         let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
-        let mut config = mast_proto::ChatConfig {
+        let mut config = mast_proto::ChatConfig { approval_rules: false,
             harness: HarnessId::Mock,
             model: Some("old-model".into()),
             reasoning: Some(ReasoningLevel::Medium),
@@ -1633,7 +1633,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
 async fn queued_turn_uses_the_chats_current_approval_mode() {
     let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
     let client = mast_rpc::memory_client(core.rpc_service());
-    let config = mast_proto::ChatConfig {
+    let config = mast_proto::ChatConfig { approval_rules: false,
         harness: HarnessId::Mock,
         model: None,
         reasoning: None,

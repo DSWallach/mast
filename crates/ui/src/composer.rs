@@ -7547,7 +7547,7 @@ impl Composer {
                     .and_then(|spec| spec.space_id.as_ref())
                     .is_some();
                 let command = SessionCommandPayload::Run {
-                    request: RunRequest {
+                    request: RunRequest { scheduled_task: None, approval_rules: resolved.approval_rules,
                         prompt: content.clone(),
                         harness: resolved.harness,
                         model: resolved.model.clone(),
@@ -10492,7 +10492,7 @@ mod tests {
     }
 
     fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
-        UserInputQuestion {
+        UserInputQuestion { permission: None,
             command_approval: None,
             allow_custom: false,
             id: id.into(),

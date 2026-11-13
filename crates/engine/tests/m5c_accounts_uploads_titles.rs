@@ -676,7 +676,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .set_chat_branch(chat_id, &worktree.branch)
         .expect("set branch");
 
-    let request = mast_proto::RunRequest {
+    let request = mast_proto::RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "please fix the login flow".into(),
         harness: None,
         model: None,
@@ -723,7 +723,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     core.workspace
         .rename_chat(chat_id, "My Custom Name")
         .expect("rename");
-    let request = mast_proto::RunRequest {
+    let request = mast_proto::RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "another request".into(),
         harness: None,
         model: None,

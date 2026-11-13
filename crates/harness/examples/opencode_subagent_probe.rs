@@ -48,7 +48,7 @@ async fn main() {
          word finished.'. Tell me its result."
             .into()
     });
-    let request = RunRequest {
+    let request = RunRequest { scheduled_task: None, approval_rules: false,
         prompt,
         harness: None,
         model: None,

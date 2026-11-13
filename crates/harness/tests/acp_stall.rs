@@ -45,7 +45,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         steering: steer_rx,
         interrupt: token.clone(),
     };
-    let request = RunRequest {
+    let request = RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "scenario:prompt-stall".into(),
         harness: None,
         model: None,

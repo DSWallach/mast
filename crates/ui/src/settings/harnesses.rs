@@ -94,6 +94,9 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
 }
 
 pub struct HarnessesPage {
+    permission_rules: Option<mast_proto::PermissionRulesView>,
+    permission_rules_generation: u64,
+    permission_rules_error: Option<String>,
     friction_settings: Option<mast_proto::FrictionSettings>,
     friction_saving: bool,
     title_settings: Loadable<TitleSettings>,
@@ -166,6 +169,9 @@ impl SignInPhase {
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
+            permission_rules: None,
+            permission_rules_generation: 0,
+            permission_rules_error: None,
             friction_settings: None,
             friction_saving: false,
             title_settings: Loadable::Idle,
@@ -191,6 +197,119 @@ impl HarnessesPage {
         page.load(cx);
         page.load_friction_settings(cx);
         page
+    }
+
+    /// Load (or, with `remove`, edit then reload) the target device's
+    /// `~/.mast/settings.json` rules.
+    fn load_permission_rules(&mut self, remove: Option<String>, cx: &mut Context<Self>) {
+        self.permission_rules_generation += 1;
+        let generation = self.permission_rules_generation;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = self.target_device.clone();
+        let method = if remove.is_some() {
+            methods::REMOVE_PERMISSION_RULE
+        } else {
+            methods::GET_PERMISSION_RULES
+        };
+        let params = self.with_target(match remove {
+            Some(rule) => serde_json::json!({ "rule": rule }),
+            None => serde_json::json!({}),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(method, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| {
+                    serde_json::from_value::<mast_proto::PermissionRulesView>(v)
+                        .map_err(|e| e.to_string())
+                });
+            this.update(cx, |this, cx| {
+                if this.target_device != target || this.permission_rules_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(view) => {
+                        this.permission_rules = Some(view);
+                        this.permission_rules_error = None;
+                    }
+                    Err(error) => this.permission_rules_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_permission_rules(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let mut card = widgets::section_card(theme)
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(widgets::row_title(theme, "Permission rules"))
+            .child(widgets::page_subtitle(
+                theme,
+                "Chats and scheduled tasks in Rules mode run what these rules allow without asking. Same format as Claude Code's settings.json.",
+            ));
+        if let Some(error) = &self.permission_rules_error {
+            card = card.child(widgets::error_strip(theme, error.clone()));
+        }
+        let Some(view) = &self.permission_rules else {
+            return card.into_any_element();
+        };
+        card = card.child(widgets::page_subtitle(theme, view.path.clone()));
+        if let Some(error) = &view.error {
+            card = card.child(widgets::error_strip(
+                theme,
+                format!("{error}. Until it's fixed, every request asks."),
+            ));
+        }
+        if view.allow.is_empty() && view.deny.is_empty() && view.ask.is_empty() {
+            card = card.child(widgets::page_subtitle(
+                theme,
+                "No rules yet. Add them to the file, or choose Always allow on a prompt in Rules mode.",
+            ));
+        }
+        for rule in &view.allow {
+            let remove = rule.clone();
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(div().flex_1().min_w_0().child(widgets::row_title(theme, format!("Allow  {rule}"))))
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id(SharedString::from(format!("remove-permission-rule-{rule}")))
+                            .cursor_pointer()
+                            .hover(|el| el.bg(crate::theme::ink(0.06)))
+                            .child("Remove")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.load_permission_rules(Some(remove.clone()), cx);
+                            })),
+                    ),
+            );
+        }
+        for (label, rules) in [("Deny", &view.deny), ("Ask", &view.ask)] {
+            for rule in rules {
+                card = card.child(widgets::row_title(theme, format!("{label}  {rule}")));
+            }
+        }
+        if !view.unsupported.is_empty() {
+            card = card.child(widgets::page_subtitle(
+                theme,
+                format!(
+                    "Not checked by Mast (Claude Code applies its own copy): {}",
+                    view.unsupported.join(", ")
+                ),
+            ));
+        }
+        card.into_any_element()
     }
 
     fn load_friction_settings(&mut self, cx: &mut Context<Self>) {
@@ -260,6 +379,8 @@ impl HarnessesPage {
         self.installing = None;
         self.install_task = None;
         self.target_device = target;
+        self.permission_rules = None;
+        self.permission_rules_error = None;
         self.error = None;
         self.sign_in_failure = None;
         self.harnesses = Loadable::Idle;
@@ -274,6 +395,7 @@ impl HarnessesPage {
             return;
         };
         let params = self.with_target(serde_json::json!({}));
+        self.load_permission_rules(None, cx);
         self.load_titles(None, cx);
         self.harnesses = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
@@ -1127,6 +1249,7 @@ impl Render for HarnessesPage {
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
+        let permission_rules = self.render_permission_rules(&theme, cx);
         let friction = self.friction_settings.as_ref().map(|settings| {
             let enabled = settings.auto_capture;
             let saving = self.friction_saving;
@@ -1185,7 +1308,8 @@ impl Render for HarnessesPage {
                             .children(error)
                             .child(body)
                             .children(friction)
-                            .child(titles),
+                            .child(titles)
+                            .child(permission_rules),
                     ),
             )
             .children(scrollbar)

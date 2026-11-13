@@ -99,7 +99,7 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 
 fn run_payload(message_id: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
-        request: RunRequest {
+        request: RunRequest { scheduled_task: None, approval_rules: false,
             prompt: "back from the archive".into(),
             harness: None,
             model: None,

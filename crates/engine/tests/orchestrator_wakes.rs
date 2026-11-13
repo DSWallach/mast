@@ -1135,7 +1135,7 @@ async fn awaiting_input_and_failed_tool_calls_wake_the_parent() {
             chat_id: "w1".into(),
             input: mast_proto::AwaitingInput {
                 request_id: "request-1".into(),
-                questions: vec![mast_proto::UserInputQuestion {
+                questions: vec![mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
                     allow_custom: false,
                     id: "q1".into(),

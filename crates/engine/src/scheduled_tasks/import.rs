@@ -159,7 +159,7 @@ pub fn preview(
                     prompt,
                     cwd: row["cwd"].as_str().unwrap_or("").into(),
                     space_id: space_id.clone(),
-                    config: ChatConfig {
+                    config: ChatConfig { approval_rules: true,
                         harness: HarnessId::ClaudeCode,
                         model: row["model"].as_str().map(str::to_owned),
                         reasoning: None,

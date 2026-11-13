@@ -278,6 +278,7 @@ impl ClaudeHarness {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
         self.apply_home(&mut cmd);
+        crate::export_scheduled_task(&mut cmd, request.scheduled_task.as_deref());
         cmd.args([
             "--print",
             "--input-format",
@@ -784,6 +785,7 @@ impl ClaudeHarness {
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         let session = run_session(Session {
             title_only,
+            rules_mode: request.approval_rules && !request.auto_approve,
             child,
             stdout_lines: BufReader::new(stdout).lines(),
             stdin_tx,
@@ -913,6 +915,8 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 
 struct Session {
     title_only: bool,
+    /// Rules mode: tool requests go to the engine instead of being allowed.
+    rules_mode: bool,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
@@ -930,6 +934,7 @@ struct Session {
 async fn run_session(session: Session) {
     let Session {
         title_only,
+        rules_mode,
         mut child,
         mut stdout_lines,
         stdin_tx,
@@ -977,7 +982,7 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(req, &request_input, &stdin_tx, rules_mode);
                         }
                         continue;
                     }
@@ -1095,12 +1100,36 @@ fn handle_control_request(
     req: ControlRequestFrame,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+    rules_mode: bool,
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
             target: "mast_harness::claude",
             "unhandled control_request subtype: {}", req.request.subtype
         );
+        return;
+    }
+    if req.request.tool_name != "AskUserQuestion" && rules_mode {
+        // The CLI only forwards calls its own settings didn't allow; the
+        // engine answers from the user's Mast rules or asks.
+        let question = tool_approval_question(&req.request.tool_name, &req.request.input);
+        let request_input = Arc::clone(request_input);
+        let stdin_tx = stdin_tx.clone();
+        tokio::spawn(async move {
+            let id = question.id.clone();
+            let answers = (request_input)(vec![question]).await.unwrap_or_default();
+            let allowed = answers
+                .iter()
+                .find(|a| a.question_id == id)
+                .and_then(|a| a.labels.first())
+                .is_some_and(|label| label.eq_ignore_ascii_case("yes"));
+            let response = if allowed {
+                allow_response(req.request.input)
+            } else {
+                serde_json::json!({ "behavior": "deny", "message": "The user's Mast permission rules don't allow this tool call." })
+            };
+            let _ = stdin_tx.send(StdinMsg::Line(control_response_line(&req.request_id, response)));
+        });
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
@@ -1130,6 +1159,55 @@ fn handle_control_request(
     });
 }
 
+/// A Yes/No prompt for one Claude tool call, carrying the call in the
+/// provider-neutral form the engine's rules read.
+fn tool_approval_question(tool: &str, input: &Value) -> UserInputQuestion {
+    let (permission, question) = if tool == "Bash" {
+        let command = input.get("command").and_then(Value::as_str).unwrap_or_default();
+        (
+            (!command.is_empty()).then(|| mast_proto::PermissionRequest::Command {
+                command: Value::String(command.to_owned()),
+            }),
+            format!("Claude wants to run `{command}`. Allow it?"),
+        )
+    } else if let Some((server, name)) = tool
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .filter(|(server, name)| !server.is_empty() && !name.is_empty())
+    {
+        (
+            Some(mast_proto::PermissionRequest::McpTool {
+                server: server.to_owned(),
+                tool: name.to_owned(),
+            }),
+            format!("Claude wants to use the `{name}` tool from the {server} MCP server. Allow it?"),
+        )
+    } else {
+        let mut detail = input.to_string();
+        if detail.chars().count() > 300 {
+            detail = detail.chars().take(300).collect::<String>() + "…";
+        }
+        // A bare tool rule like `Write` must never let the agent edit the
+        // rules themselves, so anything naming the rules file always asks.
+        let text = input.to_string();
+        let touches_rules = text.contains(".mast") && text.contains("settings");
+        (
+            (!touches_rules).then(|| mast_proto::PermissionRequest::Tool { name: tool.to_owned() }),
+            format!("Claude wants to use `{tool}` with {detail}. Allow it?"),
+        )
+    };
+    UserInputQuestion {
+        permission,
+        command_approval: None,
+        allow_custom: false,
+        id: uuid::Uuid::new_v4().to_string(),
+        header: "Approve tool".into(),
+        question,
+        options: vec!["Yes".into(), "No".into()],
+        multi_select: false,
+    }
+}
+
 /// Parse Claude's `AskUserQuestion` tool input into [`UserInputQuestion`]s
 /// (tolerant of `header`/`title`, `question`/`prompt`, string or object
 /// options — option descriptions are dropped, the wire type carries labels).
@@ -1141,7 +1219,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
         .map(|q| {
             let field =
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
-            UserInputQuestion {
+            UserInputQuestion { permission: None,
                 command_approval: None,
                 allow_custom: true,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -1205,6 +1283,45 @@ fn updated_input_with_answers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_approval_questions_describe_the_call() {
+        use mast_proto::PermissionRequest;
+        let bash = tool_approval_question("Bash", &json!({"command":"git log -3"}));
+        assert_eq!(bash.permission, Some(PermissionRequest::Command { command: json!("git log -3") }));
+        assert_eq!(bash.header, "Approve tool");
+        let mcp = tool_approval_question("mcp__claude_ai_Notion__notion-update-page", &json!({}));
+        assert_eq!(
+            mcp.permission,
+            Some(PermissionRequest::McpTool { server: "claude_ai_Notion".into(), tool: "notion-update-page".into() })
+        );
+        let edit = tool_approval_question("Edit", &json!({"file_path":"/x"}));
+        assert_eq!(edit.permission, Some(PermissionRequest::Tool { name: "Edit".into() }));
+        let rules_file = tool_approval_question("Write", &json!({"file_path":"/Users/d/.mast/settings.json"}));
+        assert_eq!(rules_file.permission, None);
+        assert_eq!(tool_approval_question("Bash", &json!({})).permission, None);
+    }
+
+    #[tokio::test]
+    async fn rules_mode_routes_tool_calls_to_the_engine_and_denies_on_no() {
+        for (label, behavior) in [("Yes", "allow"), ("No", "deny")] {
+            let request: ControlRequestFrame = serde_json::from_value(json!({
+                "request_id":"r1", "request":{"subtype":"can_use_tool", "tool_name":"Bash", "input":{"command":"git push"}}
+            })).unwrap();
+            let label = label.to_owned();
+            let callback: Arc<RequestInputFn> = Arc::new(Box::new(move |questions: Vec<UserInputQuestion>| {
+                assert!(questions[0].permission.is_some());
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tx.send(vec![UserInputAnswer { question_id: questions[0].id.clone(), labels: vec![label.clone()] }]).unwrap();
+                rx
+            }));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            handle_control_request(request, &callback, &tx, true);
+            let StdinMsg::Line(line) = rx.recv().await.unwrap() else { panic!("expected response") };
+            let response: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["response"]["response"]["behavior"], behavior);
+        }
+    }
 
     fn instruction_request(
         resume: Option<&str>,
@@ -1517,7 +1634,7 @@ mod tests {
             rx
         }));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        handle_control_request(request, &callback, &tx);
+        handle_control_request(request, &callback, &tx, false);
         let StdinMsg::Line(line) = rx.recv().await.unwrap() else { panic!("expected response") };
         let response: Value = serde_json::from_str(&line).unwrap();
         let mut expected_input = input;

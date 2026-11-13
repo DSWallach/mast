@@ -268,7 +268,7 @@ impl ExternalSessionImporter {
             chat_id,
             Some(space_id.as_str()),
             Some(self.device_id.as_str()),
-            Some(ChatConfig {
+            Some(ChatConfig { approval_rules: false,
                 harness: HarnessId::ClaudeCode,
                 model: None,
                 reasoning: None,
@@ -631,7 +631,7 @@ impl ExternalSessionImporter {
             if self.read_cursor(&chat.id)?.is_none() {
                 continue; // not an externally-imported chat at all
             }
-            let config = ChatConfig {
+            let config = ChatConfig { approval_rules: false,
                 harness: HarnessId::ClaudeCode,
                 model: None,
                 reasoning: None,

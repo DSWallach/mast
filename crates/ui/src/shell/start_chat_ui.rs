@@ -2491,7 +2491,7 @@ mod tests {
                 state.selected_chat = Some(CHAT_API.into());
                 state.apply_chat_config(
                     CHAT_API,
-                    mast_proto::ChatConfig {
+                    mast_proto::ChatConfig { approval_rules: false,
                         harness: mast_proto::HarnessId::Codex,
                         model: Some("gpt-5.4".into()),
                         reasoning: Some(mast_proto::ReasoningLevel::Low),
@@ -2650,7 +2650,7 @@ mod tests {
         assert_eq!(creates[0]["initialPrompt"]["text"], "Ship it");
         assert_eq!(
             creates[0]["config"],
-            serde_json::to_value(mast_proto::ChatConfig {
+            serde_json::to_value(mast_proto::ChatConfig { approval_rules: false,
                 harness: mast_proto::HarnessId::ClaudeCode,
                 model: Some("sonnet".into()),
                 reasoning: Some(mast_proto::ReasoningLevel::High),

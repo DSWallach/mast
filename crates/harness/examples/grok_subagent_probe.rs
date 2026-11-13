@@ -32,7 +32,7 @@ async fn main() {
         steering,
         interrupt: CancellationToken::new(),
     };
-    let request = RunRequest {
+    let request = RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "Use spawn_subagent to launch ONE subagent of type general with description \
                  'Viz probe' and prompt: 'Run the terminal command: echo viz-probe-ok && sleep 3. \
                  Then reply with the word finished.'. Wait for it with \

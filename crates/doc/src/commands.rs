@@ -472,7 +472,7 @@ mod tests {
     }
 
     fn run_request() -> RunRequest {
-        RunRequest {
+        RunRequest { scheduled_task: None, approval_rules: false,
             prompt: "hello".into(),
             harness: None,
             model: None,
