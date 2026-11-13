@@ -134,6 +134,11 @@ impl TitleGenerator {
         if title.is_empty() {
             return Ok(());
         }
+        // The branch already lives in its repository, so it takes the title
+        // without the Space/PR/ticket decoration.
+        let branch_title = Some(clean_title(&candidate))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| title.clone());
 
         // Re-read after the model call: a user may have named the chat or checked
         // out another branch while the throwaway generation was live.
@@ -158,7 +163,7 @@ impl TitleGenerator {
             match self
                 .inner
                 .repos
-                .rename_worktree_branch(std::path::Path::new(chat_cwd), branch, &title)
+                .rename_worktree_branch(std::path::Path::new(chat_cwd), branch, &branch_title)
                 .await
             {
                 Ok(renamed) if &renamed != branch => {

@@ -705,7 +705,8 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
             .filter(|c| c.title.as_deref().is_some_and(|t| !t.is_empty()))
     })
     .await;
-    assert_eq!(chat.title.as_deref(), Some("Fix Login Flow"));
+    // Titles in a Space are qualified by its name (see `contextualize_title`).
+    assert_eq!(chat.title.as_deref(), Some("repo: Fix Login Flow"));
     // Branch renamed from the title, chat row updated to match.
     assert_eq!(chat.branch.as_deref(), Some("mast/fix-login-flow"));
     let head = tokio::process::Command::new("git")

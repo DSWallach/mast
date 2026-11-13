@@ -6135,28 +6135,30 @@ mod tests {
         assert_eq!(preview["historyPending"], true);
         assert_eq!(preview["reset"][0]["parts"].as_array().unwrap().len(), 128);
         assert_eq!(preview["reset"][0]["parts"][0]["id"], "part-372");
-        // Changes between preview and subscribe must appear in the full reset.
+        // A change after first paint lands in the full reset or, since the
+        // attach starts eagerly, in the delta right after it; never lost.
         handle
             .write_user_message("arrived", "new local message", 1)
             .unwrap();
         let full = stream.next().await.unwrap();
         assert!(full.get("historyPending").is_none());
         assert_eq!(full["reset"][0]["parts"].as_array().unwrap().len(), 500);
-        assert_eq!(full["reset"][1]["id"], "arrived");
+        let mut entries = Vec::new();
+        let update: mast_doc::TranscriptUpdate = serde_json::from_value(full).unwrap();
+        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
         handle
             .write_user_message("live", "after attach", 2)
             .unwrap();
-        let live = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap();
-        let mut entries = Vec::new();
-        for value in [full, live] {
+        while entries.last().map(|e| e.id.as_str()) != Some("live") {
+            let value = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
             let update: mast_doc::TranscriptUpdate = serde_json::from_value(value).unwrap();
             mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
         }
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries.last().unwrap().id, "live");
+        let ids: Vec<_> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["turn", "arrived", "live"]);
         host.shutdown_workers().await;
     }
 

@@ -148,14 +148,15 @@ async fn sync_picks_up_a_closed_message_but_defers_the_new_open_reply() {
         "only u2 is safe — asst2's turn is still open, deferred to the next sync"
     );
 
-    // Nothing further to add while the tail stays open.
+    // An unchanged file on the next sync means the open tail has settled
+    // (see `ExternalImport::sync`), so asst2 lands now.
     let result_repeat = core
         .external_import
         .sync(chat_id)
-        .expect("sync again, still open");
-    assert_eq!(result_repeat.new_message_count, 0);
+        .expect("sync again, file unchanged");
+    assert_eq!(result_repeat.new_message_count, 1, "asst2 after one stable observation");
 
-    // A third message closes asst2's turn.
+    // A third message arrives later; asst2 must not be added twice.
     grown.push_str(&third_message_closes_it());
     std::fs::write(&transcript_path, &grown).expect("close the turn");
 
@@ -163,7 +164,7 @@ async fn sync_picks_up_a_closed_message_but_defers_the_new_open_reply() {
         .external_import
         .sync(chat_id)
         .expect("sync after close");
-    assert_eq!(result_final.new_message_count, 2, "asst2 (now closed) + u3");
+    assert_eq!(result_final.new_message_count, 1, "only u3");
 
     core.shutdown().await;
 

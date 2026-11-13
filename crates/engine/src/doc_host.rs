@@ -6554,7 +6554,8 @@ mod source_context_tests {
             .await
             .expect("source context");
         assert_eq!(context.branch, "feature/captured");
-        assert_eq!(context.cwd, repo.to_string_lossy());
+        // The cwd is canonical (macOS temp dirs sit behind /var -> /private/var).
+        assert_eq!(context.cwd, repo.canonicalize().unwrap().to_string_lossy());
         assert_eq!(
             context.repo_root,
             repo.canonicalize().unwrap().to_string_lossy()
