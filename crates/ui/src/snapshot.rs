@@ -208,11 +208,19 @@ pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
 }
 
 /// Offline chat shell where the agent asks a question and the user has typed
-/// a long answer of their own.
+/// a long answer of their own. The host takes side chats, so the panel offers
+/// Clarify.
 pub fn question_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let shell = chat_fixture_with(
         data_dir,
         |state, cx| {
+            state.devices.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "local", "name": "This Mac", "platform": "macos",
+                    "capabilities": [mast_proto::capabilities::SIDE_CHAT_V1],
+                }))
+                .unwrap(),
+            );
             state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
                 {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
                 {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"The caption gap and the control gap disagree. I can fix it either way."},{"id":"ask","kind":"input","requestId":"req-1","questions":[{"id":"q1","header":"Spacing","question":"Which gap should the sidebar captions use?","options":["The control gap token","A new caption token","Leave it as is"],"allowCustom":true}]}],"createdAt":1788900001000_i64,"deviceId":"local","status":"streaming"}

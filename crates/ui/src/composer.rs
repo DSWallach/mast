@@ -633,6 +633,57 @@ fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) ->
     key == "escape" && (!input_focused || input_empty)
 }
 
+/// Mast's own slash command: `/btw <question>` asks in a side chat instead of
+/// the main one.
+const BTW_COMMAND: &str = "btw";
+
+/// The question in a `/btw` prompt: `Some(None)` for a bare `/btw`, `None`
+/// when the text isn't a `/btw` command at all.
+fn btw_question(text: &str) -> Option<Option<String>> {
+    let rest = text.trim().strip_prefix('/')?.strip_prefix(BTW_COMMAND)?;
+    if rest.chars().next().is_some_and(|c| !c.is_whitespace()) {
+        return None;
+    }
+    let rest = rest.trim();
+    Some((!rest.is_empty()).then(|| rest.to_owned()))
+}
+
+/// Put `/btw` in a harness's command list, replacing any harness command of
+/// the same name: Mast intercepts it before the harness would see it.
+fn with_btw_command(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    commands.retain(|command| command.name != BTW_COMMAND);
+    commands.push(SlashCommand {
+        name: BTW_COMMAND.into(),
+        description: "Ask in a side chat without interrupting this one".into(),
+        input_hint: Some("question".into()),
+    });
+    commands
+}
+
+/// The side chat's first message when clarifying the agent's question: the
+/// side chat can't answer it, so it gets the choice spelled out.
+fn clarify_prompt(question: &UserInputQuestion, ask: Option<&str>) -> String {
+    let options: String = question
+        .options
+        .iter()
+        .enumerate()
+        .map(|(ix, option)| format!("\n{}. {option}", ix + 1))
+        .collect();
+    let kind = if question.multi_select {
+        "I can pick more than one option."
+    } else if question.options.is_empty() {
+        "It takes a free-text answer."
+    } else {
+        "I pick one option."
+    };
+    let ask = ask.unwrap_or("What are the trade-offs between these options?");
+    format!(
+        "The main chat is waiting for my answer to this question. Help me understand it; \
+         don't answer it for me.\n\nQuestion: {}{options}\n{kind}\n\nMy question: {ask}",
+        question.question
+    )
+}
+
 /// A muted caption line in the question panel.
 fn wizard_note(theme: &Theme, text: &'static str) -> gpui::Div {
     div()
@@ -641,9 +692,13 @@ fn wizard_note(theme: &Theme, text: &'static str) -> gpui::Div {
         .child(SharedString::from(text))
 }
 
-fn wizard_placeholder(wizard: &Wizard) -> &'static str {
+fn wizard_placeholder(wizard: &Wizard, can_clarify: bool) -> &'static str {
     if !wizard.accepts_typed() {
-        "Pick an option above"
+        if can_clarify {
+            "Pick an option above, or ask about it here"
+        } else {
+            "Pick an option above"
+        }
     } else if wizard.page_has_pick() {
         "Type your own answer, or leave this blank to use the selected option"
     } else {
@@ -810,18 +865,23 @@ impl Wizard {
             .is_some_and(|q| q.options.is_empty() || q.allow_custom)
     }
 
+    /// Whether non-empty `typed` text answers the current question: free text
+    /// where it's taken, otherwise only an option's name.
+    pub fn typed_is_answer(&self, typed: &str) -> bool {
+        let typed = typed.trim();
+        !typed.is_empty()
+            && (self.accepts_typed()
+                || self.current().is_some_and(|q| {
+                    q.options.iter().any(|o| o.eq_ignore_ascii_case(typed))
+                }))
+    }
+
     /// Whether the current page, with `typed` in the input, has an answer
     /// `validate_input_answers` would accept.
     pub fn page_answerable(&self, typed: &str) -> bool {
-        let Some(question) = self.current() else {
-            return false;
-        };
-        let typed = typed.trim();
-        question.options.is_empty()
+        self.current().is_some_and(|q| q.options.is_empty())
             || self.page_has_pick()
-            || (!typed.is_empty()
-                && (question.allow_custom
-                    || question.options.iter().any(|o| o.eq_ignore_ascii_case(typed))))
+            || self.typed_is_answer(typed)
     }
 
     /// Explicit submit / auto-advance landing.
@@ -4060,6 +4120,12 @@ pub enum ComposerEvent {
     /// yet: the transcript remembers the stable id and promotes it to an
     /// own-turn anchor only when the host materializes the matching bubble.
     Queued { chat_id: String, message_id: String },
+    /// `/btw` or the question panel's Clarify: open a side chat of `chat_id`,
+    /// asking `question` first when given.
+    AskOnSide {
+        chat_id: String,
+        question: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6146,7 +6212,7 @@ impl Composer {
                             composer.slash_cache.insert(
                                 key,
                                 SlashCacheEntry {
-                                    commands,
+                                    commands: with_btw_command(commands),
                                     fetched_at: Instant::now(),
                                 },
                             );
@@ -6253,7 +6319,10 @@ impl Composer {
     /// and delete the typed `/query` token. While a queued row is being
     /// edited there is no send to carry a preamble, so it inserts instead.
     fn attach_slash(&mut self, cx: &mut Context<Self>) {
-        if self.editing_queued.is_some() {
+        let btw = self
+            .active_slash_command()
+            .is_some_and(|command| command.name == BTW_COMMAND);
+        if self.editing_queued.is_some() || btw {
             self.accept_slash(cx);
             return;
         }
@@ -6656,7 +6725,7 @@ impl Composer {
                 if !same {
                     self.reset_mention(None, cx);
                     let wizard = Wizard::new(request_id, questions);
-                    let placeholder = wizard_placeholder(&wizard);
+                    let placeholder = wizard_placeholder(&wizard, self.can_ask_on_side(cx));
                     self.wizard = Some(wizard);
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
@@ -6740,7 +6809,18 @@ impl Composer {
         if self.commit_queue_edit(cx) {
             return;
         }
-        if self.wizard.is_some() {
+        if let Some(ask) = btw_question(self.input.read(cx).text()) {
+            self.ask_on_side(ask, cx);
+            return;
+        }
+        if let Some(wizard) = self.wizard.as_ref() {
+            // Text the question can't take as an answer is a question about
+            // it: ask on the side rather than sending nothing.
+            let typed = self.input.read(cx).text().trim().to_string();
+            if !typed.is_empty() && !wizard.typed_is_answer(&typed) && self.can_ask_on_side(cx) {
+                self.ask_on_side(Some(typed), cx);
+                return;
+            }
             // Enter inside the panel's free-text input submits the page.
             self.wizard_advance(cx);
             return;
@@ -7757,10 +7837,55 @@ impl Composer {
     }
 
     fn refresh_wizard_placeholder(&mut self, cx: &mut Context<Self>) {
-        if let Some(placeholder) = self.wizard.as_ref().map(wizard_placeholder) {
+        let can_clarify = self.can_ask_on_side(cx);
+        if let Some(wizard) = self.wizard.as_ref() {
+            let placeholder = wizard_placeholder(wizard, can_clarify);
             self.input
                 .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
         }
+    }
+
+    fn can_ask_on_side(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state
+            .selected_chat
+            .as_deref()
+            .is_some_and(|chat_id| state.can_ask_on_side(chat_id))
+    }
+
+    /// Open a side chat of the selected chat, asking `ask` first. While the
+    /// agent's question panel is up, the side chat is told the question and
+    /// its options, and the panel stays up for the answer.
+    fn ask_on_side(&mut self, ask: Option<String>, cx: &mut Context<Self>) {
+        let chat_id = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .filter(|_| self.can_ask_on_side(cx));
+        let Some(chat_id) = chat_id else {
+            self.failure = Some("Side chats aren't available for this chat.".into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return;
+        };
+        let question = match self.wizard.as_ref().and_then(Wizard::current) {
+            Some(pending) => Some(clarify_prompt(pending, ask.as_deref())),
+            None => ask,
+        };
+        if let Some(wizard) = self.wizard.as_mut() {
+            wizard.set_typed(String::new());
+        }
+        self.input.update(cx, |input, cx| input.set_text("", cx));
+        cx.emit(ComposerEvent::AskOnSide { chat_id, question });
+        cx.notify();
+    }
+
+    /// The question panel's Clarify: ask about the choice in a side chat,
+    /// with whatever is typed as the question.
+    fn wizard_clarify(&mut self, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).text().trim().to_string();
+        self.ask_on_side((!typed.is_empty()).then_some(typed), cx);
     }
 
     /// Save the shared input's text as the current page's free-text answer.
@@ -7951,7 +8076,14 @@ impl Composer {
         let typed = self.input.read(cx).text().trim().to_string();
         let typed_empty = typed.is_empty() || !wizard.accepts_typed();
         let can_advance = wizard.page_answerable(&typed);
-        let typed_ignored = !typed.is_empty() && !wizard.accepts_typed();
+        let can_clarify = self.can_ask_on_side(cx);
+        let typed_hint = (!typed.is_empty() && !wizard.typed_is_answer(&typed)).then_some(
+            if can_clarify {
+                "This question only takes the listed options. Enter asks about it in a side chat."
+            } else {
+                "This question only takes the listed options."
+            },
+        );
         // The composer's own render sizes the shared input, and it doesn't
         // run while the panel is up: left at a single-line viewport, wrapped
         // text painted below the panel. Cap it here and let it scroll.
@@ -8118,11 +8250,8 @@ impl Composer {
                             .pb(px(4.0))
                             .px(px(4.0))
                             .child(self.input.clone())
-                            .when(typed_ignored, |el| {
-                                el.child(
-                                    wizard_note(&theme, "This question only takes the listed options.")
-                                        .mt(px(6.0)),
-                                )
+                            .when_some(typed_hint, |el, hint| {
+                                el.child(wizard_note(&theme, hint).mt(px(6.0)))
                             }),
                     ),
             )
@@ -8158,11 +8287,31 @@ impl Composer {
                             }),
                     )
                     .child(
-                        crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
-                            .id("wizard-submit")
-                            .px(px(16.0))
-                            .when(!can_advance, |el| el.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .when(can_clarify, |el| {
+                                el.child(
+                                    crate::popover::btn_ghost(&theme, "Clarify", "wizard-clarify")
+                                        .id("wizard-clarify")
+                                        .debug_selector(|| "wizard-clarify".into())
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.wizard_clarify(cx)),
+                                        ),
+                                )
+                            })
+                            .child(
+                                crate::popover::btn_primary(
+                                    &theme,
+                                    if last { "Submit" } else { "Next" },
+                                )
+                                .id("wizard-submit")
+                                .px(px(16.0))
+                                .when(!can_advance, |el| el.opacity(0.4))
+                                .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
+                            ),
                     ),
             )
             .into_any_element()
@@ -11139,6 +11288,58 @@ mod tests {
             Ok(()),
             "the host accepts what the wizard sends"
         );
+    }
+
+    #[test]
+    fn btw_takes_the_rest_of_the_prompt_as_its_question() {
+        assert_eq!(btw_question("/btw"), Some(None));
+        assert_eq!(btw_question("  /btw   "), Some(None));
+        assert_eq!(
+            btw_question("/btw why option B?"),
+            Some(Some("why option B?".into()))
+        );
+        assert_eq!(
+            btw_question("/btw\nfirst line\nsecond"),
+            Some(Some("first line\nsecond".into()))
+        );
+        assert_eq!(btw_question("/btwx"), None, "another command");
+        assert_eq!(btw_question("btw why?"), None);
+        assert_eq!(btw_question("fix this /btw"), None, "only a leading command");
+    }
+
+    #[test]
+    fn btw_joins_the_harness_commands_once() {
+        let harness = |name: &str| SlashCommand {
+            name: name.into(),
+            description: "harness".into(),
+            input_hint: None,
+        };
+        let commands = with_btw_command(vec![harness("review"), harness(BTW_COMMAND)]);
+        assert_eq!(
+            commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["review", BTW_COMMAND]
+        );
+        assert_ne!(commands[1].description, "harness", "Mast's own /btw wins");
+    }
+
+    #[test]
+    fn clarify_spells_out_the_choice_and_the_users_question() {
+        let prompt = clarify_prompt(&question("q", &["Keep it", "Drop it"], false), Some("Why drop?"));
+        assert!(prompt.contains("Question: Question q\n1. Keep it\n2. Drop it\nI pick one option."));
+        assert!(prompt.ends_with("My question: Why drop?"));
+        assert!(prompt.contains("don't answer it for me"));
+
+        let open = clarify_prompt(&question("q", &[], false), None);
+        assert!(open.contains("Question: Question q\nIt takes a free-text answer."));
+        assert!(open.ends_with("My question: What are the trade-offs between these options?"));
+    }
+
+    #[test]
+    fn typed_text_naming_an_option_is_an_answer_not_a_question() {
+        let w = Wizard::new("req".into(), vec![question("q", &["Keep it"], false)]);
+        assert!(w.typed_is_answer(" keep IT "));
+        assert!(!w.typed_is_answer("what does keeping it cost?"));
+        assert!(!w.typed_is_answer("   "));
     }
 
     #[test]

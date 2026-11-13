@@ -1297,6 +1297,25 @@ impl AppState {
             .is_some_and(|chat| self.device_supports(&chat.device_id, capability))
     }
 
+    /// Side chats are offered when both this engine and the chat's host
+    /// understand them, and never on a side chat itself.
+    pub(crate) fn can_ask_on_side(&self, chat_id: &str) -> bool {
+        use mast_proto::capabilities::SIDE_CHAT_V1;
+        let local = match self.engine() {
+            Some(engine) => engine.engine_info().supports(SIDE_CHAT_V1),
+            None => self
+                .local_device_id
+                .as_deref()
+                .is_some_and(|device| self.device_supports(device, SIDE_CHAT_V1)),
+        };
+        local
+            && self
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && !chat.archived && !chat.is_side_chat())
+            && self.chat_host_supports(chat_id, SIDE_CHAT_V1)
+    }
+
     /// First project on the composer's picked device (falling back through
     /// the local device, then any project at all — better a cross-device
     /// project than a surprise project-less canvas). Display order.
