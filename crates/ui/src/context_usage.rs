@@ -107,8 +107,8 @@ fn with_separators(count: u64) -> String {
 }
 
 /// whether the indicator has anything to measure against: harnesses that
-/// never report a window (antigravity) get no indicator at all, rather than a
-/// permanently empty ring.
+/// never report a window get no indicator at all, rather than a permanently
+/// empty ring.
 pub fn has_window(usage: Option<ContextUsage>) -> bool {
     usage
         .and_then(|usage| usage.window)
