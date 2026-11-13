@@ -28,6 +28,7 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod antigravity_context;
 mod antigravity_paths;
 mod devin_models;
 mod normalize;
@@ -772,7 +773,7 @@ fn antigravity_spec() -> AcpAgentSpec {
              ANTIGRAVITY_ACP_EXECUTABLE to override)",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
-            vec![
+            let mut models = vec![
                 Model {
                     id: "gemini-4-argon".into(),
                     label: "Gemini 4 Argon".into(),
@@ -801,7 +802,9 @@ fn antigravity_spec() -> AcpAgentSpec {
                     reasoning_levels: vec![Low, High],
                     options: Vec::new(),
                 },
-            ]
+            ];
+            antigravity_context::enrich_antigravity_models(&mut models);
+            models
         },
         steering_mode: SteeringMode::TurnBoundary,
         permission_title_is_command: false,
@@ -1515,6 +1518,9 @@ impl AcpHarness {
             if self.spec.effort_in_model_id {
                 models = group_effort_variants(models);
             }
+            if self.spec.id == HarnessId::Antigravity {
+                antigravity_context::enrich_antigravity_models(&mut models);
+            }
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
@@ -1897,19 +1903,23 @@ impl Harness for AcpHarness {
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
-        match self.model_catalog(true).await {
-            Ok(catalog) => Ok(catalog.models),
+        let mut models = match self.model_catalog(true).await {
+            Ok(catalog) => catalog.models,
             Err(error)
                 if self.id() == HarnessId::Devin
                     || !crate::CatalogFailure::classify(&error).allows_stale() =>
             {
-                Err(error)
+                return Err(error);
             }
             Err(error) => {
                 tracing::warn!(%error, source = "static", "Model discovery failed");
-                Ok(self.fallback_models())
+                self.fallback_models()
             }
+        };
+        if self.spec.id == HarnessId::Antigravity {
+            antigravity_context::enrich_antigravity_models(&mut models);
         }
+        Ok(models)
     }
 
     /// the agent's advertised commands minus the spec's hidden ones, then its
@@ -2295,7 +2305,7 @@ fn validate_config_model_selection(
     let context_1m = model_options
         .get("contextWindow")
         .and_then(Value::as_str)
-        .is_some_and(|window| window.eq_ignore_ascii_case("1m"));
+        .is_some_and(|window| window.eq_ignore_ascii_case("1m") || window == "1000000");
     if pick_model_value(requested, &available, context_1m).is_some() {
         return Ok(());
     }
@@ -2345,7 +2355,7 @@ fn config_option_sets(
     let context_1m = model_options
         .get("contextWindow")
         .and_then(Value::as_str)
-        .is_some_and(|w| w.eq_ignore_ascii_case("1m"));
+        .is_some_and(|w| w.eq_ignore_ascii_case("1m") || w == "1000000");
     let mut sets = Vec::new();
     for option in options {
         let Some(config_id) = option.get("id").and_then(Value::as_str) else {
@@ -2509,6 +2519,37 @@ fn usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> 
         input_tokens: input.unwrap_or(0),
         output_tokens: output.unwrap_or(0),
     })
+}
+
+/// Settled context usage snapshot from a finished `session/prompt` response.
+fn context_usage_from_response(
+    res: &Result<Value, HarnessError>,
+    harness: HarnessId,
+    model: Option<&str>,
+    model_options: &serde_json::Map<String, Value>,
+) -> Option<AgentEvent> {
+    let resp = res.as_ref().ok()?;
+    let usage = resp.get("usage").or_else(|| resp.get("_meta"))?;
+    let count = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| usage.get(*k))
+            .and_then(Value::as_u64)
+    };
+    let tokens = count(&["totalTokens", "total_tokens", "used"])
+        .or_else(|| count(&["inputTokens", "input_tokens"]));
+    let wire_window = count(&[
+        "max",
+        "limit",
+        "size",
+        "contextWindow",
+        "context_window",
+        "modelContextWindow",
+        "model_context_window",
+    ])
+    .filter(|n| *n > 0);
+    let window = wire_window
+        .or_else(|| antigravity_context::effective_context_window(harness, model, model_options));
+    (tokens.is_some() || window.is_some()).then_some(AgentEvent::ContextUsage { tokens, window })
 }
 
 /// Map a finished `session/prompt` result to the run's terminal status.
@@ -3447,6 +3488,20 @@ async fn run_session(session: Session) {
         child.shutdown(kill_grace).await;
         return;
     }
+    if let Some(window) = antigravity_context::effective_context_window(
+        harness,
+        request.model.as_deref(),
+        &request.model_options,
+    ) {
+        let _ = send(
+            &event_tx,
+            AgentEvent::ContextUsage {
+                tokens: None,
+                window: Some(window),
+            },
+        )
+        .await;
+    }
 
     // Subagent correlation + transcript tails: Devin carries nested updates
     // on ACP itself; everything else gets the Grok tracker (inert without
@@ -3675,6 +3730,15 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
+                if let Some(context_usage) = context_usage_from_response(
+                    &res,
+                    harness,
+                    request.model.as_deref(),
+                    &request.model_options,
+                ) && !send(&event_tx, context_usage).await
+                {
+                    break 'main;
+                }
                 let (status, mut error) = stop_outcome(&res, interrupted);
                 if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
                     error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
@@ -3850,6 +3914,14 @@ async fn run_session(session: Session) {
                         .await;
                         if let Some(usage) = usage_from_response(&res) {
                             let _ = send(&event_tx, usage).await;
+                        }
+                        if let Some(context_usage) = context_usage_from_response(
+                            &res,
+                            harness,
+                            request.model.as_deref(),
+                            &request.model_options,
+                        ) {
+                            let _ = send(&event_tx, context_usage).await;
                         }
                         let (status, error) = stop_outcome(&res, interrupted);
                         done_current = true;
