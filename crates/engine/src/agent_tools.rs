@@ -639,6 +639,14 @@ fn check_child_config(
              Auto (never wider than its parent)",
         ));
     }
+    let parent_rules = parent.is_some_and(|c| c.approval_rules);
+    if child.approval_rules && !child.auto_approve && !parent_auto && !parent_rules {
+        return Err(AgentToolError::refused(
+            AgentToolErrorCode::Forbidden,
+            "approvalRules refused: a child chat can only use Rules when the calling chat is on \
+             Rules or Auto (never wider than its parent)",
+        ));
+    }
     if effective_rank(child.sandbox, child.auto_approve) > effective_rank(cap, parent_auto) {
         return Err(AgentToolError::refused(
             AgentToolErrorCode::Forbidden,
@@ -2676,7 +2684,7 @@ fn child_run_request(
     attachments: Vec<String>,
 ) -> RunRequest {
     let config = chat.config.as_ref();
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: config.is_some_and(|c| c.approval_rules),
         prompt,
         harness: config.map(|c| c.harness),
         model: config.and_then(|c| c.model.clone()),

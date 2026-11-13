@@ -676,7 +676,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .set_chat_branch(chat_id, &worktree.branch)
         .expect("set branch");
 
-    let request = mast_proto::RunRequest {
+    let request = mast_proto::RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "please fix the login flow".into(),
         harness: None,
         model: None,
@@ -705,7 +705,8 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
             .filter(|c| c.title.as_deref().is_some_and(|t| !t.is_empty()))
     })
     .await;
-    assert_eq!(chat.title.as_deref(), Some("Fix Login Flow"));
+    // Titles in a Space are qualified by its name (see `contextualize_title`).
+    assert_eq!(chat.title.as_deref(), Some("repo: Fix Login Flow"));
     // Branch renamed from the title, chat row updated to match.
     assert_eq!(chat.branch.as_deref(), Some("mast/fix-login-flow"));
     let head = tokio::process::Command::new("git")
@@ -723,7 +724,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     core.workspace
         .rename_chat(chat_id, "My Custom Name")
         .expect("rename");
-    let request = mast_proto::RunRequest {
+    let request = mast_proto::RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "another request".into(),
         harness: None,
         model: None,

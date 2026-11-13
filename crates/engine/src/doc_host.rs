@@ -3993,6 +3993,7 @@ impl DocHost {
                     // Config-less rows can't name an approval mode; keep the
                     // previous run's (a configured row wins just below).
                     current.auto_approve = previous.auto_approve;
+                    current.approval_rules = previous.approval_rules;
                     current.worktree = previous.worktree.clone();
                 }
                 current
@@ -5273,6 +5274,9 @@ impl DocHost {
                 if sessions.respond_input(chat_id, request_id, answers.clone())? {
                     return Ok((SessionCommandStatus::Applied, None));
                 }
+                if answers.iter().any(|a| a.labels.iter().any(|l| mast_proto::is_always_allow_label(l))) {
+                    return Ok((SessionCommandStatus::Rejected, Some("This request is no longer live, so no rule was saved. Add it to ~/.mast/settings.json, or wait for the agent to ask again.".into())));
+                }
                 // No live resolver. Only a request id the doc shows as an
                 // OPEN question on a SETTLED entry gets the orphan fallback:
                 // a mismatched or already-resolved id is a stale/buggy answer
@@ -5529,7 +5533,7 @@ impl DocHost {
         if let Some(ws) = self.workspace()
             && ws.chat_config(chat_id).is_none()
         {
-            let config = mast_proto::ChatConfig {
+            let config = mast_proto::ChatConfig { approval_rules: request.approval_rules,
                 harness,
                 model: request.model.clone(),
                 reasoning: request.reasoning,
@@ -6089,7 +6093,7 @@ impl DocHost {
             None => chat.cwd.unwrap_or_default(),
         };
         let config = chat.config;
-        Some(mast_proto::RunRequest {
+        Some(mast_proto::RunRequest { scheduled_task: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
             model: config.as_ref().and_then(|c| c.model.clone()),
@@ -6124,6 +6128,7 @@ impl DocHost {
     pub(crate) fn apply_chat_approval(&self, chat_id: &str, request: &mut mast_proto::RunRequest) {
         if let Some(config) = self.workspace().and_then(|ws| ws.chat_config(chat_id)) {
             request.auto_approve = config.auto_approve;
+            request.approval_rules = config.approval_rules;
         }
     }
 
@@ -6188,7 +6193,7 @@ fn approval_reply_prompt(questions: &[UserInputQuestion], answers: &[UserInputAn
     let [label] = answer.labels.as_slice() else { return None; };
     let header = question.header.trim_end_matches(" (subagent)");
     let approval = question.command_approval.is_some()
-        || matches!(header, "Approve command" | "Approve permissions" | "Approve file change" | "Permission");
+        || matches!(header, "Approve command" | "Approve permissions" | "Approve file change" | "Approve tool" | "Permission");
     if !approval || label.trim().is_empty()
         || question.options.iter().any(|option| option.eq_ignore_ascii_case(label.trim()))
     {
@@ -6243,7 +6248,7 @@ mod approval_reply_tests {
 
     #[test]
     fn custom_reply_overrides_approval_but_preserves_choice_validation() {
-        let mut question = UserInputQuestion {
+        let mut question = UserInputQuestion { permission: None,
             id: "q".into(), header: "Approve command (subagent)".into(),
             question: "Run it?".into(), options: vec!["Yes".into(), "No".into()],
             multi_select: false, allow_custom: false, command_approval: None,
@@ -6549,7 +6554,8 @@ mod source_context_tests {
             .await
             .expect("source context");
         assert_eq!(context.branch, "feature/captured");
-        assert_eq!(context.cwd, repo.to_string_lossy());
+        // The cwd is canonical (macOS temp dirs sit behind /var -> /private/var).
+        assert_eq!(context.cwd, repo.canonicalize().unwrap().to_string_lossy());
         assert_eq!(
             context.repo_root,
             repo.canonicalize().unwrap().to_string_lossy()

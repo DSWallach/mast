@@ -100,6 +100,10 @@ struct AcpAgentSpec {
     install_hint: &'static str,
     models: fn() -> Vec<Model>,
     steering_mode: SteeringMode,
+    /// The agent puts the exact shell command in a permission request's
+    /// `toolCall.title` and sends no `rawInput` (Gemini CLI). Rules mode only
+    /// reads a command from the title when this is set.
+    permission_title_is_command: bool,
     /// Effort ladder surfaced in the picker; applied per session via the
     /// `thought_level` config option (must mirror the registry descriptor).
     reasoning_levels: &'static [ReasoningLevel],
@@ -245,6 +249,7 @@ fn grok_spec() -> AcpAgentSpec {
         },
         // No `_session/steering` extension: steers deliver at turn boundaries.
         steering_mode: SteeringMode::TurnBoundary,
+        permission_title_is_command: false,
         // Grok Build's advertised efforts (default high); applied through the
         // session's `thought_level` config option.
         reasoning_levels: &[
@@ -329,6 +334,7 @@ fn devin_spec() -> AcpAgentSpec {
             ]
         },
         steering_mode: SteeringMode::TurnBoundary,
+        permission_title_is_command: false,
         // Effort is encoded in Devin's advertised model ids, not a separate
         // thought_level config option.
         reasoning_levels: &[],
@@ -399,6 +405,7 @@ fn hermes_spec() -> AcpAgentSpec {
         },
         // No `_session/steering` extension: steers deliver at turn boundaries.
         steering_mode: SteeringMode::TurnBoundary,
+        permission_title_is_command: false,
         // Hermes exposes no effort config over ACP today (hybrid reasoning is
         // model-internal); revisit when the adapter advertises a ladder.
         reasoning_levels: &[],
@@ -453,6 +460,7 @@ fn pi_spec() -> AcpAgentSpec {
         },
         // The adapter has no `_session/steering` extension: turn boundaries.
         steering_mode: SteeringMode::TurnBoundary,
+        permission_title_is_command: false,
         // pi's thinking ladder (minimal→max; its extra "off" tier has no zeron
         // equivalent and is left to the agent default).
         reasoning_levels: &[
@@ -796,6 +804,7 @@ fn antigravity_spec() -> AcpAgentSpec {
             ]
         },
         steering_mode: SteeringMode::TurnBoundary,
+        permission_title_is_command: false,
         reasoning_levels: &[
             ReasoningLevel::Low,
             ReasoningLevel::Medium,
@@ -975,7 +984,7 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
+        let (_scratch, mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[], None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1348,6 +1357,7 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
+        scheduled_task: Option<&str>,
     ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
@@ -1356,6 +1366,7 @@ impl AcpHarness {
         child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
+        crate::export_scheduled_task(&mut cmd, scheduled_task);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
@@ -1402,7 +1413,7 @@ impl AcpHarness {
     /// refuses sessions before login still surfaces whatever the handshake
     /// advertised.
     async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (_scratch, mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
+        let (_scratch, mut child, _stderr) = self.spawn_agent(None, false, &[], None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1470,7 +1481,7 @@ impl AcpHarness {
             crate::executable::model_discovery_cwd(self.model_discovery_cwd.as_deref())?;
         let discovery_cwd_string = discovery_cwd.to_string_lossy().into_owned();
         let (_scratch, mut child, stderr_tail) = self
-            .spawn_agent(Some(&discovery_cwd_string), false, &[])
+            .spawn_agent(Some(&discovery_cwd_string), false, &[], None)
             .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
@@ -1989,7 +2000,7 @@ impl AcpHarness {
             }
         }
         let (scratch, mut child, stderr_tail) =
-            self.spawn_agent(Some(&request.cwd), true, &[]).await?;
+            self.spawn_agent(Some(&request.cwd), true, &[], request.scheduled_task.as_deref()).await?;
         let stdin = child
             .stdin
             .take()
@@ -2011,6 +2022,7 @@ impl AcpHarness {
             agent_tools,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
+            permission_title_is_command: self.spec.permission_title_is_command,
             prompt_transform: self.spec.prompt_transform,
             effort_values: self.spec.effort_values,
             prompt_complete_extension: self.spec.prompt_complete_extension,
@@ -2052,6 +2064,7 @@ struct Session {
     agent_tools: Option<crate::AgentToolsInjection>,
     harness: HarnessId,
     agent_name: &'static str,
+    permission_title_is_command: bool,
     prompt_complete_extension: bool,
     prompt_stall: Option<Duration>,
     stall_hint: &'static str,
@@ -2321,6 +2334,7 @@ fn config_option_sets(
     model: Option<&str>,
     efforts: &[&'static str],
     model_options: &serde_json::Map<String, Value>,
+    rules_mode: bool,
 ) -> Vec<(String, Value)> {
     let Some(options) = session_response
         .get("configOptions")
@@ -2365,7 +2379,8 @@ fn config_option_sets(
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
                 .map(|c| Value::String(c.to_owned()))
-                .or_else(|| {
+                // Rules mode needs the agent to keep asking.
+                .or_else(|| (!rules_mode).then_some(()).and_then(|()| {
                     [
                         "bypassPermissions",
                         "bypass_permissions",
@@ -2378,7 +2393,7 @@ fn config_option_sets(
                     .into_iter()
                     .find(|v| available.contains(v))
                     .map(|v| Value::String(v.to_owned()))
-                }),
+                })),
             ("select", Some("thought_level")) => efforts
                 .iter()
                 .find(|c| available.contains(*c))
@@ -2615,6 +2630,7 @@ fn handle_server_request_live(
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
+    rules: Option<bool>,
 ) -> Vec<AgentEvent> {
     if params
         .get("sessionId")
@@ -2632,6 +2648,9 @@ fn handle_server_request_live(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if let Some(title_is_command) = rules.filter(|_| !is_user_question(&options)) {
+        return ask_tool_permission(client, id, params, options, request_input, title_is_command);
+    }
     if !is_user_question(&options) {
         return handle_server_request(client, id, method, params);
     }
@@ -2644,7 +2663,7 @@ fn handle_server_request_live(
                 .to_owned()
         })
         .collect();
-    let question = UserInputQuestion {
+    let question = UserInputQuestion { permission: None,
         command_approval: None,
         allow_custom: false,
         id: new_message_id(),
@@ -2674,6 +2693,106 @@ fn handle_server_request_live(
                     .find(|o| o.get("name").and_then(Value::as_str) == Some(label.as_str()))
             })
             .and_then(|o| o.get("optionId").and_then(Value::as_str));
+        match picked {
+            Some(option_id) => client.respond(
+                &id,
+                json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
+            ),
+            None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
+        }
+    });
+    Vec::new()
+}
+
+/// What an ACP tool permission request asks for. Gemini CLI names MCP tools
+/// in `toolCall._meta["gemini-cli"].mcp`; shell commands come from
+/// `rawInput.command`, or from the title for agents that put it there.
+fn acp_permission(tool_call: &Value, title_is_command: bool) -> Option<mast_proto::PermissionRequest> {
+    let meta = tool_call.get("_meta");
+    let mcp = meta
+        .and_then(|m| m.get("gemini-cli"))
+        .and_then(|g| g.get("mcp"))
+        .or_else(|| meta.and_then(|m| m.get("mcp")));
+    if let Some(mcp) = mcp {
+        let field = |k: &str| {
+            mcp.get(k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        return Some(mast_proto::PermissionRequest::McpTool {
+            server: field("server_name")?,
+            tool: field("tool_name")?,
+        });
+    }
+    if tool_call.get("kind").and_then(Value::as_str) != Some("execute") {
+        return None;
+    }
+    let command = tool_call
+        .get("rawInput")
+        .and_then(|input| input.get("command"))
+        .filter(|c| c.is_array() || c.as_str().is_some_and(|s| !s.trim().is_empty()))
+        .cloned()
+        .or_else(|| {
+            title_is_command
+                .then(|| tool_call.get("title").and_then(Value::as_str))
+                .flatten()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| Value::String(t.to_owned()))
+        })?;
+    Some(mast_proto::PermissionRequest::Command { command })
+}
+
+/// Rules mode: ask the engine (which answers from the user's rules or asks
+/// the user) and reply with the agent's allow-once or reject option. Never
+/// picks an allow-always option, which would store a grant inside the agent.
+fn ask_tool_permission(
+    client: &RpcClient,
+    id: Value,
+    params: &Value,
+    options: Vec<Value>,
+    request_input: &std::sync::Arc<RequestInputFn>,
+    title_is_command: bool,
+) -> Vec<AgentEvent> {
+    let tool_call = params.get("toolCall").cloned().unwrap_or(Value::Null);
+    let title = tool_call
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("a tool");
+    let question = UserInputQuestion {
+        permission: acp_permission(&tool_call, title_is_command),
+        command_approval: None,
+        allow_custom: false,
+        id: new_message_id(),
+        header: "Approve tool".into(),
+        question: format!("The agent wants to run `{title}`. Allow it?"),
+        options: vec!["Yes".into(), "No".into()],
+        multi_select: false,
+    };
+    let client = client.clone();
+    let request_input = std::sync::Arc::clone(request_input);
+    tokio::spawn(async move {
+        let answers = (request_input)(vec![question.clone()]).await.unwrap_or_default();
+        let allowed = answers
+            .iter()
+            .find(|a| a.question_id == question.id)
+            .and_then(|a| a.labels.first())
+            .is_some_and(|l| l.eq_ignore_ascii_case("yes"));
+        let by_kind = |kinds: &[&str]| {
+            kinds.iter().find_map(|kind| {
+                options
+                    .iter()
+                    .find(|o| o.get("kind").and_then(Value::as_str) == Some(*kind))
+                    .and_then(|o| o.get("optionId").and_then(Value::as_str))
+                    .map(str::to_owned)
+            })
+        };
+        let picked = if allowed {
+            // No allow-once option: cancel rather than store a grant.
+            by_kind(&["allow_once"])
+        } else {
+            by_kind(&["reject_once", "reject_always"])
+        };
         match picked {
             Some(option_id) => client.respond(
                 &id,
@@ -3037,6 +3156,7 @@ async fn run_session(session: Session) {
         agent_tools,
         harness,
         agent_name,
+        permission_title_is_command,
         prompt_complete_extension,
         prompt_stall,
         stall_hint,
@@ -3056,6 +3176,8 @@ async fn run_session(session: Session) {
         interrupt,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
+    // Rules mode: tool permissions go to the engine; Some(title_is_command).
+    let rules = (request.approval_rules && !request.auto_approve).then_some(permission_title_is_command);
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
@@ -3191,6 +3313,7 @@ async fn run_session(session: Session) {
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
+            rules.is_some(),
         ) {
             let mut params = serde_json::Map::new();
             params.insert("sessionId".into(), session_id.clone().into());
@@ -3519,6 +3642,7 @@ async fn run_session(session: Session) {
                                 &params,
                                 &request_input,
                                 &session_id,
+                        rules,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -3698,6 +3822,7 @@ async fn run_session(session: Session) {
                         &params,
                         &request_input,
                         &session_id,
+                        rules,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -3808,6 +3933,7 @@ async fn run_session(session: Session) {
                                         &params,
                                         &request_input,
                                 &session_id,
+                        rules,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -4232,6 +4358,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn acp_permissions_read_gemini_mcp_metadata_and_commands() {
+        use mast_proto::PermissionRequest;
+        let gemini_mcp = json!({"kind":"other", "title":"notion: notion-update-page",
+            "_meta":{"gemini-cli":{"mcp":{"server_name":"notion", "tool_name":"notion-update-page"}}}});
+        assert_eq!(
+            acp_permission(&gemini_mcp, true),
+            Some(PermissionRequest::McpTool { server: "notion".into(), tool: "notion-update-page".into() })
+        );
+        let raw = json!({"kind":"execute", "title":"Run tests", "rawInput":{"command":"cargo test"}});
+        assert_eq!(acp_permission(&raw, false), Some(PermissionRequest::Command { command: json!("cargo test") }));
+        // Only an agent that puts the exact command in the title is trusted for it.
+        let titled = json!({"kind":"execute", "title":"git log -3"});
+        assert_eq!(acp_permission(&titled, false), None);
+        assert_eq!(acp_permission(&titled, true), Some(PermissionRequest::Command { command: json!("git log -3") }));
+        assert_eq!(acp_permission(&json!({"kind":"edit", "title":"x"}), true), None);
+    }
+
+    #[test]
+    fn rules_mode_keeps_the_agent_asking() {
+        let response = json!({"configOptions":[{"id":"mode", "type":"select", "category":"mode",
+            "options":[{"value":"default"}, {"value":"yolo"}]}]});
+        let no_opts = serde_json::Map::new();
+        assert_eq!(config_option_sets(&response, None, &[], &no_opts, false), vec![("mode".to_owned(), json!({"value":"yolo"}))]);
+        assert!(config_option_sets(&response, None, &[], &no_opts, true).is_empty());
+    }
+
+    #[test]
     fn pi_discovery_allows_cold_extension_startup() {
         let pi = AcpHarness::pi();
         assert_eq!(pi.model_discovery_timeout, Duration::from_secs(60));
@@ -4572,7 +4725,7 @@ mod tests {
         // Model switch + effort preference list; fastMode untouched without a
         // model-option selection.
         assert_eq!(
-            config_option_sets(&response, Some("claude-opus-5"), &["medium"], &no_opts),
+            config_option_sets(&response, Some("claude-opus-5"), &["medium"], &no_opts, false),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5" })),
                 ("effort".to_owned(), json!({ "value": "medium" })),
@@ -4580,7 +4733,7 @@ mod tests {
         );
         // Effort preference order: first ADVERTISED candidate wins.
         assert_eq!(
-            config_option_sets(&response, None, &["xhigh", "max"], &no_opts),
+            config_option_sets(&response, None, &["xhigh", "max"], &no_opts, false),
             vec![("effort".to_owned(), json!({ "value": "max" }))]
         );
         // contextWindow=1m composes the [1m] model id; fastMode=on matches the
@@ -4589,7 +4742,7 @@ mod tests {
         opts.insert("contextWindow".into(), json!("1m"));
         opts.insert("fastMode".into(), json!("on"));
         assert_eq!(
-            config_option_sets(&response, Some("claude-opus-5"), &["high"], &opts),
+            config_option_sets(&response, Some("claude-opus-5"), &["high"], &opts, false),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5[1m]" })),
                 (
@@ -4600,16 +4753,16 @@ mod tests {
         );
         // Already-current values and unadvertised models set nothing.
         assert_eq!(
-            config_option_sets(&response, Some("claude-sonnet-5"), &["high"], &no_opts),
+            config_option_sets(&response, Some("claude-sonnet-5"), &["high"], &no_opts, false),
             Vec::new()
         );
         assert_eq!(
-            config_option_sets(&response, Some("gpt-5.6-sol"), &[], &no_opts),
+            config_option_sets(&response, Some("gpt-5.6-sol"), &[], &no_opts, false),
             Vec::new()
         );
         // No configOptions advertised → nothing to set.
         assert_eq!(
-            config_option_sets(&json!({"sessionId": "s"}), Some("x"), &["high"], &no_opts),
+            config_option_sets(&json!({"sessionId": "s"}), Some("x"), &["high"], &no_opts, false),
             Vec::new()
         );
     }
@@ -4930,7 +5083,7 @@ mod tests {
         });
         let no_opts = serde_json::Map::new();
         assert_eq!(
-            config_option_sets(&codex, None, &[], &no_opts),
+            config_option_sets(&codex, None, &[], &no_opts, false),
             vec![("mode".to_owned(), json!({ "value": "agent-full-access" }))]
         );
     }
@@ -5171,7 +5324,8 @@ mod tests {
                 &live,
                 Some("gemini-3.8-flash"),
                 &["high"],
-                &serde_json::Map::new()
+                &serde_json::Map::new(),
+                false
             ),
             vec![
                 ("model".to_owned(), json!({"value": "gemini-3.8-flash"})),

@@ -164,6 +164,10 @@ pub struct ChatConfig {
     /// Serde-defaulted so rows written before this field existed read as Ask.
     #[serde(default)]
     pub auto_approve: bool,
+    /// "Rules" mode: requests matching `~/.mast/settings.json` run without
+    /// asking. Ignored when `auto_approve` is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approval_rules: bool,
 }
 
 impl ChatConfig {
@@ -1507,7 +1511,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
-            config: model.map(|m| ChatConfig {
+            config: model.map(|m| ChatConfig { approval_rules: false,
                 harness: HarnessId::ClaudeCode,
                 model: Some(m.into()),
                 reasoning: None,
@@ -1595,7 +1599,7 @@ mod tests {
 
     #[test]
     fn chat_config_auto_approve_wire_name_is_pinned_and_defaults_to_ask() {
-        let config = ChatConfig {
+        let config = ChatConfig { approval_rules: false,
             harness: HarnessId::ClaudeCode,
             model: None,
             reasoning: None,

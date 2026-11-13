@@ -261,7 +261,7 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     state.update(vcx, |state, _| state.sessions = vec![mast_proto::Session {
         last_completed_turn: None, last_turn_tool_failures: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
         status: mast_proto::SessionStatus::AwaitingInput, started_at: None, updated_at: chrono::Utc::now(),
-        awaiting_input: Some(mast_proto::AwaitingInput { request_id: "pending-approval".into(), questions: vec![mast_proto::UserInputQuestion {
+        awaiting_input: Some(mast_proto::AwaitingInput { request_id: "pending-approval".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             id: "question".into(), header: "Approve command".into(), question: "Allow pgrep? Reason: sandbox".into(),
             options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,
             command_approval: Some(mast_proto::CommandApproval { command: serde_json::json!(["pgrep", "cargo"]), cwd: Some(dir.path().to_string_lossy().into_owned()), reason: Some("sandbox".into()), sandbox_permissions: None }),

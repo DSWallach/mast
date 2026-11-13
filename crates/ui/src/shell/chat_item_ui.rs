@@ -526,7 +526,156 @@ impl Shell {
                     })),
             );
         }
+        if let Some(activity) = self.render_session_activity(&facts.chat_id, theme, cx) {
+            row = row.child(activity);
+        }
         row.into_any_element()
+    }
+
+    pub(super) fn close_session_activity_menu(&mut self, cx: &mut Context<Self>) {
+        if self.session_activity_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.session_activity_menu);
+            cx.notify();
+        }
+    }
+
+    fn render_session_activity(
+        &mut self,
+        chat_id: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let activity = self.state.read(cx).running_activity(chat_id);
+        let multiple = activity.len() > 1;
+        if self
+            .session_activity_menu
+            .get()
+            .is_some_and(|owner| owner != chat_id)
+            || !multiple
+        {
+            self.session_activity_menu = Default::default();
+        }
+        let first = activity.first()?;
+        let label = if multiple {
+            format!("{} running", activity.len())
+        } else {
+            format!(
+                "Running: {}",
+                first.title.lines().next().unwrap_or("process")
+            )
+        };
+        let tooltip: SharedString = if multiple {
+            "Running agents and processes".to_owned()
+        } else {
+            first.title.clone()
+        }
+        .into();
+        let open = first.open.clone();
+        let owner = chat_id.to_owned();
+        let mut pill = crate::components::shell_parts::chat_header_chip(
+            "chat-header-chip-activity".into(),
+            "chat-header-chip-activity".into(),
+            theme,
+            theme.border_strong,
+            theme.text,
+            false,
+        )
+        .relative()
+        .max_w(px(300.0))
+        .when(multiple || open.is_some(), |pill| {
+            pill.cursor_pointer().hover(|pill| pill.bg(theme.element_hover))
+        })
+        .child(crate::components::shell_parts::activity_indicator(
+            crate::status_style::Status::Working,
+            "session-activity-status".into(),
+            theme,
+            cx.entity_id(),
+            cx,
+        ))
+        .child(div().min_w_0().truncate().child(SharedString::from(label)))
+        .when(multiple, |pill| {
+            pill.child(crate::icons::icon(crate::icons::ALT_ARROW_DOWN).size(px(11.0)))
+        })
+        .tooltip(move |_, cx| {
+            cx.new(|_| SurfaceTabTooltip {
+                text: tooltip.clone(),
+            })
+            .into()
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, _| this.session_activity_menu.note_trigger_press()),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if multiple {
+                if this.session_activity_menu.take_press_was_open() {
+                    this.close_session_activity_menu(cx);
+                } else {
+                    this.session_activity_menu.open(owner.clone());
+                }
+                cx.notify();
+            } else if let Some(open) = &open {
+                this.handle_transcript_event(open, cx);
+            }
+        }));
+        if self.session_activity_menu.get().is_some() {
+            let popup_theme = theme.for_popup();
+            let mut menu = popover::popover_card(&popup_theme)
+                .w(px(360.0))
+                .max_h(px(320.0))
+                .id("session-activity-menu")
+                .overflow_y_scroll()
+                .debug_selector(|| "session-activity-menu".into())
+                .on_mouse_down_out(
+                    cx.listener(|this, _, _, cx| this.close_session_activity_menu(cx)),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(|_, _, cx| cx.stop_propagation());
+            for item in activity {
+                let open = item.open;
+                let tooltip: SharedString = item.title.clone().into();
+                let selector = format!("session-activity-{}", item.id);
+                menu = menu.child(
+                    popover::menu_row(&popup_theme, false, format!("session-activity-{}", item.id))
+                        .id(SharedString::from(format!("session-activity-{}", item.id)))
+                        .debug_selector(move || selector.clone())
+                        .child(
+                            crate::icons::icon(if open.is_some() {
+                                crate::icons::BOT
+                            } else {
+                                crate::icons::TERMINAL
+                            })
+                            .size(px(14.0)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(item.title)),
+                        )
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| SurfaceTabTooltip {
+                                text: tooltip.clone(),
+                            })
+                            .into()
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(open) = &open {
+                                this.close_session_activity_menu(cx);
+                                this.handle_transcript_event(open, cx);
+                            }
+                            cx.stop_propagation();
+                        })),
+                );
+            }
+            pill = pill.child(popover::anchored_menu_below(
+                "session-activity-popover",
+                menu.into_any_element(),
+                self.session_activity_menu.closing_since(),
+            ));
+        }
+        Some(pill.into_any_element())
     }
 
     // ----------------------------------------------------------------------

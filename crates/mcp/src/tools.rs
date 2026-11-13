@@ -1311,7 +1311,7 @@ impl Tools {
         if args.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
             tracing::debug!(?harness, model = ?model, "create_chat had no model; filled in the Mast default");
         }
-        let config = ChatConfig {
+        let config = ChatConfig { approval_rules: false,
             harness,
             model: model.clone(),
             reasoning,
@@ -1942,6 +1942,10 @@ impl Tools {
             question_id: a.question_id.unwrap_or_default(), labels: a.labels,
         }).collect();
         mast_proto::validate_input_answers(&questions, &mut answers).map_err(anyhow::Error::msg)?;
+        // A saved permission rule is the user's decision, never an agent's.
+        if answers.iter().any(|a| a.labels.iter().any(|l| mast_proto::is_always_allow_label(l))) {
+            anyhow::bail!("only the user can choose Always allow; answer Yes or No");
+        }
         let command_id = self
             .zeron
             .queue_command(
@@ -2335,7 +2339,7 @@ fn run_request(chat: &Chat, space: Option<&Space>, harness: HarnessId, text: Str
         .clone()
         .or_else(|| space.map(|s| s.path.clone()))
         .unwrap_or_else(|| "~".into());
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
         prompt: text,
         harness: Some(harness),
         model: config.as_ref().and_then(|c| c.model.clone()),

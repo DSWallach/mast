@@ -547,7 +547,7 @@ pub fn chat_title(action: PrReviewAction, repo_name: &str, number: u64, pr_title
 /// The config a review Chat runs with when the caller sends none: Claude
 /// Code with Mast's default model (never the CLI's own default).
 pub fn default_config() -> ChatConfig {
-    ChatConfig {
+    ChatConfig { approval_rules: false,
         harness: HarnessId::ClaudeCode,
         model: mast_proto::resolve_model(HarnessId::ClaudeCode, None),
         reasoning: None,
@@ -851,7 +851,7 @@ impl PrReviewLauncher {
 
 Work only inside {checkout}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.", space.path
         );
-        let request = RunRequest {
+        let request = RunRequest { scheduled_task: None, approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),
@@ -1193,7 +1193,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, op)?;
         }
-        let request = RunRequest {
+        let request = RunRequest { scheduled_task: None, approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),

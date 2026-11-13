@@ -147,7 +147,7 @@ fn seed(
                 ));
             for chat in &mut state.chats {
                 if chat.id == CHAT_AUTH {
-                    chat.config = Some(mast_proto::ChatConfig {
+                    chat.config = Some(mast_proto::ChatConfig { approval_rules: false,
                         harness: mast_proto::HarnessId::Codex,
                         model: None,
                         reasoning: None,

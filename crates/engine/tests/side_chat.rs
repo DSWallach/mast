@@ -70,7 +70,7 @@ impl Harness for TurnHarness {
             requests.len()
         };
         if request.prompt.starts_with("[ask]") {
-            let answers = (controls.request_input)(vec![UserInputQuestion {
+            let answers = (controls.request_input)(vec![UserInputQuestion { permission: None,
                 id: "q".into(),
                 header: "Approve command".into(),
                 question: "Run rm?".into(),
@@ -196,7 +196,7 @@ impl Rig {
     /// Queue a turn and wait for it to reach the harness (not to finish).
     async fn start(&self, chat: &str, prompt: &str) {
         let before = self.harness.requests.lock().unwrap().len();
-        let request = RunRequest {
+        let request = RunRequest { scheduled_task: None, approval_rules: false,
             prompt: prompt.into(),
             harness: Some(HarnessId::Mock),
             model: None,

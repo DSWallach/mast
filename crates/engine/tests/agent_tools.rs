@@ -233,7 +233,7 @@ async fn wait_for<F: FnMut() -> bool>(mut predicate: F, what: &str) {
 
 fn run_command(prompt: &str, cwd: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
-        request: RunRequest {
+        request: RunRequest { scheduled_task: None, approval_rules: false,
             prompt: prompt.into(),
             harness: Some(HarnessId::Mock),
             model: None,
@@ -2284,7 +2284,7 @@ async fn project_destination_worker_prompt_wakes_without_watcher_delay() {
         rig.core.sessions.clone(), rig.core.doc_host.clone(), rig.core.workspace.clone(), None, Arc::new(|| 1_000_000),
     );
     wakes.ingest_worker_signal(mast_engine::sessions::WorkerSignal::Input {
-        chat_id: OTHER_CHAT.into(), input: mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion {
+        chat_id: OTHER_CHAT.into(), input: mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             command_approval: None,
             allow_custom: false,
             id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false,
@@ -4045,7 +4045,7 @@ async fn friction_captures_tool_failures_and_can_be_disabled() {
 #[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_approval_and_answer() {
     let rig = rig().await;
-    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { command_approval: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None, command_approval: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
     let mut signals = rig.core.sessions.watch_worker_signals();
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
     let input = loop {
@@ -4077,7 +4077,7 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
         space_id: SPACE.into(), rule, operation_id: "approval-rule".into(),
     }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
-    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
         command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
         allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,
@@ -4098,6 +4098,107 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     let snapshot = mast_doc::materialize_work_outline(SPACE, &inputs);
     assert_eq!(snapshot.space_settings.approval_rules[0].hit_count, 1);
     assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+fn rules_run(rig: &Rig, approval_rules: bool) -> SessionCommandPayload {
+    let mut command = run_command("test", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut command {
+        request.auto_approve = false;
+        request.approval_rules = approval_rules;
+    }
+    command
+}
+
+fn permission_question(permission: mast_proto::PermissionRequest) -> mast_proto::UserInputQuestion {
+    mast_proto::UserInputQuestion {
+        permission: Some(permission), command_approval: None, allow_custom: false,
+        id: "approval".into(), header: "Approve tool".into(),
+        question: "The agent wants to run `x`. Allow it?".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rules_mode_answers_from_mast_settings_and_audits() {
+    let rig = rig().await;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.json");
+    std::fs::write(&settings, json!({"permissions": {"allow": ["mcp__claude_ai_Notion__notion-update-page"]}}).to_string()).unwrap();
+    rig.core.sessions.set_permission_rules_path(settings);
+    *rig.harness.questions.lock().unwrap() = vec![permission_question(mast_proto::PermissionRequest::McpTool {
+        server: "notion".into(), tool: "notion-update-page".into(),
+    })];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, rules_run(&rig, true)).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "rule answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(signals.try_recv().is_err(), "an allowed request never reaches the user");
+    let rows = rig.core.workspace.friction_reports(SPACE);
+    assert!(rows[0].summary.contains("Allowed by rule mcp__claude_ai_Notion__notion-update-page"), "{}", rows[0].summary);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rules_mode_denies_from_mast_settings() {
+    let rig = rig().await;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.json");
+    std::fs::write(&settings, json!({"permissions": {"allow": ["Bash(git:*)"], "deny": ["Bash(git push:*)"]}}).to_string()).unwrap();
+    rig.core.sessions.set_permission_rules_path(settings);
+    *rig.harness.questions.lock().unwrap() = vec![permission_question(mast_proto::PermissionRequest::Command { command: json!("git push origin main") })];
+    rig.core.doc_host.queue_command(CHAT, rules_run(&rig, true)).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "rule answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["No"]);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rules_mode_offers_always_allow_and_saves_the_rule() {
+    let rig = rig().await;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("mast/settings.json");
+    rig.core.sessions.set_permission_rules_path(settings.clone());
+    *rig.harness.questions.lock().unwrap() = vec![permission_question(mast_proto::PermissionRequest::Command { command: json!("gh_read pulls 12") })];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, rules_run(&rig, true)).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+    };
+    assert_eq!(input.questions[0].options, ["Yes", "No", "Always allow: Bash(gh_read pulls:*)"]);
+    assert!(rig.core.sessions.respond_input(CHAT, &input.request_id, vec![mast_proto::UserInputAnswer {
+        question_id: "approval".into(), labels: vec!["Always allow: Bash(gh_read pulls:*)".into()],
+    }]).unwrap());
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(saved["permissions"]["allow"], json!(["Bash(gh_read pulls:*)"]));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ask_mode_ignores_rules_and_offers_no_always_allow() {
+    let rig = rig().await;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.json");
+    std::fs::write(&settings, json!({"permissions": {"allow": ["Bash(gh_read:*)"]}}).to_string()).unwrap();
+    rig.core.sessions.set_permission_rules_path(settings);
+    *rig.harness.questions.lock().unwrap() = vec![permission_question(mast_proto::PermissionRequest::Command { command: json!("gh_read pulls") })];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, rules_run(&rig, false)).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+    };
+    assert_eq!(input.questions[0].options, ["Yes", "No"]);
+    assert!(input.questions[0].permission.is_none());
+    let refused = rig.core.sessions.respond_input(CHAT, &input.request_id, vec![mast_proto::UserInputAnswer {
+        question_id: "approval".into(), labels: vec!["Always allow: Bash(gh_read:*)".into()],
+    }]);
+    assert!(refused.is_err(), "Always allow isn't an option outside Rules mode");
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
 }

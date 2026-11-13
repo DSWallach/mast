@@ -1496,6 +1496,17 @@ impl AppState {
         crate::transcript::running_subagents(chat_id, &self.transcript)
     }
 
+    /// Header activity belongs to the loaded, selected session only.
+    pub(crate) fn running_activity(
+        &self,
+        chat_id: &str,
+    ) -> Vec<crate::transcript::RunningActivity> {
+        if self.selected_chat.as_deref() != Some(chat_id) {
+            return Vec::new();
+        }
+        crate::transcript::running_activity(chat_id, &self.transcript)
+    }
+
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
@@ -2150,10 +2161,10 @@ impl AppState {
             subagents ^= sh.finish();
         }
         subagents.hash(&mut h);
-        // The Item tab lists the selected chat's running subagents.
+        // Repaint the header only when its activity list changes.
         if let Some(chat_id) = &self.selected_chat {
-            for running in self.running_subagents(chat_id) {
-                (running.doc_id, running.title).hash(&mut h);
+            for running in self.running_activity(chat_id) {
+                (running.id, running.title).hash(&mut h);
             }
         }
         h.finish()
@@ -5188,10 +5199,10 @@ mod tests {
         };
         state.apply_transcript(vec![turn("running")]);
         let running = state.shell_fingerprint(now);
-        assert_eq!(state.running_subagents("a").len(), 1);
-        assert!(state.running_subagents("b").is_empty(), "only the selected chat");
+        assert_eq!(state.running_activity("a").len(), 1);
+        assert!(state.running_activity("b").is_empty(), "only the selected chat");
         state.apply_transcript(vec![turn("done")]);
-        assert_ne!(state.shell_fingerprint(now), running, "the Item tab drops the row");
+        assert_ne!(state.shell_fingerprint(now), running, "the header drops the activity");
     }
 
     #[test]
@@ -6236,7 +6247,7 @@ mod tests {
     fn apply_chat_config_stamps_the_row() {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
-        let config = mast_proto::ChatConfig {
+        let config = mast_proto::ChatConfig { approval_rules: false,
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
             reasoning: Some(mast_proto::ReasoningLevel::XHigh),
@@ -6261,7 +6272,7 @@ mod tests {
         // Unknown chat: no-op, no panic.
         state.apply_chat_config(
             "missing",
-            mast_proto::ChatConfig {
+            mast_proto::ChatConfig { approval_rules: false,
                 harness: HarnessId::ClaudeCode,
                 model: None,
                 reasoning: None,

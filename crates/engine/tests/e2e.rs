@@ -26,7 +26,7 @@ const CHAT: &str = "chat-e2e";
 const VIEWER: &str = "viewer-device";
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -1099,7 +1099,7 @@ async fn custom_approval_reply_interrupts_and_delivers_new_instruction() {
                     let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
                     return;
                 }
-                let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion {
+                let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
                     allow_custom: false,
                     id: "q1".into(),
@@ -1199,7 +1199,7 @@ async fn respond_input_resolves_pending_question() {
         ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
-                let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion {
+                let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
                     allow_custom: false,
                     id: "q1".into(),
@@ -1366,7 +1366,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
         ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
-                let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion {
+                let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
                     allow_custom: false,
                     id: "q1".into(),
@@ -1559,7 +1559,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                     // Blocks on the question; an interrupt fails the resolver
                     // (empty answers) and cancels the token — like a real CLI
                     // being torn down, the stream then ends WITHOUT a Done.
-                    let _ = (controls.request_input)(vec![mast_proto::UserInputQuestion {
+                    let _ = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                         command_approval: None,
                         allow_custom: false,
                         id: "q1".into(),
@@ -1708,7 +1708,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
         ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
-                let question = mast_proto::UserInputQuestion {
+                let question = mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
                     allow_custom: false,
                     id: "q1".into(),
@@ -2067,7 +2067,7 @@ async fn real_claude_sees_uploaded_image_inline() {
          what solid color is this image? Reply with exactly one lowercase word.\n\n\
          Attached images (local files — open them to view):\n- {path}"
     );
-    let request = RunRequest {
+    let request = RunRequest { scheduled_task: None, approval_rules: false,
         prompt,
         harness: None,
         model: Some("haiku".into()),
@@ -2748,7 +2748,8 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
         })
         .collect();
     assert_eq!(images.len(), 1);
-    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir()));
+    // Stored under the canonical uploads dir (macOS temp dirs are symlinked).
+    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir().canonicalize().unwrap()));
     let serialized = serde_json::to_string(&journal.replay(CHAT, 0).unwrap()).unwrap();
     assert!(!serialized.contains(source.to_str().unwrap()));
     assert!(!serialized.contains("BASE64_SENTINEL"));

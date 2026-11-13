@@ -1897,15 +1897,17 @@ impl WorkspaceHost {
         &self,
         chat_id: &str,
         auto_approve: bool,
+        approval_rules: bool,
     ) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| {
             let Some(mut config) = doc.chat(chat_id)?.and_then(|chat| chat.config) else {
                 return Ok::<bool, mast_doc::DocError>(false);
             };
-            if config.auto_approve == auto_approve {
+            if config.auto_approve == auto_approve && config.approval_rules == approval_rules {
                 return Ok(true);
             }
             config.auto_approve = auto_approve;
+            config.approval_rules = approval_rules;
             doc.set_chat_config(chat_id, &config)
         })?)
     }

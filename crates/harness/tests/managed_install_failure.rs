@@ -42,7 +42,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         steering,
         interrupt: CancellationToken::new(),
     };
-    let request = RunRequest {
+    let request = RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "hi".into(),
         harness: None,
         model: None,

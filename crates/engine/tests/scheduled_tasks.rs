@@ -8,7 +8,7 @@ fn draft(root: &std::path::Path) -> ScheduledTaskDraft {
         prompt: "Hello".into(),
         cwd: root.to_string_lossy().into(),
         space_id: None,
-        config: ChatConfig {
+        config: ChatConfig { approval_rules: false,
             harness: HarnessId::Mock,
             model: Some("mock-1".into()),
             reasoning: Some(ReasoningLevel::Medium),

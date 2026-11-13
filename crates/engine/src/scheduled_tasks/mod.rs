@@ -224,6 +224,7 @@ impl ScheduledTasks {
                 let mut draft = candidate.draft;
                 draft.enabled = false;
                 draft.config.auto_approve = false;
+                draft.config.approval_rules = true;
                 self.validate(&draft)?;
                 let id =
                     import::task_id(self.0.store.scope(), &response.device_id, &candidate.source);

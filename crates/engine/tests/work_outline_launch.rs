@@ -161,7 +161,7 @@ fn params(rig: &Rig, op: &str, prompt: &str) -> CreateChatForWorkItemParams {
             text: prompt.into(),
             attachments: Vec::new(),
         },
-        config: Some(mast_proto::ChatConfig {
+        config: Some(mast_proto::ChatConfig { approval_rules: false,
             harness: HarnessId::Mock,
             model: None,
             reasoning: None,
@@ -239,7 +239,7 @@ async fn signed_out_claude_launch_reaches_transcript() {
     let request = CreateChatForWorkItemParams {
         work_item_id: derive_id("first-item", roles::ITEM),
         initial_prompt: WorkItemPrompt { text: "scenario:signed-out".into(), attachments: Vec::new() },
-        config: Some(mast_proto::ChatConfig { harness: HarnessId::ClaudeCode, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
+        config: Some(mast_proto::ChatConfig { approval_rules: false, harness: HarnessId::ClaudeCode, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
         execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None,
     };
     let reply: CreateChatForWorkItemReply = serde_json::from_value(client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap()).unwrap();
@@ -283,7 +283,7 @@ async fn codex_only_launch_spawns_selected_executable() {
     let request = CreateChatForWorkItemParams {
         work_item_id: derive_id("first-item", roles::ITEM),
         initial_prompt: WorkItemPrompt { text: "scenario:publication".into(), attachments: Vec::new() },
-        config: Some(mast_proto::ChatConfig { harness: HarnessId::Codex, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
+        config: Some(mast_proto::ChatConfig { approval_rules: false, harness: HarnessId::Codex, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
         execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None,
     };
     let reply: CreateChatForWorkItemReply = serde_json::from_value(client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap()).unwrap();
@@ -413,7 +413,7 @@ fn applications_of(rig: &Rig, chat: &str) -> Vec<mast_doc::RegistryRow> {
 }
 
 fn run_request(prompt: &str, cwd: &str) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
         model: None,

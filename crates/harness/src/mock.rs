@@ -19,7 +19,7 @@ pub struct MockHarness {
 /// the QuestionPanel end-to-end: single-select page, multi-select page).
 fn question_script() -> Vec<UserInputQuestion> {
     vec![
-        UserInputQuestion {
+        UserInputQuestion { permission: None,
             command_approval: None,
             allow_custom: false,
             id: "q-sync".into(),
@@ -32,7 +32,7 @@ fn question_script() -> Vec<UserInputQuestion> {
             ],
             multi_select: false,
         },
-        UserInputQuestion {
+        UserInputQuestion { permission: None,
             command_approval: None,
             allow_custom: false,
             id: "q-gates".into(),

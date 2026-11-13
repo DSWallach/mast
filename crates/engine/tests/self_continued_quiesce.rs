@@ -47,7 +47,7 @@ fn init_env() {
 }
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,

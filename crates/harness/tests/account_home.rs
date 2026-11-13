@@ -22,7 +22,7 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 fn request(prompt: &str, cwd: &Path) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,

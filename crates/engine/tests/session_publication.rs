@@ -245,7 +245,7 @@ async fn turn(core: &EngineCore, cwd: &std::path::Path, live: bool, second: bool
         .dispatch(
             CHAT,
             HarnessId::Codex,
-            RunRequest {
+            RunRequest { scheduled_task: None, approval_rules: false,
                 prompt: prompt.into(),
                 harness: None,
                 model: live

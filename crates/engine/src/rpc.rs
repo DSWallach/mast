@@ -135,7 +135,7 @@ async fn hand_off_config(
     reasoning: Option<mast_proto::ReasoningLevel>,
 ) -> Result<Option<mast_proto::ChatConfig>, RpcError> {
     if harness.is_none() && model.is_none() && reasoning.is_none() { return Ok(source); }
-    let mut config = source.unwrap_or(mast_proto::ChatConfig {
+    let mut config = source.unwrap_or(mast_proto::ChatConfig { approval_rules: false,
         harness: fallback, model: None, reasoning: None, model_options: Default::default(),
         sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
     });
@@ -789,7 +789,13 @@ enum MutateParams {
     /// missing or config-less row — the composer's chip writes a full
     /// `setChatConfig` there instead.
     #[serde(rename_all = "camelCase")]
-    SetChatAutoApprove { chat_id: String, auto_approve: bool },
+    SetChatAutoApprove {
+        chat_id: String,
+        auto_approve: bool,
+        /// Rules mode; older clients omit it and get Ask or Auto.
+        #[serde(default)]
+        approval_rules: bool,
+    },
     /// Tombstone: removes the chats-map row; the session doc remains.
     #[serde(rename_all = "camelCase")]
     DeleteChat { chat_id: String },
@@ -2135,9 +2141,10 @@ impl EngineRpc {
             MutateParams::SetChatAutoApprove {
                 chat_id,
                 auto_approve,
+                approval_rules,
             } => self
                 .workspace
-                .set_chat_auto_approve(&chat_id, auto_approve)
+                .set_chat_auto_approve(&chat_id, auto_approve, approval_rules)
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
@@ -2215,6 +2222,19 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
 }
 
+fn permission_rules_view(sessions: &SessionsEngine) -> mast_proto::PermissionRulesView {
+    let rules = sessions.permission_rules();
+    let set = rules.current();
+    mast_proto::PermissionRulesView {
+        path: rules.path().display().to_string(),
+        allow: set.allow_rules(),
+        deny: set.deny_rules(),
+        ask: set.ask_rules(),
+        unsupported: set.unsupported.clone(),
+        error: set.error.clone(),
+    }
+}
+
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
@@ -2222,6 +2242,8 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::LIST_HARNESSES
+            | methods::GET_PERMISSION_RULES
+            | methods::REMOVE_PERMISSION_RULE
             | methods::INSTALL_HARNESS
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
@@ -2805,6 +2827,19 @@ impl RpcService for EngineRpc {
                 let p: ChatParams = parse_params(params)?;
                 self.agent_tools.tokens().admin().revoke(&p.chat_id);
                 RpcReply::value(&serde_json::json!({}))
+            }
+            methods::GET_PERMISSION_RULES => RpcReply::value(&permission_rules_view(&self.sessions)),
+            methods::REMOVE_PERMISSION_RULE => {
+                #[derive(serde::Deserialize)]
+                struct Remove {
+                    rule: String,
+                }
+                let p: Remove = parse_params(params)?;
+                self.sessions
+                    .permission_rules()
+                    .remove_allow(&p.rule)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&permission_rules_view(&self.sessions))
             }
             methods::LIST_ADMIN_GRANTS => {
                 RpcReply::value(&self.agent_tools.tokens().admin().list())
@@ -5693,7 +5728,7 @@ mod tests {
         registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
         let mut options = serde_json::Map::new();
         options.insert("old".into(), serde_json::json!(true));
-        let source = mast_proto::ChatConfig { harness: HarnessId::Codex, model: Some("old-model".into()), reasoning: Some(mast_proto::ReasoningLevel::High), model_options: options, sandbox: mast_proto::SandboxLevel::ReadOnly, auto_approve: true };
+        let source = mast_proto::ChatConfig { approval_rules: false, harness: HarnessId::Codex, model: Some("old-model".into()), reasoning: Some(mast_proto::ReasoningLevel::High), model_options: options, sandbox: mast_proto::SandboxLevel::ReadOnly, auto_approve: true };
         let unchanged = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, None, None, None).await.unwrap();
         assert_eq!(unchanged, Some(source.clone()));
         let changed = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, Some(HarnessId::Mock), Some("mock-1".into()), Some(mast_proto::ReasoningLevel::Medium)).await.unwrap().unwrap();
@@ -6100,28 +6135,30 @@ mod tests {
         assert_eq!(preview["historyPending"], true);
         assert_eq!(preview["reset"][0]["parts"].as_array().unwrap().len(), 128);
         assert_eq!(preview["reset"][0]["parts"][0]["id"], "part-372");
-        // Changes between preview and subscribe must appear in the full reset.
+        // A change after first paint lands in the full reset or, since the
+        // attach starts eagerly, in the delta right after it; never lost.
         handle
             .write_user_message("arrived", "new local message", 1)
             .unwrap();
         let full = stream.next().await.unwrap();
         assert!(full.get("historyPending").is_none());
         assert_eq!(full["reset"][0]["parts"].as_array().unwrap().len(), 500);
-        assert_eq!(full["reset"][1]["id"], "arrived");
+        let mut entries = Vec::new();
+        let update: mast_doc::TranscriptUpdate = serde_json::from_value(full).unwrap();
+        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
         handle
             .write_user_message("live", "after attach", 2)
             .unwrap();
-        let live = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap();
-        let mut entries = Vec::new();
-        for value in [full, live] {
+        while entries.last().map(|e| e.id.as_str()) != Some("live") {
+            let value = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
             let update: mast_doc::TranscriptUpdate = serde_json::from_value(value).unwrap();
             mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
         }
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries.last().unwrap().id, "live");
+        let ids: Vec<_> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["turn", "arrived", "live"]);
         host.shutdown_workers().await;
     }
 

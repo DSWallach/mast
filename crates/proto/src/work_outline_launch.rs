@@ -192,7 +192,7 @@ mod tests {
                 text: "Fix it".into(),
                 attachments: vec!["/tmp/a.png".into()],
             },
-            config: Some(ChatConfig {
+            config: Some(ChatConfig { approval_rules: false,
                 harness: HarnessId::Mock,
                 model: Some("m".into()),
                 reasoning: None,

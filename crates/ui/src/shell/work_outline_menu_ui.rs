@@ -2065,7 +2065,7 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 for chat in state.chats.iter_mut().filter(|chat| chat.id == "chat-api" || chat.id == "chat-ui") {
-                    chat.config = Some(mast_proto::ChatConfig {
+                    chat.config = Some(mast_proto::ChatConfig { approval_rules: false,
                         harness: mast_proto::HarnessId::ClaudeCode, model: None, reasoning: None,
                         model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
                         auto_approve: false,

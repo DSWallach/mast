@@ -11,5 +11,6 @@
 - [GitHub and Linear](github-and-linear.md)
 - [Accounts](accounts.md)
 - [Scheduled tasks](scheduled-tasks.md)
+- [Permission rules](permissions.md)
 - [Keyboard](keyboard.md)
 - [Updating](updating-to-mast.md)
