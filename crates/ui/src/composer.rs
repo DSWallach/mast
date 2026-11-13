@@ -101,6 +101,8 @@ const COMPOSER_WIDTH_EPSILON: f32 = 0.5;
 pub const MIN_COMPACT_INPUT_WIDTH: f32 = 200.0;
 /// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
 pub const INPUT_LINE_HEIGHT: f32 = 22.75;
+/// Rows the question panel's free-text input grows to before it scrolls.
+const WIZARD_INPUT_MAX_LINES: f32 = 6.0;
 pub const INPUT_TEXT_SIZE: f32 = 14.0;
 /// A compact ramp; the glyph-ascent inset keeps the clip edge invisible.
 const INPUT_FADE_BAND: f32 = 12.0;
@@ -4640,6 +4642,12 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.reconcile_with_state(cx);
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    #[cfg(feature = "snapshot")]
     pub(crate) fn fixture_attachment(&mut self, bytes: Vec<u8>) {
         let attachment = attachments::stage_png_bytes("preview.png".into(), bytes);
         self.attachments.entry(self.current_key.clone()).or_default().push(attachment);
@@ -7834,19 +7842,35 @@ impl Composer {
         }
     }
 
-    /// Submit RespondInput and retire the panel.
-    fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.take() else {
-            return;
-        };
+    /// Take the panel down for good: its request counts as handled, and the
+    /// borrowed composer input gets its own identity back.
+    fn retire_wizard(&mut self, cx: &mut Context<Self>) -> Option<Wizard> {
+        let wizard = self.wizard.take()?;
         self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
         self.input.update(cx, |input, cx| {
-            input.set_text("", cx);
-            // The panel borrowed the composer input; hand back its identity.
             input.set_placeholder("Do anything…", cx);
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
         });
+        Some(wizard)
+    }
+
+    /// Quit the question without answering: stop the run so the chat waits
+    /// for the next message. Ending the turn resolves the question in the
+    /// transcript; anything typed stays as the draft.
+    fn wizard_quit(&mut self, cx: &mut Context<Self>) {
+        if self.retire_wizard(cx).is_some() {
+            self.interrupt_selected(cx);
+            cx.notify();
+        }
+    }
+
+    /// Submit RespondInput and retire the panel.
+    fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
+        let Some(wizard) = self.retire_wizard(cx) else {
+            return;
+        };
+        self.input.update(cx, |input, cx| input.set_text("", cx));
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -7952,6 +7976,23 @@ impl Composer {
         let typed_empty = typed.is_empty() || !wizard.accepts_typed();
         let can_advance = wizard.page_answerable(&typed);
         let typed_ignored = !typed.is_empty() && !wizard.accepts_typed();
+        // The composer's own render sizes the shared input, and it doesn't
+        // run while the panel is up: left at a single-line viewport, wrapped
+        // text painted below the panel. Cap it here and let it scroll.
+        let viewport = WIZARD_INPUT_MAX_LINES * INPUT_LINE_HEIGHT;
+        self.input.update(cx, |input, cx| {
+            if input.viewport_height != Some(viewport)
+                || input.settled_viewport_height != Some(viewport)
+                || input.resizing
+                || input.overflow_top_padding != 0.0
+            {
+                input.viewport_height = Some(viewport);
+                input.settled_viewport_height = Some(viewport);
+                input.resizing = false;
+                input.overflow_top_padding = 0.0;
+                cx.notify();
+            }
+        });
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -8118,14 +8159,28 @@ impl Composer {
                     .px(px(16.0))
                     .pb(px(16.0))
                     .pt(px(4.0))
-                    .child(if page > 0 {
-                        crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                            .id("wizard-back")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                            .into_any_element()
-                    } else {
-                        gpui::Empty.into_any_element()
-                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                crate::popover::btn_ghost(&theme, "Quit", "wizard-quit")
+                                    .id("wizard-quit")
+                                    .debug_selector(|| "wizard-quit".into())
+                                    .on_click(cx.listener(|this, _, _, cx| this.wizard_quit(cx))),
+                            )
+                            .when(page > 0, |el| {
+                                el.child(
+                                    crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                                        .id("wizard-back")
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.wizard_back(cx)),
+                                        ),
+                                )
+                            }),
+                    )
                     .child(
                         crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
                             .id("wizard-submit")
@@ -9658,6 +9713,37 @@ mod tests {
         // written its frame into the channel by the time the executor parks.
         cx.run_until_parked();
         assert!(server_in.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn quitting_a_question_stops_the_run_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (out, mut server_in) = tokio::sync::mpsc::channel::<String>(16);
+        let (_server_out, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                mast_rpc::RpcClient::new(out, inbound),
+            ));
+            state.selected_chat = Some("c".into());
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer.wizard = Some(Wizard::new("req".into(), vec![question("q", &["a"], false)]));
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("never mind, do this instead", cx));
+            composer.wizard_quit(cx);
+            assert!(composer.wizard.is_none());
+            assert!(composer.answered_requests.contains("req"), "the panel stays down");
+            assert!(composer.interrupting.contains("c"));
+            assert_eq!(composer.input.read(cx).text(), "never mind, do this instead");
+        });
+        cx.run_until_parked();
+        let frame = server_in.try_recv().expect("an interrupt was sent");
+        assert!(frame.contains("\"interrupt\""), "{frame}");
+        assert!(!frame.contains("respondInput"), "{frame}");
     }
 
     /// Orchestrator wakes: typing tells the engine at once when the draft

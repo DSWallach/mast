@@ -15360,6 +15360,10 @@ impl Shell {
         self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
     }
 
+    pub fn fixture_snapshot_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| composer.fixture_type(text, cx));
+    }
+
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
     }
