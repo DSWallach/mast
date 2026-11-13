@@ -41,7 +41,7 @@ async fn main() {
     let answer_yes = std::env::var_os("OPENCODE_PROBE_ANSWER_YES").is_some();
     let interrupt = CancellationToken::new();
     let (_steer_tx, steering) = mpsc::channel(8);
-    let request = RunRequest {
+    let request = RunRequest { scheduled_task: None, approval_rules: false,
         prompt,
         harness: None,
         model,

@@ -65,7 +65,7 @@ type PendingInputs = Arc<Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot:
 
 fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
-    if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header == "MCP server request" || header == "Permission") { return None; }
+    if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header.starts_with("Approve tool") || header == "MCP server request" || header == "Permission") { return None; }
     let command = question.question.split('`').nth(1).unwrap_or(&question.question);
     let why = question.question.split_once(" Reason: ").map(|(_, why)| why).unwrap_or(&question.question);
     Some(mast_proto::FrictionApproval { command: command.into(), why: why.into(), answer: None })
@@ -94,6 +94,7 @@ struct RuntimeConfig {
     cwd: String,
     sandbox: mast_proto::SandboxLevel,
     auto_approve: bool,
+    approval_rules: bool,
     worktree: Option<mast_proto::WorktreeSpec>,
     /// The Work Outline revision this Execution Session received. A prompt
     /// for a different revision is never routed into the live mailbox: the
@@ -112,6 +113,7 @@ impl RuntimeConfig {
             cwd: request.cwd.clone(),
             sandbox: request.sandbox,
             auto_approve: request.auto_approve,
+            approval_rules: request.approval_rules,
             worktree: request.worktree.clone(),
             instructions: request.instructions.as_ref().map(|d| d.envelope.pin()),
         }
@@ -191,6 +193,8 @@ struct Inner {
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
+    /// `~/.mast/settings.json`, consulted only by runs in Rules mode.
+    permission_rules: Mutex<Arc<crate::permission_rules::PermissionRules>>,
     /// Per-project accounts; unset in bare test engines (everything runs on Default).
     managed_accounts: OnceLock<crate::managed_accounts::ManagedAccounts>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
@@ -345,6 +349,9 @@ impl SessionsEngine {
                 dispatch_locks: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
+                permission_rules: Mutex::new(Arc::new(crate::permission_rules::PermissionRules::new(
+                    crate::permission_rules::PermissionRules::default_path(),
+                ))),
                 managed_accounts: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
@@ -382,14 +389,8 @@ impl SessionsEngine {
             return None;
         }
         let launch = lock(&self.inner.agent_tools_launch).clone()?;
-        let space_id = self
-            .inner
-            .workspace()?
-            .chat(chat_id)
-            .ok()
-            .flatten()?
-            .space_id
-            .filter(|space| !space.is_empty())?;
+        let chat = self.inner.workspace()?.chat(chat_id).ok().flatten()?;
+        let space_id = chat.space_id.filter(|space| !space.is_empty())?;
         let lease = self
             .inner
             .agent_tokens
@@ -468,6 +469,16 @@ impl SessionsEngine {
     /// completed exchange the run task fires it for still-untitled chats.
     pub fn set_titles(&self, titles: crate::titles::TitleGenerator) {
         let _ = self.inner.titles.set(titles);
+    }
+
+    /// Point Rules mode at a different settings file (tests, other profiles).
+    pub fn set_permission_rules_path(&self, path: std::path::PathBuf) {
+        *lock(&self.inner.permission_rules) =
+            Arc::new(crate::permission_rules::PermissionRules::new(path));
+    }
+
+    pub fn permission_rules(&self) -> Arc<crate::permission_rules::PermissionRules> {
+        lock(&self.inner.permission_rules).clone()
     }
 
     /// Wire per-project accounts (called once at engine assembly).
@@ -1121,6 +1132,13 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         let shown_prompt = request.prompt.clone();
+        request.scheduled_task = self
+            .inner
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.scheduled_task_info)
+            .map(|task| task.task_name)
+            .filter(|name| !name.is_empty());
         if request.resume.is_none() && request.instructions.is_none() {
             self.inner
                 .prepare_side_chat_start(chat_id, harness.as_ref(), &mut request);
@@ -1136,20 +1154,59 @@ impl SessionsEngine {
 
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
+        let rules_mode = request.approval_rules && !request.auto_approve;
         let request_input = {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             let inner = self.inner.clone();
             let chat_id = chat_id.to_owned();
-            Box::new(move |questions: Vec<UserInputQuestion>| {
+            Box::new(move |mut questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
                 // Nobody answers a side chat: decline at once, never park.
                 if side_chat {
                     let _ = tx.send(side_chat_declines(&questions));
                     return rx;
                 }
+                let mut ruled = None;
+                if rules_mode && questions.len() == 1 {
+                    if let Some(permission) = questions[0].permission.clone() {
+                        let rules = lock(&inner.permission_rules).clone();
+                        match rules.decide(&permission) {
+                            crate::permission_rules::RuleDecision::Allow(matched) => {
+                                ruled = Some((true, format!("Allowed by rule {} in {}", matched.join(", "), rules.path().display())));
+                            }
+                            crate::permission_rules::RuleDecision::Deny(rule) => {
+                                ruled = Some((false, format!("Denied by rule {rule} in {}", rules.path().display())));
+                            }
+                            crate::permission_rules::RuleDecision::Ask => {
+                                if let Some(rule) = crate::permission_rules::suggest_rule(&permission) {
+                                    questions[0].options.push(format!("{}{rule}", mast_proto::ALWAYS_ALLOW_PREFIX));
+                                }
+                            }
+                        }
+                    } else {
+                        // Rules mode never widens to "allow" without a structured request.
+                        questions[0].permission = None;
+                    }
+                } else {
+                    for question in &mut questions {
+                        question.permission = None;
+                    }
+                }
                 let request_id = new_id();
                 lock(&pending).insert(request_id.clone(), (questions.clone(), tx));
+                if let Some((allow, summary)) = ruled {
+                    let question = &questions[0];
+                    let mut approval = friction_approval(question);
+                    if let Some(approval) = approval.as_mut() { approval.answer = Some(allow); }
+                    inner.capture_friction_with_policy(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, approval, true);
+                    let label = if allow { "Yes" } else { "No" };
+                    let answer = UserInputAnswer { question_id: question.id.clone(), labels: vec![label.into()] };
+                    let engine = SessionsEngine { inner: inner.clone() };
+                    if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
+                        return rx;
+                    }
+                }
                 if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
                     let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
                     let engine = SessionsEngine { inner: inner.clone() };
@@ -1377,6 +1434,19 @@ impl SessionsEngine {
             let mut pending = lock(&pending);
             let Some((questions, _)) = pending.get(request_id) else { return Ok(false); };
             mast_proto::validate_input_answers(questions, &mut answers).map_err(EngineError::Other)?;
+            // Save before releasing the tool: a failed write keeps the
+            // request pending and returns the error to the user.
+            for answer in &mut answers {
+                let Some(rule) = answer.labels.first().and_then(|l| l.strip_prefix(mast_proto::ALWAYS_ALLOW_PREFIX)).map(str::to_owned) else { continue };
+                let Some(permission) = questions.iter().find(|q| q.id == answer.question_id).and_then(|q| q.permission.as_ref()) else {
+                    return Err(EngineError::Other("This request can't be saved as a rule".into()));
+                };
+                if crate::permission_rules::rule_covers(&rule, permission) != Ok(true) {
+                    return Err(EngineError::Other(format!("{rule} doesn't cover this request")));
+                }
+                lock(&self.inner.permission_rules).clone().add_allow(&rule)?;
+                answer.labels = vec!["Yes".into()];
+            }
             pending.remove(request_id).expect("pending input exists").1
         };
         if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id)
@@ -1518,7 +1588,7 @@ impl SessionsEngine {
             .or_else(|| host.request_from_chat_row(chat_id, prompt))
             .or_else(|| {
                 let (_, cwd) = self.inner.journal_harness_session(chat_id)?;
-                Some(RunRequest {
+                Some(RunRequest { scheduled_task: None, approval_rules: false,
                     prompt: String::new(), harness: None, model: None, reasoning: None,
                     model_options: Default::default(), cwd,
                     sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
@@ -2001,7 +2071,7 @@ impl Inner {
 
     fn auto_approve_command(&self, chat_id: &str, question: &UserInputQuestion) -> bool {
         use mast_proto::work_outline::ApprovalRuleHarness;
-        if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || question.options != ["Yes", "No"] { return false; }
+        if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || !question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]) { return false; }
         let Some(details) = &question.command_approval else { return false; };
         let Some(cwd) = details.cwd.as_deref() else { return false; };
         let Some(ws) = self.workspace() else { return false; };
@@ -4402,7 +4472,7 @@ mod tests {
     }
 
     fn request() -> RunRequest {
-        RunRequest {
+        RunRequest { scheduled_task: None, approval_rules: false,
             prompt: "first".into(),
             harness: None,
             model: Some("grok-4.6".into()),

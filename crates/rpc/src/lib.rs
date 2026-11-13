@@ -82,6 +82,11 @@ pub mod methods {
     /// Live admin grants on this device. No params; replies `AdminGrant[]`.
     /// IPC-only.
     pub const LIST_ADMIN_GRANTS: &str = "ListAdminGrants";
+    /// The `~/.mast/settings.json` rules on the target device. No params;
+    /// replies `PermissionRulesView`.
+    pub const GET_PERMISSION_RULES: &str = "GetPermissionRules";
+    /// Remove one `permissions.allow` rule by `{rule}`; replies the new view.
+    pub const REMOVE_PERMISSION_RULE: &str = "RemovePermissionRule";
     /// This device's personal assistant chat. No params; replies
     /// `PersonalAssistantReply`. IPC-only.
     pub const GET_PERSONAL_ASSISTANT: &str = "GetPersonalAssistant";

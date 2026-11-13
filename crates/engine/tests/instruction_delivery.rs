@@ -156,7 +156,7 @@ fn pre_title(core: &EngineCore) {
 }
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
         model: None,

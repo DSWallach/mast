@@ -144,7 +144,7 @@ where
 }
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
+    RunRequest { scheduled_task: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -560,7 +560,7 @@ async fn chat_config_selects_the_run_harness() {
             "chat-cfg",
             Some("space-cfg"),
             None,
-            Some(ChatConfig {
+            Some(ChatConfig { approval_rules: false,
                 harness: HarnessId::Cursor,
                 model: None,
                 reasoning: None,
@@ -602,7 +602,7 @@ async fn set_chat_auto_approve_round_trips_on_the_chat_config() {
     core.workspace
         .create_space("space-aa", "dev-a", "/tmp/aa", None, false)
         .expect("create space");
-    let config = ChatConfig {
+    let config = ChatConfig { approval_rules: false,
         harness: HarnessId::Cursor,
         model: Some("cursor-model".into()),
         reasoning: Some(ReasoningLevel::High),

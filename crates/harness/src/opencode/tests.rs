@@ -1977,3 +1977,20 @@ async fn v2_spawn_names_bind_child_traffic_to_the_parent_chip() {
         assert!(child_events.iter().any(|(id, event)| id == &calls[0].0 && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "child answer")), "{name}: {child_events:?}");
     }
 }
+
+#[test]
+fn permission_requests_map_to_rule_shapes() {
+    use mast_proto::PermissionRequest;
+    assert_eq!(
+        opencode_permission(&json!({"permission":"bash", "patterns":["git log *"], "metadata":{"command":"git log -3"}})),
+        Some(PermissionRequest::Command { command: json!("git log -3") })
+    );
+    assert_eq!(opencode_permission(&json!({"action":"shell", "resources":["git status"]})), None);
+    assert_eq!(
+        opencode_permission(&json!({"permission":"notion_notion-update-page", "patterns":["*"]})),
+        Some(PermissionRequest::McpToolJoined { name: "notion_notion-update-page".into() })
+    );
+    assert_eq!(opencode_permission(&json!({"permission":"edit", "patterns":["src/x"]})), None);
+    assert_eq!(opencode_permission(&json!({"action":"shell", "resources":[]})), None);
+    assert_eq!(opencode_permission(&json!({"permission":"bash", "metadata":{}})), None);
+}

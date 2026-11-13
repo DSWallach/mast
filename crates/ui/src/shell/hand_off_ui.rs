@@ -245,7 +245,7 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().parent_chat_id = Some(CHAT_API.into());
-                state.chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().config = Some(mast_proto::ChatConfig {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().config = Some(mast_proto::ChatConfig { approval_rules: false,
                     harness: mast_proto::HarnessId::Codex, model: Some("source-model".into()), reasoning: None,
                     model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
                 });

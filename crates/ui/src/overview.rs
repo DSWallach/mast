@@ -8368,7 +8368,7 @@ mod logic_tests {
     fn card_model_label_uses_explicit_id_or_honest_default() {
         let mut chat = row("c", "/r/zeron", None).chat;
         assert_eq!(chat_model_label(&chat), "default model");
-        chat.config = Some(mast_proto::ChatConfig {
+        chat.config = Some(mast_proto::ChatConfig { approval_rules: false,
             harness: mast_proto::HarnessId::Codex,
             model: Some("gpt-6-codex".into()),
             reasoning: None,

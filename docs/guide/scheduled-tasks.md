@@ -32,9 +32,15 @@ Alternatively enter a one-time timestamp with its UTC offset, such as
 `2026-12-01T08:00:00-05:00`. A one-time timestamp replaces the cron expression.
 Use **Preview next five runs** to check the actual dates and offsets.
 
-**Permissions: Ask** uses Mast's normal permission prompts. **Auto-approve**
-uses the existing agent approval mode for that task. A run waiting for approval
-or another answer stays active and prevents overlapping editions of the task.
+**Permissions: Ask** uses Mast's normal permission prompts. **Permissions:
+Rules**, the default for new and imported tasks, runs what your
+[permission rules](permissions.md) allow without asking and asks about the rest.
+**Auto-approve** uses the existing agent approval mode for that task. A run
+waiting for approval or another answer stays active and prevents overlapping
+editions of the task.
+
+Every scheduled run gets `MAST_SCHEDULED_TASK=<task name>` in its environment,
+so your own hooks can tell an unattended run from an interactive one.
 
 Enable scheduled runs and choose **Save changes**. **Run now** creates a separate
 edition without changing the recurring next-run time. **Pause** stops future
@@ -72,7 +78,8 @@ is still active. Acknowledge that handoff in Mast's editor. Mast checks the
 source registry's paused state on the first activation and records the handoff.
 Afterward, retiring the source definition does not disable the Mast schedule.
 Mast never changes Claude's registry or transfers scoped tool approvals into
-permission bypass. Existing connector credentials and local command tools must
+permission bypass. To reuse Claude's allow list, copy its `permissions` block into
+`~/.mast/settings.json`. Existing connector credentials and local command tools must
 be available to the execution account; import is not a guarantee of tool parity.
 
 ## Missed runs and recovery

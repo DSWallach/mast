@@ -117,7 +117,7 @@ async fn a_chat_with_no_configured_model_records_and_displays_what_ran() {
         .queue_command(
             CHAT,
             SessionCommandPayload::Run {
-                request: RunRequest {
+                request: RunRequest { scheduled_task: None, approval_rules: false,
                     prompt: "hi".into(),
                     harness: None,
                     model: None,

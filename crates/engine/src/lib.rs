@@ -45,6 +45,7 @@ pub mod local_import;
 pub mod managed_accounts;
 mod model_catalogs;
 pub mod orchestrator_wakes;
+pub mod permission_rules;
 pub mod personal_assistant;
 pub mod pr_chat_links;
 pub mod pr_dash;

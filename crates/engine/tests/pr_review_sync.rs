@@ -942,7 +942,7 @@ async fn a_review_started_from_a_synced_item_is_assigned_to_it() {
             json!({
                 "repoOwner": "acme", "repoName": "ui", "number": 9, "action": "codeReview",
                 "spaceId": SPACE, "workItemId": item, "operationId": "review-ui-9",
-                "config": serde_json::to_value(mast_proto::ChatConfig {
+                "config": serde_json::to_value(mast_proto::ChatConfig { approval_rules: false,
                     harness: HarnessId::Mock,
                     model: None,
                     reasoning: None,
@@ -1006,7 +1006,7 @@ async fn a_merged_pr_archives_its_item_and_leaves_chats_alone() {
             json!({
                 "repoOwner": "acme", "repoName": "ui", "number": 9, "action": "codeReview",
                 "spaceId": SPACE, "workItemId": item, "operationId": "review-ui-9",
-                "config": serde_json::to_value(mast_proto::ChatConfig {
+                "config": serde_json::to_value(mast_proto::ChatConfig { approval_rules: false,
                     harness: HarnessId::Mock,
                     model: None,
                     reasoning: None,

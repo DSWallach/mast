@@ -741,7 +741,7 @@ pub(crate) mod tests {
         InstructionRejectedSend {
             command_id: command_id.into(),
             message_id: message_id.into(),
-            request: RunRequest {
+            request: RunRequest { scheduled_task: None, approval_rules: false,
                 prompt: format!("prompt {message_id}"),
                 harness: Some(HarnessId::Codex),
                 model: None,

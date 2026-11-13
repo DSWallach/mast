@@ -6,7 +6,7 @@ use mast_doc::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus,
 #[test]
 fn run_request_attachments_survive_command_round_trip() {
     let doc = SessionDoc::init("chat-1").unwrap();
-    let request = mast_proto::RunRequest {
+    let request = mast_proto::RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "p".into(),
         harness: None,
         model: None,

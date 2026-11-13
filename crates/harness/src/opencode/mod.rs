@@ -286,12 +286,12 @@ impl OpencodeHarness {
 
     /// Boot (or attach to) a server for a run/probe. Probes have no chat cwd:
     /// they boot in the user's home, where global provider config lives.
-    async fn server(&self, cwd: Option<&str>) -> Result<Server, HarnessError> {
+    async fn server(&self, cwd: Option<&str>, scheduled_task: Option<&str>) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout).await
+        Server::spawn(&exe, cwd, self.startup_timeout, scheduled_task).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -301,7 +301,7 @@ impl OpencodeHarness {
         let discovery_cwd =
             crate::executable::model_discovery_cwd(self.model_discovery_cwd.as_deref())?;
         let discovery_cwd = discovery_cwd.to_string_lossy().into_owned();
-        let mut server = self.server(Some(&discovery_cwd)).await?;
+        let mut server = self.server(Some(&discovery_cwd), None).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
             let mut models = models_from_providers(&providers);
@@ -333,7 +333,7 @@ impl OpencodeHarness {
         if let Some(commands) = self.commands_cache.get() {
             return Ok(commands.clone());
         }
-        let mut server = self.server(None).await?;
+        let mut server = self.server(None, None).await?;
         let result = server
             .commands_wire(None)
             .await
@@ -420,7 +420,7 @@ impl Harness for OpencodeHarness {
         crate::require_read_only_support(self.id(), &request)?;
         crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref()).await?;
+        let server = self.server(cwd.as_deref(), request.scheduled_task.as_deref()).await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -565,12 +565,14 @@ impl Server {
         exe: &std::path::Path,
         cwd: Option<&str>,
         startup: Duration,
+        scheduled_task: Option<&str>,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
         })?;
         let password = uuid::Uuid::new_v4().to_string();
         let mut cmd = Command::new(exe);
+        crate::export_scheduled_task(&mut cmd, scheduled_task);
         cmd.arg("serve")
             .arg("--port")
             .arg(port.to_string())
@@ -2677,6 +2679,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             };
             let permission_input = Arc::clone(request_input);
             let question = UserInputQuestion {
+                permission: opencode_permission(props),
                 command_approval: None,
                 allow_custom: false,
                 id: format!("permission:{id}"),
@@ -3204,6 +3207,32 @@ fn part_delta_events(
     }]
 }
 
+/// What a `permission.asked` event asks for. 1.x names the permission in
+/// `permission` with the full shell command in `metadata.command`; 2.x uses
+/// `action` and lists parsed sub-commands in `resources`, which may drop
+/// redirects, so a 2.x shell request always asks. MCP tools are named
+/// `<server>_<tool>`.
+fn opencode_permission(props: &Value) -> Option<mast_proto::PermissionRequest> {
+    use mast_proto::PermissionRequest;
+    let kind = props
+        .get("permission")
+        .or_else(|| props.get("action"))
+        .and_then(Value::as_str)
+        .filter(|k| !k.is_empty())?;
+    match kind {
+        "bash" => props
+            .get("metadata")
+            .and_then(|m| m.get("command"))
+            .and_then(Value::as_str)
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| PermissionRequest::Command { command: Value::String(c.to_owned()) }),
+        // Scoped by path or URL; a bare tool rule would allow them anywhere.
+        "shell" | "external_directory" | "edit" | "read" | "webfetch" => None,
+        name if name.contains('_') => Some(PermissionRequest::McpToolJoined { name: name.to_owned() }),
+        name => Some(PermissionRequest::Tool { name: name.to_owned() }),
+    }
+}
+
 /// `question.asked` → the input panel's questions (ids are positional).
 fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
     props
@@ -3214,7 +3243,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .enumerate()
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
-                    Some(UserInputQuestion {
+                    Some(UserInputQuestion { permission: None,
                         command_approval: None,
                         allow_custom: false,
                         id: format!("q{ix}"),

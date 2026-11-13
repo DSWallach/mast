@@ -961,7 +961,7 @@ mod tests {
             branch: Some("main".into()),
             checkout_id: None,
             source_context: None,
-            config: Some(ChatConfig {
+            config: Some(ChatConfig { approval_rules: false,
                 harness: HarnessId::Mock,
                 model: Some("mock-1".into()),
                 reasoning: None,
@@ -1038,7 +1038,7 @@ mod tests {
             "contextWindow".into(),
             serde_json::Value::String("1m".into()),
         );
-        let config = ChatConfig {
+        let config = ChatConfig { approval_rules: false,
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
             reasoning: Some(mast_proto::ReasoningLevel::XHigh),

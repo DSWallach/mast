@@ -353,6 +353,14 @@ fn canonical_executable(candidate: std::path::PathBuf) -> Option<std::path::Path
     canonical.is_absolute().then_some(canonical)
 }
 
+/// Name the scheduled task in the agent's environment so the user's own hooks
+/// can tell an unattended run apart (see `RunRequest::scheduled_task`).
+pub(crate) fn export_scheduled_task(cmd: &mut process::Command, task: Option<&str>) {
+    if let Some(task) = task {
+        cmd.env("MAST_SCHEDULED_TASK", task);
+    }
+}
+
 /// Compose the child's PATH: the resolved executable's directory first, then
 /// our own PATH, then the login-shell PATH snapshot — deduped. npm-shim CLIs
 /// are `#!/usr/bin/env node` scripts whose `node` lives beside them in the

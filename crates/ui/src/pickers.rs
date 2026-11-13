@@ -97,6 +97,8 @@ pub struct DraftConfig {
     /// New-chat approval chip pick (see [`approval`]): `false` = Ask. Never
     /// remembered across chats — every new chat starts at Ask.
     pub auto_approve: bool,
+    /// New-chat Rules pick; see [`approval::ApprovalMode`].
+    pub approval_rules: bool,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -188,12 +190,14 @@ pub struct ResolvedRunConfig {
     /// The chat's approval mode (`ChatConfig.autoApprove`; false = Ask) —
     /// what `RunRequest.auto_approve` carries.
     pub auto_approve: bool,
+    /// Rules mode (`ChatConfig.approvalRules`).
+    pub approval_rules: bool,
 }
 
 impl ResolvedRunConfig {
     /// The `ChatConfig` recorded on `Mutate createChat` (needs a known harness).
     pub fn chat_config(&self) -> Option<ChatConfig> {
-        Some(ChatConfig {
+        Some(ChatConfig { approval_rules: self.approval_rules,
             harness: self.harness?,
             model: self.model.clone(),
             reasoning: self.reasoning,
@@ -765,7 +769,7 @@ pub struct Pickers {
     /// The new-chat draft's approval pick, carried onto the chat that send
     /// just minted (`(chat_id, auto_approve)`) until its row syncs a config —
     /// see [`approval::effective_auto_approve`].
-    carried_auto_approve: Option<(String, bool)>,
+    carried_auto_approve: Option<(String, ApprovalMode)>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -920,7 +924,7 @@ impl Pickers {
                 // value) lands. Any other selection change carries nothing.
                 this.carried_auto_approve = match (&this.draft_owner, &selected) {
                     (None, Some(id)) if !state.read(cx).chats.iter().any(|c| &c.id == id) => {
-                        Some((id.clone(), this.config.auto_approve))
+                        Some((id.clone(), ApprovalMode::from_flags(this.config.auto_approve, this.config.approval_rules)))
                     }
                     _ => None,
                 };
@@ -930,6 +934,7 @@ impl Pickers {
                 this.config.reasoning = None;
                 // Every new chat starts at Ask (per-chat only, no global).
                 this.config.auto_approve = false;
+                this.config.approval_rules = false;
                 this.draft_worktree_target = None;
                 this.switch_error = None;
             }
@@ -1359,34 +1364,39 @@ impl Pickers {
                 }),
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
-            auto_approve: self.effective_auto_approve(cx),
+            auto_approve: self.effective_mode(cx).auto_approve(),
+            approval_rules: self.effective_mode(cx).approval_rules(),
         }
     }
 
     // ---- the per-chat approval chip (see [`approval`]) ----
 
-    /// The approval flag the next send carries (and the chip shows).
-    pub fn effective_auto_approve(&self, cx: &App) -> bool {
-        approval::effective_auto_approve(
+    /// The approval mode the next send carries (and the chip shows).
+    pub fn effective_mode(&self, cx: &App) -> ApprovalMode {
+        approval::effective_mode(
             self.chat_id(cx),
             self.chat_row(cx).and_then(|c| c.config.as_ref()),
             self.carried_auto_approve
                 .as_ref()
-                .map(|(id, value)| (id.as_str(), *value)),
-            self.config.auto_approve,
+                .map(|(id, mode)| (id.as_str(), *mode)),
+            ApprovalMode::from_flags(self.config.auto_approve, self.config.approval_rules),
         )
     }
 
-    /// Chip click: flip Ask ↔ Auto for the current chat (or the new-chat
-    /// draft). A configured row gets an optimistic stamp + `Mutate
-    /// setChatAutoApprove` (patches only that field); a config-less row gets
+    pub fn effective_auto_approve(&self, cx: &App) -> bool {
+        self.effective_mode(cx).auto_approve()
+    }
+
+    /// Chip click: cycle Ask → Rules → Auto for the current chat (or the
+    /// new-chat draft). A configured row gets an optimistic stamp + `Mutate
+    /// setChatAutoApprove` (patches only those fields); a config-less row gets
     /// a full `setChatConfig` built like the model pickers' writes.
     fn toggle_auto_approve(&mut self, cx: &mut Context<Self>) {
-        let next = ApprovalMode::from_auto_approve(self.effective_auto_approve(cx))
-            .next()
-            .auto_approve();
+        let mode = self.effective_mode(cx).next();
+        let (next, next_rules) = (mode.auto_approve(), mode.approval_rules());
         let Some(chat_id) = self.chat_id(cx).map(str::to_owned) else {
             self.config.auto_approve = next;
+            self.config.approval_rules = next_rules;
             cx.notify();
             return;
         };
@@ -1396,7 +1406,10 @@ impl Pickers {
             .selected_chat_row()
             .and_then(|c| c.config.clone());
         let Some(mut config) = row_config else {
-            self.update_chat_config(cx, move |config| config.auto_approve = next);
+            self.update_chat_config(cx, move |config| {
+                config.auto_approve = next;
+                config.approval_rules = next_rules;
+            });
             // Once written (harness known), the row's config owns the value;
             // otherwise (row not synced yet) the carried pick does.
             self.carried_auto_approve = if self
@@ -1407,12 +1420,13 @@ impl Pickers {
             {
                 None
             } else {
-                Some((chat_id, next))
+                Some((chat_id, mode))
             };
             cx.notify();
             return;
         };
         config.auto_approve = next;
+        config.approval_rules = next_rules;
         self.state.update(cx, |state, cx| {
             state.apply_chat_config(&chat_id, config);
             cx.notify();
@@ -1423,6 +1437,7 @@ impl Pickers {
                     "op": "setChatAutoApprove",
                     "chatId": chat_id,
                     "autoApprove": next,
+                    "approvalRules": next_rules,
                 });
                 if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                     tracing::warn!(error = %err, "setChatAutoApprove mutate failed");
@@ -1435,7 +1450,7 @@ impl Pickers {
     /// The Ask / Auto chip beside the model chip. Auto wears the warning
     /// accent — it's the "the agent won't ask" state.
     fn render_approval_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let mode = ApprovalMode::from_auto_approve(self.effective_auto_approve(cx));
+        let mode = self.effective_mode(cx);
         let tooltip = SharedString::from(mode.tooltip());
         crate::components::conversation_picker_approval(theme, mode.auto_approve(), mode.label())
             .tooltip(move |_, cx| cx.new(|_| WorkspaceChipTooltip(tooltip.clone())).into())
@@ -6354,7 +6369,11 @@ mod tests {
             assert!(!pickers.resolved(cx).auto_approve);
             pickers.toggle_auto_approve(cx);
             let resolved = pickers.resolved(cx);
-            assert!(resolved.auto_approve);
+            assert!(resolved.approval_rules && !resolved.auto_approve);
+            assert!(resolved.chat_config().expect("harness known").approval_rules);
+            pickers.toggle_auto_approve(cx);
+            let resolved = pickers.resolved(cx);
+            assert!(resolved.auto_approve && !resolved.approval_rules);
             assert!(resolved.chat_config().expect("harness known").auto_approve);
         });
 
@@ -6377,7 +6396,7 @@ mod tests {
         });
 
         // Config-less chat: Ask by default (the new-chat draft doesn't leak
-        // onto an existing chat); a click creates its config with Auto.
+        // onto an existing chat); a click creates its config with Rules.
         state.update(cx, |state, cx| {
             state.selected_chat = Some("bare-chat".into());
             cx.notify();
@@ -6386,9 +6405,13 @@ mod tests {
         pickers.update(cx, |pickers, cx| {
             assert!(!pickers.resolved(cx).auto_approve);
             pickers.toggle_auto_approve(cx);
-            assert!(pickers.resolved(cx).auto_approve);
+            assert!(pickers.resolved(cx).approval_rules);
         });
-        assert_eq!(row_flag(cx, "bare-chat"), Some(true));
+        assert_eq!(row_flag(cx, "bare-chat"), Some(false));
+        state.read_with(cx, |state, _| {
+            let chat = state.chats.iter().find(|c| c.id == "bare-chat").unwrap();
+            assert!(chat.config.as_ref().unwrap().approval_rules);
+        });
 
         // Back to a fresh new chat: Ask again (per-chat only, no global).
         state.update(cx, |state, cx| {
@@ -7513,7 +7536,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
-            config: Some(mast_proto::ChatConfig {
+            config: Some(mast_proto::ChatConfig { approval_rules: false,
                 harness: HarnessId::ClaudeCode,
                 model: model.map(str::to_owned),
                 reasoning: None,

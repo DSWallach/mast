@@ -415,7 +415,7 @@ impl ScheduledTasksPage {
                     prompt: String::new(),
                     cwd,
                     space_id: space.map(|s| s.id.clone()),
-                    config: ChatConfig {
+                    config: ChatConfig { approval_rules: true,
                         harness: self.catalog_harness,
                         model: self.models.first().map(|m| m.id.clone()),
                         reasoning: None,
@@ -1070,7 +1070,7 @@ impl Render for ScheduledTasksPage {
                 );
             }
             let enabled = e.draft.enabled;
-            let auto = e.draft.config.auto_approve;
+            let mode = crate::pickers::approval::ApprovalMode::from_config(&e.draft.config);
             content = content.child(
                 div()
                     .flex()
@@ -1097,17 +1097,19 @@ impl Render for ScheduledTasksPage {
                     .child(
                         popover::btn_ghost(
                             &theme,
-                            if auto {
-                                "Permissions: Auto-approve"
-                            } else {
-                                "Permissions: Ask"
+                            match mode {
+                                crate::pickers::approval::ApprovalMode::Ask => "Permissions: Ask",
+                                crate::pickers::approval::ApprovalMode::Rules => "Permissions: Rules (~/.mast/settings.json)",
+                                crate::pickers::approval::ApprovalMode::Auto => "Permissions: Auto-approve",
                             },
                             "task-permissions",
                         )
                         .id("task-permissions")
                         .on_click(cx.listener(|p, _, _, cx| {
                             if let Some(e) = p.editor.as_mut() {
-                                e.draft.config.auto_approve = !e.draft.config.auto_approve;
+                                let next = crate::pickers::approval::ApprovalMode::from_config(&e.draft.config).next();
+                                e.draft.config.auto_approve = next.auto_approve();
+                                e.draft.config.approval_rules = next.approval_rules();
                             }
                             cx.notify();
                         })),

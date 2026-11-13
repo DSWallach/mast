@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         steering,
         interrupt: CancellationToken::new(),
     };
-    let request = RunRequest {
+    let request = RunRequest { scheduled_task: None, approval_rules: false,
         prompt: "Reply with exactly: Devin model discovery verified. Do not use tools.".into(),
         harness: None,
         model: Some(model.clone()),

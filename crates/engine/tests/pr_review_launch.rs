@@ -317,7 +317,7 @@ fn params(op: &str, number: u64, action: PrReviewAction) -> StartPrReviewParams 
         action,
         space_id: None,
         work_item_id: None,
-        config: Some(ChatConfig {
+        config: Some(ChatConfig { approval_rules: false,
             harness: HarnessId::Mock,
             model: None,
             reasoning: None,

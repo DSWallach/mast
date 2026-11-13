@@ -246,7 +246,7 @@ async fn repair_never_overwrites_an_existing_config() {
         .expect("create chat row");
     core.workspace
         .set_chat_harness_session(chat_id, "some-external-session-id", "/work/project");
-    let custom_config = mast_proto::ChatConfig {
+    let custom_config = mast_proto::ChatConfig { approval_rules: false,
         harness: HarnessId::Codex,
         model: Some("some-model".into()),
         reasoning: None,

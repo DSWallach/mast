@@ -6247,7 +6247,7 @@ mod tests {
     fn apply_chat_config_stamps_the_row() {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
-        let config = mast_proto::ChatConfig {
+        let config = mast_proto::ChatConfig { approval_rules: false,
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
             reasoning: Some(mast_proto::ReasoningLevel::XHigh),
@@ -6272,7 +6272,7 @@ mod tests {
         // Unknown chat: no-op, no panic.
         state.apply_chat_config(
             "missing",
-            mast_proto::ChatConfig {
+            mast_proto::ChatConfig { approval_rules: false,
                 harness: HarnessId::ClaudeCode,
                 model: None,
                 reasoning: None,

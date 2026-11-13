@@ -129,7 +129,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
-            config: Some(mast_proto::ChatConfig {
+            config: Some(mast_proto::ChatConfig { approval_rules: false,
                 harness,
                 model: None,
                 reasoning: None,
