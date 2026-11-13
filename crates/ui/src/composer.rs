@@ -631,6 +631,24 @@ fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) ->
     key == "escape" && (!input_focused || input_empty)
 }
 
+/// A muted caption line in the question panel.
+fn wizard_note(theme: &Theme, text: &'static str) -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted.opacity(0.65))
+        .child(SharedString::from(text))
+}
+
+fn wizard_placeholder(wizard: &Wizard) -> &'static str {
+    if !wizard.accepts_typed() {
+        "Pick an option above"
+    } else if wizard.page_has_pick() {
+        "Type your own answer, or leave this blank to use the selected option"
+    } else {
+        "Type your own answer, or pick an option above"
+    }
+}
+
 /// Find the unresolved input request the panel should serve, if any: an
 /// unresolved input part on the LAST assistant entry — regardless of the
 /// entry's run status. The question stays answerable until the user actually
@@ -690,6 +708,8 @@ pub enum WizardStep {
     Stay,
     /// Single-select landed — advance after [`AUTO_ADVANCE_MS`].
     AutoAdvance,
+    /// The current page has no answer the host would accept yet.
+    Incomplete,
     /// All pages answered — submit these answers.
     Done(Vec<UserInputAnswer>),
 }
@@ -776,8 +796,37 @@ impl Wizard {
         }
     }
 
+    /// Free text saved for the current page.
+    pub fn typed(&self) -> &str {
+        self.typed.get(self.page).map(String::as_str).unwrap_or("")
+    }
+
+    /// Whether the current question takes free text: open questions always
+    /// do; option lists only when the harness allows custom answers.
+    pub fn accepts_typed(&self) -> bool {
+        self.current()
+            .is_some_and(|q| q.options.is_empty() || q.allow_custom)
+    }
+
+    /// Whether the current page, with `typed` in the input, has an answer
+    /// `validate_input_answers` would accept.
+    pub fn page_answerable(&self, typed: &str) -> bool {
+        let Some(question) = self.current() else {
+            return false;
+        };
+        let typed = typed.trim();
+        question.options.is_empty()
+            || self.page_has_pick()
+            || (!typed.is_empty()
+                && (question.allow_custom
+                    || question.options.iter().any(|o| o.eq_ignore_ascii_case(typed))))
+    }
+
     /// Explicit submit / auto-advance landing.
     pub fn advance(&mut self) -> WizardStep {
+        if !self.page_answerable(self.typed()) {
+            return WizardStep::Incomplete;
+        }
         if self.page + 1 < self.questions.len() {
             self.page += 1;
             WizardStep::Stay
@@ -796,14 +845,18 @@ impl Wizard {
         }
     }
 
-    /// Answers per question: free text overrides picked labels.
+    /// Answers per question: free text overrides picked labels where the
+    /// question takes free text (or the text names one of its options).
     pub fn answers(&self) -> Vec<UserInputAnswer> {
         self.questions
             .iter()
             .enumerate()
             .map(|(ix, q)| {
                 let typed = self.typed.get(ix).map(|s| s.trim()).unwrap_or("");
-                let labels = if !typed.is_empty() {
+                let typed_counts = q.options.is_empty()
+                    || q.allow_custom
+                    || q.options.iter().any(|o| o.eq_ignore_ascii_case(typed));
+                let labels = if !typed.is_empty() && typed_counts {
                     vec![typed.to_string()]
                 } else {
                     self.picked
@@ -5669,6 +5722,8 @@ impl Composer {
             if self.slash.token.is_some() || self.slash_task.is_some() {
                 self.reset_slash(None, cx);
             }
+            // The Submit button's state and the options-only hint read the text.
+            cx.notify();
             return;
         }
         let (slash, slash_dismissed, mention, mention_dismissed) = {
@@ -6617,12 +6672,13 @@ impl Composer {
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
                     self.reset_mention(None, cx);
-                    self.wizard = Some(Wizard::new(request_id, questions));
+                    let wizard = Wizard::new(request_id, questions);
+                    let placeholder = wizard_placeholder(&wizard);
+                    self.wizard = Some(wizard);
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
-                    self.input.update(cx, |input, cx| {
-                        input.set_placeholder("Type your own answer, or pick an option above", cx)
-                    });
+                    self.input
+                        .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
                 }
             }
             _ => {
@@ -6703,10 +6759,6 @@ impl Composer {
         }
         if self.wizard.is_some() {
             // Enter inside the panel's free-text input submits the page.
-            let typed = self.input.read(cx).text().trim().to_string();
-            if let Some(w) = self.wizard.as_mut() {
-                w.set_typed(typed);
-            }
             self.wizard_advance(cx);
             return;
         }
@@ -7705,23 +7757,47 @@ impl Composer {
             return;
         };
         let step = wizard.select(option_ix);
-        let has_pick = wizard.page_has_pick();
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(
-                if has_pick {
-                    "Type your own answer, or leave this blank to use the selected option"
-                } else {
-                    "Type your own answer, or pick an option above"
-                },
-                cx,
-            )
-        });
+        if step == WizardStep::AutoAdvance {
+            // Clicking a single-select option is the answer: drop any typed
+            // text so the advance doesn't pick it up as an override.
+            wizard.set_typed(String::new());
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.refresh_wizard_placeholder(cx);
         match step {
             WizardStep::AutoAdvance => self.schedule_auto_advance(cx),
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
-            WizardStep::Stay => {}
+            WizardStep::Stay | WizardStep::Incomplete => {}
         }
         cx.notify();
+    }
+
+    fn refresh_wizard_placeholder(&mut self, cx: &mut Context<Self>) {
+        if let Some(placeholder) = self.wizard.as_ref().map(wizard_placeholder) {
+            self.input
+                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+        }
+    }
+
+    /// Save the shared input's text as the current page's free-text answer.
+    /// Every page change goes through this, so Submit, Next, Back, Enter and
+    /// auto-advance all see what was typed.
+    fn wizard_capture_typed(&mut self, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).text().trim().to_string();
+        if let Some(wizard) = self.wizard.as_mut() {
+            wizard.set_typed(typed);
+        }
+    }
+
+    /// Load the current page's saved free text into the shared input.
+    fn wizard_restore_typed(&mut self, cx: &mut Context<Self>) {
+        let typed = self
+            .wizard
+            .as_ref()
+            .map(|w| w.typed().to_string())
+            .unwrap_or_default();
+        self.input.update(cx, |input, cx| input.set_text(typed, cx));
+        self.refresh_wizard_placeholder(cx);
     }
 
     fn schedule_auto_advance(&mut self, cx: &mut Context<Self>) {
@@ -7735,22 +7811,25 @@ impl Composer {
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
+        self.wizard_capture_typed(cx);
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
         match wizard.advance() {
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
+            // Nothing acceptable to send yet: keep the page and its text.
+            WizardStep::Incomplete => cx.notify(),
             _ => {
-                // Moving on: clear the shared free-text input for the next page.
-                self.input.update(cx, |input, cx| input.set_text("", cx));
+                self.wizard_restore_typed(cx);
                 cx.notify();
             }
         }
     }
 
     fn wizard_back(&mut self, cx: &mut Context<Self>) {
-        if let Some(wizard) = self.wizard.as_mut() {
-            wizard.back();
+        self.wizard_capture_typed(cx);
+        if self.wizard.as_mut().is_some_and(|wizard| wizard.back()) {
+            self.wizard_restore_typed(cx);
             cx.notify();
         }
     }
@@ -7869,8 +7948,10 @@ impl Composer {
         };
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
-        let typed_empty = self.input.read(cx).is_empty();
-        let can_advance = wizard.page_has_pick() || !typed_empty;
+        let typed = self.input.read(cx).text().trim().to_string();
+        let typed_empty = typed.is_empty() || !wizard.accepts_typed();
+        let can_advance = wizard.page_answerable(&typed);
+        let typed_ignored = !typed.is_empty() && !wizard.accepts_typed();
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -7999,13 +8080,7 @@ impl Composer {
                             .child(SharedString::from(question.question.clone())),
                     )
                     .when(question.multi_select, |el| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from("Select one or more options.")),
-                        )
+                        el.child(wizard_note(&theme, "Select one or more options.").mt(px(4.0)))
                     })
                     .child(
                         div()
@@ -8025,7 +8100,13 @@ impl Composer {
                             .pt(px(12.0))
                             .pb(px(4.0))
                             .px(px(4.0))
-                            .child(self.input.clone()),
+                            .child(self.input.clone())
+                            .when(typed_ignored, |el| {
+                                el.child(
+                                    wizard_note(&theme, "This question only takes the listed options.")
+                                        .mt(px(6.0)),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -11012,13 +11093,9 @@ mod tests {
 
     #[test]
     fn wizard_typed_answer_overrides_and_back_pages() {
-        let mut w = Wizard::new(
-            "req".into(),
-            vec![
-                question("q1", &["a"], false),
-                question("q2", &["x", "y"], false),
-            ],
-        );
+        let mut q2 = question("q2", &["x", "y"], false);
+        q2.allow_custom = true;
+        let mut w = Wizard::new("req".into(), vec![question("q1", &["a"], false), q2]);
         w.select(0);
         w.advance();
         assert_eq!(w.page, 1);
@@ -11035,6 +11112,61 @@ mod tests {
             answers[1].labels,
             vec!["custom answer"],
             "typed overrides picked, trimmed"
+        );
+    }
+
+    #[test]
+    fn wizard_holds_a_page_without_an_acceptable_answer() {
+        let mut w = Wizard::new(
+            "req".into(),
+            vec![question("q1", &["a"], false), question("q2", &["x"], false)],
+        );
+        assert_eq!(w.advance(), WizardStep::Incomplete, "nothing picked");
+        assert_eq!(w.page, 0);
+
+        w.set_typed("why is this needed?".into());
+        assert!(!w.accepts_typed());
+        assert!(!w.page_answerable(w.typed()));
+        assert_eq!(
+            w.advance(),
+            WizardStep::Incomplete,
+            "free text on an options-only question is never sent"
+        );
+
+        w.set_typed("A".into());
+        assert_eq!(w.advance(), WizardStep::Stay, "typed text naming an option counts");
+        w.select(0);
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec!["A"]);
+        assert_eq!(answers[1].labels, vec!["x"]);
+    }
+
+    #[test]
+    fn wizard_typed_text_only_overrides_where_allowed() {
+        let mut custom = question("q1", &["a"], false);
+        custom.allow_custom = true;
+        let questions = vec![custom, question("q2", &["x", "y"], false), question("q3", &[], false)];
+        let mut w = Wizard::new("req".into(), questions.clone());
+        w.set_typed("my own answer".into());
+        assert!(w.accepts_typed());
+        assert_eq!(w.advance(), WizardStep::Stay);
+        w.select(1);
+        w.set_typed("ignored".into());
+        assert_eq!(w.advance(), WizardStep::Stay, "the pick answers the page");
+        assert!(w.accepts_typed(), "open questions take free text");
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!("an open question may be left blank")
+        };
+        assert_eq!(answers[0].labels, vec!["my own answer"]);
+        assert_eq!(answers[1].labels, vec!["y"]);
+        assert!(answers[2].labels.is_empty());
+        let mut answers = answers;
+        assert_eq!(
+            mast_proto::agent::validate_input_answers(&questions, &mut answers),
+            Ok(()),
+            "the host accepts what the wizard sends"
         );
     }
 
