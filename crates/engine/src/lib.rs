@@ -202,7 +202,7 @@ pub struct EngineCore {
     pub external_import: external_import::ExternalSessionImporter,
     /// PR/ticket linkage cache for the multi-chat overview (ticket 002 phase
     /// 2) — a pure cache read; its background sweep is spawned once here and
-    /// runs for the process's lifetime.
+    /// runs until shutdown.
     pub pr_ticket_cache: pr_ticket_cache::PrTicketCache,
     /// Linear integration (key, client, caches); its linked-item sync loop
     /// is spawned once here. Tests `reconfigure` it onto a mock endpoint.
@@ -230,6 +230,9 @@ pub struct EngineCore {
     updater: std::sync::Mutex<Option<mast_update::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The PR/ticket sweep — owned so shutdown can end it. It reaches the
+    /// doc host through the merged-PR wakes.
+    pr_ticket_sweep: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -645,7 +648,7 @@ impl EngineCore {
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));
-        pr_ticket_cache.spawn_sweep_loop();
+        let pr_ticket_sweep = pr_ticket_cache.spawn_sweep_loop();
         let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
         scheduled_tasks.start();
         Ok(Self {
@@ -680,6 +683,7 @@ impl EngineCore {
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
+            pr_ticket_sweep: std::sync::Mutex::new(Some(pr_ticket_sweep)),
             _instance_lock: lock,
         })
     }
@@ -857,6 +861,15 @@ impl EngineCore {
         self.agent_accounts.shutdown();
         self.managed_accounts.shutdown();
         self.change_requests.shutdown();
+        let sweep = self
+            .pr_ticket_sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(sweep) = sweep {
+            sweep.abort();
+            let _ = sweep.await;
+        }
         // Cancel + await every worker that can reach Edge before flushing: a
         // replaced synced runtime must not keep polling releases or draining
         // the attachment outbox under the old identity after Local boots.

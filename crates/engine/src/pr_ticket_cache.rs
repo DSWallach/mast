@@ -609,10 +609,9 @@ impl PrTicketCache {
             .collect()
     }
 
-    /// Spawn the throttled background sweep. Caller keeps the returned
-    /// handle alive for as long as the sweep should run (dropping it aborts
-    /// the loop) — `EngineCore` holds it for its own lifetime, same as any
-    /// other engine-owned background task.
+    /// Spawn the throttled background sweep. The loop never ends on its own
+    /// and dropping the handle does not stop it: the caller must abort it
+    /// (`EngineCore::shutdown` does).
     pub fn spawn_sweep_loop(&self) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
         tokio::spawn(async move {
