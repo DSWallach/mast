@@ -107,6 +107,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "linear-settings",
         "team",
         "side-chat",
+        "question",
         "details",
         "walkthrough",
         "appearance",
