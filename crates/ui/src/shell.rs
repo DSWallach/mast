@@ -1849,6 +1849,7 @@ pub struct Shell {
     /// The header's hover context card (show / hide / ⌥⌘I pin) and the chat
     /// it belongs to.
     chat_item_card: crate::chat_item::CardState,
+    session_activity_menu: popover::Popup<String>,
     running: running_ui::RunningUi,
     chat_item_card_chat: String,
     /// The Item tab's open accordion rows, its embedded Needs-you list, and
@@ -2322,6 +2323,7 @@ impl Shell {
             chat_header_links: Default::default(),
             chat_header_links_pending: Default::default(),
             chat_item_card: Default::default(),
+            session_activity_menu: Default::default(),
             running: running_ui::RunningUi::new(
                 matches!(install, mast_update::InstallKind::MacApp { .. }),
                 cx,
@@ -9060,6 +9062,10 @@ impl Shell {
         // path close here; the others remain explicit blockers.
         if self.device_group_menu.take().is_some() {
             cx.notify();
+            return true;
+        }
+        if self.session_activity_menu.is_open() {
+            self.close_session_activity_menu(cx);
             return true;
         }
         if self.closeout_dialog.is_some() {

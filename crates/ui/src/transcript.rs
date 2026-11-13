@@ -8168,7 +8168,7 @@ fn subagent_tab_title(call: &ToolCall) -> SharedString {
 }
 
 /// What clicking a spawn chip emits; `None` unless an agent call is bound to
-/// its doc. The Item tab's running list emits the same event.
+/// its doc. The session activity pill emits the same event.
 pub(crate) fn subagent_open_event(
     chat_id: &str,
     call: &ToolCall,
@@ -8225,6 +8225,51 @@ pub(crate) fn running_subagents(
         });
     }
     running
+}
+
+/// Activity shown in the session header. Processes have no subagent document.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RunningActivity {
+    pub id: String,
+    pub title: String,
+    pub open: Option<TranscriptEvent>,
+}
+
+pub(crate) fn running_activity(
+    chat_id: &str,
+    entries: &[SessionMessageEntry],
+) -> Vec<RunningActivity> {
+    let mut activity: Vec<_> = running_subagents(chat_id, entries)
+        .into_iter()
+        .map(|agent| RunningActivity {
+            id: agent.doc_id,
+            title: agent.title,
+            open: Some(agent.open),
+        })
+        .collect();
+    // A settled/interrupted turn can retain unresolved tools; those are no
+    // longer live processes. Agent lifecycle above is independent of the turn.
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.status == Some(MessageStatus::Streaming))
+    {
+        for part in &entry.parts {
+            if let MessagePart::Tool {
+                id,
+                call: ToolCall::Exec { command },
+                resolved: false,
+                ..
+            } = part
+            {
+                activity.push(RunningActivity {
+                    id: format!("process-{}-{id}", entry.id),
+                    title: command.clone(),
+                    open: None,
+                });
+            }
+        }
+    }
+    activity
 }
 
 /// Clip one newly appended task row to its committed height. Fade and lift are
@@ -11234,6 +11279,39 @@ mod tests {
         set_subagent(&mut entries[0].parts[0], Some(SubagentStatus::Done), Some("chat--sub--s1"));
         set_subagent(&mut entries[1].parts[2], Some(SubagentStatus::Failed), Some("chat--sub--s5"));
         assert!(running_subagents("chat", &entries).is_empty());
+    }
+
+    #[test]
+    fn running_activity_combines_agents_and_live_processes() {
+        let mut entries = vec![assistant(
+            "turn",
+            MessageStatus::Streaming,
+            vec![
+                agent_part("agent", "Audit"),
+                tool_part("exec", "cargo test"),
+            ],
+        )];
+        if let MessagePart::Tool { resolved, .. } = &mut entries[0].parts[1] {
+            *resolved = false;
+        }
+        let activity = running_activity("chat", &entries);
+        assert_eq!(activity.len(), 2);
+        assert!(activity[0].open.is_some());
+        assert_eq!(activity[1].title, "cargo test");
+        assert!(activity[1].open.is_none());
+        if let MessagePart::Tool { resolved, .. } = &mut entries[0].parts[1] {
+            *resolved = true;
+        }
+        assert_eq!(running_activity("chat", &entries).len(), 1);
+        if let MessagePart::Tool { resolved, .. } = &mut entries[0].parts[1] {
+            *resolved = false;
+        }
+        entries[0].status = Some(MessageStatus::Aborted);
+        assert_eq!(
+            running_activity("chat", &entries).len(),
+            1,
+            "interrupted commands disappear; agents keep their own lifecycle"
+        );
     }
 
     #[test]
