@@ -89,7 +89,7 @@ impl ComposerDefaults {
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(data_dir)?;
-        let path = Self::path(data_dir);
+        let path = super::write_target(&Self::path(data_dir));
         // Each writer owns its temporary file; overlapping windows must not
         // truncate or rename one another's in-progress writes.
         let tmp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
@@ -104,7 +104,7 @@ impl ComposerDefaults {
             file.sync_all()?;
             std::fs::rename(&tmp, &path)?;
             #[cfg(unix)]
-            std::fs::File::open(data_dir)?.sync_all()?;
+            std::fs::File::open(path.parent().unwrap_or(data_dir))?.sync_all()?;
             Ok(())
         })();
         if result.is_err() {
@@ -218,6 +218,26 @@ mod tests {
             loaded.model_for(HarnessId::ClaudeCode).map(|m| &*m.label),
             Some("Fable 5")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = tempfile::tempdir().unwrap();
+        let target = dotfiles.path().join("composer-defaults.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = ComposerDefaults::path(dir.path());
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let defaults = ComposerDefaults {
+            harness: Some(HarnessId::Codex),
+            ..Default::default()
+        };
+        defaults.save(dir.path()).unwrap();
+
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(ComposerDefaults::load(dotfiles.path()), defaults);
     }
 
     #[test]
