@@ -368,7 +368,8 @@ pub(crate) fn mermaid_fragment(source: &str, dark: bool) -> String {
     let theme = if dark { "dark" } else { "default" };
     format!(
         "<div class=\"mast-mermaid\" style=\"display:flex;justify-content:center\">\
-<pre class=\"mermaid\">{source}</pre></div>\n\
+<pre class=\"mermaid\">{source}</pre>\
+<script type=\"text/plain\" class=\"mast-src\">{source}</script></div>\n\
 <script src=\"{MERMAID_SRC}\"></script>\n\
 <script>{zoom_js}</script>\n\
 <script>(() => {{\n\
@@ -392,11 +393,19 @@ pub(crate) const MERMAID_ZOOM_JS: &str = r#"function mastDiagramZoom() {
     const pre = wrap.querySelector("pre.mermaid");
     if (!pre || !pre.querySelector("svg") || wrap.dataset.mastZoom) return;
     wrap.dataset.mastZoom = "1";
-    wrap.style.cssText += ";position:relative;overflow:hidden;touch-action:none;cursor:grab;outline:none";
+    const srcEl = wrap.querySelector("script.mast-src");
+    let source = srcEl ? srcEl.textContent : "";
+    // Outer frame holds the diagram and, when open, its source editor, so
+    // "expand" can take both full-window.
+    const frame = document.createElement("div");
+    frame.style.cssText = "display:flex;flex-direction:column;gap:6px";
+    wrap.parentNode.insertBefore(frame, wrap);
+    frame.appendChild(wrap);
+    wrap.style.cssText += ";position:relative;overflow:hidden;touch-action:none;cursor:grab;outline:none;min-height:160px;flex:1 1 auto;min-width:0";
     wrap.tabIndex = 0;
     pre.style.transformOrigin = "0 0";
-    let k = 1, x = 0, y = 0;
-    const MIN = 0.5, MAX = 12;
+    let k = 1, x = 0, y = 0, expanded = false, orient = "auto", counter = 0;
+    const MIN = 0.25, MAX = 16;
     const apply = () => { pre.style.transform = "translate(" + x + "px," + y + "px) scale(" + k + ")"; };
     const zoomAt = (f, cx, cy) => {
       const nk = Math.min(MAX, Math.max(MIN, k * f));
@@ -405,20 +414,102 @@ pub(crate) const MERMAID_ZOOM_JS: &str = r#"function mastDiagramZoom() {
     };
     const reset = () => { k = 1; x = 0; y = 0; apply(); };
     const center = () => { const r = wrap.getBoundingClientRect(); return [r.width / 2, r.height / 2]; };
+    // Actual size: scale so the diagram's own text is at its authored size.
+    const actual = () => {
+      const svg = pre.querySelector("svg");
+      if (!svg) return;
+      const vb = svg.viewBox && svg.viewBox.baseVal;
+      const natural = vb && vb.width ? vb.width : parseFloat(svg.style.maxWidth) || 0;
+      const shown = svg.getBoundingClientRect().width / k;
+      if (!natural || !shown) return;
+      k = Math.min(MAX, Math.max(MIN, natural / shown)); x = 0; y = 0; apply();
+    };
+    // Direction: wide LR flowcharts are unreadable in a narrow pane, so
+    // "auto" lays them out top-down below 640px and left-right otherwise.
+    const DIR = /^(\s*(?:flowchart|graph)\s+)(TD|TB|LR|RL|BT)\b/m;
+    const withOrientation = (text) => {
+      const m = DIR.exec(text);
+      if (!m) return text;
+      let want = orient === "auto" ? (wrap.clientWidth < 640 ? "TD" : m[2]) : orient;
+      if ((m[2] === "LR" || m[2] === "RL") && orient === "auto" && wrap.clientWidth >= 640) want = m[2];
+      return text.replace(DIR, "$1" + want);
+    };
+    const note = document.createElement("div");
+    note.style.cssText = "display:none;color:#b3261e;font:12px sans-serif;white-space:pre-wrap";
+    const draw = (text, quiet) => {
+      if (!globalThis.mermaid) return Promise.resolve();
+      return mermaid.render("mast-d" + wrap.dataset.mastId + "-" + (++counter), withOrientation(text))
+        .then((r) => { pre.innerHTML = r.svg; note.style.display = "none"; reset(); })
+        .catch((e) => {
+          document.querySelectorAll("[id^=dmast-d]").forEach((n) => n.remove());
+          note.textContent = e && e.message ? e.message : String(e);
+          note.style.display = quiet ? "none" : "block";
+        });
+    };
+    wrap.dataset.mastId = String(document.querySelectorAll(".mast-mermaid[data-mast-zoom]").length);
+    let lastWidthClass = wrap.clientWidth < 640;
+    new ResizeObserver(() => {
+      const narrow = wrap.clientWidth < 640;
+      if (orient === "auto" && narrow !== lastWidthClass) { lastWidthClass = narrow; draw(source, true); }
+    }).observe(wrap);
+    if (orient === "auto" && lastWidthClass && DIR.test(source)) draw(source, true);
+
+    // Source editor (session-local; Copy writes it to the clipboard).
+    let editor = null;
+    const toggleEditor = () => {
+      if (editor) { editor.remove(); editor = null; note.remove(); return; }
+      editor = document.createElement("textarea");
+      editor.value = source; editor.spellcheck = false;
+      editor.setAttribute("aria-label", "Diagram source");
+      editor.style.cssText = "width:100%;box-sizing:border-box;height:" + (expanded ? "34vh" : "200px") + ";font:12px/1.4 ui-monospace,monospace;padding:8px;border:1px solid rgba(128,128,128,.5);border-radius:6px;background:rgba(128,128,128,.08);color:inherit;resize:vertical;flex:none";
+      let timer = 0;
+      editor.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { source = editor.value; draw(source, false); }, 350);
+      });
+      frame.appendChild(editor); frame.appendChild(note);
+      editor.focus();
+    };
+    const toggleExpand = () => {
+      expanded = !expanded;
+      frame.style.cssText = expanded
+        ? "display:flex;flex-direction:column;gap:6px;position:fixed;inset:0;z-index:2147483000;padding:8px;box-sizing:border-box;background:Canvas;color:CanvasText"
+        : "display:flex;flex-direction:column;gap:6px";
+      wrap.style.minHeight = expanded ? "0" : "160px";
+      if (editor) editor.style.height = expanded ? "34vh" : "200px";
+      reset();
+    };
+    const cycleOrient = () => {
+      orient = { auto: "TD", TD: "LR", LR: "auto" }[orient];
+      b_orient.textContent = orient === "auto" ? "Auto" : orient;
+      draw(source, false);
+    };
+    const copy = () => { try { navigator.clipboard.writeText(source); } catch (_) {} };
+
     const bar = document.createElement("div");
-    bar.style.cssText = "position:absolute;top:6px;right:6px;display:flex;gap:4px;z-index:2";
-    [["+", "Zoom in", () => zoomAt(1.4, ...center())],
-     ["−", "Zoom out", () => zoomAt(1 / 1.4, ...center())],
-     ["⟲", "Reset zoom", reset]].forEach(([t, label, fn]) => {
+    bar.style.cssText = "position:absolute;top:6px;right:6px;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;z-index:2;max-width:calc(100% - 12px)";
+    const mk = (t, label, fn) => {
       const b = document.createElement("button");
       b.type = "button"; b.textContent = t; b.title = label; b.setAttribute("aria-label", label);
-      b.style.cssText = "min-width:32px;height:32px;border:1px solid rgba(128,128,128,.5);border-radius:6px;background:rgba(128,128,128,.18);color:inherit;font:600 16px sans-serif;cursor:pointer";
+      b.style.cssText = "min-width:32px;height:32px;padding:0 8px;border:1px solid rgba(128,128,128,.5);border-radius:6px;background:rgba(128,128,128,.18);color:inherit;font:600 13px sans-serif;cursor:pointer";
       b.addEventListener("pointerdown", (e) => e.stopPropagation());
       b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
       bar.appendChild(b);
-    });
+      return b;
+    };
+    mk("+", "Zoom in", () => zoomAt(1.4, ...center()));
+    mk("\u2212", "Zoom out", () => zoomAt(1 / 1.4, ...center()));
+    mk("Fit", "Fit to width", reset);
+    mk("1:1", "Actual size (text at its authored size)", actual);
+    const b_orient = mk("Auto", "Layout direction: auto / top-down / left-right", cycleOrient);
+    mk("\u2922", "Expand to full window (Esc to close)", toggleExpand);
+    mk("Edit", "Edit the diagram source", toggleEditor);
+    mk("Copy", "Copy the diagram source", copy);
     wrap.appendChild(bar);
+    // Plain wheel scrolls the page; ctrl/cmd+wheel (or any wheel when
+    // expanded) zooms.
     wrap.addEventListener("wheel", (e) => {
+      if (!(e.ctrlKey || e.metaKey || expanded)) return;
       e.preventDefault();
       const r = wrap.getBoundingClientRect();
       zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002)), e.clientX - r.left, e.clientY - r.top);
@@ -459,7 +550,9 @@ pub(crate) const MERMAID_ZOOM_JS: &str = r#"function mastDiagramZoom() {
       if (e.key === "+" || e.key === "=") zoomAt(1.4, ...center());
       else if (e.key === "-") zoomAt(1 / 1.4, ...center());
       else if (e.key === "0") reset();
+      else if (e.key === "Escape" && expanded) toggleExpand();
     });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && expanded) toggleExpand(); });
   });
 }"#;
 
