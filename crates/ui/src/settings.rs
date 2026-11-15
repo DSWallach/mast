@@ -310,6 +310,11 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+/// Borrow defaults without cloning the full UI settings on every picker render.
+pub fn new_session_defaults(cx: &App) -> Option<&composer::NewSessionDefaults> {
+    cx.try_global::<SettingsStore>().map(|store| &store.current.new_session_defaults)
+}
+
 /// Copy a selected image into Mast's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -644,6 +649,9 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
+    /// Starting harness, model, reasoning and options for new chats. Unset
+    /// fields keep the last-picked composer choices.
+    pub new_session_defaults: composer::NewSessionDefaults,
     pub sidebar_width: f32,
     pub changes_file_list_width: f32,
     pub sidebar_collapsed: bool,
@@ -876,6 +884,7 @@ impl Default for UiSettings {
             terminal_open: false,
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
+            new_session_defaults: composer::NewSessionDefaults::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
             appshots_enabled: false,
             appshot_sound_enabled: true,
@@ -2502,6 +2511,52 @@ mod tests {
     }
 
     #[test]
+    fn new_session_defaults_load_from_old_and_partial_settings() {
+        use mast_proto::{HarnessId, ReasoningLevel};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300}"#).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path()).new_session_defaults,
+            composer::NewSessionDefaults::default()
+        );
+
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"newSessionDefaults": {"byHarness": {"codex": {"reasoning": "low"}}}}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path()).new_session_defaults;
+        assert_eq!(loaded.harness, None);
+        let codex = loaded.for_harness(HarnessId::Codex).unwrap();
+        assert_eq!(codex.reasoning, Some(ReasoningLevel::Low));
+        assert!(codex.model.is_none());
+        assert!(codex.model_options.is_empty());
+
+        let mut settings = UiSettings::default();
+        settings.new_session_defaults.harness = Some(HarnessId::ClaudeCode);
+        settings.new_session_defaults.set_model(
+            HarnessId::ClaudeCode,
+            Some(composer::RememberedModel {
+                id: "claude-opus-5-5".into(),
+                label: "Opus 5.5".into(),
+            }),
+        );
+        settings.new_session_defaults.set_model_option(
+            HarnessId::ClaudeCode,
+            "contextWindow",
+            Some("1m".into()),
+        );
+        settings.save(dir.path()).unwrap();
+        let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        assert!(json.contains(r#""newSessionDefaults""#));
+        assert!(json.contains(r#""claude-code""#));
+        assert_eq!(
+            UiSettings::load(dir.path()).new_session_defaults,
+            settings.new_session_defaults
+        );
+    }
+
+    #[test]
     fn window_geometry_round_trips_and_legacy_settings_default() {
         let dir = tempfile::tempdir().unwrap();
         let geometry = WindowGeometry {
@@ -3023,6 +3078,23 @@ mod tests {
             },
             escape_stops_active_agent: true,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
+            new_session_defaults: composer::NewSessionDefaults {
+                harness: Some(mast_proto::HarnessId::Codex),
+                by_harness: HashMap::from([(
+                    mast_proto::HarnessId::Codex,
+                    composer::SessionModelDefaults {
+                        model: Some(composer::RememberedModel {
+                            id: "gpt-5.4".into(),
+                            label: "GPT-5.4".into(),
+                        }),
+                        reasoning: Some(mast_proto::ReasoningLevel::Low),
+                        model_options: serde_json::Map::from_iter([(
+                            "serviceTier".into(),
+                            serde_json::Value::String("fast".into()),
+                        )]),
+                    },
+                )]),
+            },
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and

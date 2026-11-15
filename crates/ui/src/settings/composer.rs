@@ -32,6 +32,77 @@ pub struct RememberedModel {
     pub label: String,
 }
 
+/// Device-local preferences for fresh sessions. Every unset field keeps the
+/// last-picked behavior, field by field.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NewSessionDefaults {
+    pub harness: Option<HarnessId>,
+    pub by_harness: HashMap<HarnessId, SessionModelDefaults>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionModelDefaults {
+    pub model: Option<RememberedModel>,
+    pub reasoning: Option<ReasoningLevel>,
+    /// Option id → choice id for `model`; an absent option keeps its last pick.
+    pub model_options: ModelOptions,
+}
+
+impl SessionModelDefaults {
+    fn is_empty(&self) -> bool {
+        self.model.is_none() && self.reasoning.is_none() && self.model_options.is_empty()
+    }
+}
+
+impl NewSessionDefaults {
+    pub fn for_harness(&self, harness: HarnessId) -> Option<&SessionModelDefaults> {
+        self.by_harness.get(&harness)
+    }
+
+    /// Options were validated against one model, so a model change drops them.
+    pub fn set_model(&mut self, harness: HarnessId, model: Option<RememberedModel>) {
+        self.edit(harness, |defaults| {
+            if defaults.model.as_ref().map(|m| &m.id) != model.as_ref().map(|m| &m.id) {
+                defaults.model_options.clear();
+            }
+            defaults.model = model;
+        });
+    }
+
+    pub fn set_reasoning(&mut self, harness: HarnessId, reasoning: Option<ReasoningLevel>) {
+        self.edit(harness, |defaults| defaults.reasoning = reasoning);
+    }
+
+    /// Options only apply on top of a configured model.
+    pub fn set_model_option(&mut self, harness: HarnessId, option: &str, choice: Option<String>) {
+        self.edit(harness, |defaults| {
+            if defaults.model.is_none() {
+                return;
+            }
+            match choice {
+                Some(choice) => {
+                    defaults
+                        .model_options
+                        .insert(option.to_owned(), serde_json::Value::String(choice));
+                }
+                None => {
+                    defaults.model_options.remove(option);
+                }
+            }
+        });
+    }
+
+    fn edit(&mut self, harness: HarnessId, change: impl FnOnce(&mut SessionModelDefaults)) {
+        let defaults = self.by_harness.entry(harness).or_default();
+        change(defaults);
+        if defaults.is_empty() {
+            self.by_harness.remove(&harness);
+        }
+    }
+}
+
 /// One starred model in the picker (t3code client-settings `favorites`,
 /// keyed `provider:model`) — harness + model id, insertion-ordered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -274,6 +345,47 @@ mod tests {
         assert!(!defaults.toggle_favorite(HarnessId::ClaudeCode, "claude-opus-5"));
         assert!(!defaults.is_favorite(HarnessId::ClaudeCode, "claude-opus-5"));
         assert!(defaults.is_favorite(HarnessId::Codex, "gpt-5.2-codex"));
+    }
+
+    #[test]
+    fn new_session_model_change_drops_options_and_empty_entries_vanish() {
+        let fable = RememberedModel {
+            id: "claude-fable-5".into(),
+            label: "Fable 5".into(),
+        };
+        let mut defaults = NewSessionDefaults::default();
+        defaults.set_model_option(HarnessId::ClaudeCode, "contextWindow", Some("1m".into()));
+        assert!(defaults.by_harness.is_empty(), "options need a model");
+
+        defaults.set_model(HarnessId::ClaudeCode, Some(fable.clone()));
+        defaults.set_model_option(HarnessId::ClaudeCode, "contextWindow", Some("1m".into()));
+        defaults.set_model(HarnessId::ClaudeCode, Some(fable));
+        assert_eq!(
+            defaults
+                .for_harness(HarnessId::ClaudeCode)
+                .unwrap()
+                .model_options["contextWindow"],
+            "1m",
+            "re-picking the same model keeps its options"
+        );
+
+        defaults.set_model(
+            HarnessId::ClaudeCode,
+            Some(RememberedModel {
+                id: "claude-opus-5-5".into(),
+                label: "Opus 5.5".into(),
+            }),
+        );
+        assert!(
+            defaults
+                .for_harness(HarnessId::ClaudeCode)
+                .unwrap()
+                .model_options
+                .is_empty()
+        );
+
+        defaults.set_model(HarnessId::ClaudeCode, None);
+        assert!(defaults.for_harness(HarnessId::ClaudeCode).is_none());
     }
 
     #[test]

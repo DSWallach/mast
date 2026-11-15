@@ -4582,6 +4582,7 @@ impl Shell {
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
         self.settings.transcript_width = current.transcript_width;
+        self.settings.new_session_defaults = current.new_session_defaults;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {

@@ -38,7 +38,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::observe_gate::ObserveGate;
 use crate::popover::{self, Loadable, MenuKey};
-use crate::settings::composer::ComposerDefaults;
+use crate::settings::composer::{ComposerDefaults, RememberedModel};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use crate::workspace_chip::{WorkspaceChipTooltip, WorkspaceChoice, WorkspaceOutcome};
@@ -89,6 +89,8 @@ pub struct DraftConfig {
     pub harness: Option<HarnessId>,
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
+    /// One-session option overrides, independent of configured starting defaults.
+    pub model_options: Option<serde_json::Map<String, serde_json::Value>>,
     /// The picked ref (base branch in NewWorktree mode; a worktree's branch
     /// when reusing one). `None` = the repo's current branch.
     pub branch: Option<String>,
@@ -928,6 +930,7 @@ impl Pickers {
                 this.config.harness = None;
                 this.config.model = None;
                 this.config.reasoning = None;
+                this.config.model_options = None;
                 // Every new chat starts at Ask (per-chat only, no global).
                 this.config.auto_approve = false;
                 this.draft_worktree_target = None;
@@ -1179,10 +1182,11 @@ impl Pickers {
         if let Some(config) = self.chat_row(cx).and_then(|c| c.config.as_ref()) {
             return Some(config.harness);
         }
-        // New-chat canvas: the remembered last-used harness (sticky defaults),
-        // when the loaded catalog still offers it (the device may have
-        // disabled it in Settings → Agents since).
-        if let Some(harness) = self.defaults.harness {
+        // New-chat canvas: the configured default, else the remembered
+        // last-used harness, whichever the loaded catalog still offers (the
+        // device may have disabled it in Settings → Agents since).
+        let configured = crate::settings::new_session_defaults(cx).and_then(|d| d.harness);
+        for harness in [configured, self.defaults.harness].into_iter().flatten() {
             let offered = match self.harnesses.ready() {
                 Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
                 None => true, // catalog not loaded yet — trust the memory
@@ -1210,7 +1214,30 @@ impl Pickers {
             return chat.config.as_ref().and_then(|c| c.model.as_deref());
         }
         let harness = self.effective_harness(cx)?;
-        self.defaults.model_for(harness).map(|m| m.id.as_str())
+        self.configured_model(cx)
+            .or_else(|| self.defaults.model_for(harness))
+            .map(|m| m.id.as_str())
+    }
+
+    /// Settings → Agents defaults for the new-chat canvas's harness.
+    fn session_model_defaults<'a>(
+        &self,
+        cx: &'a App,
+    ) -> Option<&'a crate::settings::composer::SessionModelDefaults> {
+        if self.chat_id(cx).is_some() {
+            return None;
+        }
+        crate::settings::new_session_defaults(cx)?.for_harness(self.effective_harness(cx)?)
+    }
+
+    /// The configured default model, unless the loaded catalog dropped it.
+    fn configured_model<'a>(&self, cx: &'a App) -> Option<&'a RememberedModel> {
+        let model = self.session_model_defaults(cx)?.model.as_ref()?;
+        let harness = self.effective_harness(cx)?;
+        match self.models.get(&harness).and_then(Loadable::ready) {
+            Some(models) if !models.iter().any(|m| m.id == model.id) => None,
+            _ => Some(model),
+        }
     }
 
     pub(crate) fn identity_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
@@ -1224,8 +1251,11 @@ impl Pickers {
         let explicit = self.config.reasoning.or_else(|| {
             match self.chat_row(cx) {
                 Some(chat) => chat.config.as_ref().and_then(|c| c.reasoning),
-                // New chat: the remembered last-used level.
-                None => self.defaults.reasoning,
+                // New chat: the configured level, else the last-used one.
+                None => self
+                    .session_model_defaults(cx)
+                    .and_then(|d| d.reasoning)
+                    .or(self.defaults.reasoning),
             }
         });
         if self.selected_model(cx).is_none() {
@@ -1248,9 +1278,10 @@ impl Pickers {
         self.selected_model(cx)
             .map(|model| model.label.clone())
             .or_else(|| {
-                let remembered = self
-                    .effective_harness(cx)
-                    .and_then(|h| self.defaults.model_for(h));
+                let remembered = self.configured_model(cx).or_else(|| {
+                    self.effective_harness(cx)
+                        .and_then(|h| self.defaults.model_for(h))
+                });
                 match self.effective_model_id(cx) {
                     Some(id) => Some(
                         remembered
@@ -1312,21 +1343,35 @@ impl Pickers {
         let Some(harness) = self.effective_harness(cx) else {
             return Default::default();
         };
-        match self.selected_model(cx) {
-            Some(model) => offered_options(
-                model,
-                self.defaults
-                    .model_options_for(harness, &model.id)
+        let model_id = self.identity_model_id(cx);
+        let mut options = match &self.config.model_options {
+            Some(options) => options.clone(),
+            None => {
+                let mut options = model_id
+                    .and_then(|id| self.defaults.model_options_for(harness, id))
                     .cloned()
-                    .unwrap_or_default(),
-            ),
-            // Catalog not loaded (or failed): the picks were validated for
-            // this exact model when made, so they are safe to send as-is.
-            None => self
-                .effective_model_id(cx)
-                .and_then(|id| self.defaults.model_options_for(harness, id))
-                .cloned()
-                .unwrap_or_default(),
+                    .unwrap_or_default();
+                // Configured picks were made for the configured model only.
+                if let Some(defaults) = self.session_model_defaults(cx)
+                    && self.configured_model(cx).map(|m| m.id.as_str()) == model_id
+                {
+                    options.extend(defaults.model_options.clone());
+                }
+                options
+            }
+        };
+        match self.selected_model(cx) {
+            Some(model) => {
+                // A default choice is sent as no pick, like `pick_option`.
+                options.retain(|id, choice| {
+                    !model
+                        .options
+                        .iter()
+                        .any(|o| o.id == *id && choice.as_str() == Some(o.default_choice.as_str()))
+                });
+                offered_options(model, options)
+            }
+            None => options,
         }
     }
 
@@ -2088,6 +2133,7 @@ impl Pickers {
             // defaults fallback; a foreign pick must not linger.
             self.config.model = None;
             self.config.reasoning = None;
+            self.config.model_options = None;
         }
         self.config.harness = Some(harness);
         self.defaults.harness = Some(harness);
@@ -2110,6 +2156,7 @@ impl Pickers {
             self.update_chat_config(cx, move |config| config.model = Some(model_id));
         } else {
             // New chat: draft pick + sticky last-used memory for this harness.
+            self.config.model_options = None;
             self.config.model = Some(model_id.clone());
             if let Some(harness) = self.effective_harness(cx) {
                 let label = self
@@ -2163,12 +2210,14 @@ impl Pickers {
         {
             // New chat: the pick is the sticky memory for the catalog model
             // that offered it — never stored unvalidated.
-            let options = self.defaults.model_options_mut(harness, &model);
+            let mut options = self.explicit_options(cx);
             if default {
                 options.remove(&option_id);
             } else {
                 options.insert(option_id, serde_json::Value::String(choice_id));
             }
+            *self.defaults.model_options_mut(harness, &model) = options.clone();
+            self.config.model_options = Some(options);
             self.save_defaults();
         }
         cx.notify();
@@ -2581,6 +2630,11 @@ impl Pickers {
         if self.draft_worktree_target.is_some() {
             self.clear_draft_worktree_target(cx);
         }
+        self.config.harness = None;
+        self.config.model = None;
+        self.config.reasoning = None;
+        self.config.model_options = None;
+        cx.notify();
     }
 
     // ---- the new-chat worktree chip (see `crate::workspace_chip`) ----
@@ -7719,6 +7773,259 @@ mod tests {
             let resolved = pickers.resolved(cx);
             assert_eq!(resolved.model.as_deref(), Some("opus"));
             assert_eq!(resolved.model_options.get("contextWindow"), Some(&one_m));
+        });
+    }
+
+    fn install_new_session_defaults(
+        cx: &mut gpui::TestAppContext,
+        defaults: crate::settings::composer::NewSessionDefaults,
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = crate::settings::UiSettings::default();
+        settings.new_session_defaults = defaults;
+        cx.update(|cx| crate::settings::init(settings, dir.path(), cx));
+        dir
+    }
+
+    fn remembered(id: &str, label: &str) -> RememberedModel {
+        RememberedModel {
+            id: id.into(),
+            label: label.into(),
+        }
+    }
+
+    fn tiered_model(id: &str, label: &str) -> Model {
+        let mut model = bare_model(id, label);
+        model.reasoning_levels = vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+        ];
+        model.options.push(ModelOption {
+            id: "serviceTier".into(),
+            label: "Service tier".into(),
+            choices: ["auto", "fast"]
+                .map(|id| ModelOptionChoice {
+                    id: id.into(),
+                    label: id.into(),
+                })
+                .into(),
+            default_choice: "auto".into(),
+        });
+        model
+    }
+
+    /// Two offered harnesses, Codex with a tiered model plus a bare one.
+    fn load_defaults_catalog(pickers: &mut Pickers) {
+        pickers.harnesses = Loadable::Ready(vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Codex, "Codex"),
+        ]);
+        pickers.models.insert(
+            HarnessId::ClaudeCode,
+            Loadable::Ready(vec![
+                bare_model("claude-opus-5-5", "Opus 5.5"),
+                bare_model("claude-fable-5", "Fable 5"),
+            ]),
+        );
+        pickers.models.insert(
+            HarnessId::Codex,
+            Loadable::Ready(vec![
+                bare_model("gpt-plain", "GPT plain"),
+                tiered_model("gpt-tiered", "GPT tiered"),
+            ]),
+        );
+    }
+
+    #[gpui::test]
+    fn new_chat_starts_from_configured_defaults_over_last_picks(cx: &mut gpui::TestAppContext) {
+        let fast = serde_json::Value::String("fast".into());
+        let mut defaults = crate::settings::composer::NewSessionDefaults {
+            harness: Some(HarnessId::Codex),
+            ..Default::default()
+        };
+        defaults.set_model(
+            HarnessId::Codex,
+            Some(remembered("gpt-tiered", "GPT tiered")),
+        );
+        defaults.set_reasoning(HarnessId::Codex, Some(ReasoningLevel::Low));
+        defaults.set_model_option(HarnessId::Codex, "serviceTier", Some("fast".into()));
+        let _dir = install_new_session_defaults(cx, defaults);
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            load_defaults_catalog(pickers);
+            pickers.defaults.remember_model(
+                HarnessId::Codex,
+                "gpt-plain".into(),
+                "GPT plain".into(),
+            );
+            pickers.defaults.harness = Some(HarnessId::ClaudeCode);
+            pickers.defaults.reasoning = Some(ReasoningLevel::High);
+
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Codex));
+            assert_eq!(resolved.model.as_deref(), Some("gpt-tiered"));
+            assert_eq!(resolved.reasoning, Some(ReasoningLevel::Low));
+            assert_eq!(resolved.model_options.get("serviceTier"), Some(&fast));
+            assert_eq!(pickers.chip_model_label(cx).as_deref(), Some("GPT tiered"));
+
+            // A pick in the draft wins and does not inherit configured options.
+            pickers.pick_model("gpt-plain".into(), cx);
+            pickers.pick_reasoning(ReasoningLevel::Medium, cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.model.as_deref(), Some("gpt-plain"));
+            assert!(resolved.model_options.is_empty());
+
+            // The next new chat starts from the configured defaults again,
+            // even though the picks above became the last-used memory.
+            pickers.reset_new_session_scope(cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Codex));
+            assert_eq!(resolved.model.as_deref(), Some("gpt-tiered"));
+            assert_eq!(resolved.reasoning, Some(ReasoningLevel::Low));
+            assert_eq!(resolved.model_options.get("serviceTier"), Some(&fast));
+
+            // Switching to a harness without defaults keeps its last picks.
+            pickers.pick_harness(HarnessId::ClaudeCode, cx);
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("claude-opus-5-5")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn unset_default_fields_keep_their_last_picks(cx: &mut gpui::TestAppContext) {
+        let mut defaults = crate::settings::composer::NewSessionDefaults::default();
+        defaults.set_reasoning(HarnessId::Codex, Some(ReasoningLevel::Low));
+        let _dir = install_new_session_defaults(cx, defaults);
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            load_defaults_catalog(pickers);
+            pickers.defaults.remember_model(
+                HarnessId::Codex,
+                "gpt-tiered".into(),
+                "GPT tiered".into(),
+            );
+            pickers.defaults.reasoning = Some(ReasoningLevel::High);
+            pickers
+                .defaults
+                .model_options_mut(HarnessId::Codex, "gpt-tiered")
+                .insert("serviceTier".into(), "fast".into());
+
+            let resolved = pickers.resolved(cx);
+            assert_eq!(
+                resolved.harness,
+                Some(HarnessId::Codex),
+                "last-picked harness"
+            );
+            assert_eq!(
+                resolved.model.as_deref(),
+                Some("gpt-tiered"),
+                "last-picked model"
+            );
+            assert_eq!(
+                resolved.reasoning,
+                Some(ReasoningLevel::Low),
+                "configured level"
+            );
+            assert_eq!(
+                resolved.model_options["serviceTier"], "fast",
+                "last-picked option"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn configured_default_choice_overrides_a_last_picked_option(cx: &mut gpui::TestAppContext) {
+        let mut defaults = crate::settings::composer::NewSessionDefaults::default();
+        defaults.set_model(
+            HarnessId::Codex,
+            Some(remembered("gpt-tiered", "GPT tiered")),
+        );
+        defaults.set_model_option(HarnessId::Codex, "serviceTier", Some("auto".into()));
+        let _dir = install_new_session_defaults(cx, defaults);
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            load_defaults_catalog(pickers);
+            pickers.defaults.harness = Some(HarnessId::Codex);
+            pickers
+                .defaults
+                .model_options_mut(HarnessId::Codex, "gpt-tiered")
+                .insert("serviceTier".into(), "fast".into());
+            assert!(
+                pickers.resolved(cx).model_options.is_empty(),
+                "the configured default choice is sent as no pick"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn unavailable_configured_harness_and_model_fall_back(cx: &mut gpui::TestAppContext) {
+        let mut defaults = crate::settings::composer::NewSessionDefaults {
+            harness: Some(HarnessId::Cursor),
+            ..Default::default()
+        };
+        defaults.set_model(
+            HarnessId::ClaudeCode,
+            Some(remembered("claude-retired", "Retired")),
+        );
+        defaults.set_model_option(HarnessId::ClaudeCode, "contextWindow", Some("1m".into()));
+        let _dir = install_new_session_defaults(cx, defaults);
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            // Before the catalog loads, the configured picks are trusted.
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Cursor));
+
+            load_defaults_catalog(pickers);
+            // No last pick either: the first offered harness and its default.
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::ClaudeCode));
+            assert_eq!(resolved.model.as_deref(), Some("claude-opus-5-5"));
+            assert!(resolved.model_options.is_empty());
+
+            // With last picks, those take over from the unavailable defaults.
+            pickers.defaults.harness = Some(HarnessId::Codex);
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Codex));
+            pickers.defaults.harness = Some(HarnessId::ClaudeCode);
+            pickers.defaults.remember_model(
+                HarnessId::ClaudeCode,
+                "claude-fable-5".into(),
+                "Fable 5".into(),
+            );
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::ClaudeCode));
+            assert_eq!(resolved.model.as_deref(), Some("claude-fable-5"));
+            assert_eq!(pickers.chip_model_label(cx).as_deref(), Some("Fable 5"));
+        });
+    }
+
+    #[gpui::test]
+    fn reset_new_session_scope_clears_the_draft_picks(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            load_defaults_catalog(pickers);
+            pickers.pick_harness(HarnessId::Codex, cx);
+            pickers.pick_model("gpt-tiered".into(), cx);
+            pickers.pick_reasoning(ReasoningLevel::Low, cx);
+            pickers.pick_option("serviceTier".into(), "fast".into(), false, cx);
+            assert!(pickers.config.model_options.is_some());
+
+            pickers.reset_new_session_scope(cx);
+            assert_eq!(pickers.config.harness, None);
+            assert_eq!(pickers.config.model, None);
+            assert_eq!(pickers.config.reasoning, None);
+            assert_eq!(pickers.config.model_options, None);
+            // Without configured defaults the fresh draft is the last picks.
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Codex));
+            assert_eq!(resolved.model.as_deref(), Some("gpt-tiered"));
+            assert_eq!(resolved.model_options["serviceTier"], "fast");
         });
     }
 
