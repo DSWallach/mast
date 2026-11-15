@@ -14,9 +14,29 @@ pub fn outline_sidebar_sections(snapshot: &WorkOutlineSnapshot) -> Vec<SidebarSe
         .iter()
         .map(|item| (item.id.as_str(), item))
         .collect();
+    // The snapshot's item table has no presentation order. Walk the same
+    // ordered roots and children as Overview, excluding unreachable items.
+    let mut ordered = Vec::new();
+    let mut pending: Vec<_> = snapshot
+        .root_work_item_ids
+        .iter()
+        .rev()
+        .map(String::as_str)
+        .collect();
+    let mut visited = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(item) = items.get(id) else {
+            continue;
+        };
+        ordered.push(*item);
+        pending.extend(item.child_ids.iter().rev().map(String::as_str));
+    }
     let mut sections = Vec::new();
     let mut destinations = HashMap::new();
-    for item in &snapshot.items {
+    for item in &ordered {
         let mut ancestors = Vec::new();
         let mut current = Some(item.id.as_str());
         let mut seen = HashSet::new();
@@ -78,7 +98,7 @@ pub fn outline_sidebar_sections(snapshot: &WorkOutlineSnapshot) -> Vec<SidebarSe
         .enumerate()
         .map(|(index, section)| (section.id.clone(), index))
         .collect();
-    for item in &snapshot.items {
+    for item in &ordered {
         let Some(destination) = destinations.get(item.id.as_str()) else {
             continue;
         };
@@ -107,6 +127,7 @@ mod tests {
     fn snapshot() -> WorkOutlineSnapshot {
         let mut snapshot = WorkOutlineSnapshot::unavailable("space", true, 1);
         snapshot.available = true;
+        snapshot.root_work_item_ids = vec!["projects".into(), "archive".into()];
         snapshot.items = serde_json::from_value(json!([
             {"id":"projects","spaceId":"space","title":"Projects","childIds":["compliance"]},
             {"id":"compliance","spaceId":"space","title":"Compliance","parentWorkItemId":"projects","isProject":true,"childIds":["ticket"]},
@@ -138,6 +159,8 @@ mod tests {
             "Projects / New name"
         );
         snapshot.items[2].parent_work_item_id = Some("archive".into());
+        snapshot.items[1].child_ids.clear();
+        snapshot.items[3].child_ids.push("ticket".into());
         let sections = outline_sidebar_sections(&snapshot);
         assert!(sections[0].session_ids.is_empty());
         assert_eq!(sections[1].session_ids, ["chat", "old-chat"]);
@@ -145,6 +168,37 @@ mod tests {
         assert_eq!(
             outline_sidebar_sections(&snapshot)[1].session_ids,
             ["old-chat"]
+        );
+    }
+
+    #[test]
+    fn outline_sidebar_sections_follow_outline_order_not_item_table_order() {
+        let mut snapshot = snapshot();
+        snapshot.root_work_item_ids.reverse();
+        snapshot.items.rotate_left(1);
+        let sections = outline_sidebar_sections(&snapshot);
+        assert_eq!(
+            sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Archive", "Projects / Compliance"]
+        );
+        // Removing a tree edge hides its orphaned items in both views.
+        snapshot.root_work_item_ids = vec!["archive".into()];
+        assert_eq!(outline_sidebar_sections(&snapshot).len(), 1);
+    }
+
+    #[test]
+    fn outline_sidebar_sections_follow_project_sibling_order() {
+        let mut snapshot = snapshot();
+        let mut project = snapshot.items[1].clone();
+        project.id = "second".into();
+        project.title = "Second".into();
+        project.child_ids.clear();
+        snapshot.items.push(project);
+        snapshot.items[0].child_ids.insert(0, "second".into());
+        let sections = outline_sidebar_sections(&snapshot);
+        assert_eq!(
+            sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Projects / Second", "Projects / Compliance", "Archive"]
         );
     }
 
