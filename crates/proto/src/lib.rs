@@ -51,7 +51,7 @@ pub use artifacts::{
     ArtifactContentReply, ArtifactDriftParams, ArtifactDriftReply, ArtifactError,
     ArtifactErrorCode, ArtifactKind, ArtifactLayoutWarning, ArtifactOptionPick,
     ArtifactPickOptionParams, ArtifactPickOptionReply, ArtifactPinParams, ArtifactPinReply,
-    ArtifactPromoteParams, ArtifactPromoteReply, ArtifactPublishReply, ArtifactQuestionAnswer,
+    ArtifactPromoteParams, ArtifactPromoteReply, ArtifactWriteContentParams, ArtifactPublishReply, ArtifactQuestionAnswer,
     ArtifactRegisterParams, ArtifactRenderCheckResult, ArtifactRenderCompanion,
     ArtifactRenderRequest, ArtifactRenderResultParams, ArtifactRenderResultReply,
     ArtifactRenderScreenshot, ArtifactRenderTheme, ArtifactRenderViewport,

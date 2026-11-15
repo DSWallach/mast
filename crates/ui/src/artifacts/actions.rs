@@ -131,6 +131,13 @@ impl ArtifactActions {
         self.call(methods::ARTIFACT_PROMOTE, &params)
     }
 
+    pub(crate) fn write_content(
+        &self,
+        params: mast_proto::ArtifactWriteContentParams,
+    ) -> ArtifactTask<mast_proto::ArtifactPublishReply> {
+        self.call(methods::ARTIFACT_WRITE_CONTENT, &params)
+    }
+
     pub(crate) fn pin(&self, params: ArtifactPinParams) -> ArtifactTask<ArtifactPinReply> {
         self.call(methods::ARTIFACT_PIN, &params)
     }

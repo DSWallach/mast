@@ -32,7 +32,7 @@ pub(crate) const HOST_SCRIPT: &str = r##"window.addEventListener("message", (eve
   if (!msg || typeof msg !== "object") return;
   let json;
   try { json = JSON.stringify(msg); } catch (_) { return; }
-  if (!json || json.length > 12000) return;
+  if (!json || json.length > 32000) return;
   const a = document.createElement("a");
   a.href = "mast-msg:" + encodeURIComponent(json);
   a.rel = "noreferrer";
@@ -68,6 +68,8 @@ pub(crate) enum FrameMessage {
     SheetUndo(String),
     SheetDiscard,
     SheetSend,
+    /// The reader edited a Mermaid diagram in the page and chose "Save".
+    DiagramSave(String),
 }
 
 impl FrameMessage {
@@ -117,6 +119,11 @@ impl FrameMessage {
             "sheet-undo" => Some(FrameMessage::SheetUndo(text("id", 256)?)),
             "sheet-discard" => Some(FrameMessage::SheetDiscard),
             "sheet-send" => Some(FrameMessage::SheetSend),
+            "diagram-save" => {
+                let src = object.get("src")?.as_str()?;
+                (!src.trim().is_empty() && src.chars().count() <= 11_000)
+                    .then(|| FrameMessage::DiagramSave(src.to_owned()))
+            }
             "answer" => {
                 let id = text("id", 16)?.trim().to_ascii_uppercase();
                 let valid = id
@@ -255,6 +262,6 @@ mod tests {
     fn host_script_checks_the_source_and_the_size() {
         assert!(HOST_SCRIPT.contains("event.source !== frame.contentWindow"));
         assert!(HOST_SCRIPT.contains("mast-msg:"));
-        assert!(HOST_SCRIPT.contains("12000"));
+        assert!(HOST_SCRIPT.contains("32000"));
     }
 }

@@ -782,6 +782,14 @@ impl ArtifactTab {
                         .ok();
                 }
             }));
+            let save_tab = weak.clone();
+            preview.on_save_markdown = Some(Rc::new(move |updated, _window, cx| {
+                save_tab
+                    .update(cx, |tab, cx| {
+                        tab.save_content(updated, "Plan diagram edited in Mast", cx);
+                    })
+                    .ok();
+            }));
             preview
         });
         self.markdown = Some(preview.clone());

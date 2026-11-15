@@ -2351,6 +2351,7 @@ fn forwardable(method: &str) -> bool {
             | methods::ARTIFACT_CONTENT
             | methods::ARTIFACT_REGISTER
             | methods::ARTIFACT_PROMOTE
+            | methods::ARTIFACT_WRITE_CONTENT
             | methods::ARTIFACT_DRIFT
     )
 }
@@ -3442,6 +3443,12 @@ impl RpcService for EngineRpc {
             methods::ARTIFACT_PROMOTE => {
                 let p: mast_proto::ArtifactPromoteParams = parse_params(params)?;
                 self.artifact_reply(move |service| service.promote(&p.artifact_id))
+                    .await
+            }
+            methods::ARTIFACT_WRITE_CONTENT => {
+                let p: mast_proto::ArtifactWriteContentParams = parse_params(params)?;
+                let by = self.work_outline.local_user();
+                self.artifact_reply(move |service| service.write_content(&p, by))
                     .await
             }
             methods::ARTIFACT_PIN => {

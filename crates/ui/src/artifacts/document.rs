@@ -505,6 +505,14 @@ pub(crate) const MERMAID_ZOOM_JS: &str = r#"function mastDiagramZoom() {
     mk("\u2922", "Expand to full window (Esc to close)", toggleExpand);
     mk("Edit", "Edit the diagram source", toggleEditor);
     mk("Copy", "Copy the diagram source", copy);
+    // Only inside Mast's frame (the host relays this to the artifact).
+    if (window.parent && window.parent !== window) {
+      const save = mk("Save", "Save the edited diagram as a new revision", () => {
+        try { window.parent.postMessage({ mastMsg: { t: "diagram-save", src: source } }, "*"); } catch (_) {}
+        save.textContent = "Saved?";
+        setTimeout(() => { save.textContent = "Save"; }, 2500);
+      });
+    }
     wrap.appendChild(bar);
     // Plain wheel scrolls the page; ctrl/cmd+wheel (or any wheel when
     // expanded) zooms.

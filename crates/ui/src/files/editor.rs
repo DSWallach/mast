@@ -154,6 +154,28 @@ pub(super) fn toggle_markdown_task(
     });
 }
 
+/// Replace a top-level block in the editor, using the normal atomic edit path.
+pub(super) fn replace_markdown_block(
+    editor: &Entity<FileEditorState>,
+    source: &str,
+    range: std::ops::Range<usize>,
+    replacement: &str,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    editor.update(cx, |state, cx| {
+        if !state.context_menu_capabilities().is_editable() || state.value().as_ref() != source {
+            return;
+        }
+        let selection = state.selected_range();
+        let scroll = state.scroll_offset();
+        state.set_selected_range(range, cx);
+        state.replace(replacement, window, cx);
+        state.set_selected_range(selection, cx);
+        state.set_scroll_offset(scroll, cx);
+    });
+}
+
 pub(super) fn subscribe_to_changes(
     editor: &Entity<FileEditorState>,
     path: String,
