@@ -292,6 +292,13 @@ impl SettingsStore {
     }
 }
 
+/// Where an atomic save of `path` should land: the file a symlink points at,
+/// so the rename replaces that file instead of the link (settings kept in a
+/// dotfiles repo stay linked). `path` itself when it is not a symlink.
+pub(crate) fn write_target(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     cx.set_global(SettingsStore {
         current: settings,
@@ -2158,7 +2165,7 @@ impl UiSettings {
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(data_dir)?;
-        let path = Self::path(data_dir);
+        let path = write_target(&Self::path(data_dir));
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -2956,6 +2963,26 @@ mod tests {
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
         assert_eq!(loaded.changes_file_list_width, 320.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = tempfile::tempdir().unwrap();
+        let target = dotfiles.path().join(FILE_NAME);
+        std::fs::write(&target, "{}").unwrap();
+        let link = UiSettings::path(dir.path());
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let settings = UiSettings {
+            sidebar_width: 300.0,
+            ..Default::default()
+        };
+        settings.save(dir.path()).unwrap();
+
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(UiSettings::load(dotfiles.path()).sidebar_width, 300.0);
     }
 
     #[test]
