@@ -202,6 +202,19 @@ impl ImageView {
         *self.0.borrow_mut() = ViewState::default();
     }
 
+    /// Zoom by `factor` about the viewport center (buttons and keyboard).
+    pub fn zoom_step(&self, factor: f32) {
+        let mut state = self.0.borrow_mut();
+        let center = point(state.geometry.viewport.width / 2.0, state.geometry.viewport.height / 2.0);
+        let scale = state.geometry.scale * factor;
+        state.geometry.zoom(scale, center);
+    }
+
+    /// Return to the fitted view, keeping measured bounds.
+    pub fn fit_view(&self) {
+        self.0.borrow_mut().geometry.fit();
+    }
+
     pub fn render(
         &self,
         image: Arc<Image>,

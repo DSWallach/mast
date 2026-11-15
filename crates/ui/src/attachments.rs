@@ -979,6 +979,7 @@ pub(crate) fn lightbox_with_size(
     };
     let on_close = std::rc::Rc::new(on_close);
     let close_on_key = on_close.clone();
+    let key_state = preview.viewer.clone();
     let press_state = preview.viewer.clone();
     let click_state = preview.viewer.clone();
     gpui::deferred(
@@ -998,9 +999,18 @@ pub(crate) fn lightbox_with_size(
                     .justify_center()
                     .gap(px(12.0))
                     .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" {
+                        let key = event.keystroke.key.as_str();
+                        if key == "escape" {
                             cx.stop_propagation();
                             close_on_key(window, cx);
+                        } else if matches!(key, "+" | "=" | "-" | "0") {
+                            cx.stop_propagation();
+                            match key {
+                                "0" => key_state.fit_view(),
+                                "-" => key_state.zoom_step(1.0 / 1.4),
+                                _ => key_state.zoom_step(1.4),
+                            }
+                            window.refresh();
                         }
                     })
                     .capture_any_mouse_down(move |event, _, _| {
@@ -1018,11 +1028,44 @@ pub(crate) fn lightbox_with_size(
                     .child(div().w(max_w).h(max_h).child(content))
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
                             .max_w(max_w)
-                            .overflow_hidden()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(ink(0.45))
-                            .child(preview.name.clone()),
+                            .child(div().overflow_hidden().child(preview.name.clone()))
+                            .children(
+                                [
+                                    ("lightbox-zoom-out", "−", "Zoom out", 0u8),
+                                    ("lightbox-zoom-fit", "Fit", "Fit to window", 1),
+                                    ("lightbox-zoom-in", "+", "Zoom in", 2),
+                                ]
+                                .map(|(id, label, aria, op)| {
+                                    let viewer = preview.viewer.clone();
+                                    div()
+                                        .id(id)
+                                        .px(px(10.0))
+                                        .py(px(4.0))
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(ink(0.3))
+                                        .text_color(ink(0.8))
+                                        .cursor_pointer()
+                                        .role(gpui::Role::Button)
+                                        .aria_label(aria)
+                                        .child(label)
+                                        .on_click(move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            match op {
+                                                0 => viewer.zoom_step(1.0 / 1.4),
+                                                1 => viewer.fit_view(),
+                                                _ => viewer.zoom_step(1.4),
+                                            }
+                                            window.refresh();
+                                        })
+                                }),
+                            ),
                     ),
             ),
     )

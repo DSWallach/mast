@@ -370,6 +370,7 @@ pub(crate) fn mermaid_fragment(source: &str, dark: bool) -> String {
         "<div class=\"mast-mermaid\" style=\"display:flex;justify-content:center\">\
 <pre class=\"mermaid\">{source}</pre></div>\n\
 <script src=\"{MERMAID_SRC}\"></script>\n\
+<script>{zoom_js}</script>\n\
 <script>(() => {{\n\
   const fail = (message) => {{\n\
     console.error(\"Mermaid: \" + message);\n\
@@ -377,11 +378,90 @@ pub(crate) fn mermaid_fragment(source: &str, dark: bool) -> String {
   }};\n\
   if (!globalThis.mermaid) {{ fail(\"the Mermaid library could not load\"); return; }}\n\
   mermaid.initialize({{ startOnLoad: false, securityLevel: \"strict\", theme: \"{theme}\" }});\n\
-  mermaid.run({{ querySelector: \"pre.mermaid\" }}).catch((error) => fail(error && error.message ? error.message : String(error)));\n\
+  mermaid.run({{ querySelector: \"pre.mermaid\" }}).then(() => {{ try {{ mastDiagramZoom(); }} catch (e) {{ console.error(\"Mermaid zoom: \" + e); }} }}).catch((error) => fail(error && error.message ? error.message : String(error)));\n\
 }})();</script>",
         source = escape_text(source),
+        zoom_js = MERMAID_ZOOM_JS,
     )
 }
+
+/// Pan/zoom for rendered diagrams: wheel / ctrl+wheel, pinch, drag, +/-/reset
+/// buttons, double-click to reset, and keyboard +/-/0 when focused.
+pub(crate) const MERMAID_ZOOM_JS: &str = r#"function mastDiagramZoom() {
+  document.querySelectorAll(".mast-mermaid").forEach((wrap) => {
+    const pre = wrap.querySelector("pre.mermaid");
+    if (!pre || !pre.querySelector("svg") || wrap.dataset.mastZoom) return;
+    wrap.dataset.mastZoom = "1";
+    wrap.style.cssText += ";position:relative;overflow:hidden;touch-action:none;cursor:grab;outline:none";
+    wrap.tabIndex = 0;
+    pre.style.transformOrigin = "0 0";
+    let k = 1, x = 0, y = 0;
+    const MIN = 0.5, MAX = 12;
+    const apply = () => { pre.style.transform = "translate(" + x + "px," + y + "px) scale(" + k + ")"; };
+    const zoomAt = (f, cx, cy) => {
+      const nk = Math.min(MAX, Math.max(MIN, k * f));
+      f = nk / k;
+      x = cx - (cx - x) * f; y = cy - (cy - y) * f; k = nk; apply();
+    };
+    const reset = () => { k = 1; x = 0; y = 0; apply(); };
+    const center = () => { const r = wrap.getBoundingClientRect(); return [r.width / 2, r.height / 2]; };
+    const bar = document.createElement("div");
+    bar.style.cssText = "position:absolute;top:6px;right:6px;display:flex;gap:4px;z-index:2";
+    [["+", "Zoom in", () => zoomAt(1.4, ...center())],
+     ["−", "Zoom out", () => zoomAt(1 / 1.4, ...center())],
+     ["⟲", "Reset zoom", reset]].forEach(([t, label, fn]) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = t; b.title = label; b.setAttribute("aria-label", label);
+      b.style.cssText = "min-width:32px;height:32px;border:1px solid rgba(128,128,128,.5);border-radius:6px;background:rgba(128,128,128,.18);color:inherit;font:600 16px sans-serif;cursor:pointer";
+      b.addEventListener("pointerdown", (e) => e.stopPropagation());
+      b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+      bar.appendChild(b);
+    });
+    wrap.appendChild(bar);
+    wrap.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const r = wrap.getBoundingClientRect();
+      zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002)), e.clientX - r.left, e.clientY - r.top);
+    }, { passive: false });
+    const pts = new Map();
+    let last = null;
+    const span = () => { const [a, b] = [...pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
+    const mid = () => { const [a, b] = [...pts.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
+    wrap.addEventListener("pointerdown", (e) => {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      wrap.setPointerCapture(e.pointerId);
+      wrap.style.cursor = "grabbing";
+      last = pts.size === 2 ? { d: span(), m: mid() } : null;
+    });
+    wrap.addEventListener("pointermove", (e) => {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      const r = wrap.getBoundingClientRect();
+      if (pts.size === 1) {
+        x += e.clientX - p.x; y += e.clientY - p.y; apply();
+        p.x = e.clientX; p.y = e.clientY;
+      } else if (pts.size === 2 && last) {
+        p.x = e.clientX; p.y = e.clientY;
+        const d = span(), m = mid();
+        x += m.x - last.m.x; y += m.y - last.m.y;
+        zoomAt(d / last.d, m.x - r.left, m.y - r.top);
+        last = { d, m };
+      }
+    });
+    const up = (e) => {
+      pts.delete(e.pointerId); last = null;
+      if (!pts.size) wrap.style.cursor = "grab";
+    };
+    wrap.addEventListener("pointerup", up);
+    wrap.addEventListener("pointercancel", up);
+    wrap.addEventListener("dblclick", reset);
+    wrap.addEventListener("keydown", (e) => {
+      if (e.key === "+" || e.key === "=") zoomAt(1.4, ...center());
+      else if (e.key === "-") zoomAt(1 / 1.4, ...center());
+      else if (e.key === "0") reset();
+    });
+  });
+}"#;
 
 fn image_fragment(base64: &str, mime_type: &str, title: &str) -> String {
     let mime = if mime_type.starts_with("image/") {
@@ -796,6 +876,7 @@ mod export_tests {
         let pdf_mermaid = export_document(WebKind::Mermaid, "graph TD; A-->B", "Diagram", true);
         assert!(pdf_mermaid.contains(&format!("<script src=\"{MERMAID_SRC}\"></script>")));
         assert!(html.contains("graph TD; A--&gt;B"));
+        assert!(html.contains("function mastDiagramZoom"));
         let pdf = export_document(WebKind::Fragment, "<details><summary>More</summary>Text</details>", "PDF", true);
         assert!(pdf.contains("d.open = true"));
         assert!(pdf.contains("@page"));
