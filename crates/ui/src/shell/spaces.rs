@@ -445,7 +445,7 @@ mod pinned_session_tests {
             for collapsed in [false, true] {
                 shell.update(cx, |shell, cx| {
                     shell.space_menu = popover::Popup::default();
-                    shell.device_group_menu = None;
+                    shell.group_menu = None;
                     shell.settings.sidebar_organization = organization;
                     shell.state.update(cx, |state, _| {
                         state.chats[0].space_id = project.then(|| "project".into());
@@ -467,11 +467,14 @@ mod pinned_session_tests {
                             shell.space_menu.get().map(|(id, _)| id.as_str()),
                             Some("project")
                         );
-                        assert!(shell.device_group_menu.is_none());
+                        assert!(shell.group_menu.is_none());
                     } else {
                         assert_eq!(
-                            shell.device_group_menu.as_ref().map(|(id, _)| id.as_str()),
-                            Some("local")
+                            shell.group_menu.as_ref().map(|(target, _)| target),
+                            Some(&SidebarGroupTarget::Device {
+                                device_id: "local".into(),
+                                key: if project { "local" } else { "home:local" }.into(),
+                            })
                         );
                         assert!(!shell.space_menu.is_open());
                     }
@@ -590,6 +593,97 @@ mod pinned_session_tests {
         });
         state.sidebar_preferences.synced = synced;
         state.sidebar_preferences.initialized = initialized;
+    }
+
+    #[gpui::test]
+    fn deleting_a_derived_group_archives_only_its_unpinned_sessions(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .settings
+                    .sidebar_pins_mut("local".into())
+                    .push("run-pinned".into());
+                shell.settings.space_filter = None;
+                shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.chats = [
+                        ("run-new", Some("briefing")),
+                        ("a-chat", None),
+                        ("run-pinned", Some("briefing")),
+                        ("other-run", Some("other")),
+                        ("run-old", Some("briefing")),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (id, task))| {
+                        let mut chat = pin_test_chat(id);
+                        chat.created_at = Utc::now() - chrono::Duration::minutes(ix as i64);
+                        chat.scheduled_task = task.map(Into::into);
+                        chat
+                    })
+                    .collect();
+                    state.set_test_engine(engine);
+                });
+                let sorted = |mut ids: Vec<String>| {
+                    ids.sort();
+                    ids
+                };
+                assert_eq!(
+                    sorted(shell.sidebar_group_chat_ids(SCHEDULED_GROUP_KEY, None, cx)),
+                    ["other-run", "run-new", "run-old"]
+                );
+                assert_eq!(
+                    sorted(shell.sidebar_group_chat_ids("local", None, cx)),
+                    ["a-chat"]
+                );
+                shell.group_menu = Some((
+                    SidebarGroupTarget::Scheduled {
+                        task: Some("briefing".into()),
+                    },
+                    gpui::point(px(0.0), px(0.0)),
+                ));
+                shell.delete_sidebar_group(
+                    &SidebarGroupTarget::Scheduled {
+                        task: Some("briefing".into()),
+                    },
+                    cx,
+                );
+                assert!(shell.group_menu.is_none());
+            })
+            .unwrap();
+        let mut archived = Vec::new();
+        for _ in 0..2 {
+            cx.run_until_parked();
+            let request: serde_json::Value =
+                serde_json::from_str(&requests.try_recv().expect("each run is archived")).unwrap();
+            assert_eq!(request["params"]["op"], "setChatArchived");
+            assert_eq!(request["params"]["archived"], true);
+            archived.push(request["params"]["chatId"].as_str().unwrap().to_owned());
+            let reply = serde_json::json!({"id":request["id"],"ok":{"ok":true}});
+            runtime.block_on(async {
+                replies.send(reply.to_string()).await.unwrap();
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+        cx.run_until_parked();
+        archived.sort();
+        assert_eq!(archived, ["run-new", "run-old"]);
+        assert!(requests.try_recv().is_err(), "the pinned run is untouched");
     }
 
     fn pin_test_chat(id: &str) -> mast_proto::Chat {
@@ -2640,6 +2734,16 @@ fn group_by_scheduled_task<T>(rows: Vec<(String, T)>) -> Vec<(String, Vec<T>)> {
 
 fn scheduled_subgroup_key(task: &str) -> String {
     format!("scheduled:{task}")
+}
+
+/// What a sidebar group header's menu acts on.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum SidebarGroupTarget {
+    /// A device group, or a device's home-directory project group; `key` is
+    /// the group key the rows were bucketed under.
+    Device { device_id: String, key: String },
+    /// Every scheduled-task run, or one task's runs.
+    Scheduled { task: Option<String> },
 }
 
 pub(super) use crate::components::shell_parts::sidebar_separator;
@@ -5492,44 +5596,16 @@ impl Shell {
             let project_id = (self.settings.sidebar_organization == SidebarOrganization::ByProject)
                 .then(|| self.state.read(cx).space_row(&key).map(|_| key.clone()))
                 .flatten();
-            let device_id = key.strip_prefix("home:").unwrap_or(&key).to_owned();
-            let menu_open = if let Some(id) = &project_id {
-                self.space_menu.get().is_some_and(|(space, _)| space == id)
-            } else {
-                self.device_group_menu
-                    .as_ref()
-                    .is_some_and(|(device, _)| device == &device_id)
-            };
-            let menu = crate::components::shell_parts::sidebar_group_menu(
-                SharedString::from(format!("sidebar-group-menu-{collapse_key}")),
+            let menu = self.sidebar_group_menu_button(
+                &collapse_key,
+                project_id,
+                SidebarGroupTarget::Device {
+                    device_id: key.strip_prefix("home:").unwrap_or(&key).to_owned(),
+                    key: key.clone(),
+                },
                 theme,
-                menu_open,
-            )
-                .debug_selector({
-                    let key = collapse_key.clone();
-                    move || format!("sidebar-group-menu-{key}")
-                })
-                .on_click(
-                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                        this.section_menu = None;
-                        this.close_sidebar_view_menu(cx);
-                        if let Some(id) = &project_id {
-                            this.device_group_menu = None;
-                            this.space_menu.open((id.clone(), event.position()));
-                        } else {
-                            this.close_space_menu(cx);
-                            this.device_group_menu = Some((device_id.clone(), event.position()));
-                            window.focus(&this.device_group_menu_focus, cx);
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    icon(icons::MORE_HORIZONTAL)
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
-                );
+                cx,
+            );
             let controls = div()
                 .flex()
                 .items_center()
@@ -5596,6 +5672,53 @@ impl Shell {
         }
     }
 
+    /// The ⋯ button on a group header. A registered project opens the space
+    /// menu; every other group opens its own menu for `target`.
+    fn sidebar_group_menu_button(
+        &self,
+        id: &str,
+        space_id: Option<String>,
+        target: SidebarGroupTarget,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let menu_open = match &space_id {
+            Some(id) => self.space_menu.get().is_some_and(|(space, _)| space == id),
+            None => self
+                .group_menu
+                .as_ref()
+                .is_some_and(|(open, _)| open == &target),
+        };
+        let selector = id.to_owned();
+        crate::components::shell_parts::sidebar_group_menu(
+            SharedString::from(format!("sidebar-group-menu-{id}")),
+            theme,
+            menu_open,
+        )
+            .debug_selector(move || format!("sidebar-group-menu-{selector}"))
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.section_menu = None;
+                    this.close_sidebar_view_menu(cx);
+                    if let Some(id) = &space_id {
+                        this.group_menu = None;
+                        this.space_menu.open((id.clone(), event.position()));
+                    } else {
+                        this.close_space_menu(cx);
+                        this.group_menu = Some((target.clone(), event.position()));
+                        window.focus(&this.group_menu_focus, cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                icon(icons::MORE_HORIZONTAL)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+    }
+
     /// Scheduled-task runs: one disclosure, closed by default, holding a nested
     /// disclosure per task name.
     fn render_scheduled_group(
@@ -5624,8 +5747,24 @@ impl Shell {
             };
             let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
             let toggle_motion_key = motion_key.clone();
-            let header = sidebar_disclosure_header(theme, label, chevron)
+            let menu = self.sidebar_group_menu_button(
+                &key,
+                None,
+                SidebarGroupTarget::Scheduled {
+                    task: Some(task.clone()),
+                },
+                theme,
+                cx,
+            );
+            let controls = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(menu)
+                .child(chevron);
+            let header = sidebar_disclosure_header(theme, label, controls.into_any_element())
                 .id(SharedString::from(format!("sidebar-group-{key}")))
+                .group("automatic-sidebar-group")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&key);
                     this.begin_sidebar_disclosure_motion(
@@ -5693,10 +5832,24 @@ impl Shell {
         };
         let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
         let toggle_motion_key = motion_key.clone();
-        let header = sidebar_disclosure_header(theme, label, chevron)
+        let menu = self.sidebar_group_menu_button(
+            SCHEDULED_GROUP_KEY,
+            None,
+            SidebarGroupTarget::Scheduled { task: None },
+            theme,
+            cx,
+        );
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(menu)
+            .child(chevron);
+        let header = sidebar_disclosure_header(theme, label, controls.into_any_element())
             .id(SharedString::from(format!(
                 "sidebar-group-{SCHEDULED_GROUP_KEY}"
             )))
+            .group("automatic-sidebar-group")
             .on_click(cx.listener(move |this, _, _, cx| {
                 let was_open = this.scheduled_tasks_open;
                 this.begin_sidebar_disclosure_motion(
@@ -7475,8 +7628,39 @@ impl Shell {
         cx.notify();
     }
 
+    /// Active sessions the sidebar draws under a group, leaving out pinned
+    /// ones and members of custom sections, which render elsewhere.
+    fn sidebar_group_chat_ids(&self, key: &str, task: Option<&str>, cx: &App) -> Vec<String> {
+        let pinned = self.active_sidebar_pins(cx);
+        let sections = self.active_sidebar_sections(cx);
+        self.state
+            .read(cx)
+            .sidebar_chats(Utc::now(), self.settings.space_filter.as_deref())
+            .into_iter()
+            .map(|(_, chat)| chat)
+            .filter(|chat| {
+                sidebar_group_key(self.settings.sidebar_organization, chat).as_deref() == Some(key)
+                    && task.is_none_or(|task| chat.scheduled_task.as_deref() == Some(task))
+                    && !pinned.contains(&chat.id)
+                    && !sections.iter().any(|s| s.session_ids.contains(&chat.id))
+            })
+            .map(|chat| chat.id.clone())
+            .collect()
+    }
+
+    /// Deleting a derived group archives its sessions; it empties, so it goes.
+    fn delete_sidebar_group(&mut self, target: &SidebarGroupTarget, cx: &mut Context<Self>) {
+        self.group_menu = None;
+        let (key, task) = match target {
+            SidebarGroupTarget::Device { key, .. } => (key.as_str(), None),
+            SidebarGroupTarget::Scheduled { task } => (SCHEDULED_GROUP_KEY, task.as_deref()),
+        };
+        let ids = self.sidebar_group_chat_ids(key, task, cx);
+        self.archive_chat_ids(ids, cx);
+    }
+
     fn edit_sidebar_device(&mut self, device_id: String, cx: &mut Context<Self>) {
-        self.device_group_menu = None;
+        self.group_menu = None;
         let Some(name) = self
             .state
             .read(cx)
@@ -7505,25 +7689,30 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
-        if let Some((device_id, position)) = self.device_group_menu.clone() {
-            let rename_id = device_id.clone();
-            let menu = popover::popover_card(&theme)
+        if let Some((target, position)) = self.group_menu.clone() {
+            let key_target = target.clone();
+            let delete_target = target.clone();
+            let mut menu = popover::popover_card(&theme)
                 .w(px(180.0))
-                .track_focus(&self.device_group_menu_focus)
+                .track_focus(&self.group_menu_focus)
                 .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                    match event.keystroke.key.as_str() {
-                        "escape" => this.device_group_menu = None,
-                        "enter" => this.edit_sidebar_device(device_id.clone(), cx),
+                    match (event.keystroke.key.as_str(), &key_target) {
+                        ("escape", _) => this.group_menu = None,
+                        ("enter", SidebarGroupTarget::Device { device_id, .. }) => {
+                            this.edit_sidebar_device(device_id.clone(), cx)
+                        }
                         _ => return,
                     }
                     cx.stop_propagation();
                     cx.notify();
                 }))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.device_group_menu = None;
+                    this.group_menu = None;
                     cx.notify();
-                }))
-                .child(
+                }));
+            if let SidebarGroupTarget::Device { device_id, .. } = &target {
+                let rename_id = device_id.clone();
+                menu = menu.child(
                     popover::menu_row(&theme, false, "device-group-rename")
                         .id("device-group-rename")
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -7533,6 +7722,23 @@ impl Shell {
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child("Rename device…"),
                 );
+            }
+            let menu = menu.child(
+                popover::menu_row(&theme, false, "sidebar-group-delete")
+                    .id("sidebar-group-delete")
+                    .debug_selector(|| "sidebar-group-delete".into())
+                    .text_color(theme.danger)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.delete_sidebar_group(&delete_target, cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        icon(icons::TRASH_BIN_MINIMALISTIC)
+                            .size(px(16.0))
+                            .text_color(theme.danger),
+                    )
+                    .child("Delete group"),
+            );
             overlays.push(popover::menu_at(
                 "device-group-menu",
                 position,
