@@ -211,15 +211,13 @@ pub fn context_reset_message(harness: HarnessId) -> String {
     )
 }
 
-/// Harnesses whose instruction support is advertised per device.
-pub const INSTRUCTION_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
-
-/// Harnesses on this device that can deliver instructions right now (installed
-/// and probe passing). Runs the cached CLI probes; call off the async runtime.
+/// Harnesses on this device that can deliver instructions right now (an
+/// instruction channel in the capability table, installed, and probe passing).
+/// Runs the cached CLI probes; call off the async runtime.
 pub fn supported_instruction_harnesses(registry: &HarnessRegistry) -> Vec<HarnessId> {
-    INSTRUCTION_HARNESSES
-        .iter()
-        .copied()
+    HarnessId::ALL
+        .into_iter()
+        .filter(|id| mast_harness::capabilities(*id).instructions)
         .filter(|id| {
             registry.resolve(*id).is_ok_and(|harness| {
                 harness.installed() && harness.instruction_support().is_supported()

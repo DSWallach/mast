@@ -61,7 +61,7 @@ use tokio::sync::mpsc;
 
 use mast_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
+    RunRequest, SlashCommand, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -352,13 +352,8 @@ impl Harness for OpencodeHarness {
         // Must match the registry's lazy descriptor.
         "OpenCode"
     }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    /// Steers queue and deliver as the next prompt when the live turn goes
-    /// idle — opencode has no mid-turn injection on this wire.
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+    fn capabilities(&self) -> crate::HarnessCapabilities {
+        crate::capabilities(self.id())
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         REASONING_LEVELS
@@ -367,11 +362,6 @@ impl Harness for OpencodeHarness {
         self.executable.is_some()
             || self.base_url.is_some()
             || resolve_opencode_executable().is_some()
-    }
-    /// `session.status{idle}` is a real terminal frame per turn: the engine
-    /// can retire its quiesce watchdogs.
-    fn deterministic_turn_end(&self) -> bool {
-        true
     }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its

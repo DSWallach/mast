@@ -5,8 +5,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use mast_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, UserInputQuestion,
 };
 
 use crate::{Harness, HarnessError, RunControls};
@@ -56,11 +55,8 @@ impl Harness for MockHarness {
     fn display_name(&self) -> &str {
         "Mock"
     }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
+    fn capabilities(&self) -> crate::HarnessCapabilities {
+        crate::capabilities(self.id())
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
@@ -698,11 +694,8 @@ impl Harness for InstructionMockHarness {
     fn display_name(&self) -> &str {
         "Mock"
     }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
+    fn capabilities(&self) -> crate::HarnessCapabilities {
+        crate::capabilities(self.id())
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]

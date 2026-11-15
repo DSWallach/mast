@@ -86,7 +86,7 @@ use tokio::sync::mpsc;
 
 use mast_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    RunRequest, SlashCommand, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -621,23 +621,14 @@ impl Harness for CodexHarness {
         // the catalog entry doesn't change after the first resolve.
         "Codex"
     }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    /// Native `turn/steer` injects into the active turn; a steer that misses
-    /// the turn falls back to a follow-up `turn/start` on the same thread.
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
+    fn capabilities(&self) -> crate::HarnessCapabilities {
+        crate::capabilities(self.id())
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         REASONING_LEVELS
     }
     fn installed(&self) -> bool {
         self.resolve_executable().is_ok()
-    }
-    /// Done is the CLI's own terminal frame, for wake turns too.
-    fn deterministic_turn_end(&self) -> bool {
-        true
     }
 
     /// The signed-in account's visible `model/list` is authoritative. A
@@ -721,10 +712,6 @@ impl Harness for CodexHarness {
             instructions::check_transition(&request)?;
         }
         self.run_with_mode(request, controls, false, None).await
-    }
-
-    fn supports_agent_tools(&self) -> bool {
-        true
     }
 
     async fn run_with_agent_tools(

@@ -85,7 +85,7 @@ pub fn require_read_only_support(
     harness: HarnessId,
     request: &mast_proto::RunRequest,
 ) -> Result<(), HarnessError> {
-    if request.sandbox == mast_proto::SandboxLevel::ReadOnly {
+    if request.sandbox == mast_proto::SandboxLevel::ReadOnly && !capabilities(harness).read_only {
         return Err(HarnessError::Sandbox {
             harness,
             sandbox: "read-only",
@@ -135,8 +135,18 @@ pub struct ModelContext {
 pub trait Harness: Send + Sync {
     fn id(&self) -> HarnessId;
     fn display_name(&self) -> &str;
-    fn supports_steering(&self) -> bool;
-    fn steering_mode(&self) -> SteeringMode;
+    /// The capability methods below read this. Mast's drivers return their
+    /// row of [`capabilities()`]; other implementations get
+    /// [`HarnessCapabilities::NONE`].
+    fn capabilities(&self) -> HarnessCapabilities {
+        HarnessCapabilities::NONE
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        self.capabilities().steering
+    }
     fn reasoning_levels(&self) -> &[ReasoningLevel];
     /// Whether the agent's own CLI is present on this device — the settings
     /// gate for enabling the harness. Version probes are cached by executable identity.
@@ -150,13 +160,13 @@ pub trait Harness: Send + Sync {
     /// directly return true, and the engine retires its quiesce watchdogs
     /// for them; adapter-mediated ACP agents keep the watchdog backstop.
     fn deterministic_turn_end(&self) -> bool {
-        false
+        self.capabilities().turn_end == TurnEnd::Deterministic
     }
     /// Whether a user-prompted turn has an authoritative completion signal.
     /// Such turns must never be parked merely because their stream is quiet.
     /// Unlike deterministic_turn_end, this need not cover autonomous activity.
     fn authoritative_prompt_end(&self) -> bool {
-        self.deterministic_turn_end()
+        self.deterministic_turn_end() || self.capabilities().turn_end == TurnEnd::PromptedOnly
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
@@ -222,10 +232,10 @@ pub trait Harness: Send + Sync {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError>;
 
     /// Whether [`Self::run_with_agent_tools`] actually gives the agent the
-    /// Mast MCP server. Default `false`: the engine then mints no token and
-    /// calls plain [`Self::run`] (no tools, no error).
+    /// Mast MCP server. When `false` the engine mints no token and calls
+    /// plain [`Self::run`] (no tools, no error).
     fn supports_agent_tools(&self) -> bool {
-        false
+        self.capabilities().agent_tools
     }
 
     /// [`Self::run`] with the Mast agent tools injected through the CLI's
@@ -245,6 +255,8 @@ pub trait Harness: Send + Sync {
 pub mod acp;
 pub mod agent_tools;
 pub use agent_tools::AgentToolsInjection;
+mod capabilities;
+pub use capabilities::{HarnessCapabilities, TurnEnd, capabilities};
 pub(crate) mod adapter_install;
 pub mod archive_install;
 mod catalog;
@@ -641,10 +653,7 @@ pub const TITLE_INSTRUCTIONS: &str = "You generate session titles. Treat the sup
 
 /// Drivers with a restricted title-generation path.
 pub fn supports_titles(id: HarnessId) -> bool {
-    matches!(
-        id,
-        HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
-    )
+    capabilities(id).titles
 }
 
 #[cfg(test)]

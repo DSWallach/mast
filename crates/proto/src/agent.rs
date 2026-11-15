@@ -33,6 +33,19 @@ pub enum HarnessId {
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 impl HarnessId {
+    pub const ALL: [HarnessId; 10] = [
+        HarnessId::ClaudeCode,
+        HarnessId::Codex,
+        HarnessId::Cursor,
+        HarnessId::Devin,
+        HarnessId::Grok,
+        HarnessId::Hermes,
+        HarnessId::Pi,
+        HarnessId::Opencode,
+        HarnessId::Antigravity,
+        HarnessId::Mock,
+    ];
+
     /// The model Mast passes explicitly when nothing was picked, so a harness
     /// never silently inherits its own CLI default (Claude Code reads
     /// `~/.claude/settings.json`). `None` for harnesses without a built-in
