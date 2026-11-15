@@ -14,7 +14,7 @@ pub(super) struct SectionDialog {
 
 fn section_menu_labels(id: &str) -> &'static [&'static str] {
     if id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX) {
-        &["Edit group in Work Outline", "Archive all"]
+        &["Edit group in Work Outline", "Archive all", "Delete"]
     } else {
         &["Edit section", "Archive all", "Delete"]
     }
@@ -253,18 +253,60 @@ impl Shell {
         else {
             return;
         };
-        let state = self.state.read(cx);
-        let ids: Vec<_> = state
+        let ids: Vec<_> = self
+            .state
+            .read(cx)
             .chats
             .iter()
             .filter(|chat| !chat.archived && section.session_ids.contains(&chat.id))
             .map(|chat| chat.id.clone())
             .collect();
+        self.archive_chat_ids(ids, cx);
+    }
+
+    /// An outline group is its work item, so deleting it archives the item
+    /// (and its descendants, which fold into the same group) along with the
+    /// group's sessions. Both are recoverable.
+    fn delete_outline_group(&mut self, id: &str, cx: &mut Context<Self>) {
+        let target = self.state.read(cx).spaces.iter().find_map(|space| {
+            let prefix = format!(
+                "{}{}:",
+                mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX,
+                space.id
+            );
+            id.strip_prefix(&prefix).map(str::to_owned)
+        });
+        self.archive_sidebar_section(id, cx);
+        let Some(work_item_id) = target else {
+            return;
+        };
+        let archive = self
+            .state
+            .read(cx)
+            .work_outline_actions()
+            .archive_work_item(mast_proto::ArchiveWorkItemParams {
+                work_item_id,
+                descendant_archive_policy: mast_proto::DescendantArchivePolicy::ArchiveDescendants,
+                operation_id: crate::work_outline::actions::new_operation_id(),
+            });
+        cx.spawn(async move |this, cx| {
+            if archive.await.is_err() {
+                let _ = this.update(cx, |this, cx| {
+                    this.sidebar_notice = Some("Could not delete the group. Try again.".into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Archive each session, one request apiece, reporting how many failed.
+    pub(super) fn archive_chat_ids(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
         if ids.is_empty() {
             cx.notify();
             return;
         }
-        let Some(engine) = state.engine().cloned() else {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.sidebar_notice = Some("Engine not connected".into());
             cx.notify();
             return;
@@ -495,7 +537,7 @@ impl Shell {
                     cx.notify();
                 }
                 1 => self.archive_sidebar_section(id, cx),
-                _ => {}
+                _ => self.delete_outline_group(id, cx),
             }
             return;
         }
@@ -668,6 +710,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     fn test_shell(
         cx: &mut gpui::TestAppContext,
         path: &std::path::Path,
@@ -800,8 +843,8 @@ mod tests {
         assert!(cx.debug_bounds("section-action-0").is_some());
         assert!(cx.debug_bounds("section-action-1").is_some());
         assert!(
-            cx.debug_bounds("section-action-2").is_none(),
-            "outline groups cannot be deleted as sidebar preferences"
+            cx.debug_bounds("section-action-2").is_some(),
+            "outline groups can be deleted"
         );
         let edit = cx.debug_bounds("section-action-0").unwrap().center();
         cx.simulate_click(edit, gpui::Modifiers::default());
@@ -818,6 +861,71 @@ mod tests {
                     .has_work_item_details()
             );
         });
+    }
+
+    #[gpui::test]
+    fn deleting_an_outline_group_archives_its_work_item_and_sessions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+        let outline_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = outline_calls.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
+                snapshot.available = true;
+                snapshot.items = serde_json::from_value(serde_json::json!([
+                    {"id":"focus","spaceId":"space","title":"Focus","chatIds":["regular"]}
+                ])).unwrap();
+                shell.state.update(cx, |state, _| {
+                    state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"space","deviceId":"local","path":"/workspace","createdAt":"2026-09-20T00:00:00Z"})).unwrap()];
+                    state.set_work_outline_for_test(snapshot);
+                    state.set_test_engine(engine);
+                    state.work_outline_actions_override =
+                        Some(crate::work_outline::WorkOutlineActions::scripted(Arc::new(
+                            move |method, params| {
+                                recorded.lock().unwrap().push((method.to_owned(), params));
+                                Ok(serde_json::json!({}))
+                            },
+                        )));
+                });
+                shell.settings.sidebar_outline_groups = true;
+                shell.delete_outline_group("outline:space:focus", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("the session is archived")).unwrap();
+        assert_eq!(request["params"]["op"], "setChatArchived");
+        assert_eq!(request["params"]["chatId"], "regular");
+        let reply = serde_json::json!({"id":request["id"],"ok":{"ok":true}});
+        runtime.block_on(async {
+            replies.send(reply.to_string()).await.unwrap();
+            while replies.capacity() < replies.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        });
+        cx.run_until_parked();
+        let calls = outline_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, mast_rpc::methods::WORK_OUTLINE_MUTATE);
+        assert_eq!(calls[0].1["op"], "archiveWorkItem");
+        assert_eq!(calls[0].1["workItemId"], "focus");
+        assert_eq!(
+            calls[0].1["descendantArchivePolicy"]["type"],
+            "archiveDescendants"
+        );
     }
 
     #[gpui::test]
