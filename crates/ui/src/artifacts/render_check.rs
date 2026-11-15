@@ -145,7 +145,16 @@ pub(crate) fn request_document(
         }
         ArtifactKind::HtmlFragment => Ok(web(WebKind::Fragment, &text()?, "text/html")),
         ArtifactKind::HtmlPage => Ok(web(WebKind::Page, &text()?, "text/html")),
-        ArtifactKind::Mermaid => Ok(web(WebKind::Mermaid, &text()?, "text/plain")),
+        ArtifactKind::Mermaid => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(web(WebKind::Mermaid, &text()?, "text/plain"))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(RenderSkip::Native)
+            }
+        }
         ArtifactKind::Image => {
             let base64 = match request.encoding {
                 ArtifactContentEncoding::Base64 => request.content.clone(),
@@ -238,12 +247,6 @@ where
         result: None,
         error: Some(error),
     };
-    let Some(renderer) = renderer else {
-        return failed(wire_error(
-            ArtifactErrorCode::RenderUnavailable,
-            "this Mast window cannot render artifacts offscreen on this platform",
-        ));
-    };
     let (plan, cap_warning) = request.renders();
     let mut renders = Vec::new();
     for (viewport, requested) in &plan {
@@ -277,6 +280,12 @@ where
             }
         }
     }
+    let Some(renderer) = renderer else {
+        return failed(wire_error(
+            ArtifactErrorCode::RenderUnavailable,
+            "this Mast window cannot render artifacts offscreen on this platform",
+        ));
+    };
     let renderer = &renderer;
     let all = async {
         let mut finished = Vec::new();

@@ -188,5 +188,6 @@ mod tests {
         assert!(render("this is not a diagram", &palette).is_err());
         assert!(render(&"x".repeat(MAX_SOURCE_BYTES + 1), &palette).is_err());
         assert!(render("flowchart TD\nA[Hola<br/>mundo] --> B[Fin]", &palette).is_ok());
+        assert!(render("flowchart LR\nsubgraph S[\"Title\"]\nTS[\"Transcript\\nSession\"]\nend", &palette).is_ok());
     }
 }

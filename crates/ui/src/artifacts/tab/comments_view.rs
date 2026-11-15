@@ -56,6 +56,27 @@ pub(crate) struct CommentsState {
     subscriptions: Vec<Subscription>,
 }
 
+fn strip_mermaid_fence(content: &str) -> String {
+    let trimmed = content.trim();
+    if (trimmed.starts_with("```mermaid") || trimmed.starts_with("~~~mermaid"))
+        && (trimmed.ends_with("```") || trimmed.ends_with("~~~"))
+    {
+        let after_first_line = match trimmed.find('\n') {
+            Some(pos) => &trimmed[pos + 1..],
+            None => trimmed,
+        };
+        let before_last_line = match after_first_line.rfind('\n') {
+            Some(pos) => &after_first_line[..pos],
+            None => after_first_line,
+        };
+        return before_last_line
+            .trim_end_matches(['`', '~'])
+            .trim_end()
+            .to_string();
+    }
+    content.to_string()
+}
+
 impl ArtifactTab {
     /// Comments make sense for HTML and Mermaid artifacts, on screen as a
     /// page.
@@ -190,6 +211,11 @@ impl ArtifactTab {
             cx.notify();
             return;
         }
+        let content = if artifact.kind == mast_proto::ArtifactKind::Mermaid {
+            strip_mermaid_fence(&content)
+        } else {
+            content
+        };
         let target_device_id = (!self.is_local(&artifact, cx)).then(|| artifact.device_id.clone());
         let call = self.state.read(cx).artifact_actions().write_content(
             mast_proto::ArtifactWriteContentParams {

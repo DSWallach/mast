@@ -332,9 +332,18 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                     kind: WebKind::Page,
                     source: text,
                 },
-                ArtifactKind::Mermaid => ArtifactBody::Web {
-                    kind: WebKind::Mermaid,
-                    source: text,
+                ArtifactKind::Mermaid => {
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        ArtifactBody::Markdown(format!("```mermaid\n{text}\n```"))
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        ArtifactBody::Web {
+                            kind: WebKind::Mermaid,
+                            source: text,
+                        }
+                    }
                 },
                 ArtifactKind::Plan => match mast_proto::plan::Plan::parse(&text) {
                     Ok(plan) => ArtifactBody::Web { kind: WebKind::Plan, source: mast_proto::plan_render::render(&plan) },
