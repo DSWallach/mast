@@ -2325,7 +2325,8 @@ impl Shell {
             chat_item_card: Default::default(),
             session_activity_menu: Default::default(),
             running: running_ui::RunningUi::new(
-                matches!(install, mast_update::InstallKind::MacApp { .. }),
+                matches!(install, mast_update::InstallKind::MacApp { .. })
+                    || cfg!(target_os = "linux"),
                 cx,
             ),
             chat_item_card_chat: String::new(),

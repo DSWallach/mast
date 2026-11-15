@@ -631,6 +631,38 @@ pub fn relaunch_app_after_exit(bundle: &Path) {
     let _ = bundle;
 }
 
+/// Detached binary relauncher: waits for THIS process to exit, then re-executes
+/// the binary with the given arguments. The caller quits the app after this returns.
+pub fn relaunch_binary_after_exit(exe: &Path, args: &[std::ffi::OsString]) {
+    relaunch_binary_after_pid(std::process::id(), exe, args);
+}
+
+pub(crate) fn relaunch_binary_after_pid(pid: u32, exe: &Path, args: &[std::ffi::OsString]) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("pid=\"$1\"; exe=\"$2\"; shift 2; while /bin/kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done; exec \"$exe\" \"$@\"")
+            .arg("sh")
+            .arg(pid.to_string())
+            .arg(exe)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        if let Err(err) = command.spawn() {
+            tracing::error!(error = %err, "failed to spawn the binary relauncher");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, exe, args);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Engine-side checker
 // ---------------------------------------------------------------------------
@@ -1170,6 +1202,32 @@ mod tests {
         );
         // Unstaged version refuses.
         assert!(apply_headless(&app_root, "0.2.0").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_relaunch_binary_after_pid() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("relaunch_ran");
+        let script = tmp.path().join("touch_marker.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 0.1"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+
+        relaunch_binary_after_pid(pid, &script, &[marker.as_os_str().to_os_string()]);
+        let _ = child.wait();
+
+        let start = std::time::Instant::now();
+        while !marker.exists() && start.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "relaunch script should have created the marker");
     }
 }
 

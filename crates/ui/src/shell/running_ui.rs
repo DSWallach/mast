@@ -47,9 +47,18 @@ const BUILD_CHECK_EVERY_TICKS: u32 = 5;
 /// How often a non-empty interrupted ledger is re-read.
 const INTERRUPTED_REFRESH_TICKS: u32 = 10;
 
+fn clean_deleted_exe(path: PathBuf) -> PathBuf {
+    if let Some(s) = path.to_str() {
+        if let Some(clean) = s.strip_suffix(" (deleted)") {
+            return PathBuf::from(clean);
+        }
+    }
+    path
+}
+
 impl RunningUi {
     pub(super) fn new(restart_enabled: bool, cx: &mut Context<Shell>) -> Self {
-        let exe = std::env::current_exe().ok();
+        let exe = std::env::current_exe().ok().map(clean_deleted_exe);
         Self {
             open: false,
             position: point(px(12.0), px(Theme::TITLEBAR_HEIGHT + 4.0)),
@@ -531,6 +540,14 @@ impl Shell {
             if let mast_update::InstallKind::MacApp { bundle } = &self.install {
                 mast_update::relaunch_app_after_exit(bundle);
                 crate::app_menus::quit_after_save(cx);
+            } else if cfg!(target_os = "linux") {
+                if let Some(exe) = self.running.exe.as_deref() {
+                    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+                    mast_update::relaunch_binary_after_exit(exe, &args);
+                    crate::app_menus::quit_after_save(cx);
+                } else {
+                    self.running.plan.cancel();
+                }
             } else {
                 self.running.plan.cancel();
             }
@@ -1628,5 +1645,17 @@ mod tests {
             assert!(shell.interrupted_block(cx).is_none())
         });
         redraw(cx);
+    }
+
+    #[test]
+    fn clean_deleted_exe_strips_kernel_deleted_suffix() {
+        assert_eq!(
+            clean_deleted_exe(PathBuf::from("/home/user/target/installed/mast (deleted)")),
+            PathBuf::from("/home/user/target/installed/mast")
+        );
+        assert_eq!(
+            clean_deleted_exe(PathBuf::from("/home/user/target/installed/mast")),
+            PathBuf::from("/home/user/target/installed/mast")
+        );
     }
 }
