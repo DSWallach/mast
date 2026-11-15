@@ -52,7 +52,7 @@ use tokio::sync::mpsc;
 
 use mast_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, UserInputAnswer, UserInputQuestion,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -559,14 +559,11 @@ impl Harness for ClaudeHarness {
     fn display_name(&self) -> &str {
         "Claude Code"
     }
-    fn supports_steering(&self) -> bool {
-        true
+    fn capabilities(&self) -> crate::HarnessCapabilities {
+        crate::capabilities(self.id())
     }
     fn supports_session_fork(&self) -> bool {
         true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[
@@ -582,10 +579,6 @@ impl Harness for ClaudeHarness {
         // (or a test `executable`) must report installed, and an invalid one
         // must not — availability and launches share one resolution.
         self.resolve_executable().is_ok()
-    }
-    /// Done is the CLI's own terminal frame, for wake turns too.
-    fn deterministic_turn_end(&self) -> bool {
-        true
     }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
@@ -677,10 +670,6 @@ impl Harness for ClaudeHarness {
             crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         }
         self.run_with_mode(request, controls, false, None).await
-    }
-
-    fn supports_agent_tools(&self) -> bool {
-        true
     }
 
     async fn run_with_agent_tools(

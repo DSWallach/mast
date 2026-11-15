@@ -41,6 +41,22 @@ pub struct HarnessDescriptor {
 }
 
 impl HarnessDescriptor {
+    /// The static descriptor a lazy slot lists before its first resolve.
+    /// Steering comes from the capability table, as it does after resolving.
+    fn lazy(id: HarnessId, name: &str, reasoning_levels: Vec<ReasoningLevel>) -> Self {
+        let capabilities = mast_harness::capabilities(id);
+        Self {
+            id,
+            name: name.into(),
+            supports_steering: true,
+            steering_mode: capabilities.steering,
+            reasoning_levels,
+            installed: true,
+            can_install: false,
+            enabled: None,
+        }
+    }
+
     /// Whether this harness can accept a prompt inside the turn that is
     /// currently running. Turn-boundary steering is still useful to the
     /// automatic queue drain, but it is not the non-interrupting "Steer"
@@ -508,24 +524,19 @@ fn default_registry_with_model_discovery_cwd(
     }));
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::ClaudeCode,
-            name: "Claude Code".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
+        HarnessDescriptor::lazy(
+            HarnessId::ClaudeCode,
+            "Claude Code",
             // Must mirror ClaudeHarness exactly — the descriptor-stability
             // rule (see the codex test below).
-            reasoning_levels: vec![
+            vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
                 ReasoningLevel::High,
                 ReasoningLevel::XHigh,
                 ReasoningLevel::Max,
             ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        ),
         Box::new(|| mast_harness::ClaudeHarness::new().installed()),
         Box::new(move || {
             let mut harness = mast_harness::ClaudeHarness::new();
@@ -543,12 +554,10 @@ fn default_registry_with_model_discovery_cwd(
     // run/model call actually resolves the slot.
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Codex,
-            name: "Codex".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            reasoning_levels: vec![
+        HarnessDescriptor::lazy(
+            HarnessId::Codex,
+            "Codex",
+            vec![
                 ReasoningLevel::Minimal,
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -557,10 +566,7 @@ fn default_registry_with_model_discovery_cwd(
                 ReasoningLevel::Max,
                 ReasoningLevel::Ultra,
             ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        ),
         Box::new(|| mast_harness::CodexHarness::new().installed()),
         Box::new(move || {
             let mut harness = mast_harness::CodexHarness::new();
@@ -575,16 +581,7 @@ fn default_registry_with_model_discovery_cwd(
     // CursorHarness exactly. Turn-boundary steering; no effort ladder.
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Cursor,
-            name: "Cursor".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        HarnessDescriptor::lazy(HarnessId::Cursor, "Cursor", Vec::new()),
         Box::new(|| mast_harness::CursorHarness::new().installed()),
         Box::new(move || {
             let mut harness = mast_harness::CursorHarness::new();
@@ -600,16 +597,7 @@ fn default_registry_with_model_discovery_cwd(
     // advertised model ids instead of a `thought_level` option.
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Devin,
-            name: "Devin".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        HarnessDescriptor::lazy(HarnessId::Devin, "Devin", Vec::new()),
         Box::new(|| mast_harness::AcpHarness::devin().installed()),
         Box::new(move || {
             let mut harness = mast_harness::AcpHarness::devin();
@@ -625,20 +613,15 @@ fn default_registry_with_model_discovery_cwd(
     // session via the `thought_level` config option.
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Grok,
-            name: "Grok".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
+        HarnessDescriptor::lazy(
+            HarnessId::Grok,
+            "Grok",
+            vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
                 ReasoningLevel::High,
             ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        ),
         Box::new(|| mast_harness::AcpHarness::grok().installed()),
         Box::new(move || {
             let mut harness = mast_harness::AcpHarness::grok();
@@ -654,16 +637,7 @@ fn default_registry_with_model_discovery_cwd(
     // config over ACP today (hybrid reasoning is model-internal).
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Hermes,
-            name: "Hermes".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        HarnessDescriptor::lazy(HarnessId::Hermes, "Hermes", Vec::new()),
         Box::new(|| mast_harness::AcpHarness::hermes().installed()),
         Box::new(move || {
             let mut harness = mast_harness::AcpHarness::hermes();
@@ -678,12 +652,10 @@ fn default_registry_with_model_discovery_cwd(
     // pi's thinking ladder minus its "off" tier.
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Pi,
-            name: "Pi".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
+        HarnessDescriptor::lazy(
+            HarnessId::Pi,
+            "Pi",
+            vec![
                 ReasoningLevel::Minimal,
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -691,10 +663,7 @@ fn default_registry_with_model_discovery_cwd(
                 ReasoningLevel::XHigh,
                 ReasoningLevel::Max,
             ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        ),
         Box::new(|| mast_harness::AcpHarness::pi().installed()),
         Box::new(move || {
             let mut harness = mast_harness::AcpHarness::pi();
@@ -711,22 +680,17 @@ fn default_registry_with_model_discovery_cwd(
     // run sends the first advertised variant id for the picked level).
     let discovery_cwd = model_discovery_cwd.clone();
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Opencode,
-            name: "OpenCode".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
+        HarnessDescriptor::lazy(
+            HarnessId::Opencode,
+            "OpenCode",
+            vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
                 ReasoningLevel::High,
                 ReasoningLevel::XHigh,
                 ReasoningLevel::Max,
             ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        ),
         Box::new(|| mast_harness::OpencodeHarness::new().installed()),
         Box::new(move || {
             let mut harness = mast_harness::OpencodeHarness::new();
@@ -741,20 +705,15 @@ fn default_registry_with_model_discovery_cwd(
     // extension (turn boundaries), with Low/Medium/High thinking levels.
     let discovery_cwd = model_discovery_cwd;
     registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Antigravity,
-            name: "Antigravity".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
+        HarnessDescriptor::lazy(
+            HarnessId::Antigravity,
+            "Antigravity",
+            vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
                 ReasoningLevel::High,
             ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
+        ),
         Box::new(|| mast_harness::AcpHarness::antigravity().installed()),
         Box::new(move || {
             let mut harness = mast_harness::AcpHarness::antigravity();
@@ -1254,6 +1213,29 @@ mod tests {
         assert_eq!(before.supports_steering, after.supports_steering);
         assert_eq!(before.steering_mode, after.steering_mode);
         assert_eq!(before.reasoning_levels, after.reasoning_levels);
+    }
+
+    /// Every resolved harness agrees with its capability-table row, so the
+    /// table can't advertise a feature the driver doesn't implement.
+    #[test]
+    fn resolved_harnesses_match_the_capability_table() {
+        let registry = default_registry();
+        let home = tempfile::tempdir().unwrap();
+        for id in HarnessId::ALL {
+            let harness = registry.resolve(id).unwrap();
+            let capabilities = mast_harness::capabilities(id);
+            assert_eq!(harness.steering_mode(), capabilities.steering, "{id:?}");
+            assert_eq!(
+                harness.supports_agent_tools(),
+                capabilities.agent_tools,
+                "{id:?}"
+            );
+            assert_eq!(
+                harness.scoped_to_account_home(home.path()).is_some(),
+                capabilities.account_homes,
+                "{id:?}"
+            );
+        }
     }
 }
 

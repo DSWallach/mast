@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 
 use mast_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SteeringMode, TodoItem, ToolCall,
+    RunRequest, TodoItem, ToolCall,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -238,12 +238,8 @@ impl Harness for CursorHarness {
     fn display_name(&self) -> &str {
         "Cursor"
     }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    /// The SDK has no mid-turn injection; steers queue for the next turn.
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+    fn capabilities(&self) -> crate::HarnessCapabilities {
+        crate::capabilities(self.id())
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
@@ -254,10 +250,6 @@ impl Harness for CursorHarness {
     fn installed(&self) -> bool {
         self.executable.is_some()
             || crate::acp::find_on_paths("cursor-agent", cursor_cli_paths()).is_some()
-    }
-    /// Done is the SDK run's terminal result, for every turn shape.
-    fn deterministic_turn_end(&self) -> bool {
-        true
     }
 
     /// Keep a successful catalog during transient outages. A cold failure
