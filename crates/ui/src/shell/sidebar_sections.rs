@@ -935,9 +935,12 @@ mod tests {
         window.update(cx, |shell, _, cx| {
             prepare(shell, cx);
             shell.settings.sidebar_sections_by_profile.get_mut("local").unwrap()[0].session_ids = vec!["regular".into(), "other".into()];
+            assert!(shell.settings.sidebar_outline_groups);
+            shell.settings.sidebar_outline_groups = false;
             let original = shell.active_sidebar_sections(cx);
             let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
             snapshot.available = true;
+            snapshot.root_work_item_ids = vec!["focus".into()];
             snapshot.items = serde_json::from_value(serde_json::json!([
                 {"id":"focus","spaceId":"space","title":"Focus from outline","chatIds":["regular","pin"]}
             ])).unwrap();
