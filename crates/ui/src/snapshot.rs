@@ -77,6 +77,16 @@ pub fn populated_walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>
     crate::changes::walkthrough::snapshot_fixture_with_changes(true, cx)
 }
 
+/// Construct the Changes pane with its file tree expanded or collapsed.
+pub fn changes_fixture(collapsed: bool, focused: bool, window: &mut Window, cx: &mut App) -> Entity<crate::changes::Changes> {
+    let changes = crate::changes::snapshot_populated_changes(cx);
+    if collapsed {
+        changes.update(cx, |changes, cx| changes.collapse_snapshot_file_tree(cx));
+    }
+    if focused { changes.update(cx, |changes, cx| changes.focus_snapshot_file_tree(window, cx)); }
+    changes
+}
+
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     chat_fixture_with(data_dir, |_, _| {}, cx)
@@ -228,6 +238,44 @@ pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
         state
     });
     cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
+}
+
+/// Offline chat shell where the agent asks a question and the user has typed
+/// a long answer of their own. The host takes side chats, so the panel offers
+/// Clarify.
+pub fn question_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture_with(
+        data_dir,
+        |state, cx| {
+            state.devices.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "local", "name": "This Mac", "platform": "macos",
+                    "capabilities": [mast_proto::capabilities::SIDE_CHAT_V1],
+                }))
+                .unwrap(),
+            );
+            state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
+                {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+                {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"The caption gap and the control gap disagree. I can fix it either way."},{"id":"ask","kind":"input","requestId":"req-1","questions":[{"id":"q1","header":"Spacing","question":"Which gap should the sidebar captions use?","options":["The control gap token","A new caption token","Leave it as is"],"allowCustom":true}]}],"createdAt":1788900001000_i64,"deviceId":"local","status":"streaming"}
+            ])).unwrap() }, cx).unwrap();
+        },
+        cx,
+    );
+    shell.update(cx, |shell, cx| {
+        shell.fixture_snapshot_type(
+            "Use the control gap token for the captions, but only in the sidebar. The Overview \
+             rows already read their gap from the same token, so changing it there would shift \
+             every row. Keep the compact layout's smaller token as it is, and check the \
+             walkthrough screens afterwards, since they reuse the sidebar captions. If the \
+             caption row still looks cramped at the narrowest width, add one pixel of top \
+             padding rather than a new token, and leave a note in the design doc so the next \
+             change to the spacing scale accounts for it.\n\nOne more thing: the industrial \
+             style draws a border around each caption, so check that the extra pixel doesn't \
+             double up with it, and run the preview in both themes before you hand it back.",
+            cx,
+        )
+    });
+    shell
 }
 
 /// Offline chat shell with a single in-memory worker.

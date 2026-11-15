@@ -4,9 +4,10 @@ The outline arranges a project's chats under work items. An item can be a workst
 
 ## Sidebar sections
 
-Enable **Settings → Appearance → Use Work Outline groups in the sidebar** to
-make the sidebar follow the outline. The setting is off by default. Turning it
-off restores your custom sections without changing their saved membership.
+The sidebar follows Work Outline groups by default, in the same tree order as
+Overview. You can turn off **Settings → Appearance → Use Work Outline groups
+in the sidebar** to restore your custom sections without changing their saved
+membership.
 
 When enabled, root groups become
 sections; projects get their own sections named by their outline path. Sessions

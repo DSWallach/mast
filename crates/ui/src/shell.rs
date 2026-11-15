@@ -1756,8 +1756,8 @@ pub struct Shell {
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
-    device_group_menu: Option<(String, Point<Pixels>)>,
-    device_group_menu_focus: FocusHandle,
+    group_menu: Option<(spaces::SidebarGroupTarget, Point<Pixels>)>,
+    group_menu_focus: FocusHandle,
     /// Per-project agent account picker / add-account sign-in.
     account_flow: Option<Entity<crate::managed_accounts::AccountFlow>>,
     account_flow_sub: Option<Subscription>,
@@ -2074,6 +2074,9 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::AskOnSide { chat_id, question } => {
+                    this.ask_on_side(chat_id.clone(), question.clone(), cx)
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -2268,8 +2271,8 @@ impl Shell {
             closeout_seq: 0,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
-            device_group_menu: None,
-            device_group_menu_focus: cx.focus_handle(),
+            group_menu: None,
+            group_menu_focus: cx.focus_handle(),
             account_flow: None,
             account_flow_sub: None,
             sidebar_section_migration: None,
@@ -3745,14 +3748,38 @@ impl Shell {
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(branch) = branch {
+        let checkout = {
+            let state = self.state.read(cx);
+            let targets = state.chat_diff_targets(&chat_id);
+            targets.iter()
+                .find(|target| branch.as_ref().is_some_and(|branch| target.branch.as_ref() == Some(branch)))
+                .or_else(|| targets.iter().find(|target| target.selected))
+                .or_else(|| targets.first())
+                .map(|target| target.path.clone())
+        };
+        if let Some(path) = checkout {
+            let task = self.state.update(cx, |state, cx| {
+                state.clear_chat_diff_member_pick(&chat_id);
+                state.set_chat_diff_target(&chat_id, mast_proto::SetChatDiffTargetAction::Select, Some(path), cx)
+            });
+            task.detach();
+        } else if let Some(branch) = branch {
             let task = self.state.update(cx, |state, cx| {
                 state.clear_chat_diff_member_pick(&chat_id);
                 state.bind_chat_ref_target(&chat_id, branch, None, cx)
             });
             task.detach();
         }
-        self.open_chat_changes(chat_id, cx);
+        self.open_chat(chat_id.clone(), cx);
+        let this = cx.weak_entity();
+        cx.defer(move |cx| {
+            this.update(cx, |this, cx| {
+                this.set_surfaces_open(true, cx);
+                let changes = cx.new(|cx| Changes::for_chat(this.state.clone(), chat_id, cx));
+                changes.update(cx, |changes, cx| changes.set_scope(crate::changes::DiffScope::Branch, cx));
+                this.register_diff_surface(changes, cx);
+            }).ok();
+        });
     }
 
     fn add_diff_surface(&mut self, cx: &mut Context<Self>) {
@@ -5830,7 +5857,7 @@ impl Shell {
             || self.workspace_search.is_some()
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
-            || self.device_group_menu.is_some()
+            || self.group_menu.is_some()
             || self.space_menu.is_open()
             || self.running.open
             || self.add_space.is_some()
@@ -9061,7 +9088,7 @@ impl Shell {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
-        if self.device_group_menu.take().is_some() {
+        if self.group_menu.take().is_some() {
             cx.notify();
             return true;
         }
@@ -9296,7 +9323,7 @@ impl Shell {
                             .debug_selector(|| "chat-menu-ask-side".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
-                                this.ask_on_side(ask_side_id.clone(), cx);
+                                this.ask_on_side(ask_side_id.clone(), None, cx);
                             }))
                             .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Ask on the side…")),
@@ -15772,6 +15799,10 @@ impl Shell {
 
     pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
+    }
+
+    pub fn fixture_snapshot_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| composer.fixture_type(text, cx));
     }
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {

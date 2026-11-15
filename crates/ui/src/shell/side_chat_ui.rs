@@ -112,6 +112,12 @@ impl SideChatPane {
             .map(|chat| chat.device_id.clone())
     }
 
+    /// Send `question` as if typed into the pane.
+    pub(crate) fn ask(&mut self, question: String, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(question, cx));
+        self.send(cx);
+    }
+
     /// Questions always go through the queue: an idle side chat runs it at
     /// once, a busy one after its current answer.
     fn send(&mut self, cx: &mut Context<Self>) {
@@ -290,24 +296,8 @@ impl Render for SideChatPane {
 }
 
 impl Shell {
-    /// "Ask on the side…" is offered when both this engine and the chat's
-    /// host understand side chats, and never on a side chat itself.
     pub(super) fn can_ask_on_side(&self, chat_id: &str, cx: &App) -> bool {
-        use mast_proto::capabilities::SIDE_CHAT_V1;
-        let state = self.state.read(cx);
-        let local = match state.engine() {
-            Some(engine) => engine.engine_info().supports(SIDE_CHAT_V1),
-            None => state
-                .local_device_id
-                .as_deref()
-                .is_some_and(|device| state.device_supports(device, SIDE_CHAT_V1)),
-        };
-        local
-            && state
-                .chats
-                .iter()
-                .any(|chat| chat.id == chat_id && !chat.archived && !chat.is_side_chat())
-            && state.chat_host_supports(chat_id, SIDE_CHAT_V1)
+        self.state.read(cx).can_ask_on_side(chat_id)
     }
 
     #[cfg(feature = "snapshot")]
@@ -323,8 +313,13 @@ impl Shell {
     }
 
     /// Create a side chat of `main_id` and open it in the main chat's right
-    /// pane.
-    pub(super) fn ask_on_side(&mut self, main_id: String, cx: &mut Context<Self>) {
+    /// pane, asking `question` first when given.
+    pub(super) fn ask_on_side(
+        &mut self,
+        main_id: String,
+        question: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.sidebar_notice = Some("Engine not connected".into());
             cx.notify();
@@ -339,7 +334,12 @@ impl Shell {
         self.side_chats_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::MUTATE, params).await;
             this.update(cx, |shell, cx| match result {
-                Ok(_) if shell.panel_key(cx) == main_id => shell.add_side_chat_surface(side_id, cx),
+                Ok(_) if shell.panel_key(cx) == main_id => {
+                    let pane = shell.add_side_chat_surface(side_id, cx);
+                    if let Some(question) = question {
+                        pane.update(cx, |pane, cx| pane.ask(question, cx));
+                    }
+                }
                 // The user moved on before it was created: nothing will show
                 // it, so it must not linger.
                 Ok(_) => shell.archive_chat(side_id, cx),
@@ -352,7 +352,11 @@ impl Shell {
         }));
     }
 
-    pub(super) fn add_side_chat_surface(&mut self, side_id: String, cx: &mut Context<Self>) {
+    pub(super) fn add_side_chat_surface(
+        &mut self,
+        side_id: String,
+        cx: &mut Context<Self>,
+    ) -> Entity<SideChatPane> {
         self.set_surfaces_open(true, cx);
         self.side_chats.seq += 1;
         let id = self.side_chats.seq;
@@ -361,7 +365,7 @@ impl Shell {
         let sub = cx.subscribe(&pane, move |this, _, event, cx| match event {
             SideChatPaneEvent::Close => this.close_side_chat(id, cx),
         });
-        self.side_chats.tabs.insert(id, pane);
+        self.side_chats.tabs.insert(id, pane.clone());
         self.side_chats.subs.insert(id, sub);
         let key = self.panel_key(cx);
         self.right_tabs
@@ -369,6 +373,7 @@ impl Shell {
             .or_default()
             .push(RightSurface::SideChat(id));
         self.set_right_active(RightSurface::SideChat(id), cx);
+        pane
     }
 
     pub(super) fn side_chat_pane(&self, id: u64) -> Option<&Entity<SideChatPane>> {

@@ -50,7 +50,7 @@ use tokio::sync::mpsc;
 
 use mast_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    RunRequest, SlashCommand, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -100,7 +100,6 @@ struct AcpAgentSpec {
     /// Search summary + install hint for the NotInstalled error.
     install_hint: &'static str,
     models: fn() -> Vec<Model>,
-    steering_mode: SteeringMode,
     /// The agent puts the exact shell command in a permission request's
     /// `toolCall.title` and sends no `rawInput` (Gemini CLI). Rules mode only
     /// reads a command from the title when this is set.
@@ -249,7 +248,6 @@ fn grok_spec() -> AcpAgentSpec {
             }]
         },
         // No `_session/steering` extension: steers deliver at turn boundaries.
-        steering_mode: SteeringMode::TurnBoundary,
         permission_title_is_command: false,
         // Grok Build's advertised efforts (default high); applied through the
         // session's `thought_level` config option.
@@ -334,7 +332,6 @@ fn devin_spec() -> AcpAgentSpec {
                 },
             ]
         },
-        steering_mode: SteeringMode::TurnBoundary,
         permission_title_is_command: false,
         // Effort is encoded in Devin's advertised model ids, not a separate
         // thought_level config option.
@@ -405,7 +402,6 @@ fn hermes_spec() -> AcpAgentSpec {
             ]
         },
         // No `_session/steering` extension: steers deliver at turn boundaries.
-        steering_mode: SteeringMode::TurnBoundary,
         permission_title_is_command: false,
         // Hermes exposes no effort config over ACP today (hybrid reasoning is
         // model-internal); revisit when the adapter advertises a ladder.
@@ -460,7 +456,6 @@ fn pi_spec() -> AcpAgentSpec {
             }]
         },
         // The adapter has no `_session/steering` extension: turn boundaries.
-        steering_mode: SteeringMode::TurnBoundary,
         permission_title_is_command: false,
         // pi's thinking ladder (minimal→max; its extra "off" tier has no zeron
         // equivalent and is left to the agent default).
@@ -806,7 +801,6 @@ fn antigravity_spec() -> AcpAgentSpec {
             antigravity_context::enrich_antigravity_models(&mut models);
             models
         },
-        steering_mode: SteeringMode::TurnBoundary,
         permission_title_is_command: false,
         reasoning_levels: &[
             ReasoningLevel::Low,
@@ -1795,17 +1789,8 @@ impl Harness for AcpHarness {
     fn display_name(&self) -> &str {
         self.spec.display_name
     }
-    fn authoritative_prompt_end(&self) -> bool {
-        // ACP session/prompt owns the turn until its response. The engine's
-        // quiet watchdog must not park a still-pending model request either.
-        true
-    }
-
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        self.spec.steering_mode
+    fn capabilities(&self) -> crate::HarnessCapabilities {
+        crate::capabilities(self.id())
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         self.spec.reasoning_levels
@@ -1966,10 +1951,6 @@ impl Harness for AcpHarness {
         } else {
             crate::InstructionSupport::no_channel()
         }
-    }
-
-    fn supports_agent_tools(&self) -> bool {
-        true
     }
 
     async fn run(
