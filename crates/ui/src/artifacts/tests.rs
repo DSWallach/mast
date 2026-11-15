@@ -279,7 +279,11 @@ fn each_kind_renders_with_its_component(cx: &mut TestAppContext) {
             ArtifactKind::Mermaid,
             "graph TD; A-->B".into(),
             utf8,
-            Presenter::Web(WebKind::Mermaid),
+            if cfg!(target_os = "macos") {
+                Presenter::Web(WebKind::Mermaid)
+            } else {
+                Presenter::Markdown
+            },
         ),
         (
             ArtifactKind::Image,
@@ -317,7 +321,7 @@ fn each_kind_renders_with_its_component(cx: &mut TestAppContext) {
                 assert!(documents[0].1.contains("srcdoc="));
                 assert!(documents[0].1.contains("sandbox=\"allow-scripts\""));
             }
-            ArtifactKind::Mermaid => {
+            ArtifactKind::Mermaid if cfg!(target_os = "macos") => {
                 assert!(documents[0].1.contains(MERMAID_SRC));
             }
             _ => assert!(documents.is_empty(), "{kind:?} renders natively"),
@@ -911,7 +915,7 @@ fn render_check_times_out_and_reports_missing_probes_and_platforms(cx: &mut Test
     }));
     let timed_out = serve_now(
         cx,
-        render_request(1, ArtifactKind::Mermaid, "graph TD; A-->B"),
+        render_request(1, ArtifactKind::HtmlPage, "<html><head></head><body>x</body></html>"),
         Some(hanging),
     );
     assert!(timed_out.result.is_none());
@@ -968,16 +972,27 @@ fn render_check_times_out_and_reports_missing_probes_and_platforms(cx: &mut Test
             .starts_with("artifact/renderUnavailable:")
     );
 
-    // Markdown renders natively: answered with a warning, no screenshot.
-    let any: Rc<dyn ArtifactRenderer> = Rc::new(Rc::new(FakeRenderer::default()));
+    // Markdown renders natively: answered with a warning, no screenshot, even without a renderer.
     let markdown = serve_now(
         cx,
         render_request(4, ArtifactKind::Markdown, "# x"),
-        Some(any),
+        None,
     );
     let result = markdown.result.unwrap();
     assert!(result.screenshot_png_base64.is_none());
     assert_eq!(result.warnings.len(), 1);
+
+    // Standalone Mermaid renders natively on Linux without requiring an offscreen renderer.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mermaid = serve_now(
+            cx,
+            render_request(5, ArtifactKind::Mermaid, "graph TD; A-->B"),
+            None,
+        );
+        let result = mermaid.result.unwrap();
+        assert!(result.screenshot_png_base64.is_none());
+    }
 }
 
 #[gpui::test]
