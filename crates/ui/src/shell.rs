@@ -2074,6 +2074,9 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::AskOnSide { chat_id, question } => {
+                    this.ask_on_side(chat_id.clone(), question.clone(), cx)
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -9295,7 +9298,7 @@ impl Shell {
                             .debug_selector(|| "chat-menu-ask-side".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
-                                this.ask_on_side(ask_side_id.clone(), cx);
+                                this.ask_on_side(ask_side_id.clone(), None, cx);
                             }))
                             .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Ask on the side…")),
@@ -15771,6 +15774,10 @@ impl Shell {
 
     pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
+    }
+
+    pub fn fixture_snapshot_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| composer.fixture_type(text, cx));
     }
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {

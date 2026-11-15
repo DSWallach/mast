@@ -499,7 +499,7 @@ impl Shell {
             MenuAction::RevokeAdmin(chat_id) => self.revoke_chat_admin(&chat_id, cx),
             MenuAction::ArchiveChat(chat_id) => self.archive_chat(chat_id, cx),
             MenuAction::HandOffChat(chat_id) => self.open_hand_off(chat_id, cx),
-            MenuAction::AskOnSide(chat_id) => self.ask_on_side(chat_id, cx),
+            MenuAction::AskOnSide(chat_id) => self.ask_on_side(chat_id, None, cx),
             MenuAction::HideSpace(space_id) => {
                 Self::set_outline_space_hidden(outline, &space_id, true, cx)
             }
