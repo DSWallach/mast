@@ -108,6 +108,7 @@ pub struct HarnessesPage {
     title_saving: bool,
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
+    new_session: Entity<crate::settings::new_session::NewSessionDefaultsCard>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     /// Which device's harnesses are shown/edited; `None` = this device (no
     /// passthrough). Retargeted by the page-header device switcher.
@@ -170,7 +171,14 @@ impl SignInPhase {
 
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let mut page = Self {
+        let mut page = Self::unloaded(state, cx);
+        page.load(cx);
+        page.load_friction_settings(cx);
+        page
+    }
+
+    fn unloaded(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self {
             friction_settings: None,
             friction_saving: false,
             title_settings: Loadable::Idle,
@@ -178,6 +186,9 @@ impl HarnessesPage {
             title_menu: None,
             title_task: None,
             title_saving: false,
+            new_session: cx.new(|cx| {
+                crate::settings::new_session::NewSessionDefaultsCard::new(state.clone(), cx)
+            }),
             state,
             scroll: widgets::PageScroll::default(),
             harnesses: Loadable::Idle,
@@ -192,10 +203,36 @@ impl HarnessesPage {
             sign_in: None,
             sign_in_failure: None,
             sign_in_task: None,
-        };
-        page.load(cx);
-        page.load_friction_settings(cx);
+        }
+    }
+
+    /// The page with a fixed catalog and no RPC, for the UI preview.
+    #[cfg(feature = "snapshot")]
+    pub fn offline_fixture(
+        state: Entity<AppState>,
+        harnesses: Vec<HarnessDescriptor>,
+        models: Vec<(HarnessId, Vec<Model>)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        use crate::settings::new_session::NewSessionDefaultsCard;
+        let mut page = Self::unloaded(state.clone(), cx);
+        let card = NewSessionDefaultsCard::with_catalog(state, harnesses.clone(), models);
+        page.new_session = cx.new(|_| card);
+        page.harnesses = Loadable::Ready(harnesses);
+        page.friction_settings = Some(mast_proto::FrictionSettings::default());
+        page.title_settings = Loadable::Ready(TitleSettings::default());
         page
+    }
+
+    /// Scroll the page so `y` pixels of its top are above the viewport.
+    #[cfg(feature = "snapshot")]
+    pub fn scroll_to(&self, y: f32) {
+        self.scroll.scroll.set_offset(gpui::point(px(0.0), px(-y)));
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub fn new_session_card(&self) -> Entity<crate::settings::new_session::NewSessionDefaultsCard> {
+        self.new_session.clone()
     }
 
     fn load_friction_settings(&mut self, cx: &mut Context<Self>) {
@@ -1189,6 +1226,7 @@ impl Render for HarnessesPage {
                             )
                             .children(error)
                             .child(body)
+                            .child(self.new_session.clone())
                             .children(friction)
                             .child(titles),
                     ),

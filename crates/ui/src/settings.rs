@@ -24,6 +24,7 @@ pub mod devices;
 pub mod design_panel;
 pub mod files;
 pub mod harnesses;
+pub mod new_session;
 pub mod notifications;
 pub mod shortcuts;
 pub mod widgets;

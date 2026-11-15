@@ -214,6 +214,67 @@ pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
 }
 
+/// Settings → Agents with saved new-session defaults and the model menu open,
+/// no RPC. Expects `settings::init` to have run.
+pub fn agents_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    use crate::settings::composer::RememberedModel;
+    use mast_proto::{HarnessId, ReasoningLevel};
+    let harnesses: Vec<mast_engine::registry::HarnessDescriptor> =
+        serde_json::from_value(serde_json::json!([
+            {"id":"claude-code","name":"Claude Code","installed":true,"enabled":true,
+             "supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]},
+            {"id":"codex","name":"Codex","installed":true,"enabled":true,
+             "supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]},
+            {"id":"cursor","name":"Cursor","installed":false,"enabled":false,
+             "supportsSteering":false,"steeringMode":"step-boundary","reasoningLevels":[]}
+        ]))
+        .expect("harness fixture");
+    let models =
+        |value| -> Vec<mast_proto::Model> { serde_json::from_value(value).expect("model fixture") };
+    let catalog = vec![
+        (
+            HarnessId::ClaudeCode,
+            models(serde_json::json!([
+                {"id":"claude-opus-5-5","label":"Opus 5.5","reasoningLevels":["low","medium","high","xhigh","max"]},
+                {"id":"claude-sonnet-5-5","label":"Sonnet 5.5","reasoningLevels":["low","medium","high"]}
+            ])),
+        ),
+        (
+            HarnessId::Codex,
+            models(serde_json::json!([
+                {"id":"gpt-5.4","label":"GPT-5.4","reasoningLevels":["low","medium","high","xhigh"],"options":[
+                    {"id":"context-window","label":"Context window","defaultChoice":"standard","choices":[{"id":"standard","label":"Standard"},{"id":"1m","label":"1M tokens"}]},
+                    {"id":"service-tier","label":"Service tier","defaultChoice":"auto","choices":[{"id":"auto","label":"Standard"},{"id":"fast","label":"Fast"}]}
+                ]},
+                {"id":"gpt-5.3-codex","label":"GPT-5.3 Codex","reasoningLevels":["low","medium","high"]}
+            ])),
+        ),
+    ];
+    crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+        let defaults = &mut settings.new_session_defaults;
+        defaults.harness = Some(HarnessId::Codex);
+        defaults.set_model(
+            HarnessId::Codex,
+            Some(RememberedModel {
+                id: "gpt-5.4".into(),
+                label: "GPT-5.4".into(),
+            }),
+        );
+        defaults.set_reasoning(HarnessId::Codex, Some(ReasoningLevel::High));
+        defaults.set_model_option(HarnessId::Codex, "service-tier", Some("fast".into()));
+        defaults.set_reasoning(HarnessId::ClaudeCode, Some(ReasoningLevel::XHigh));
+    });
+    let state = cx.new(|_| crate::state::AppState::new());
+    let page = cx.new(|cx| {
+        crate::settings::harnesses::HarnessesPage::offline_fixture(state, harnesses, catalog, cx)
+    });
+    // Keep the harness list's tail in view above the whole New sessions card.
+    page.read(cx).scroll_to(200.0);
+    let card = page.read(cx).new_session_card();
+    card.update(cx, |card, _| card.open_model_menu());
+    page
+}
+
 /// Workflow pack settings with an import preview and recent imports, no RPC.
 pub fn workflow_pack_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::settings::workflow_pack::{

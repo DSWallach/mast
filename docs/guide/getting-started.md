@@ -21,6 +21,8 @@ The Space's chats, outline, instructions and accounts all hang off this folder.
 
 Press `⌘N` for a new session in the composer, pick a model, and send a message. This works without any work item. If Mast detects that the selected account is signed out, choose **Sign in…** or **Start anyway**. If sign-in fails, check the selected account in [Accounts](accounts.md), or run `mast doctor` (use `target/installed/mast doctor` from a source checkout) for suggested fixes. The outline is for when you want to keep track of more than one chat.
 
+A new chat starts with the agent, model, reasoning level and model options you picked last. To always start from the same choices, set them under **Settings → Agents → New sessions**. You can set a default agent, and a model, reasoning level and options for each agent. Any field left on **Last picked** keeps your most recent choice. If a default agent or model isn't available on the device the chat runs on, the chat uses your last pick instead.
+
 ## The outline in five minutes
 
 1. Press `⇧⌘L` to open the Outline.
