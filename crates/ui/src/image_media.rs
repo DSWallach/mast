@@ -26,6 +26,8 @@ pub(crate) struct MediaImage {
 }
 
 const PREVIEW_PIXELS: usize = 1024 * 1024;
+const ENLARGED_PIXELS: usize = 4 * PREVIEW_PIXELS;
+const ZOOM_HEADROOM: f32 = 4.0;
 const MAX_RASTER_SIDE: f64 = 4096.0;
 // GPUI's SvgRenderer rasterizes SVG images at twice their declared dimensions.
 const GPUI_SVG_SCALE: f64 = 2.0;
@@ -36,12 +38,13 @@ fn raster_size(
     viewport: (f32, f32),
     dpi: f32,
     pixels: usize,
+    max_fit: f64,
 ) -> (u32, u32) {
     let (w, h) = (width as f64, height as f64);
     let dpi = f64::from(dpi.clamp(1.0, 4.0));
     let fit = (f64::from(viewport.0.max(1.0)) / w)
         .min(f64::from(viewport.1.max(1.0)) / h)
-        .min(1.0);
+        .min(max_fit);
     let scale = (fit * dpi)
         .min(MAX_RASTER_SIDE / w)
         .min(MAX_RASTER_SIDE / h)
@@ -66,7 +69,14 @@ impl MediaImage {
         let Some(svg) = &self.svg else {
             return self.clone();
         };
-        let size = raster_size(self.width, self.height, viewport, dpi, pixels);
+        let size = raster_size(self.width, self.height, viewport, dpi, pixels, 1.0);
+        self.for_view_upscaled(viewport, dpi, pixels, size)
+    }
+
+    fn for_view_upscaled(&self, _viewport: (f32, f32), _dpi: f32, _pixels: usize, size: (u32, u32)) -> Self {
+        let Some(svg) = &self.svg else {
+            return self.clone();
+        };
         if self.raster_size == Some(size) {
             return self.clone();
         }
@@ -108,12 +118,15 @@ impl MediaImage {
         if pixels < self.raster_size.map_or(0, |(w, h)| w as usize * h as usize) {
             return self.clone();
         }
-        let pixels = pixels.min(2 * PREVIEW_PIXELS);
-        let size = raster_size(self.width, self.height, viewport, dpi, pixels);
+        let pixels = pixels.min(ENLARGED_PIXELS);
+        // The enlarged view is zoomed, so rasterize well past the fitted size
+        // (up to the pixel budget) to keep zoomed-in text sharp.
+        let viewport = (viewport.0 * ZOOM_HEADROOM, viewport.1 * ZOOM_HEADROOM);
+        let size = raster_size(self.width, self.height, viewport, dpi, pixels, ZOOM_HEADROOM as f64 * 2.0);
         if let Some(cached) = cached.filter(|cached| cached.raster_size == Some(size)) {
             return cached.clone();
         }
-        self.for_view(viewport, dpi, pixels)
+        self.for_view_upscaled(viewport, dpi, pixels, size)
     }
 }
 
@@ -157,7 +170,7 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
         if svg.len() > mast_proto::MAX_WORKSPACE_IMAGE_BYTES {
             return Err("Prepared SVG exceeds preview size limit".into());
         }
-        let maximum = raster_size(width, height, (900.0, 480.0), 4.0, PREVIEW_PIXELS);
+        let maximum = raster_size(width, height, (900.0, 480.0), 4.0, PREVIEW_PIXELS, 1.0);
         // Reserve the largest admitted preview across supported display densities,
         // including both CPU pixels and GPU texture, plus source and wrapper.
         let retained = svg.len() * 2 + 1024 + maximum.0 as usize * maximum.1 as usize * 8;
@@ -320,7 +333,7 @@ mod tests {
                 let enlarged = media.enlarged((1600.0, 1000.0), dpi, 32 * 1024 * 1024, None);
                 for (variant, limit) in [
                     (&thumbnail, PREVIEW_PIXELS),
-                    (&enlarged, 2 * PREVIEW_PIXELS),
+                    (&enlarged, ENLARGED_PIXELS),
                 ] {
                     let (w, h) = variant.raster_size.unwrap();
                     assert!(w <= 4096 && h <= 4096 && w as usize * h as usize <= limit);
@@ -354,7 +367,7 @@ mod tests {
     #[test]
     fn extreme_aspect_ratios_stay_inside_the_pixel_budget() {
         for (w, h) in [(1e20, 1.0), (1.0, 1e20)] {
-            let size = raster_size(w, h, (2000.0, 2000.0), 4.0, 16);
+            let size = raster_size(w, h, (2000.0, 2000.0), 4.0, 16, 1.0);
             assert!(size.0 as usize * size.1 as usize <= 16);
         }
     }
