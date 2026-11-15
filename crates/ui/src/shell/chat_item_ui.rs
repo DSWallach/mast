@@ -182,6 +182,21 @@ impl Shell {
         cx.notify();
     }
 
+    /// Whether the side panel is currently open on the Item tab.
+    pub(crate) fn item_tab_open(&self, cx: &App) -> bool {
+        self.right_pane_open(cx) && self.resolved_right_active(cx) == RightSurface::Item
+    }
+
+    /// Toggle the side panel's Item tab: close if already open and active,
+    /// otherwise open it.
+    pub(crate) fn toggle_item_tab(&mut self, cx: &mut Context<Self>) {
+        if self.item_tab_open(cx) {
+            self.set_surfaces_open(false, cx);
+        } else {
+            self.open_item_tab(cx);
+        }
+    }
+
     /// Open the side panel on its Item tab (opening the panel if needed).
     pub(crate) fn open_item_tab(&mut self, cx: &mut Context<Self>) {
         if self.active_chat.is_empty() {

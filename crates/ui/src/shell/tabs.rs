@@ -439,10 +439,17 @@ impl Shell {
                                     "Item",
                                     widths.files_controls >= 240.0,
                                     &theme,
-                                    cx.listener(|this, _, _, cx| this.open_item_tab(cx)),
+                                    cx.listener(|this, _, _, cx| this.toggle_item_tab(cx)),
                                 )
                                 .role(gpui::Role::Button)
-                                .aria_label("Open item view"),
+                                .aria_label(if self.item_tab_open(cx) {
+                                    "Hide item view"
+                                } else {
+                                    "Open item view"
+                                })
+                                .when(self.item_tab_open(cx), |button| {
+                                    button.bg(crate::theme::wash(0.09))
+                                }),
                             )
                             .child(
                                 header_icon_button(

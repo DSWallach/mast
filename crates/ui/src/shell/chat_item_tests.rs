@@ -380,6 +380,22 @@ fn the_item_tab_stays_selected_over_other_tabs_until_one_is_picked(cx: &mut Test
     });
 }
 
+#[gpui::test]
+fn toggle_item_tab_opens_and_closes_item_tab(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    shell.update(vcx, |shell, cx| {
+        assert!(!shell.item_tab_open(cx));
+        shell.toggle_item_tab(cx);
+        assert!(shell.item_tab_open(cx));
+        assert!(shell.right_pane_open(cx));
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Item);
+
+        shell.toggle_item_tab(cx);
+        assert!(!shell.item_tab_open(cx));
+        assert!(!shell.right_pane_open(cx));
+    });
+}
+
 // ----------------------------------------------------------------------
 // Hover card
 // ----------------------------------------------------------------------
