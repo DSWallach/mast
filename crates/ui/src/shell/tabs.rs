@@ -66,11 +66,11 @@ struct PanelTitlebarWidths {
     files_controls: f32,
 }
 
-/// The two fixed right-edge anchors: the explorer toggle and the pane toggle
-/// (28px each) with the same 4px gap the surface strip keeps between its
+/// The three fixed right-edge anchors: the Item button, the explorer toggle
+/// and the pane toggle (28px each) with the same 4px gap the surface strip keeps between its
 /// controls, so the two never render as one fused block.
 const PANEL_TOGGLE_GAP: f32 = 4.0;
-const PANEL_TOGGLE_SLOTS: f32 = 28.0 * 2.0 + PANEL_TOGGLE_GAP;
+const PANEL_TOGGLE_SLOTS: f32 = 28.0 * 3.0 + PANEL_TOGGLE_GAP * 2.0;
 
 fn panel_titlebar_widths(
     surfaces_visible: f32,
@@ -432,26 +432,24 @@ impl Shell {
                             // second one on the slot stacked on the same
                             // pixels and read lighter than the seam beneath
                             // it (user report).
-                            .when(!self.active_chat.is_empty(), |row| {
-                                row.child(
-                                    header_icon_button(
-                                        "open-item-view",
-                                        icons::CHECKLIST,
-                                        "Item",
-                                        widths.files_controls >= 180.0,
-                                        &theme,
-                                        cx.listener(|this, _, _, cx| this.open_item_tab(cx)),
-                                    )
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Open item view"),
+                            .child(
+                                header_icon_button(
+                                    "open-item-view",
+                                    icons::CHECKLIST,
+                                    "Item",
+                                    widths.files_controls >= 240.0,
+                                    &theme,
+                                    cx.listener(|this, _, _, cx| this.open_item_tab(cx)),
                                 )
-                            })
+                                .role(gpui::Role::Button)
+                                .aria_label("Open item view"),
+                            )
                             .child(
                                 header_icon_button(
                                     "toggle-files-panel",
                                     icons::FILE_TREE,
                                     "Files",
-                                    widths.files_controls >= 180.0,
+                                    widths.files_controls >= 240.0,
                                     &theme,
                                     cx.listener(|this, _, window, cx| {
                                         this.toggle_files_panel(window, cx)
@@ -471,7 +469,7 @@ impl Shell {
                                 "toggle-changes",
                                 icons::SIDEBAR_MINIMALISTIC,
                                 "Changes",
-                                widths.files_controls >= 180.0,
+                                widths.files_controls >= 240.0,
                                 &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                             )),
