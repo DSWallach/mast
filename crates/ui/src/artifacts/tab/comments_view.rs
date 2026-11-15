@@ -161,6 +161,7 @@ impl ArtifactTab {
             FrameMessage::SheetUndo(id) => self.undo_sheet_decision(Some(id), cx),
             FrameMessage::SheetDiscard => self.undo_sheet_decision(None, cx),
             FrameMessage::SheetSend => self.send_sheet_decisions(cx),
+            FrameMessage::DiagramSave(source) => self.save_diagram(source, cx),
             FrameMessage::Answer { id, text } => {
                 // Only the current revision's questions take answers (the
                 // Markdown cards do the same).
@@ -172,6 +173,53 @@ impl ArtifactTab {
                 }
             }
         }
+    }
+
+    pub(crate) fn save_content(&mut self, content: String, note: &str, cx: &mut Context<Self>) {
+        let Some(artifact) = self.artifact(cx) else {
+            return;
+        };
+        if !matches!(
+            artifact.kind,
+            mast_proto::ArtifactKind::Markdown | mast_proto::ArtifactKind::Mermaid
+        ) {
+            return;
+        }
+        if self.shown_or_current_revision(&artifact) != artifact.current_revision {
+            self.notice = Some("Only the current revision can be edited.".into());
+            cx.notify();
+            return;
+        }
+        let target_device_id = (!self.is_local(&artifact, cx)).then(|| artifact.device_id.clone());
+        let call = self.state.read(cx).artifact_actions().write_content(
+            mast_proto::ArtifactWriteContentParams {
+                artifact_id: self.artifact_id.clone(),
+                content,
+                base_revision: Some(artifact.current_revision),
+                note: Some(note.to_owned()),
+                target_device_id,
+            },
+        );
+        self.busy = true;
+        self._side = Some(cx.spawn(async move |this, cx| {
+            let reply = call.await;
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                this.notice = Some(match reply {
+                    Ok(reply) if reply.changed => format!("Saved as revision {}", reply.revision),
+                    Ok(_) => "No changes to save".into(),
+                    Err(error) => error.text(),
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Write an edited Mermaid diagram back to the artifact as a new revision.
+    fn save_diagram(&mut self, source: String, cx: &mut Context<Self>) {
+        self.save_content(source, "Diagram edited in Mast", cx);
     }
 
     fn current_sheet(&self, cx: &gpui::App) -> Result<(ArtifactView, mast_proto::decision_sheet::DecisionSheet), String> {

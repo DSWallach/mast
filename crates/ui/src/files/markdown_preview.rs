@@ -9,7 +9,7 @@ use crate::{
     theme::Theme,
 };
 use gpui::{
-    AnyElement, Context, FocusHandle, ListAlignment, ListOffset, ListSizingBehavior, ListState,
+    AnyElement, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListSizingBehavior, ListState,
     Render, SharedString, Task, Window, div, list, prelude::*, px,
 };
 use std::{
@@ -113,6 +113,12 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
     Some((parts.join("/"), anchor.and_then(|a| decode(&a))))
 }
 
+struct DiagramEdit {
+    input: Entity<crate::composer::ComposerInput>,
+    current_text: String,
+    _subscription: gpui::Subscription,
+}
+
 pub(crate) struct MarkdownPreview {
     pub focus: FocusHandle,
     pub version: Option<(u64, u64, Option<String>)>,
@@ -168,6 +174,8 @@ pub(crate) struct MarkdownPreview {
     diagrams: HashMap<String, Result<crate::image_media::MediaImage, String>>,
     diagram_task: Option<Task<()>>,
     diagram_style: u32,
+    diagram_edits: HashMap<String, DiagramEdit>,
+    pub on_save_markdown: Option<Rc<dyn Fn(String, &mut Window, &mut gpui::App)>>,
     source_visible: HashSet<String>,
     /// Resolved question cards the reader expanded (by question id).
     questions_expanded: Rc<HashSet<String>>,
@@ -405,6 +413,8 @@ impl MarkdownPreview {
             diagrams: HashMap::new(),
             diagram_task: None,
             diagram_style: 0,
+            diagram_edits: HashMap::new(),
+            on_save_markdown: None,
             source_visible: HashSet::new(),
             questions_expanded: Rc::default(),
             question_answers: None,
@@ -454,6 +464,7 @@ impl MarkdownPreview {
         self.diagram_task = None;
         self.close_media_preview(cx);
         self.source_visible.clear();
+        self.diagram_edits.clear();
         self.copied_clear = None;
         self.copied_code = None;
         let epoch = self.epoch;
@@ -674,7 +685,13 @@ impl MarkdownPreview {
         let removed: Vec<_> = self
             .diagrams
             .keys()
-            .filter(|code| !sources.contains(code))
+            .filter(|code| {
+                !sources.contains(code)
+                    && !self
+                        .diagram_edits
+                        .values()
+                        .any(|edit| &edit.current_text == *code)
+            })
             .cloned()
             .collect();
         release_media(
@@ -747,6 +764,118 @@ impl MarkdownPreview {
                 Ok(media)
             }
         })
+    }
+
+    fn render_diagram_code(&mut self, code: String, cx: &mut Context<Self>) {
+        if self.diagrams.contains_key(&code) {
+            return;
+        }
+        let palette = crate::markdown::mermaid::Palette::from_theme(Theme::of(cx));
+        let epoch = self.epoch;
+        let style = self.diagram_style;
+        let source = code.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let svg = crate::markdown::mermaid::render(&source, &palette)?;
+                    crate::image_media::decode_image("image/svg+xml", svg.into_bytes())
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.epoch != epoch || view.diagram_style != style {
+                    return;
+                }
+                let result = view.admit_media(result);
+                view.diagrams.insert(code, result);
+                view.media_dirty = true;
+                view.list.remeasure_items(0..view.tree.len());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn toggle_diagram_edit(
+        &mut self,
+        id: &str,
+        initial_code: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diagram_edits.remove(id).is_some() {
+            self.list.remeasure_items(0..self.tree.len());
+            cx.notify();
+            return;
+        }
+        let input = cx.new(|cx| {
+            let mut input = crate::composer::ComposerInput::new("Mermaid diagram…", cx)
+                .with_auto_grow()
+                .with_text_metrics(12.0, 18.0);
+            input.set_text(initial_code, cx);
+            input
+        });
+        let id_for_sub = id.to_string();
+        let subscription = cx.subscribe(&input, move |this: &mut Self, input, event, cx| {
+            if matches!(event, crate::composer::ComposerInputEvent::Edited) {
+                let text = input.read(cx).text().to_string();
+                if let Some(edit) = this.diagram_edits.get_mut(&id_for_sub) {
+                    edit.current_text = text.clone();
+                }
+                this.render_diagram_code(text, cx);
+                this.list.remeasure_items(0..this.tree.len());
+                cx.notify();
+            }
+        });
+        self.render_diagram_code(initial_code.to_string(), cx);
+        let focus = input.read(cx).focus_handle(cx);
+        self.diagram_edits.insert(
+            id.to_string(),
+            DiagramEdit {
+                input,
+                current_text: initial_code.to_string(),
+                _subscription: subscription,
+            },
+        );
+        self.list.remeasure_items(0..self.tree.len());
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_diagram_edit(
+        &mut self,
+        id: &str,
+        source: &str,
+        range: std::ops::Range<usize>,
+        language: Option<&str>,
+        editor: &Option<gpui::WeakEntity<super::editor::FileEditorState>>,
+        on_save: Option<&Rc<dyn Fn(String, &mut Window, &mut gpui::App)>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = self.diagram_edits.remove(id) else {
+            return;
+        };
+        let new_code = edit.input.read(cx).text().to_string();
+        let original = match source.get(range.clone()) {
+            Some(s) => s,
+            None => return,
+        };
+        let replacement = format_code_block_replacement(original, language, &new_code);
+
+        if let Some(editor) = editor.as_ref().and_then(|e| e.upgrade()) {
+            super::editor::replace_markdown_block(&editor, source, range, &replacement, window, cx);
+        } else if let Some(on_save) = on_save {
+            let mut updated = String::with_capacity(source.len() + replacement.len());
+            updated.push_str(&source[..range.start]);
+            updated.push_str(&replacement);
+            updated.push_str(&source[range.end..]);
+            on_save(updated, window, cx);
+        }
+        self.list.remeasure_items(0..self.tree.len());
+        cx.notify();
     }
 
     pub fn activate(
@@ -1238,9 +1367,10 @@ impl MarkdownPreview {
                 opts.find = find.clone();
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
                 let editor = self.editor.as_ref().and_then(|editor| editor.upgrade());
-                let source = self.parsed_source.clone();
+                let task_source = self.parsed_source.clone();
                 opts.tasks = Some(render::TaskUi {
                     toggle: editor
+                        .as_ref()
                         .filter(|editor| {
                             !self.truncated
                                 && editor.read(cx).context_menu_capabilities().is_editable()
@@ -1253,7 +1383,7 @@ impl MarkdownPreview {
                                       cx: &mut gpui::App| {
                                     if let Some(editor) = editor.upgrade() {
                                         super::editor::toggle_markdown_task(
-                                            &editor, &source, task, window, cx,
+                                            &editor, &task_source, task, window, cx,
                                         );
                                     }
                                 },
@@ -1279,10 +1409,33 @@ impl MarkdownPreview {
                 });
                 let image_allowed = self.image_allowed.clone();
                 let diagram_allowed = self.diagram_allowed.clone();
+                let is_top_code = matches!(top.block, parser::Block::CodeBlock { .. });
+                let can_edit = !self.truncated
+                    && is_top_code
+                    && (editor
+                        .as_ref()
+                        .is_some_and(|ed| ed.read(cx).context_menu_capabilities().is_editable())
+                        || self.on_save_markdown.is_some());
+                let on_save_markdown = self.on_save_markdown.clone();
+                let editor_for_diagram = self.editor.clone();
+                let top_range = top.range.clone();
+                let top_block = top.block.clone();
+                let active_edits: Rc<HashMap<String, (Entity<crate::composer::ComposerInput>, String)>> =
+                    Rc::new(
+                        self.diagram_edits
+                            .iter()
+                            .map(|(k, edit)| (k.clone(), (edit.input.clone(), edit.current_text.clone())))
+                            .collect(),
+                    );
+                let diagram_source = self.parsed_source.clone();
                 opts.media = Some(render::MediaUi {
                     diagram: Some(Rc::new(move |code, id, theme| {
-                        let state = diagrams.get(code);
-                        let allowed = diagram_allowed.contains(code);
+                        let edit = active_edits.get(id.as_ref());
+                        let is_editing = edit.is_some();
+                        let preview_code = edit.map(|(_, text)| text.as_str()).unwrap_or(code);
+                        let editor_input = edit.map(|(input, _)| input.clone().into_any_element());
+                        let state = diagrams.get(preview_code);
+                        let allowed = diagram_allowed.contains(code) || is_editing;
                         let source_shown = source_visible.contains(id.as_ref()) || !allowed;
                         let owner = diagram_owner.clone();
                         let toggle_id = id.to_string();
@@ -1302,12 +1455,52 @@ impl MarkdownPreview {
                             None => div()
                                 .p(px(12.0))
                                 .text_color(theme.text_muted)
-                                .child(if diagram_allowed.contains(code) {
+                                .child(if allowed {
                                     "Rendering diagram…"
                                 } else {
                                     "Document diagram preview limit reached"
                                 })
                                 .into_any_element(),
+                        };
+                        let toggle_edit = if can_edit {
+                            let owner = owner.clone();
+                            let toggle_id = toggle_id.clone();
+                            let initial_code = code.to_string();
+                            Some(Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+                                let _ = owner.update(cx, |view, cx| {
+                                    view.toggle_diagram_edit(&toggle_id, &initial_code, window, cx);
+                                });
+                            }) as Rc<dyn Fn(&mut Window, &mut gpui::App)>)
+                        } else {
+                            None
+                        };
+                        let save_edit = if is_editing && can_edit {
+                            let owner = owner.clone();
+                            let toggle_id = toggle_id.clone();
+                            let source = diagram_source.clone();
+                            let top_range = top_range.clone();
+                            let editor = editor_for_diagram.clone();
+                            let on_save = on_save_markdown.clone();
+                            let lang = match &top_block {
+                                parser::Block::CodeBlock { language, .. } => language.clone(),
+                                _ => None,
+                            };
+                            Some(Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+                                let _ = owner.update(cx, |view, cx| {
+                                    view.save_diagram_edit(
+                                        &toggle_id,
+                                        &source,
+                                        top_range.clone(),
+                                        lang.as_deref(),
+                                        &editor,
+                                        on_save.as_ref(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }) as Rc<dyn Fn(&mut Window, &mut gpui::App)>)
+                        } else {
+                            None
                         };
                         render::DiagramUi {
                             body,
@@ -1321,6 +1514,10 @@ impl MarkdownPreview {
                                     cx.notify();
                                 });
                             }),
+                            is_editing,
+                            toggle_edit,
+                            save_edit,
+                            editor_input,
                         }
                     })),
                     image: Rc::new(move |image, id, theme| match images.get(&image.source) {
@@ -1599,6 +1796,28 @@ impl Render for MarkdownPreview {
         }
         root
     }
+}
+
+fn format_code_block_replacement(original: &str, lang: Option<&str>, new_code: &str) -> String {
+    let first_line = original.lines().next().unwrap_or("");
+    let trimmed = first_line.trim_start();
+    let fence_char = if trimmed.starts_with('~') { '~' } else { '`' };
+    let fence_len = trimmed.chars().take_while(|&c| c == fence_char).count().max(3);
+    let indent = &first_line[..first_line.len() - trimmed.len()];
+    let fence: String = std::iter::repeat(fence_char).take(fence_len).collect();
+    let lang_str = lang.unwrap_or("mermaid");
+    let mut out = format!("{indent}{fence}{lang_str}\n");
+    if !new_code.is_empty() {
+        for line in new_code.lines() {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!("{indent}{fence}"));
+    if original.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2542,6 +2761,17 @@ mod async_tests {
             assert!(view.image_generation > generation);
             assert!(view.version.is_none());
         });
+    }
+
+    #[test]
+    fn format_code_block_replacement_preserves_indent_and_fence() {
+        let original = "```mermaid\ngraph TD\n    A --> B\n```\n";
+        let replaced = format_code_block_replacement(original, Some("mermaid"), "graph LR\n    B --> A");
+        assert_eq!(replaced, "```mermaid\ngraph LR\n    B --> A\n```\n");
+
+        let indented = "  ~~~mermaid\n  graph TD\n  ~~~\n";
+        let replaced_indented = format_code_block_replacement(indented, Some("mermaid"), "graph LR\n  B --> A");
+        assert_eq!(replaced_indented, "  ~~~mermaid\ngraph LR\n  B --> A\n  ~~~\n");
     }
 }
 

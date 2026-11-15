@@ -556,6 +556,22 @@ pub struct ArtifactPromoteReply {
     pub promoted_path: String,
 }
 
+/// `ArtifactWriteContent`: the reader edited a Markdown or Mermaid artifact in
+/// Mast (e.g. a diagram) and saves it as a new revision. Forwardable (owning
+/// device). `baseRevision` guards against overwriting a newer revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactWriteContentParams {
+    pub artifact_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_device_id: Option<String>,
+}
+
 /// `ArtifactPin`: pin (unpinning the scope's other plan) or unpin. A pure
 /// registry write: local, any device.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

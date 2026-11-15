@@ -66,7 +66,7 @@ fn raster_size(
 impl MediaImage {
     /// Preserve the sanitized vector source; only the outer raster viewport changes.
     pub(crate) fn for_view(&self, viewport: (f32, f32), dpi: f32, pixels: usize) -> Self {
-        let Some(svg) = &self.svg else {
+        let Some(_svg) = &self.svg else {
             return self.clone();
         };
         let size = raster_size(self.width, self.height, viewport, dpi, pixels, 1.0);

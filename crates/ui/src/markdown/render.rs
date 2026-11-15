@@ -168,6 +168,10 @@ pub struct DiagramUi {
     pub body: AnyElement,
     pub show_source: bool,
     pub toggle_source: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    pub is_editing: bool,
+    pub toggle_edit: Option<Rc<dyn Fn(&mut Window, &mut gpui::App)>>,
+    pub save_edit: Option<Rc<dyn Fn(&mut Window, &mut gpui::App)>>,
+    pub editor_input: Option<AnyElement>,
 }
 
 /// Copy-button wiring for one row's code blocks: the handler writes the code
@@ -2495,6 +2499,76 @@ fn render_code_block(
             Rc::new(move |window, cx| toggle(window, cx)),
             theme,
         );
+        let mut actions = vec![toggle_action];
+        if let Some(toggle_edit) = diagram.toggle_edit.clone() {
+            if diagram.is_editing {
+                if let Some(save_edit) = diagram.save_edit.clone() {
+                    actions.push(code_icon_action(
+                        format!("{frame_id}-save").into(),
+                        "Save diagram to file",
+                        crate::icons::CHECK,
+                        save_edit,
+                        theme,
+                    ));
+                }
+                actions.push(code_icon_action(
+                    format!("{frame_id}-cancel").into(),
+                    "Cancel editing",
+                    crate::icons::CLOSE,
+                    toggle_edit,
+                    theme,
+                ));
+            } else {
+                actions.push(code_icon_action(
+                    format!("{frame_id}-edit").into(),
+                    "Edit diagram",
+                    crate::icons::PEN,
+                    toggle_edit,
+                    theme,
+                ));
+            }
+        }
+        actions.extend(code_copy_button(code, ix, opts, theme));
+
+        if diagram.is_editing && let Some(input) = diagram.editor_input {
+            let edit_body = div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .p(px(8.0))
+                .child(
+                    div()
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(px(6.0))
+                        .p(px(6.0))
+                        .bg(theme.surface)
+                        .child(input),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child("Preview:"),
+                        ),
+                )
+                .child(diagram.body);
+            return crate::components::conversation_code_frame(
+                frame_id,
+                language,
+                actions,
+                edit_body.into_any_element(),
+                theme,
+            )
+            .into_any_element();
+        }
+
         if diagram.show_source {
             return render_code_block_source_with_actions(
                 language,
@@ -2504,11 +2578,9 @@ fn render_code_block(
                 opts,
                 theme,
                 highlight,
-                vec![toggle_action],
+                actions,
             );
         }
-        let mut actions = vec![toggle_action];
-        actions.extend(code_copy_button(code, ix, opts, theme));
         return crate::components::conversation_code_frame(frame_id, language, actions, diagram.body, theme)
             .into_any_element();
     }

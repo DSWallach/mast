@@ -338,6 +338,10 @@ pub mod methods {
     /// `ArtifactPromoteParams {artifactId}` → `ArtifactPromoteReply
     /// {promotedPath}`. Forwardable (owning device).
     pub const ARTIFACT_PROMOTE: &str = "ArtifactPromote";
+    /// `ArtifactWriteContentParams {artifactId, content, baseRevision?, note?}`
+    /// → `ArtifactPublishReply` (the reader's edit of a Markdown/Mermaid
+    /// artifact as a new revision). Forwardable (owning device).
+    pub const ARTIFACT_WRITE_CONTENT: &str = "ArtifactWriteContent";
     /// `ArtifactPinParams {artifactId, pinned}` → `ArtifactPinReply`. Pure
     /// registry write: local, NOT forwardable.
     pub const ARTIFACT_PIN: &str = "ArtifactPin";

@@ -2282,6 +2282,58 @@ impl ArtifactsService {
         })
     }
 
+    /// `ArtifactWriteContent`: record the reader's edit of a Markdown or
+    /// Mermaid artifact as a new revision of the same artifact.
+    pub fn write_content(
+        &self,
+        params: &mast_proto::ArtifactWriteContentParams,
+        by: WorkOutlineActor,
+    ) -> Outcome<ArtifactPublishReply> {
+        const MAX_WRITE_BYTES: usize = 1024 * 1024;
+        let view = self.local_artifact(&params.artifact_id)?;
+        if !matches!(view.kind, ArtifactKind::Markdown | ArtifactKind::Mermaid) {
+            return Err(ArtifactError::invalid(
+                "only Markdown and Mermaid artifacts can be edited in Mast",
+            ));
+        }
+        if params.content.len() > MAX_WRITE_BYTES {
+            return Err(ArtifactError::new(ArtifactErrorCode::TooLarge, "content is too large"));
+        }
+        if let Some(base) = params.base_revision
+            && base != view.current_revision
+        {
+            return Err(ArtifactError::invalid(format!(
+                "the artifact changed since you opened it (now revision {}); reopen it to edit the latest",
+                view.current_revision
+            )));
+        }
+        let name = file_name_of(Path::new(&view.stored_path))?;
+        let dir = tempfile::tempdir().map_err(|e| ArtifactError::io(e.to_string()))?;
+        let source = dir.path().join(name);
+        std::fs::write(&source, params.content.as_bytes())
+            .map_err(|e| io_error("write", &source, e))?;
+        let note = params
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or("Edited in Mast")
+            .to_owned();
+        self.record(PublishRequest {
+            space_id: view.space_id.clone(),
+            work_item_id: view.work_item_id.clone(),
+            chat_id: view.chat_id.clone(),
+            source,
+            title: view.title.clone(),
+            kind: Some(view.kind),
+            role: view.role.clone(),
+            note,
+            pin_as_plan: false,
+            operation_id: None,
+            by,
+        })
+    }
+
     /// `ArtifactPin`.
     pub fn pin(&self, artifact_id: &str, pinned: bool) -> Outcome<ArtifactPinReply> {
         let unpinned = self
