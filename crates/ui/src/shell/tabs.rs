@@ -432,6 +432,20 @@ impl Shell {
                             // second one on the slot stacked on the same
                             // pixels and read lighter than the seam beneath
                             // it (user report).
+                            .when(!self.active_chat.is_empty(), |row| {
+                                row.child(
+                                    header_icon_button(
+                                        "open-item-view",
+                                        icons::CHECKLIST,
+                                        "Item",
+                                        widths.files_controls >= 180.0,
+                                        &theme,
+                                        cx.listener(|this, _, _, cx| this.open_item_tab(cx)),
+                                    )
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Open item view"),
+                                )
+                            })
                             .child(
                                 header_icon_button(
                                     "toggle-files-panel",
