@@ -101,6 +101,8 @@ const COMPOSER_WIDTH_EPSILON: f32 = 0.5;
 pub const MIN_COMPACT_INPUT_WIDTH: f32 = 200.0;
 /// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
 pub const INPUT_LINE_HEIGHT: f32 = 22.75;
+/// Rows the question panel's free-text input grows to before it scrolls.
+const WIZARD_INPUT_MAX_LINES: f32 = 6.0;
 pub const INPUT_TEXT_SIZE: f32 = 14.0;
 /// A compact ramp; the glyph-ascent inset keeps the clip edge invisible.
 const INPUT_FADE_BAND: f32 = 12.0;
@@ -631,6 +633,79 @@ fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) ->
     key == "escape" && (!input_focused || input_empty)
 }
 
+/// Mast's own slash command: `/btw <question>` asks in a side chat instead of
+/// the main one.
+const BTW_COMMAND: &str = "btw";
+
+/// The question in a `/btw` prompt: `Some(None)` for a bare `/btw`, `None`
+/// when the text isn't a `/btw` command at all.
+fn btw_question(text: &str) -> Option<Option<String>> {
+    let rest = text.trim().strip_prefix('/')?.strip_prefix(BTW_COMMAND)?;
+    if rest.chars().next().is_some_and(|c| !c.is_whitespace()) {
+        return None;
+    }
+    let rest = rest.trim();
+    Some((!rest.is_empty()).then(|| rest.to_owned()))
+}
+
+/// Put `/btw` in a harness's command list, replacing any harness command of
+/// the same name: Mast intercepts it before the harness would see it.
+fn with_btw_command(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    commands.retain(|command| command.name != BTW_COMMAND);
+    commands.push(SlashCommand {
+        name: BTW_COMMAND.into(),
+        description: "Ask in a side chat without interrupting this one".into(),
+        input_hint: Some("question".into()),
+    });
+    commands
+}
+
+/// The side chat's first message when clarifying the agent's question: the
+/// side chat can't answer it, so it gets the choice spelled out.
+fn clarify_prompt(question: &UserInputQuestion, ask: Option<&str>) -> String {
+    let options: String = question
+        .options
+        .iter()
+        .enumerate()
+        .map(|(ix, option)| format!("\n{}. {option}", ix + 1))
+        .collect();
+    let kind = if question.multi_select {
+        "I can pick more than one option."
+    } else if question.options.is_empty() {
+        "It takes a free-text answer."
+    } else {
+        "I pick one option."
+    };
+    let ask = ask.unwrap_or("What are the trade-offs between these options?");
+    format!(
+        "The main chat is waiting for my answer to this question. Help me understand it; \
+         don't answer it for me.\n\nQuestion: {}{options}\n{kind}\n\nMy question: {ask}",
+        question.question
+    )
+}
+
+/// A muted caption line in the question panel.
+fn wizard_note(theme: &Theme, text: &'static str) -> gpui::Div {
+    div()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted.opacity(0.65))
+        .child(SharedString::from(text))
+}
+
+fn wizard_placeholder(wizard: &Wizard, can_clarify: bool) -> &'static str {
+    if !wizard.accepts_typed() {
+        if can_clarify {
+            "Pick an option above, or ask about it here"
+        } else {
+            "Pick an option above"
+        }
+    } else if wizard.page_has_pick() {
+        "Type your own answer, or leave this blank to use the selected option"
+    } else {
+        "Type your own answer, or pick an option above"
+    }
+}
+
 /// Find the unresolved input request the panel should serve, if any: an
 /// unresolved input part on the LAST assistant entry — regardless of the
 /// entry's run status. The question stays answerable until the user actually
@@ -690,6 +765,8 @@ pub enum WizardStep {
     Stay,
     /// Single-select landed — advance after [`AUTO_ADVANCE_MS`].
     AutoAdvance,
+    /// The current page has no answer the host would accept yet.
+    Incomplete,
     /// All pages answered — submit these answers.
     Done(Vec<UserInputAnswer>),
 }
@@ -776,8 +853,42 @@ impl Wizard {
         }
     }
 
+    /// Free text saved for the current page.
+    pub fn typed(&self) -> &str {
+        self.typed.get(self.page).map(String::as_str).unwrap_or("")
+    }
+
+    /// Whether the current question takes free text: open questions always
+    /// do; option lists only when the harness allows custom answers.
+    pub fn accepts_typed(&self) -> bool {
+        self.current()
+            .is_some_and(|q| q.options.is_empty() || q.allow_custom)
+    }
+
+    /// Whether non-empty `typed` text answers the current question: free text
+    /// where it's taken, otherwise only an option's name.
+    pub fn typed_is_answer(&self, typed: &str) -> bool {
+        let typed = typed.trim();
+        !typed.is_empty()
+            && (self.accepts_typed()
+                || self.current().is_some_and(|q| {
+                    q.options.iter().any(|o| o.eq_ignore_ascii_case(typed))
+                }))
+    }
+
+    /// Whether the current page, with `typed` in the input, has an answer
+    /// `validate_input_answers` would accept.
+    pub fn page_answerable(&self, typed: &str) -> bool {
+        self.current().is_some_and(|q| q.options.is_empty())
+            || self.page_has_pick()
+            || self.typed_is_answer(typed)
+    }
+
     /// Explicit submit / auto-advance landing.
     pub fn advance(&mut self) -> WizardStep {
+        if !self.page_answerable(self.typed()) {
+            return WizardStep::Incomplete;
+        }
         if self.page + 1 < self.questions.len() {
             self.page += 1;
             WizardStep::Stay
@@ -796,14 +907,18 @@ impl Wizard {
         }
     }
 
-    /// Answers per question: free text overrides picked labels.
+    /// Answers per question: free text overrides picked labels where the
+    /// question takes free text (or the text names one of its options).
     pub fn answers(&self) -> Vec<UserInputAnswer> {
         self.questions
             .iter()
             .enumerate()
             .map(|(ix, q)| {
                 let typed = self.typed.get(ix).map(|s| s.trim()).unwrap_or("");
-                let labels = if !typed.is_empty() {
+                let typed_counts = q.options.is_empty()
+                    || q.allow_custom
+                    || q.options.iter().any(|o| o.eq_ignore_ascii_case(typed));
+                let labels = if !typed.is_empty() && typed_counts {
                     vec![typed.to_string()]
                 } else {
                     self.picked
@@ -4061,6 +4176,12 @@ pub enum ComposerEvent {
     /// yet: the transcript remembers the stable id and promotes it to an
     /// own-turn anchor only when the host materializes the matching bubble.
     Queued { chat_id: String, message_id: String },
+    /// `/btw` or the question panel's Clarify: open a side chat of `chat_id`,
+    /// asking `question` first when given.
+    AskOnSide {
+        chat_id: String,
+        question: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4645,6 +4766,12 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.reconcile_with_state(cx);
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
     #[cfg(feature = "snapshot")]
     pub(crate) fn fixture_attachment(&mut self, bytes: Vec<u8>) {
         let attachment = attachments::stage_png_bytes("preview.png".into(), bytes);
@@ -5758,6 +5885,8 @@ impl Composer {
             if self.slash.token.is_some() || self.slash_task.is_some() {
                 self.reset_slash(None, cx);
             }
+            // The Submit button's state and the options-only hint read the text.
+            cx.notify();
             return;
         }
         let (slash, slash_dismissed, mention, mention_dismissed) = {
@@ -6197,7 +6326,7 @@ impl Composer {
                             composer.slash_cache.insert(
                                 key,
                                 SlashCacheEntry {
-                                    commands,
+                                    commands: with_btw_command(commands),
                                     fetched_at: Instant::now(),
                                 },
                             );
@@ -6304,7 +6433,10 @@ impl Composer {
     /// and delete the typed `/query` token. While a queued row is being
     /// edited there is no send to carry a preamble, so it inserts instead.
     fn attach_slash(&mut self, cx: &mut Context<Self>) {
-        if self.editing_queued.is_some() {
+        let btw = self
+            .active_slash_command()
+            .is_some_and(|command| command.name == BTW_COMMAND);
+        if self.editing_queued.is_some() || btw {
             self.accept_slash(cx);
             return;
         }
@@ -6718,12 +6850,14 @@ impl Composer {
                         let draft = self.input.read(cx).text().to_string();
                         self.wizard_draft = (!draft.is_empty()).then_some(draft);
                     }
-                    self.wizard = Some(Wizard::new(request_id, questions));
+                    let wizard = Wizard::new(request_id, questions);
+                    let placeholder = wizard_placeholder(&wizard, self.can_ask_on_side(cx));
+                    self.wizard = Some(wizard);
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
                         input.set_text("", cx);
-                        input.set_placeholder("Type your own answer, or pick an option above", cx)
+                        input.set_placeholder(placeholder, cx)
                     });
                 }
             }
@@ -6808,12 +6942,19 @@ impl Composer {
         if self.commit_queue_edit(cx) {
             return;
         }
-        if self.wizard.is_some() {
-            // Enter inside the panel's free-text input submits the page.
+        if let Some(ask) = btw_question(self.input.read(cx).text()) {
+            self.ask_on_side(ask, cx);
+            return;
+        }
+        if let Some(wizard) = self.wizard.as_ref() {
+            // Text the question can't take as an answer is a question about
+            // it: ask on the side rather than sending nothing.
             let typed = self.input.read(cx).text().trim().to_string();
-            if let Some(w) = self.wizard.as_mut() {
-                w.set_typed(typed);
+            if !typed.is_empty() && !wizard.typed_is_answer(&typed) && self.can_ask_on_side(cx) {
+                self.ask_on_side(Some(typed), cx);
+                return;
             }
+            // Enter inside the panel's free-text input submits the page.
             self.wizard_advance(cx);
             return;
         }
@@ -7813,23 +7954,92 @@ impl Composer {
             return;
         };
         let step = wizard.select(option_ix);
-        let has_pick = wizard.page_has_pick();
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(
-                if has_pick {
-                    "Type your own answer, or leave this blank to use the selected option"
-                } else {
-                    "Type your own answer, or pick an option above"
-                },
-                cx,
-            )
-        });
+        if step == WizardStep::AutoAdvance {
+            // Clicking a single-select option is the answer: drop any typed
+            // text so the advance doesn't pick it up as an override.
+            wizard.set_typed(String::new());
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.refresh_wizard_placeholder(cx);
         match step {
             WizardStep::AutoAdvance => self.schedule_auto_advance(cx),
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
-            WizardStep::Stay => {}
+            WizardStep::Stay | WizardStep::Incomplete => {}
         }
         cx.notify();
+    }
+
+    fn refresh_wizard_placeholder(&mut self, cx: &mut Context<Self>) {
+        let can_clarify = self.can_ask_on_side(cx);
+        if let Some(wizard) = self.wizard.as_ref() {
+            let placeholder = wizard_placeholder(wizard, can_clarify);
+            self.input
+                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+        }
+    }
+
+    fn can_ask_on_side(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state
+            .selected_chat
+            .as_deref()
+            .is_some_and(|chat_id| state.can_ask_on_side(chat_id))
+    }
+
+    /// Open a side chat of the selected chat, asking `ask` first. While the
+    /// agent's question panel is up, the side chat is told the question and
+    /// its options, and the panel stays up for the answer.
+    fn ask_on_side(&mut self, ask: Option<String>, cx: &mut Context<Self>) {
+        let chat_id = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .filter(|_| self.can_ask_on_side(cx));
+        let Some(chat_id) = chat_id else {
+            self.failure = Some("Side chats aren't available for this chat.".into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return;
+        };
+        let question = match self.wizard.as_ref().and_then(Wizard::current) {
+            Some(pending) => Some(clarify_prompt(pending, ask.as_deref())),
+            None => ask,
+        };
+        if let Some(wizard) = self.wizard.as_mut() {
+            wizard.set_typed(String::new());
+        }
+        self.input.update(cx, |input, cx| input.set_text("", cx));
+        cx.emit(ComposerEvent::AskOnSide { chat_id, question });
+        cx.notify();
+    }
+
+    /// The question panel's Clarify: ask about the choice in a side chat,
+    /// with whatever is typed as the question.
+    fn wizard_clarify(&mut self, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).text().trim().to_string();
+        self.ask_on_side((!typed.is_empty()).then_some(typed), cx);
+    }
+
+    /// Save the shared input's text as the current page's free-text answer.
+    /// Every page change goes through this, so Submit, Next, Back, Enter and
+    /// auto-advance all see what was typed.
+    fn wizard_capture_typed(&mut self, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).text().trim().to_string();
+        if let Some(wizard) = self.wizard.as_mut() {
+            wizard.set_typed(typed);
+        }
+    }
+
+    /// Load the current page's saved free text into the shared input.
+    fn wizard_restore_typed(&mut self, cx: &mut Context<Self>) {
+        let typed = self
+            .wizard
+            .as_ref()
+            .map(|w| w.typed().to_string())
+            .unwrap_or_default();
+        self.input.update(cx, |input, cx| input.set_text(typed, cx));
+        self.refresh_wizard_placeholder(cx);
     }
 
     fn schedule_auto_advance(&mut self, cx: &mut Context<Self>) {
@@ -7843,40 +8053,66 @@ impl Composer {
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
+        self.wizard_capture_typed(cx);
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
         match wizard.advance() {
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
+            // Nothing acceptable to send yet: keep the page and its text.
+            WizardStep::Incomplete => cx.notify(),
             _ => {
-                // Moving on: clear the shared free-text input for the next page.
-                self.input.update(cx, |input, cx| input.set_text("", cx));
+                self.wizard_restore_typed(cx);
                 cx.notify();
             }
         }
     }
 
     fn wizard_back(&mut self, cx: &mut Context<Self>) {
-        if let Some(wizard) = self.wizard.as_mut() {
-            wizard.back();
+        self.wizard_capture_typed(cx);
+        if self.wizard.as_mut().is_some_and(|wizard| wizard.back()) {
+            self.wizard_restore_typed(cx);
+            cx.notify();
+        }
+    }
+
+    /// Take the panel down for good: its request counts as handled, and the
+    /// borrowed composer input gets its own identity back.
+    fn retire_wizard(&mut self, cx: &mut Context<Self>) -> Option<Wizard> {
+        let wizard = self.wizard.take()?;
+        self.advance_task = None;
+        self.answered_requests.insert(wizard.request_id.clone());
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder("Do anything…", cx);
+            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
+        });
+        Some(wizard)
+    }
+
+    /// Quit the question without answering: stop the run so the chat waits
+    /// for the next message. Ending the turn resolves the question in the
+    /// transcript; anything typed stays as the draft, and an empty input
+    /// gets back the draft stashed when the question opened.
+    fn wizard_quit(&mut self, cx: &mut Context<Self>) {
+        if self.retire_wizard(cx).is_some() {
+            let draft = self.wizard_draft.take();
+            self.input.update(cx, |input, cx| {
+                if let Some(draft) = draft.filter(|_| input.is_empty()) {
+                    input.set_text(draft, cx);
+                }
+            });
+            self.interrupt_selected(cx);
             cx.notify();
         }
     }
 
     /// Submit RespondInput and retire the panel.
     fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.take() else {
+        let Some(wizard) = self.retire_wizard(cx) else {
             return;
         };
-        self.advance_task = None;
-        self.answered_requests.insert(wizard.request_id.clone());
         let draft = self.wizard_draft.take().unwrap_or_default();
-        self.input.update(cx, |input, cx| {
-            input.set_text(draft, cx);
-            // The panel borrowed the composer input; hand back its identity.
-            input.set_placeholder("Do anything…", cx);
-            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
-        });
+        self.input.update(cx, |input, cx| input.set_text(draft, cx));
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -7978,8 +8214,34 @@ impl Composer {
         };
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
-        let typed_empty = self.input.read(cx).is_empty();
-        let can_advance = wizard.page_has_pick() || !typed_empty;
+        let typed = self.input.read(cx).text().trim().to_string();
+        let typed_empty = typed.is_empty() || !wizard.accepts_typed();
+        let can_advance = wizard.page_answerable(&typed);
+        let can_clarify = self.can_ask_on_side(cx);
+        let typed_hint = (!typed.is_empty() && !wizard.typed_is_answer(&typed)).then_some(
+            if can_clarify {
+                "This question only takes the listed options. Enter asks about it in a side chat."
+            } else {
+                "This question only takes the listed options."
+            },
+        );
+        // The composer's own render sizes the shared input, and it doesn't
+        // run while the panel is up: left at a single-line viewport, wrapped
+        // text painted below the panel. Cap it here and let it scroll.
+        let viewport = WIZARD_INPUT_MAX_LINES * INPUT_LINE_HEIGHT;
+        self.input.update(cx, |input, cx| {
+            if input.viewport_height != Some(viewport)
+                || input.settled_viewport_height != Some(viewport)
+                || input.resizing
+                || input.overflow_top_padding != 0.0
+            {
+                input.viewport_height = Some(viewport);
+                input.settled_viewport_height = Some(viewport);
+                input.resizing = false;
+                input.overflow_top_padding = 0.0;
+                cx.notify();
+            }
+        });
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -8119,13 +8381,7 @@ impl Composer {
                             .child(SharedString::from(question.question.clone())),
                     )
                     .when(question.multi_select, |el| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from("Select one or more options.")),
-                        )
+                        el.child(wizard_note(&theme, "Select one or more options.").mt(px(4.0)))
                     })
                     .child(
                         div()
@@ -8145,7 +8401,10 @@ impl Composer {
                             .pt(px(12.0))
                             .pb(px(4.0))
                             .px(px(4.0))
-                            .child(self.input.clone()),
+                            .child(self.input.clone())
+                            .when_some(typed_hint, |el, hint| {
+                                el.child(wizard_note(&theme, hint).mt(px(6.0)))
+                            }),
                     ),
             )
             .child(
@@ -8157,20 +8416,54 @@ impl Composer {
                     .px(px(16.0))
                     .pb(px(16.0))
                     .pt(px(4.0))
-                    .child(if page > 0 {
-                        crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                            .id("wizard-back")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                            .into_any_element()
-                    } else {
-                        gpui::Empty.into_any_element()
-                    })
                     .child(
-                        crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
-                            .id("wizard-submit")
-                            .px(px(16.0))
-                            .when(!can_advance, |el| el.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                crate::popover::btn_ghost(&theme, "Quit", "wizard-quit")
+                                    .id("wizard-quit")
+                                    .debug_selector(|| "wizard-quit".into())
+                                    .on_click(cx.listener(|this, _, _, cx| this.wizard_quit(cx))),
+                            )
+                            .when(page > 0, |el| {
+                                el.child(
+                                    crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                                        .id("wizard-back")
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.wizard_back(cx)),
+                                        ),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .when(can_clarify, |el| {
+                                el.child(
+                                    crate::popover::btn_ghost(&theme, "Clarify", "wizard-clarify")
+                                        .id("wizard-clarify")
+                                        .debug_selector(|| "wizard-clarify".into())
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.wizard_clarify(cx)),
+                                        ),
+                                )
+                            })
+                            .child(
+                                crate::popover::btn_primary(
+                                    &theme,
+                                    if last { "Submit" } else { "Next" },
+                                )
+                                .id("wizard-submit")
+                                .px(px(16.0))
+                                .when(!can_advance, |el| el.opacity(0.4))
+                                .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
+                            ),
                     ),
             )
             .into_any_element()
@@ -9767,6 +10060,37 @@ mod tests {
         assert!(server_in.try_recv().is_err());
     }
 
+    #[gpui::test]
+    fn quitting_a_question_stops_the_run_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (out, mut server_in) = tokio::sync::mpsc::channel::<String>(16);
+        let (_server_out, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                mast_rpc::RpcClient::new(out, inbound),
+            ));
+            state.selected_chat = Some("c".into());
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer.wizard = Some(Wizard::new("req".into(), vec![question("q", &["a"], false)]));
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("never mind, do this instead", cx));
+            composer.wizard_quit(cx);
+            assert!(composer.wizard.is_none());
+            assert!(composer.answered_requests.contains("req"), "the panel stays down");
+            assert!(composer.interrupting.contains("c"));
+            assert_eq!(composer.input.read(cx).text(), "never mind, do this instead");
+        });
+        cx.run_until_parked();
+        let frame = server_in.try_recv().expect("an interrupt was sent");
+        assert!(frame.contains("\"interrupt\""), "{frame}");
+        assert!(!frame.contains("respondInput"), "{frame}");
+    }
+
     /// Orchestrator wakes: typing tells the engine at once when the draft
     /// flips between empty and non-empty, and is throttled otherwise.
     #[gpui::test]
@@ -11281,13 +11605,9 @@ mod tests {
 
     #[test]
     fn wizard_typed_answer_overrides_and_back_pages() {
-        let mut w = Wizard::new(
-            "req".into(),
-            vec![
-                question("q1", &["a"], false),
-                question("q2", &["x", "y"], false),
-            ],
-        );
+        let mut q2 = question("q2", &["x", "y"], false);
+        q2.allow_custom = true;
+        let mut w = Wizard::new("req".into(), vec![question("q1", &["a"], false), q2]);
         w.select(0);
         w.advance();
         assert_eq!(w.page, 1);
@@ -11382,6 +11702,113 @@ mod tests {
             input.read_with(vcx, |input, _| input.text().to_string()),
             "my unsent draft"
         );
+    }
+
+    #[test]
+    fn wizard_holds_a_page_without_an_acceptable_answer() {
+        let mut w = Wizard::new(
+            "req".into(),
+            vec![question("q1", &["a"], false), question("q2", &["x"], false)],
+        );
+        assert_eq!(w.advance(), WizardStep::Incomplete, "nothing picked");
+        assert_eq!(w.page, 0);
+
+        w.set_typed("why is this needed?".into());
+        assert!(!w.accepts_typed());
+        assert!(!w.page_answerable(w.typed()));
+        assert_eq!(
+            w.advance(),
+            WizardStep::Incomplete,
+            "free text on an options-only question is never sent"
+        );
+
+        w.set_typed("A".into());
+        assert_eq!(w.advance(), WizardStep::Stay, "typed text naming an option counts");
+        w.select(0);
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec!["A"]);
+        assert_eq!(answers[1].labels, vec!["x"]);
+    }
+
+    #[test]
+    fn wizard_typed_text_only_overrides_where_allowed() {
+        let mut custom = question("q1", &["a"], false);
+        custom.allow_custom = true;
+        let questions = vec![custom, question("q2", &["x", "y"], false), question("q3", &[], false)];
+        let mut w = Wizard::new("req".into(), questions.clone());
+        w.set_typed("my own answer".into());
+        assert!(w.accepts_typed());
+        assert_eq!(w.advance(), WizardStep::Stay);
+        w.select(1);
+        w.set_typed("ignored".into());
+        assert_eq!(w.advance(), WizardStep::Stay, "the pick answers the page");
+        assert!(w.accepts_typed(), "open questions take free text");
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!("an open question may be left blank")
+        };
+        assert_eq!(answers[0].labels, vec!["my own answer"]);
+        assert_eq!(answers[1].labels, vec!["y"]);
+        assert!(answers[2].labels.is_empty());
+        let mut answers = answers;
+        assert_eq!(
+            mast_proto::agent::validate_input_answers(&questions, &mut answers),
+            Ok(()),
+            "the host accepts what the wizard sends"
+        );
+    }
+
+    #[test]
+    fn btw_takes_the_rest_of_the_prompt_as_its_question() {
+        assert_eq!(btw_question("/btw"), Some(None));
+        assert_eq!(btw_question("  /btw   "), Some(None));
+        assert_eq!(
+            btw_question("/btw why option B?"),
+            Some(Some("why option B?".into()))
+        );
+        assert_eq!(
+            btw_question("/btw\nfirst line\nsecond"),
+            Some(Some("first line\nsecond".into()))
+        );
+        assert_eq!(btw_question("/btwx"), None, "another command");
+        assert_eq!(btw_question("btw why?"), None);
+        assert_eq!(btw_question("fix this /btw"), None, "only a leading command");
+    }
+
+    #[test]
+    fn btw_joins_the_harness_commands_once() {
+        let harness = |name: &str| SlashCommand {
+            name: name.into(),
+            description: "harness".into(),
+            input_hint: None,
+        };
+        let commands = with_btw_command(vec![harness("review"), harness(BTW_COMMAND)]);
+        assert_eq!(
+            commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["review", BTW_COMMAND]
+        );
+        assert_ne!(commands[1].description, "harness", "Mast's own /btw wins");
+    }
+
+    #[test]
+    fn clarify_spells_out_the_choice_and_the_users_question() {
+        let prompt = clarify_prompt(&question("q", &["Keep it", "Drop it"], false), Some("Why drop?"));
+        assert!(prompt.contains("Question: Question q\n1. Keep it\n2. Drop it\nI pick one option."));
+        assert!(prompt.ends_with("My question: Why drop?"));
+        assert!(prompt.contains("don't answer it for me"));
+
+        let open = clarify_prompt(&question("q", &[], false), None);
+        assert!(open.contains("Question: Question q\nIt takes a free-text answer."));
+        assert!(open.ends_with("My question: What are the trade-offs between these options?"));
+    }
+
+    #[test]
+    fn typed_text_naming_an_option_is_an_answer_not_a_question() {
+        let w = Wizard::new("req".into(), vec![question("q", &["Keep it"], false)]);
+        assert!(w.typed_is_answer(" keep IT "));
+        assert!(!w.typed_is_answer("what does keeping it cost?"));
+        assert!(!w.typed_is_answer("   "));
     }
 
     #[test]
