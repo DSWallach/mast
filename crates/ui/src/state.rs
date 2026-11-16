@@ -767,6 +767,9 @@ pub struct AppState {
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
+    /// Bumped whenever the set of watch targets changes; backing-off watches
+    /// re-check immediately when it moves.
+    change_request_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
     queue_task: Option<Task<()>>,
     change_requests_visible: bool,
     /// Work Outline snapshots keyed by Space id, fed by `WatchWorkOutline`.
@@ -893,6 +896,7 @@ impl AppState {
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
+            change_request_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             queue_task: None,
             change_requests_visible: true,
             work_outlines: crate::work_outline::WorkOutlineStore::new(),
@@ -3172,9 +3176,17 @@ impl AppState {
             HashSet::new()
         };
 
+        let before = self.change_request_tasks.len();
         self.change_request_tasks
             .retain(|target, _| targets.contains(target));
         self.change_requests.retain_targets(&targets);
+        let added = targets
+            .iter()
+            .any(|target| !self.change_request_tasks.contains_key(target));
+        if added || self.change_request_tasks.len() != before {
+            self.change_request_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let local_device_id = self.local_device_id.clone();
         for target in targets {
@@ -3186,6 +3198,7 @@ impl AppState {
                 handle.clone(),
                 target.clone(),
                 local_device_id.clone(),
+                self.change_request_epoch.clone(),
             );
             self.change_request_tasks.insert(target, task);
         }
@@ -3590,6 +3603,37 @@ fn work_outline_retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(seconds.min(30))
 }
 
+/// Retry delay for a failed change-request watch. Transport errors retry every
+/// 2 s; a rejected request (`BadParams`: the cwd is not a known checkout, e.g. a
+/// deleted worktree) will fail the same way, so it backs off 2 s doubling to a
+/// 5 minute ceiling.
+fn change_request_retry_delay(err: &RpcError, attempt: u32) -> std::time::Duration {
+    const BASE: u64 = 2;
+    const CEILING: u64 = 300;
+    if matches!(err, RpcError::BadParams(_)) {
+        let seconds = BASE.saturating_mul(1u64 << attempt.min(8));
+        std::time::Duration::from_secs(seconds.min(CEILING))
+    } else {
+        std::time::Duration::from_secs(BASE)
+    }
+}
+
+/// Sleep `delay`, waking early once `epoch` moves off `seen`.
+async fn sleep_until_epoch_changes(
+    cx: &mut gpui::AsyncApp,
+    delay: std::time::Duration,
+    epoch: &std::sync::atomic::AtomicU64,
+    seen: u64,
+) {
+    const SLICE: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut remaining = delay;
+    while !remaining.is_zero() && epoch.load(std::sync::atomic::Ordering::Relaxed) == seen {
+        let step = remaining.min(SLICE);
+        cx.background_executor().timer(step).await;
+        remaining -= step;
+    }
+}
+
 /// One `WatchWorkOutline` subscription per Space. Mirrors
 /// `spawn_change_request_watch`: `UnknownMethod` (a host that predates the
 /// feature) marks the Space `Unsupported` and stops; other failures retry with
@@ -3779,11 +3823,14 @@ fn spawn_change_request_watch(
     handle: EngineHandle,
     target: ChangeRequestWatchKey,
     local_device_id: Option<String>,
+    epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut failures: u32 = 0;
         loop {
             let params = watch_params(&target, local_device_id.as_deref());
+            let seen_epoch = epoch.load(std::sync::atomic::Ordering::Relaxed);
 
             let mut subscription = match handle
                 .client()
@@ -3820,10 +3867,17 @@ fn spawn_change_request_watch(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    let delay = change_request_retry_delay(&err, failures);
+                    failures = if matches!(err, RpcError::BadParams(_)) {
+                        failures.saturating_add(1)
+                    } else {
+                        0
+                    };
+                    sleep_until_epoch_changes(cx, delay, &epoch, seen_epoch).await;
                     continue;
                 }
             };
+            failures = 0;
 
             while let Some(value) = subscription.recv().await {
                 let snapshot: CheckoutChangeRequestStatus = match serde_json::from_value(value) {
@@ -5717,6 +5771,17 @@ mod tests {
         ));
         // Not visible: ignored.
         assert!(!state.apply_work_outline_failure("other", "unknown method: x"));
+    }
+
+    #[test]
+    fn change_request_retry_backs_off_only_for_rejected_requests() {
+        let rejected = RpcError::BadParams("cwd is not a known checkout".into());
+        let delays: Vec<u64> = (0..10)
+            .map(|attempt| change_request_retry_delay(&rejected, attempt).as_secs())
+            .collect();
+        assert_eq!(delays, [2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
+        let transport = RpcError::Transport("socket closed".into());
+        assert_eq!(change_request_retry_delay(&transport, 7).as_secs(), 2);
     }
 
     #[test]
