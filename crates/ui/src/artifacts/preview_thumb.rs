@@ -195,6 +195,60 @@ mod tests {
             ..a
         }));
     }
+    #[gpui::test]
+    fn cache_hits_do_not_repeat_content_requests(cx: &mut gpui::TestAppContext) {
+        use crate::artifacts::tests::{Reply, artifact, content_reply, id, init_ui, scripted};
+        use mast_proto::ArtifactContentEncoding;
+        let _dir = init_ui(cx);
+        struct Host {
+            state: Entity<AppState>,
+            renders: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        impl gpui::Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                gpui::div()
+            }
+        }
+        let renders = std::rc::Rc::new(std::cell::Cell::new(0));
+        let view_renders = renders.clone();
+        let reply: Reply = Arc::new(|_, _| {
+            Ok(content_reply(
+                ArtifactKind::Image,
+                2,
+                "aGVsbG8=",
+                ArtifactContentEncoding::Base64,
+            ))
+        });
+        let (actions, calls) = scripted(reply);
+        let (host, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.local_device_id = Some("dev".into());
+                state.work_outline_actions_override = Some(actions);
+            });
+            Host {
+                state,
+                renders: view_renders,
+            }
+        });
+        let item = artifact(&id(1), "image", ArtifactKind::Image);
+        let request = |host: &Entity<Host>, vcx: &mut gpui::VisualTestContext| {
+            host.update_in(vcx, |host, window, cx| {
+                thumbnail(&item, host.state.clone(), &Theme::light(), window, cx).is_some()
+            })
+        };
+        assert!(!request(&host, vcx));
+        assert!(!request(&host, vcx));
+        vcx.run_until_parked();
+        let before = renders.get();
+        assert!(request(&host, vcx));
+        assert!(request(&host, vcx));
+        vcx.run_until_parked();
+        assert_eq!(renders.get(), before);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn visual_kinds_and_diagram_fragments_only() {
         let mut artifact = ArtifactView {
