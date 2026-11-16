@@ -230,7 +230,16 @@ mod tests {
             },
             snippet: "let x = 1;\nlet y = 2;".into(),
         };
-        let prompt = with_code_refs("Review", &[staged]);
+        let mut state = crate::state::AppState::new();
+        state.add_code_ref("chat", staged.clone());
+        assert_eq!(state.code_refs("chat"), &[staged.clone()]);
+        assert!(state.code_refs("other").is_empty());
+        state.remove_code_ref("chat", "reference");
+        assert!(state.code_refs("chat").is_empty());
+        state.add_code_ref("chat", staged.clone());
+        let taken = state.take_code_refs("chat");
+        assert_eq!(taken, vec![staged]);
+        let prompt = with_code_refs("Review", &taken);
         assert!(
             prompt.contains("src/main.rs:2-3 @ working tree\n```\nlet x = 1;\nlet y = 2;\n```")
         );
