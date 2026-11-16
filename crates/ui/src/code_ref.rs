@@ -19,6 +19,37 @@ pub fn snippet(contents: &str, range: CodeRefRange) -> Option<String> {
     Some(lines.get(start..end)?.join("\n"))
 }
 
+/// Read a file at a pinned commit. Call this on a background thread.
+pub fn read_commit_file(
+    repo: &std::path::Path,
+    commit: &str,
+    path: &str,
+) -> std::io::Result<String> {
+    if commit.is_empty()
+        || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || path.is_empty()
+        || path.starts_with('/')
+        || path.split('/').any(|part| part == ".." || part.is_empty())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid revision or path",
+        ));
+    }
+    let output = mast_harness::git_command()
+        .current_dir(repo)
+        .args(["show", &format!("{commit}:{path}")])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found at revision",
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     Unchanged(CodeRefRange),
@@ -57,6 +88,37 @@ pub fn reanchor(contents: &str, original: CodeRefRange, pinned_snippet: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_file_at_commit_after_worktree_changes() {
+        let repo = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let output = mast_harness::git_command()
+                .current_dir(repo.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        std::fs::write(repo.path().join("file.rs"), "before\n").unwrap();
+        run(&["add", "file.rs"]);
+        run(&["commit", "-qm", "fixture"]);
+        let commit = run(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("file.rs"), "after\n").unwrap();
+        assert_eq!(
+            read_commit_file(repo.path(), &commit, "file.rs").unwrap(),
+            "before\n"
+        );
+        assert!(read_commit_file(repo.path(), &commit, "../file.rs").is_err());
+    }
 
     #[test]
     fn resolves_unchanged_shifted_edited_and_deleted_lines() {
