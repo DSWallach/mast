@@ -212,7 +212,11 @@ async fn a_session_run_in_a_worktree_joins_its_checkouts_space() {
         .expect("import");
 
     assert_eq!(result.space_id, "space-project");
-    let chat = core.workspace.chat("imported-wt").unwrap().expect("chat row");
+    let chat = core
+        .workspace
+        .chat("imported-wt")
+        .unwrap()
+        .expect("chat row");
     assert_eq!(chat.cwd.as_deref(), wt.to_str());
     assert_eq!(chat.space_id.as_deref(), Some("space-project"));
     assert!(

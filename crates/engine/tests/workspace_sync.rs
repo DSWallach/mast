@@ -438,7 +438,11 @@ async fn claim_resolves_a_worktree_cwd_to_the_repo_root_space() {
     let root = repo.path().join("proj");
     let wt = repo.path().join("clever-ember");
     std::fs::create_dir_all(root.join(".git/worktrees/clever-ember")).unwrap();
-    std::fs::write(root.join(".git/worktrees/clever-ember/commondir"), "../..\n").unwrap();
+    std::fs::write(
+        root.join(".git/worktrees/clever-ember/commondir"),
+        "../..\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(&wt).unwrap();
     std::fs::write(
         wt.join(".git"),

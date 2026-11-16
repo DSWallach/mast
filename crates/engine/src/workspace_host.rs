@@ -1427,14 +1427,17 @@ impl WorkspaceHost {
         if worktree_home_origin(std::path::Path::new(cwd)).is_none() {
             return false;
         }
-        let result = self.read(|doc| doc.read_spaces()).map_err(EngineError::from).and_then(|spaces| {
-            match space_home(&spaces, &self.inner.config.device_id, cwd) {
-                SpaceHome::Existing(space) => {
-                    Ok(self.mutate(|doc| doc.set_chat_space(&chat.id, &space))?)
-                }
-                SpaceHome::New(_) => Ok(false),
-            }
-        });
+        let result = self
+            .read(|doc| doc.read_spaces())
+            .map_err(EngineError::from)
+            .and_then(
+                |spaces| match space_home(&spaces, &self.inner.config.device_id, cwd) {
+                    SpaceHome::Existing(space) => {
+                        Ok(self.mutate(|doc| doc.set_chat_space(&chat.id, &space))?)
+                    }
+                    SpaceHome::New(_) => Ok(false),
+                },
+            );
         match result {
             Ok(written) => written,
             Err(err) => {
@@ -2770,7 +2773,12 @@ pub(crate) fn space_home(spaces: &[Space], device_id: &str, path: &str) -> Space
         resolved
             .get_or_init(|| {
                 own.iter()
-                    .map(|s| (s.id.clone(), canonical_lenient(std::path::Path::new(&s.path))))
+                    .map(|s| {
+                        (
+                            s.id.clone(),
+                            canonical_lenient(std::path::Path::new(&s.path)),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .iter()
@@ -2791,8 +2799,9 @@ pub(crate) fn space_home(spaces: &[Space], device_id: &str, path: &str) -> Space
 /// [`worktree_origin`], unless the worktree came from a broad root like HOME
 /// (a deleted `~/.claude/worktrees/<name>`): no Space should collect those.
 fn worktree_home_origin(path: &std::path::Path) -> Option<String> {
-    worktree_origin(path)
-        .filter(|origin| !crate::repos::is_broad_workspace_root_resolved(std::path::Path::new(origin)))
+    worktree_origin(path).filter(|origin| {
+        !crate::repos::is_broad_workspace_root_resolved(std::path::Path::new(origin))
+    })
 }
 
 /// [`linked_worktree_root`], plus a worktree folder that is already gone:
@@ -4006,15 +4015,23 @@ mod tests {
             space_home(&only_above, "dev", &s(&outside_wt)),
             SpaceHome::New(s(&mast))
         );
-        assert_eq!(space_home(&spaces, "dev", &s(&outside_wt)), existing("mast"));
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&outside_wt)),
+            existing("mast")
+        );
 
         // A deleted worktree still maps to the folder holding its worktrees.
         let gone = ws.join(".worktrees/flagship/long-gone");
         assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
         let gone = ws.join(".claude/worktrees/long-gone");
         assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
-        // Anything else is matched exactly.
-        assert_eq!(space_home(&spaces, "dev", &s(&mast)), existing("mast"));
+        // Anything else is matched exactly, as stored.
+        let stored = alias.join("mast");
+        assert_eq!(space_home(&spaces, "dev", &s(&stored)), existing("mast"));
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&mast)),
+            SpaceHome::New(s(&mast))
+        );
         let plain = real.join("plain");
         assert_eq!(
             space_home(&spaces, "dev", &s(&plain)),
@@ -4153,6 +4170,9 @@ mod tests {
         assert!(!gone.exists());
         let spaces = vec![space_at("home", "dev", &home)];
         let gone = gone.to_str().unwrap();
-        assert_eq!(space_home(&spaces, "dev", gone), SpaceHome::New(gone.into()));
+        assert_eq!(
+            space_home(&spaces, "dev", gone),
+            SpaceHome::New(gone.into())
+        );
     }
 }

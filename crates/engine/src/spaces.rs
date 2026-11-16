@@ -277,7 +277,12 @@ mod tests {
         .unwrap();
         let space_of = |chat: &str| host.chat(chat).unwrap().map(|c| c.space_id.unwrap());
         let spaces = || {
-            let mut ids: Vec<String> = host.watch_spaces().borrow().iter().map(|s| s.id.clone()).collect();
+            let mut ids: Vec<String> = host
+                .read_spaces()
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
             ids.sort();
             ids
         };
