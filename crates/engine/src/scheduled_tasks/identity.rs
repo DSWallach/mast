@@ -31,9 +31,9 @@ pub(crate) fn plan(
             None => {
                 // Never by display name alone: the name must be the import
                 // source's task name, and only one live task may claim it.
-                let mut claims = tasks.iter().filter(|t| {
-                    !t.deleted && source_name(t) == Some(info.task_name.as_str())
-                });
+                let mut claims = tasks
+                    .iter()
+                    .filter(|t| !t.deleted && source_name(t) == Some(info.task_name.as_str()));
                 match (claims.next(), claims.next()) {
                     (Some(task), None) => {
                         next.legacy_task_id = info
@@ -111,13 +111,22 @@ mod tests {
 
     fn apply(chats: &mut [Chat], updates: Vec<(String, ScheduledChat)>) {
         for (id, info) in updates {
-            chats.iter_mut().find(|c| c.id == id).unwrap().scheduled_task_info = Some(info);
+            chats
+                .iter_mut()
+                .find(|c| c.id == id)
+                .unwrap()
+                .scheduled_task_info = Some(info);
         }
     }
 
     #[test]
     fn legacy_runs_join_their_native_task_once() {
-        let tasks = vec![task("native", "d", Some("/a/scheduled-tasks.json#stall-watch"), false)];
+        let tasks = vec![task(
+            "native",
+            "d",
+            Some("/a/scheduled-tasks.json#stall-watch"),
+            false,
+        )];
         let mut chats = vec![
             run("legacy", "d", "fafa", "stall-watch"),
             run("native-run", "d", "native", "Codespace Stall Watch"),
@@ -129,19 +138,39 @@ mod tests {
         assert_eq!(legacy.task_id, "native");
         assert_eq!(legacy.legacy_task_id.as_deref(), Some("fafa"));
         assert!(!legacy.retired);
-        assert!(chats[1].scheduled_task_info.as_ref().unwrap().legacy_task_id.is_none());
+        assert!(
+            chats[1]
+                .scheduled_task_info
+                .as_ref()
+                .unwrap()
+                .legacy_task_id
+                .is_none()
+        );
         // A display name that is not the import source's task name never merges.
         let display = chats[2].scheduled_task_info.as_ref().unwrap();
         assert_eq!(display.task_id, "zzz");
         assert!(display.retired);
-        assert!(plan(&chats, &tasks, "d").is_empty(), "second pass writes nothing");
+        assert!(
+            plan(&chats, &tasks, "d").is_empty(),
+            "second pass writes nothing"
+        );
     }
 
     #[test]
     fn same_name_from_two_sources_is_left_alone() {
         let tasks = vec![
-            task("one", "d", Some("/account-a/scheduled-tasks.json#slack-briefing"), false),
-            task("two", "d", Some("/account-b/scheduled-tasks.json#slack-briefing"), false),
+            task(
+                "one",
+                "d",
+                Some("/account-a/scheduled-tasks.json#slack-briefing"),
+                false,
+            ),
+            task(
+                "two",
+                "d",
+                Some("/account-b/scheduled-tasks.json#slack-briefing"),
+                false,
+            ),
         ];
         let chats = vec![run("legacy", "d", "old", "slack-briefing")];
         assert!(plan(&chats, &tasks, "d").is_empty());

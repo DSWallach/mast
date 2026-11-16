@@ -810,9 +810,9 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         {
             if !hidden_runs.contains(chat_id) {
                 item_chats
-                .entry(key.as_str())
-                .or_default()
-                .push(chat_id.into());
+                    .entry(key.as_str())
+                    .or_default()
+                    .push(chat_id.into());
             }
             if state == WorkItemChatAssignmentState::Associated {
                 *item_associated.entry(key.as_str()).or_default() += 1;

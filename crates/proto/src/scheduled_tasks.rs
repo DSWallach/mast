@@ -269,8 +269,13 @@ mod tests {
         };
         let value = serde_json::to_value(&info).unwrap();
         assert!(value.get("retired").is_none() && value.get("legacyTaskId").is_none());
-        let draft: serde_json::Value = serde_json::json!({"retired": true, "taskId": "t", "taskName": "n", "runId": "r"});
-        assert!(serde_json::from_value::<ScheduledChat>(draft).unwrap().retired);
+        let draft: serde_json::Value =
+            serde_json::json!({"retired": true, "taskId": "t", "taskName": "n", "runId": "r"});
+        assert!(
+            serde_json::from_value::<ScheduledChat>(draft)
+                .unwrap()
+                .retired
+        );
     }
     #[test]
     fn stable_ties() {
