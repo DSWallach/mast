@@ -146,7 +146,7 @@ pub(super) fn mount<'a>(
             shell.chat_header_links.insert(
                 chat_id.into(),
                 ChatHeaderLinkCache {
-                    checkout: None,
+                checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },
@@ -504,7 +504,7 @@ fn changing_chat_drops_the_card_and_its_pin(cx: &mut TestAppContext) {
         shell.chat_header_links.insert(
             CHAT_UI.into(),
             ChatHeaderLinkCache {
-                    checkout: None,
+                checkout: None,
                 status: None,
                 fetched_at: Instant::now(),
             },
@@ -1112,7 +1112,7 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
             shell.chat_header_links.insert(
                 format!("w-{i}"),
                 ChatHeaderLinkCache {
-                    checkout: None,
+                checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },
@@ -1998,16 +1998,24 @@ fn header_link_refetch_discards_a_response_for_the_previous_checkout(cx: &mut Te
     let engine =
         crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
     shell.update(vcx, |shell, cx| {
-        shell
-            .state
-            .update(cx, |state, _| state.set_test_engine(engine));
-        shell
-            .chat_header_links
-            .get_mut(CHAT_API)
-            .unwrap()
-            .fetched_at = Instant::now() - Duration::from_secs(60);
+        shell.state.update(cx, |state, _| {
+            state.set_test_engine(engine);
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/previous".into(), checkout_id: "previous".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent, selected: true,
+                    repo_name: "repo".into(), branch: Some("old-branch".into()), head_sha: None,
+                }],
+                ref_targets: vec![],
+            }]);
+        });
+        let entry = shell.chat_header_links.get_mut(CHAT_API).unwrap();
+        entry.checkout = Some(("/previous".into(), "previous".into(), Some("old-branch".into())));
+        entry.fetched_at = Instant::now() - Duration::from_secs(60);
         shell.ensure_chat_header_links(CHAT_API.into(), cx);
     });
+    let previous_fetch = shell.read_with(vcx, |shell, _| shell.chat_header_links[CHAT_API].fetched_at);
     vcx.run_until_parked();
     runtime.block_on(tokio::task::yield_now());
     let first = loop {
@@ -2049,7 +2057,8 @@ fn header_link_refetch_discards_a_response_for_the_previous_checkout(cx: &mut Te
         }
     }
     shell.read_with(vcx, |shell, _| {
-        assert_eq!(shell.chat_header_links[CHAT_API].checkout, None)
+        assert_eq!(shell.chat_header_links[CHAT_API].checkout.as_ref().map(|key| key.0.as_str()), Some("/previous"));
+        assert_eq!(shell.chat_header_links[CHAT_API].fetched_at, previous_fetch);
     });
     shell.update(vcx, |shell, cx| {
         shell.ensure_chat_header_links(CHAT_API.into(), cx)
@@ -2063,7 +2072,11 @@ fn header_link_refetch_discards_a_response_for_the_previous_checkout(cx: &mut Te
             break request;
         }
     };
-    replies.try_send(serde_json::json!({"id": second["id"], "ok": mast_engine::pr_ticket_cache::ChatLinkStatus::default()}).to_string()).unwrap();
+    replies
+        .try_send(
+            serde_json::json!({"id": second["id"], "ok": mast_engine::pr_ticket_cache::ChatLinkStatus::default()}).to_string(),
+        )
+        .unwrap();
     for _ in 0..20 {
         runtime.block_on(tokio::task::yield_now());
         vcx.run_until_parked();

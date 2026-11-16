@@ -2478,9 +2478,14 @@ impl Overview {
                 // Web `sessionMatchesSearch` fields that exist here: name
                 // (title), branch, last message (preview), cwd, ticket id,
                 // PR title. Mast has no separate `summary` field.
+                let state = self.state.read(cx);
+                let branch = crate::change_requests::display_checkout(
+                    &row.chat,
+                    state.selected_chat_diff_target(&row.chat.id),
+                ).branch;
                 let mut fields = vec![
                     row.chat.title.as_deref(),
-                    row.chat.branch.as_deref(),
+                    branch,
                     row.chat.last_message_preview.as_deref(),
                     row.chat.cwd.as_deref(),
                     row.ticket.as_deref(),
@@ -4164,7 +4169,12 @@ impl Overview {
         let is_worktree = entry
             .and_then(|e| e.is_worktree)
             .unwrap_or_else(|| cwd_is_worktree(row.chat.cwd.as_deref()));
-        let branch_value = match &row.chat.branch {
+        let state = self.state.read(cx);
+        let checkout = crate::change_requests::display_checkout(
+            &row.chat,
+            state.selected_chat_diff_target(&row.chat.id),
+        );
+        let branch_value = match checkout.branch {
             Some(branch) => div()
                 .flex()
                 .flex_wrap()

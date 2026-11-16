@@ -4189,9 +4189,12 @@ impl Pickers {
                 Some(indicator) => indicator,
                 None => crate::components::conversation_picker_footer_label(
                     crate::icons::GIT_BRANCH,
-                    chat.branch
-                        .clone()
-                        .map(SharedString::from)
+                    crate::change_requests::display_checkout(
+                        chat,
+                        self.state.read(cx).selected_chat_diff_target(&chat.id),
+                    )
+                        .branch
+                        .map(|branch| SharedString::from(branch.to_owned()))
                         .unwrap_or_else(|| SharedString::from("No ref")),
                     &theme,
                 )

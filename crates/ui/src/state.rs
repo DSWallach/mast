@@ -2403,9 +2403,14 @@ impl AppState {
             .filter(|branch| !branch.trim().is_empty())
     }
 
-    pub(crate) fn selected_checkout_key(&self, chat_id: &str) -> Option<(String, String, Option<String>)> {
+    pub(crate) fn selected_checkout_key(
+        &self,
+        chat_id: &str,
+    ) -> Option<(String, String, Option<String>)> {
         self.selected_chat_diff_target(chat_id)
-            .map(|target| (target.path.clone(), target.checkout_id.clone(), target.branch.clone()))
+            .map(|target| {
+                (target.path.clone(), target.checkout_id.clone(), target.branch.clone())
+            })
     }
 
     /// The explicitly selected checkout target, if any.

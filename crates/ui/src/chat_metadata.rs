@@ -80,9 +80,7 @@ impl HeaderPr {
         });
     }
 
-    pub(crate) fn status_from_detail(
-        detail: &mast_engine::pr_ticket_cache::PrStatus,
-    ) -> HeaderPrStatus {
+    pub(crate) fn status_from_detail(detail: &mast_engine::pr_ticket_cache::PrStatus) -> HeaderPrStatus {
         use mast_engine::pr_ticket_cache::ChecksStatus;
         HeaderPrStatus {
             state: match detail.state.as_str() {
